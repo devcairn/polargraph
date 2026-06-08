@@ -1,0 +1,39 @@
+[package]
+name        = "polargraph-server"
+description = "gRPC server binary"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+rust-version.workspace = true
+
+[lib]
+name = "polargraph_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "polargraphd"
+path = "src/main.rs"
+
+[dependencies]
+polargraph-core    = { path = "../polargraph-core" }
+polargraph-storage = { path = "../polargraph-storage" }
+polargraph-query   = { path = "../polargraph-query" }
+
+tokio       = { workspace = true }
+tonic       = { workspace = true }
+prost       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+uuid        = { workspace = true }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+clap                = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+
+[dev-dependencies]
+tempfile    = { workspace = true }
+tokio       = { workspace = true }

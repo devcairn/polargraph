@@ -1,0 +1,20 @@
+services:
+  polargraphd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: polargraph-db:latest
+    container_name: polargraphd
+    ports:
+      - "50051:50051"
+    volumes:
+      - polargraph_data:/data
+    environment:
+      POLARGRAPH_DATA_DIR: /data
+      POLARGRAPH_LISTEN_ADDR: "0.0.0.0:50051"
+      RUST_LOG: info
+    restart: unless-stopped
+
+volumes:
+  polargraph_data:
+    driver: local

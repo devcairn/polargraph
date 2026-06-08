@@ -1,0 +1,218 @@
+//! Node type schema definitions.
+//!
+//! A `NodeTypeDef` names a type and declares which property predicates it
+//! expects, their value kind, and whether each field is required.  Schemas
+//! are advisory: the store accepts any triple regardless of whether the
+//! subject has a registered type.  Validation is a separate, explicit step.
+
+use crate::value::Value;
+use serde::{Deserialize, Serialize};
+
+/// The expected value kind for a field.
+///
+/// Maps 1-to-1 with the non-`Null` variants of [`Value`]; `Null` is not a
+/// valid field kind because a field that can be null provides no type information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldKind {
+    Bool,
+    Int,
+    Float,
+    Text,
+    Blob,
+    Vector,
+}
+
+impl FieldKind {
+    /// Returns `true` if `value` is compatible with this kind.
+    pub fn matches(self, value: &Value) -> bool {
+        match (self, value) {
+            (FieldKind::Bool,   Value::Bool(_))   => true,
+            (FieldKind::Int,    Value::Int(_))     => true,
+            (FieldKind::Float,  Value::Float(_))   => true,
+            (FieldKind::Text,   Value::Text(_))    => true,
+            (FieldKind::Blob,   Value::Blob(_))    => true,
+            (FieldKind::Vector, Value::Vector(_))  => true,
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for FieldKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            FieldKind::Bool   => "bool",
+            FieldKind::Int    => "int",
+            FieldKind::Float  => "float",
+            FieldKind::Text   => "text",
+            FieldKind::Blob   => "blob",
+            FieldKind::Vector => "vector",
+        };
+        write!(f, "{s}")
+    }
+}
+
+/// A single field in a node type schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldDef {
+    pub name: String,
+    pub kind: FieldKind,
+    /// If `true`, `validate_properties` treats the absence of this field as
+    /// an error.
+    pub required: bool,
+}
+
+impl FieldDef {
+    pub fn required(name: impl Into<String>, kind: FieldKind) -> Self {
+        Self { name: name.into(), kind, required: true }
+    }
+
+    pub fn optional(name: impl Into<String>, kind: FieldKind) -> Self {
+        Self { name: name.into(), kind, required: false }
+    }
+}
+
+/// Whether a named HNSW vector space keeps vectors in heap RAM or pages them
+/// from a memory-mapped file on demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageMode {
+    /// All vectors are deserialized from RocksDB into heap RAM at startup and
+    /// held there for the lifetime of the store. Lower cold-query latency;
+    /// higher steady-state RAM usage. Default.
+    #[default]
+    Memory,
+    /// Vectors are written to a flat binary file (`<data_dir>/vectors/<space>.vecs`)
+    /// and accessed via `mmap`. The OS pages vectors in on demand and evicts them
+    /// under memory pressure. Cold-query latency increases by ~100 µs per page fault;
+    /// steady-state RAM drops from ~7 GB to ~1–2 GB for a 1 M-node, 1 536-dim index.
+    Mmap,
+}
+
+/// Metadata for a node type's vector embedding space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VectorSpaceDef {
+    /// Name of the HNSW space this type's vectors live in (e.g. `"default"` or the type name).
+    pub space_name: String,
+    /// Expected dimensionality — inserts with a different number of floats are rejected.
+    pub dimensions: u32,
+    /// Optional identifier of the embedding model (informational only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+    /// Storage mode for this space's vector data. Defaults to `Memory`.
+    #[serde(default)]
+    pub storage_mode: StorageMode,
+}
+
+impl VectorSpaceDef {
+    pub fn new(space_name: impl Into<String>, dimensions: u32) -> Self {
+        Self {
+            space_name: space_name.into(),
+            dimensions,
+            embedding_model: None,
+            storage_mode: StorageMode::Memory,
+        }
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.embedding_model = Some(model.into());
+        self
+    }
+
+    pub fn with_storage_mode(mut self, mode: StorageMode) -> Self {
+        self.storage_mode = mode;
+        self
+    }
+}
+
+/// A named node type schema.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeTypeDef {
+    pub type_name: String,
+    pub fields: Vec<FieldDef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_space: Option<VectorSpaceDef>,
+}
+
+impl NodeTypeDef {
+    pub fn new(type_name: impl Into<String>, fields: Vec<FieldDef>) -> Self {
+        Self { type_name: type_name.into(), fields, vector_space: None }
+    }
+
+    pub fn with_vector_space(mut self, space: VectorSpaceDef) -> Self {
+        self.vector_space = Some(space);
+        self
+    }
+}
+
+/// A named edge type schema.
+///
+/// `predicate` is the relation name (e.g. `"works_at"`).  `domain` and
+/// `range` are optional node type names that constrain which node types may
+/// appear as subject and object respectively.  `fields` declares expected
+/// property triples on the edge itself (edge properties are not yet stored but
+/// the schema layer is ready for them).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EdgeTypeDef {
+    /// The predicate string this schema governs.
+    pub predicate: String,
+    /// Node type name for the allowed subject. `None` means unconstrained.
+    pub domain: Option<String>,
+    /// Node type name for the allowed object. `None` means unconstrained.
+    pub range: Option<String>,
+    /// Expected property predicates on this edge.
+    pub fields: Vec<FieldDef>,
+}
+
+impl EdgeTypeDef {
+    pub fn new(
+        predicate: impl Into<String>,
+        domain: Option<impl Into<String>>,
+        range: Option<impl Into<String>>,
+        fields: Vec<FieldDef>,
+    ) -> Self {
+        Self {
+            predicate: predicate.into(),
+            domain: domain.map(Into::into),
+            range: range.map(Into::into),
+            fields,
+        }
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn field_kind_matches_correct_value() {
+        assert!(FieldKind::Bool.matches(&Value::Bool(true)));
+        assert!(FieldKind::Int.matches(&Value::Int(42)));
+        assert!(FieldKind::Float.matches(&Value::Float(3.14)));
+        assert!(FieldKind::Text.matches(&Value::Text("hi".into())));
+        assert!(FieldKind::Blob.matches(&Value::Blob(vec![1, 2])));
+        assert!(FieldKind::Vector.matches(&Value::Vector(vec![0.1])));
+    }
+
+    #[test]
+    fn field_kind_rejects_wrong_value() {
+        assert!(!FieldKind::Bool.matches(&Value::Int(1)));
+        assert!(!FieldKind::Int.matches(&Value::Float(1.0)));
+        assert!(!FieldKind::Text.matches(&Value::Blob(vec![])));
+        assert!(!FieldKind::Vector.matches(&Value::Text("x".into())));
+    }
+
+    #[test]
+    fn node_type_def_serialises_round_trip() {
+        let def = NodeTypeDef::new("Person", vec![
+            FieldDef::required("name", FieldKind::Text),
+            FieldDef::optional("age", FieldKind::Int),
+            FieldDef::optional("embedding", FieldKind::Vector),
+        ]);
+        let json = serde_json::to_string(&def).unwrap();
+        let back: NodeTypeDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(def, back);
+    }
+}

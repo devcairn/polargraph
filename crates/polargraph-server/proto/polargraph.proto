@@ -1,0 +1,438 @@
+syntax = "proto3";
+package polargraph.v1;
+
+// ── Primitive types ───────────────────────────────────────────────────────────
+
+/// 16-byte UUID v7 (time-ordered). Always exactly 16 bytes.
+message NodeId {
+    bytes bytes = 1;
+}
+
+/// Scalar property value. Exactly one field must be set.
+message Value {
+    oneof kind {
+        bool       null_val   = 1;
+        bool       bool_val   = 2;
+        sint64     int_val    = 3;
+        double     float_val  = 4;
+        string     text_val   = 5;
+        bytes      blob_val   = 6;
+        FloatArray vec_val    = 7;
+    }
+}
+
+/// A dense float32 embedding vector.
+message FloatArray {
+    repeated float values = 1;
+}
+
+// ── Triples ───────────────────────────────────────────────────────────────────
+
+/// A directed edge between two nodes.
+message RelationTriple {
+    NodeId subject   = 1;
+    string predicate = 2;
+    NodeId object    = 3;
+    /// Valid-time start, microseconds since Unix epoch.
+    int64  vt_start  = 4;
+    /// Valid-time end. Set to int64 max (9223372036854775807) for open-ended facts.
+    int64  vt_end    = 5;
+}
+
+/// A scalar property on a node.
+message PropertyTriple {
+    NodeId subject   = 1;
+    string predicate = 2;
+    Value  value     = 3;
+    int64  vt_start  = 4;
+    int64  vt_end    = 5;
+}
+
+message Triple {
+    oneof kind {
+        RelationTriple relation = 1;
+        PropertyTriple property = 2;
+    }
+}
+
+// ── Query types ───────────────────────────────────────────────────────────────
+
+/// A slot in a query pattern.
+///
+/// - `bound`: matches exactly this node ID.
+/// - `var`:   a named variable — binds on first match, constrains on subsequent.
+/// - neither: wildcard, matches any node (equivalent to `_` in Prolog).
+message Term {
+    oneof kind {
+        NodeId bound = 1;
+        string var   = 2;
+    }
+}
+
+/// A triple pattern with variable slots.
+///
+/// `predicate` is optional; empty string or omitted means "any predicate".
+message VarPattern {
+    Term   subject   = 1;
+    string predicate = 2;
+    Term   object    = 3;
+}
+
+// ── Requests and responses ────────────────────────────────────────────────────
+
+message InsertRequest {
+    repeated Triple triples = 1;
+}
+
+message InsertResponse {
+    /// Transaction time of the committed write, microseconds since epoch.
+    int64 commit_ts = 1;
+}
+
+message QueryRequest {
+    repeated VarPattern patterns    = 1;
+    /// Read snapshot timestamp (microseconds since epoch).
+    /// 0 or omitted means "latest committed state".
+    int64               snapshot_ts = 2;
+}
+
+/// One satisfying assignment of all variables in the query.
+message Binding {
+    map<string, NodeId> vars = 1;
+}
+
+message QueryResponse {
+    repeated Binding bindings = 1;
+}
+
+// ── Reachability ─────────────────────────────────────────────────────────────
+
+message ReachableRequest {
+    NodeId start     = 1;
+    string predicate = 2;
+    /// Maximum number of hops to follow. 0 = unlimited depth.
+    uint32 max_hops  = 3;
+}
+
+message ReachableResponse {
+    repeated NodeId node_ids = 1;
+}
+
+// ── Vector search ─────────────────────────────────────────────────────────────
+
+message InsertVectorRequest {
+    NodeId         node_id = 1;
+    repeated float vector  = 2;
+    /// Named HNSW space. Defaults to "default" if empty.
+    string         space   = 3;
+}
+
+message InsertVectorResponse {}
+
+message SearchVectorRequest {
+    repeated float query = 1;
+    /// Number of nearest neighbors to return.
+    uint32         k     = 2;
+    /// Named HNSW space. Defaults to "default" if empty.
+    string         space = 3;
+}
+
+message VectorSearchResult {
+    NodeId node_id    = 1;
+    /// Cosine similarity score ∈ [-1, 1]; higher = more similar.
+    float  similarity = 2;
+}
+
+message SearchVectorResponse {
+    repeated VectorSearchResult results = 1;
+}
+
+// ── Filtered vector search ────────────────────────────────────────────────────
+
+/// Restrict results to nodes whose `__type` property matches `type_name`.
+message NodeTypeFilter {
+    string type_name = 1;
+}
+
+/// Restrict results to nodes reachable from `from_node` via `predicate`.
+/// max_hops = 0 means unlimited depth.
+message ReachabilityFilter {
+    NodeId from_node  = 1;
+    string predicate  = 2;
+    uint32 max_hops   = 3;
+}
+
+message SearchVectorFilteredRequest {
+    string         space = 1;
+    repeated float query = 2;
+    uint32         k     = 3;
+    oneof filter {
+        NodeTypeFilter    node_type_filter    = 4;
+        ReachabilityFilter reachability_filter = 5;
+    }
+}
+
+message SearchVectorFilteredResponse {
+    repeated VectorSearchResult results = 1;
+}
+
+// ── Vector search in set ──────────────────────────────────────────────────────
+
+message SearchVectorInSetRequest {
+    string         space    = 1;
+    repeated float query    = 2;
+    uint32         k        = 3;
+    repeated NodeId node_ids = 4;
+}
+
+message SearchVectorInSetResponse {
+    repeated VectorSearchResult results = 1;
+}
+
+// ── Batch insert vectors ──────────────────────────────────────────────────────
+
+message VectorItem {
+    NodeId         node_id = 1;
+    repeated float vector  = 2;
+}
+
+message BatchInsertError {
+    uint32 index   = 1;
+    string message = 2;
+}
+
+message BatchInsertVectorsRequest {
+    string               space = 1;
+    repeated VectorItem  items = 2;
+}
+
+message BatchInsertVectorsResponse {
+    uint32                    count_inserted = 1;
+    repeated BatchInsertError errors         = 2;
+}
+
+// ── Node type registry ────────────────────────────────────────────────────────
+
+/// Declares the expected kind for a single named field.
+message FieldDef {
+    string field_name = 1;
+    /// One of: "bool", "int", "float", "text", "blob", "vector"
+    string kind       = 2;
+    bool   required   = 3;
+}
+
+/// Metadata for a node type's vector embedding space.
+message VectorSpaceDef {
+    string space_name      = 1;
+    uint32 dimensions      = 2;
+    /// Optional embedding model name (informational).
+    string embedding_model = 3;
+    /// Vector storage mode. One of: "memory" (default) or "mmap".
+    /// "mmap" keeps vectors on disk and pages them in via mmap; lower RAM,
+    /// higher cold-query latency. Changing the mode after first insert has
+    /// no effect — the space retains the mode it was created with.
+    string storage_mode    = 4;
+}
+
+/// A named node type schema.
+message NodeTypeDef {
+    string            type_name    = 1;
+    repeated FieldDef fields       = 2;
+    /// Optional vector space definition. Absent if the type has no vector space.
+    VectorSpaceDef    vector_space = 3;
+}
+
+message RegisterNodeTypeRequest {
+    NodeTypeDef definition = 1;
+}
+
+message RegisterNodeTypeResponse {}
+
+message GetNodeTypeRequest {
+    string type_name = 1;
+}
+
+message GetNodeTypeResponse {
+    /// Absent if the type has not been registered.
+    NodeTypeDef definition = 1;
+}
+
+message ListNodeTypesRequest {}
+
+message ListNodeTypesResponse {
+    repeated NodeTypeDef definitions = 1;
+}
+
+message ValidateNodeRequest {
+    string             type_name  = 1;
+    /// A property map: predicate name → value.
+    map<string, Value> properties = 2;
+}
+
+message ValidateNodeResponse {
+    bool            valid  = 1;
+    repeated string errors = 2;
+}
+
+// ── Edge type registry ────────────────────────────────────────────────────────
+
+/// A named edge type schema.
+message EdgeTypeDef {
+    /// The predicate string this schema governs (e.g. "works_at").
+    string            predicate = 1;
+    /// Expected node type for the subject. Empty string means unconstrained.
+    string            domain    = 2;
+    /// Expected node type for the object. Empty string means unconstrained.
+    string            range     = 3;
+    repeated FieldDef fields    = 4;
+}
+
+message RegisterEdgeTypeRequest {
+    EdgeTypeDef definition = 1;
+}
+
+message RegisterEdgeTypeResponse {}
+
+message GetEdgeTypeRequest {
+    string predicate = 1;
+}
+
+message GetEdgeTypeResponse {
+    /// Absent if the predicate has not been registered.
+    EdgeTypeDef definition = 1;
+}
+
+message ListEdgeTypesRequest {}
+
+message ListEdgeTypesResponse {
+    repeated EdgeTypeDef definitions = 1;
+}
+
+message ValidateEdgeRequest {
+    string             predicate   = 1;
+    /// Node type of the subject. Empty means unknown.
+    string             subject_type = 2;
+    /// Node type of the object. Empty means unknown.
+    string             object_type  = 3;
+    /// Edge property map: predicate name → value.
+    map<string, Value> properties   = 4;
+}
+
+message ValidateEdgeResponse {
+    bool            valid  = 1;
+    repeated string errors = 2;
+}
+
+message ListPredicatesBetweenRequest {
+    string domain_type = 1;
+    string range_type  = 2;
+}
+
+message ListPredicatesBetweenResponse {
+    repeated string predicates = 1;
+}
+
+// ── VectorSeedQuery ───────────────────────────────────────────────────────────
+
+/// One result row from a VectorSeedQuery: a complete variable binding set with
+/// the similarity score of the ANN seed node attached.
+message ScoredBinding {
+    /// Variable bindings — same schema as `Binding.vars`.
+    map<string, NodeId> vars  = 1;
+    /// Cosine similarity score of the seed node that produced this row.
+    float               score = 2;
+}
+
+/// Combine ANN vector search with a conjunctive Datalog graph query in a single
+/// server-side call. The k nearest neighbors become initial bindings for
+/// `seed_variable`; the graph patterns then filter and join those seeds.
+message VectorSeedQueryRequest {
+    /// Named HNSW space to search. Defaults to "default" if empty.
+    string              space        = 1;
+    /// Query embedding vector.
+    repeated float      query_vector = 2;
+    /// Number of ANN candidates to retrieve (before graph pattern filtering).
+    uint32              k            = 3;
+    /// Variable name to bind each ANN result node to (e.g. "doc").
+    string              seed_variable = 4;
+    /// Optional graph patterns to join against the seeds. When empty the
+    /// response contains one ScoredBinding per ANN result (just the seed).
+    repeated VarPattern patterns     = 5;
+    /// Read snapshot timestamp (microseconds since epoch). 0 = latest.
+    int64               snapshot_ts  = 6;
+    /// Optional pre-filter applied to ANN candidates before pattern evaluation.
+    oneof filter {
+        NodeTypeFilter     node_type_filter     = 7;
+        ReachabilityFilter reachability_filter  = 8;
+    }
+}
+
+message VectorSeedQueryResponse {
+    repeated ScoredBinding bindings = 1;
+}
+
+// ── Service ───────────────────────────────────────────────────────────────────
+
+service PolarGraphService {
+    /// Insert one or more triples in a single atomic transaction.
+    /// Returns ABORTED if a write-write conflict is detected.
+    rpc Insert(InsertRequest) returns (InsertResponse);
+
+    /// Execute a conjunctive query and return all satisfying variable bindings.
+    rpc Query(QueryRequest) returns (QueryResponse);
+
+    /// Insert or update a node's embedding vector in the HNSW index.
+    rpc InsertVector(InsertVectorRequest) returns (InsertVectorResponse);
+
+    /// Search for the k nearest neighbors of a query vector.
+    rpc SearchVector(SearchVectorRequest) returns (SearchVectorResponse);
+
+    /// Return all nodes transitively reachable from `start` via `predicate`.
+    /// max_hops = 0 means unlimited depth.
+    rpc Reachable(ReachableRequest) returns (ReachableResponse);
+
+    /// Register (or overwrite) a node type schema.
+    rpc RegisterNodeType(RegisterNodeTypeRequest) returns (RegisterNodeTypeResponse);
+
+    /// Look up a registered node type by name. Returns an empty definition if
+    /// the type does not exist.
+    rpc GetNodeType(GetNodeTypeRequest) returns (GetNodeTypeResponse);
+
+    /// Return all registered node type schemas.
+    rpc ListNodeTypes(ListNodeTypesRequest) returns (ListNodeTypesResponse);
+
+    /// Validate a property map against a registered schema.
+    /// Returns valid=false and a list of error messages on failure.
+    rpc ValidateNode(ValidateNodeRequest) returns (ValidateNodeResponse);
+
+    /// Register (or overwrite) an edge type schema.
+    rpc RegisterEdgeType(RegisterEdgeTypeRequest) returns (RegisterEdgeTypeResponse);
+
+    /// Look up a registered edge type by predicate name.
+    rpc GetEdgeType(GetEdgeTypeRequest) returns (GetEdgeTypeResponse);
+
+    /// Return all registered edge type schemas.
+    rpc ListEdgeTypes(ListEdgeTypesRequest) returns (ListEdgeTypesResponse);
+
+    /// Validate an edge's endpoint types and property map against a schema.
+    rpc ValidateEdge(ValidateEdgeRequest) returns (ValidateEdgeResponse);
+
+    /// Return all registered predicate names whose domain and range match
+    /// the supplied node type names. Unconstrained slots match any type.
+    rpc ListPredicatesBetween(ListPredicatesBetweenRequest) returns (ListPredicatesBetweenResponse);
+
+    /// Vector search with a node-type or reachability filter.
+    /// Runs HNSW with a large candidate pool then post-filters to the allowed set.
+    rpc SearchVectorFiltered(SearchVectorFilteredRequest) returns (SearchVectorFilteredResponse);
+
+    /// Score an explicit set of node IDs against a query vector; return top-k.
+    rpc SearchVectorInSet(SearchVectorInSetRequest) returns (SearchVectorInSetResponse);
+
+    /// Insert multiple vectors into a named space atomically.
+    rpc BatchInsertVectors(BatchInsertVectorsRequest) returns (BatchInsertVectorsResponse);
+
+    /// Run an ANN vector search and use the results as seed bindings for a
+    /// conjunctive Datalog query. Returns scored binding rows that satisfy
+    /// both the vector similarity criterion and all graph patterns.
+    rpc VectorSeedQuery(VectorSeedQueryRequest) returns (VectorSeedQueryResponse);
+}

@@ -1,0 +1,27 @@
+[package]
+name        = "polargraph-bench"
+description = "End-to-end benchmark scenarios for PolarGraph DB Engine"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+rust-version.workspace = true
+
+[[bin]]
+name = "polargraph-bench"
+path = "src/main.rs"
+
+[dependencies]
+polargraph-core    = { path = "../polargraph-core" }
+polargraph-storage = { path = "../polargraph-storage" }
+polargraph-server  = { path = "../polargraph-server" }
+
+tokio        = { workspace = true }
+tonic        = { workspace = true }
+anyhow       = { workspace = true }
+clap         = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber  = { workspace = true }
+uuid         = { workspace = true }
+hdrhistogram = { workspace = true }
+tempfile     = { workspace = true }

@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/polargraph-core",
+    "crates/polargraph-storage",
+    "crates/polargraph-query",
+    "crates/polargraph-server",
+    "crates/polargraph-bench",
+]
+
+[workspace.package]
+version     = "0.1.0"
+edition     = "2021"
+authors     = ["PolarOps"]
+license     = "UNLICENSED"
+rust-version = "1.78"
+
+# ── shared dependency versions ───────────────────────────────────────────────
+[workspace.dependencies]
+# async runtime
+tokio        = { version = "1",  features = ["full"] }
+
+# serialization
+serde        = { version = "1",  features = ["derive"] }
+serde_json   = { version = "1" }
+bytes        = { version = "1" }
+
+# storage
+rocksdb      = { version = "0.22" }
+
+# gRPC / HTTP
+tonic        = { version = "0.11" }
+tonic-build  = { version = "0.11" }
+prost        = { version = "0.12" }
+
+# error handling
+thiserror    = { version = "1" }
+anyhow       = { version = "1" }
+
+# logging / tracing
+tracing             = { version = "0.1" }
+tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
+
+# hashing / IDs
+uuid         = { version = "1", features = ["v7", "serde"] }
+xxhash-rust  = { version = "0.8", features = ["xxh3"] }
+
+# CLI argument parsing
+clap         = { version = "4", features = ["derive", "env"] }
+
+# parsing (query language, later)
+logos        = { version = "0.14" }
+
+# benchmarking
+criterion    = { version = "0.5", features = ["html_reports"] }
+hdrhistogram = { version = "7" }
+
+# memory-mapped files
+memmap2      = { version = "0.9" }
+
+# testing
+tempfile     = { version = "3" }

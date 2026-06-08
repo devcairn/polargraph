@@ -1,0 +1,76 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Cargo.lock should be committed for binaries but not libraries
+# Since this workspace has both, we'll keep Cargo.lock
+# Cargo.lock
+
+# Rust incremental compilation
+**/*.rs.bk
+**/*.pdb
+
+# RocksDB data directories
+/data/
+**/data/
+*.db/
+*.sst
+*.log
+
+# Testing artifacts
+*.profraw
+*.profdata
+
+# Benchmark results
+criterion_results/
+flamegraph.svg
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# Windows
+Thumbs.db
+eDesktop.ini
+$RECYCLE.BIN/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Docker volumes and data
+/volumes/
+docker-data/
+
+# Log files
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Generated protobuf files (if not checking them in)
+# Uncomment if you regenerate these each build
+# **/proto/*.rs
+
+# Backup files
+*.bak
+*.backup

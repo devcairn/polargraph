@@ -1,0 +1,27 @@
+[package]
+name        = "polargraph-storage"
+description = "RocksDB-backed triple store with 6-index layout and MVCC"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+rust-version.workspace = true
+
+[dependencies]
+polargraph-core = { path = "../polargraph-core" }
+rocksdb     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+bytes       = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+uuid        = { workspace = true }
+memmap2     = { workspace = true }
+
+[dev-dependencies]
+tempfile    = { workspace = true }
+criterion   = { workspace = true }
+
+[[bench]]
+name    = "storage"
+harness = false
