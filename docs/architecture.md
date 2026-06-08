@@ -1046,6 +1046,218 @@ The `ReplicaStatus` RPC returns:
 
 ---
 
+## Authentication
+
+PolarGraph uses transport-level API key authentication implemented as a tower
+middleware layer (`polargraph_server::auth::ApiKeyLayer`). This is not
+per-user RBAC — all callers with a valid key have identical access.
+
+### Configuration
+
+| Flag | Env variable | Description |
+|------|--------------|-------------|
+| `--api-key KEY` | `POLARGRAPH_API_KEY` | Required key; repeatable |
+| `--no-auth` | — | Suppress the no-key startup warning |
+
+`--api-key` can be specified multiple times. The env var accepts
+comma-separated keys: `POLARGRAPH_API_KEY=key1,key2`.
+
+When the server starts without any key configured, a warning is logged and
+all requests are accepted. Pass `--no-auth` to suppress the warning.
+
+### Request format
+
+Clients must include one of these headers on every call:
+
+```
+Authorization: Bearer <key>
+Authorization: ApiKey <key>
+```
+
+Requests without a matching key receive `UNAUTHENTICATED` (gRPC status 16).
+
+### Key rotation without downtime
+
+Configure two keys (old + new), deploy, then remove the old key and redeploy:
+
+```bash
+# Step 1 — add new key alongside existing one
+POLARGRAPH_API_KEY=old-key,new-key polargraphd ...
+
+# Step 2 — migrate clients to new-key
+
+# Step 3 — remove old key
+POLARGRAPH_API_KEY=new-key polargraphd ...
+```
+
+No rolling restart is needed; both keys are valid simultaneously during
+the migration window.
+
+### Exempt RPCs
+
+`ReplicaStatus` bypasses authentication so load-balancer health probes work
+without possessing a key. All other RPCs require auth when enabled.
+
+### Implementation
+
+`ApiKeyLayer` is a `tower::Layer` applied at the server transport level via
+`Server::builder().layer(auth_layer)`. It intercepts `http::Request<B>` before
+tonic routing, checks the `Authorization` header using `subtle::ConstantTimeEq`
+for timing-attack resistance, and returns a `grpc-status: 16` response for
+invalid credentials. Path-based exemptions are matched against `req.uri().path()`.
+
+---
+
+## Observability
+
+PolarGraph ships structured logging, per-RPC tracing, and a Prometheus metrics
+endpoint out of the box.
+
+### Logging
+
+| Flag | Env var | Default | Values |
+|------|---------|---------|--------|
+| `--log-level` | `RUST_LOG` | `info` | Any `tracing` filter (`info`, `debug`, `warn,polargraph_storage=trace`, …) |
+| `--log-format` | `LOG_FORMAT` | `pretty` | `pretty` (human-readable) or `json` (newline-delimited JSON) |
+
+Use `json` in production / containers so log aggregators (Loki, Datadog, etc.)
+can parse fields directly. The `pretty` format uses colour and is intended for
+local development.
+
+Key structured fields emitted at startup:
+
+```
+level=INFO  listen=0.0.0.0:50051  data_dir=/data  replica_mode=false
+            metrics_enabled=true  log_format=json
+            message="polargraphd starting"
+```
+
+### Per-RPC tracing
+
+`TelemetryLayer` (a `tower::Layer` in `polargraph-server::telemetry`) wraps every
+gRPC handler. Each request opens an `info_span!` that carries `method` and `peer`
+fields, so all log events emitted by the handler inherit those fields automatically.
+
+On completion, the layer logs:
+
+```
+INFO  rpc{method="Insert" peer="127.0.0.1:51234"}: completed status=ok duration_ms=2
+WARN  rpc{method="Insert" peer="127.0.0.1:51234"}: completed status=failed_precondition duration_ms=1
+ERROR rpc{method="Query"  peer="127.0.0.1:51234"}: transport error duration_ms=0
+```
+
+For error responses, the `status` field is the gRPC status code name
+(`invalid_argument`, `failed_precondition`, `aborted`, etc.). For successful
+streaming responses where the status arrives in HTTP/2 trailers, `status=ok`
+is assumed.
+
+### Prometheus metrics
+
+The server exposes a Prometheus scrape endpoint on a separate HTTP port (default
+9090). Use `--no-metrics` to disable it.
+
+| Flag | Env var | Default |
+|------|---------|---------|
+| `--metrics-port` | `POLARGRAPH_METRICS_PORT` | `9090` |
+| `--no-metrics` | — | false |
+
+Scrape the endpoint:
+
+```bash
+curl http://localhost:9090/metrics
+```
+
+#### Available metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `polargraph_rpc_requests_total` | counter | `method`, `status` | Total RPC calls by method and gRPC status |
+| `polargraph_rpc_duration_seconds` | histogram | `method` | RPC latency distribution |
+| `polargraph_triples_total` | gauge | — | Running count of inserted triples (incremented on each `Insert` batch; not absolute at startup) |
+| `polargraph_vector_spaces_total` | gauge | — | Number of named HNSW vector spaces |
+| `polargraph_wal_applied_seq` | gauge | — | Last WAL sequence number applied (replica only) |
+| `polargraph_wal_lag_entries` | gauge | — | Entries behind the primary (replica only; sampled on `ReplicaStatus` poll) |
+| `polargraph_backup_last_size_bytes` | gauge | — | Size of the most recently created backup |
+| `polargraph_compaction_deleted_total` | counter | — | Total triples deleted by retention runs |
+
+#### Sample Prometheus scrape config
+
+```yaml
+scrape_configs:
+  - job_name: polargraph
+    static_configs:
+      - targets: ["polargraphd-host:9090"]
+    scrape_interval: 15s
+```
+
+#### Sample Grafana alert (high WAL lag)
+
+```yaml
+- alert: PolarGraphReplicaLag
+  expr: polargraph_wal_lag_entries > 10000
+  for: 2m
+  labels:
+    severity: warning
+  annotations:
+    summary: "PolarGraph replica is lagging behind primary"
+```
+
+---
+
+## Management UI
+
+PolarGraph ships a browser-based management interface served from the same
+process as the gRPC server. It is a single-page app embedded directly in the
+binary (`include_str!("ui.html")`) — no build step, no separate process, no
+external assets.
+
+### Server configuration
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--ui-port PORT` | `POLARGRAPH_UI_PORT` | `8080` | HTTP port for the web UI |
+| `--no-ui` | — | false | Disable the UI entirely |
+
+The UI server binds independently of the gRPC port (default 50051) and the
+Prometheus metrics port (default 9090).
+
+### REST endpoints
+
+All endpoints live under `/api/`. The root `GET /` always serves the HTML
+regardless of auth state so the UI can load and prompt for a key.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Single-page app HTML |
+| `GET` | `/api/status` | Server info: version, uptime, data_dir, is_replica, auth_enabled |
+| `GET` | `/api/node-types` | All registered node types with field definitions |
+| `GET` | `/api/edge-types` | All registered edge types |
+| `GET` | `/api/metrics` | Key metrics snapshot (vector spaces, WAL seq, etc.) |
+| `POST` | `/api/query` | Datalog query — body: `{"patterns":[{"s":"?x","p":"__type","o":"Person"}]}` |
+| `POST` | `/api/insert` | Insert a triple — UUID object → Relation, text → Property |
+| `GET` | `/api/search` | Triple scan — params: `q=`, `type=`, `limit=` |
+
+Query patterns use `?varname` for variables, empty string for any, and UUID
+strings or plain text for bound values. `as_of_valid_time` and
+`as_of_tx_time` fields support time-travel queries.
+
+### Authentication
+
+When API keys are configured (`--api-key` / `POLARGRAPH_API_KEY`), every
+`/api/*` route requires `Authorization: Bearer <key>`. The UI stores the
+key in `localStorage` and prompts on 401. `GET /` bypasses auth so the UI
+always loads.
+
+### Architecture
+
+The UI server (`ui_api.rs`) holds an `Arc<UiState>` containing a clone of
+the `PolarGraphServer` handle. Handlers call into the gRPC service trait
+directly in-process — no network hop. The REST → gRPC adaptor is thin:
+JSON request bodies are decoded and forwarded as tonic `Request<T>` values,
+and tonic `Response<T>` values are serialised back to JSON.
+
+---
+
 ## Planned extensions
 
 | Feature | Notes |

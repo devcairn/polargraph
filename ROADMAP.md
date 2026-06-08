@@ -16,7 +16,7 @@ The core engine is working end-to-end. Here's what's fully operational:
 
 **Schema registries**: `NodeTypeRegistry` and `EdgeTypeRegistry` support runtime registration of type schemas with domain/range constraints, required/optional field declarations, and property-map validation. `EdgeTypeRegistry::list_predicates_between` queries which predicates are valid between two node types.
 
-**Server** (`polargraph-server`): The gRPC server (`polargraphd`) implements 22 RPCs: `Insert`, `Query` (with bitemporal `as_of_valid_time` / `as_of_tx_time` time-travel), `InsertVector`, `SearchVector`, `Reachable`, `RegisterNodeType`, `GetNodeType`, `ListNodeTypes`, `ValidateNode`, `RegisterEdgeType`, `GetEdgeType`, `ListEdgeTypes`, `ValidateEdge`, `ListPredicatesBetween`, `SearchVectorFiltered`, `SearchVectorInSet`, `BatchInsertVectors`, `VectorSeedQuery`, `CreateBackup`, `ListBackups`, `PurgeOldBackups`, `RunRetention`. CLI flags and env-var fallbacks are wired up. Docker packaging is in place.
+**Server** (`polargraph-server`): The gRPC server (`polargraphd`) implements 23 RPCs: `Insert`, `Query` (with bitemporal `as_of_valid_time` / `as_of_tx_time` time-travel), `InsertVector`, `SearchVector`, `Reachable`, `RegisterNodeType`, `GetNodeType`, `ListNodeTypes`, `ValidateNode`, `RegisterEdgeType`, `GetEdgeType`, `ListEdgeTypes`, `ValidateEdge`, `ListPredicatesBetween`, `SearchVectorFiltered`, `SearchVectorInSet`, `BatchInsertVectors`, `VectorSeedQuery`, `CreateBackup`, `ListBackups`, `PurgeOldBackups`, `RunRetention`, `StreamWal`. A web management UI (dark-theme SPA, embedded in binary) is served at port 8080. CLI flags and env-var fallbacks are wired up. Docker packaging is in place.
 
 **Backup** (`polargraph-storage::backup`): `BackupManager` wraps RocksDB's `BackupEngine` for incremental point-in-time backups. Enabled with `--backup-dir PATH`. Unchanged SST files are hard-linked between backups (space-efficient). Restore is an offline operation documented in `docs/architecture.md`.
 
@@ -83,6 +83,37 @@ query. 6 gRPC integration tests cover: zero-value pass-through, window boundary
 behaviour, two-version correctness, tx-time before/after commit, and the
 combined case. Documented in `docs/architecture.md` under "Time-travel queries".
 
+### ~~API key authentication~~ ✓ Done
+
+**Implemented June 2026.** `polargraph_server::auth::ApiKeyLayer` is a tower
+`Layer` applied at the transport level. Callers must include
+`Authorization: Bearer <key>` or `Authorization: ApiKey <key>` on every
+request when auth is enabled. Multiple keys are accepted simultaneously to
+allow zero-downtime rotation (`--api-key key1 --api-key key2` or
+`POLARGRAPH_API_KEY=key1,key2`). Key comparison uses `subtle::ConstantTimeEq`
+to prevent timing attacks. `ReplicaStatus` is exempt so load-balancer health
+probes work without a key. 6 gRPC integration tests + 7 unit tests.
+
+### ~~Observability~~ ✓ Done
+
+**Implemented June 2026.** `polargraph_server::telemetry::TelemetryLayer` is a
+tower `Layer` that wraps every gRPC handler. Each request opens an `info_span!`
+carrying `method` and `peer` so child log events inherit those fields. On
+completion it logs status + duration and increments
+`polargraph_rpc_requests_total{method,status}` / `polargraph_rpc_duration_seconds{method}`.
+
+Log format is selectable at runtime: `--log-format json` emits
+newline-delimited JSON (for log aggregators); `--log-format pretty` (default)
+emits human-readable coloured output. `--log-level` / `RUST_LOG` controls
+verbosity.
+
+A Prometheus `/metrics` HTTP endpoint runs on a separate port (default 9090,
+`--metrics-port` / `POLARGRAPH_METRICS_PORT`) served by `axum`. Metrics
+include RPC counters/histograms, triple/vector-space gauges, WAL replication
+lag, backup size, and compaction delete count. Use `--no-metrics` to disable.
+`docker-compose.yml` now exposes port 9090 and sets `LOG_FORMAT=json`.
+Documented in `docs/architecture.md` "Observability" section.
+
 ### Schema-aware query optimisation
 
 `EdgeTypeRegistry` knows which predicates are valid between which node types. The query planner can use this to prune bind patterns early — if a pattern has a bound predicate and a bound object type, only SPO/SOP scans where the subject type matches the domain need to be considered. This is a pure optimisation and does not change query semantics.
@@ -120,9 +151,18 @@ Raw float vectors are stored in `<data_dir>/vectors/<space>.vecs` via
 remains the default for backward compatibility. See `docs/benchmarks.md` for
 the RAM comparison and `docs/architecture.md` for implementation details.
 
-### Basic HTTP query API
+### ~~Basic HTTP query API and management UI~~ ✅ Done
 
-A lightweight HTTP/JSON API alongside the existing gRPC interface. The primary target is developer tooling and scripting — curl-able queries, a simple `POST /query` endpoint accepting a Datalog pattern body and returning JSON triples. This doesn't need to replace gRPC for production clients but dramatically lowers the barrier to exploration and integration testing.
+**Implemented June 2026.** `polargraph-server::ui_api` provides a REST JSON
+API (`/api/status`, `/api/node-types`, `/api/edge-types`, `/api/metrics`,
+`/api/query`, `/api/insert`, `/api/search`) served by `axum` on a dedicated
+port (default 8080, `--ui-port` / `POLARGRAPH_UI_PORT`). Handlers call into
+the `PolarGraphService` trait in-process — no network hop. A dark-theme SPA
+is embedded in the binary via `include_str!("ui.html")` and served at `GET /`;
+it features 5 tabs (Query, Schema, Insert, Search, Status), an auth overlay
+for API key entry, and stores the key in `localStorage`. Use `--no-ui` to
+disable. 3 integration tests cover the HTML root, status fields, and 401
+enforcement.
 
 ---
 

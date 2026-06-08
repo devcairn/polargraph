@@ -23,6 +23,7 @@ polargraph-query   = { path = "../polargraph-query" }
 tokio        = { workspace = true }
 tonic        = { workspace = true }
 prost        = { workspace = true }
+serde        = { workspace = true }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }
 anyhow       = { workspace = true }
@@ -31,6 +32,12 @@ tracing             = { workspace = true }
 tracing-subscriber  = { workspace = true }
 clap                = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
+subtle       = { workspace = true }
+tower        = { version = "0.4" }
+http         = { version = "0.2" }
+axum         = { version = "0.6" }
+metrics                     = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
@@ -38,3 +45,5 @@ tonic-build = { workspace = true }
 [dev-dependencies]
 tempfile    = { workspace = true }
 tokio       = { workspace = true }
+reqwest     = { version = "0.11", features = ["json"] }
+serde_json  = { workspace = true }

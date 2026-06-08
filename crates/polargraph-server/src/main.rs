@@ -5,26 +5,35 @@
 //! All options can be set via CLI flags **or** environment variables.
 //! CLI flags take priority over environment variables.
 //!
-//! | Flag                  | Env variable              | Default         | Description              |
-//! |-----------------------|---------------------------|-----------------|--------------------------|
-//! | `--data-dir <PATH>`   | `POLARGRAPH_DATA_DIR`     | `/data`         | RocksDB data directory   |
-//! | `--listen <ADDR>`     | `POLARGRAPH_LISTEN_ADDR`  | `0.0.0.0:50051` | gRPC listen address      |
-//! | `--backup-dir <PATH>` | `POLARGRAPH_BACKUP_DIR`   | *(none)*        | Backup directory (opt.)  |
-//! | `--replica-of <URL>`  | `POLARGRAPH_REPLICA_OF`   | *(none)*        | Primary gRPC address     |
+//! | Flag                  | Env variable              | Default         | Description                      |
+//! |-----------------------|---------------------------|-----------------|----------------------------------|
+//! | `--data-dir <PATH>`   | `POLARGRAPH_DATA_DIR`     | `/data`         | RocksDB data directory           |
+//! | `--listen <ADDR>`     | `POLARGRAPH_LISTEN_ADDR`  | `0.0.0.0:50051` | gRPC listen address              |
+//! | `--backup-dir <PATH>` | `POLARGRAPH_BACKUP_DIR`   | *(none)*        | Backup directory (opt.)          |
+//! | `--replica-of <URL>`  | `POLARGRAPH_REPLICA_OF`   | *(none)*        | Primary gRPC address             |
+//! | `--metrics-port <N>`  | `POLARGRAPH_METRICS_PORT` | `9090`          | Prometheus /metrics HTTP port    |
+//! | `--no-metrics`        | —                         | false           | Disable metrics endpoint         |
+//! | `--log-level <LEVEL>` | `RUST_LOG`                | `info`          | Log level / filter directive     |
+//! | `--log-format <FMT>`  | `LOG_FORMAT`              | `pretty`        | Log format: `pretty` or `json`   |
 //!
 //! # Examples
 //!
 //! ```bash
 //! # Primary:
-//! polargraphd --data-dir /var/lib/polargraph --listen 127.0.0.1:9090
+//! polargraphd --data-dir /var/lib/polargraph --listen 127.0.0.1:50051
 //!
 //! # Replica:
 //! polargraphd --data-dir /var/lib/replica --listen 127.0.0.1:9091 \
 //!   --replica-of http://primary-host:50051
+//!
+//! # Production with JSON logging and Prometheus:
+//! LOG_FORMAT=json RUST_LOG=info polargraphd --data-dir /data
 //! ```
 
 use anyhow::{Context, Result};
+use axum::{routing::get, Router};
 use clap::Parser;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use polargraph_core::schema::RetentionPolicy;
 use polargraph_storage::TripleStore;
 use polargraph_server::wal_client;
@@ -32,10 +41,10 @@ use proto::polar_graph_service_server::PolarGraphServiceServer;
 use service::PolarGraphServer;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use polargraph_server::{proto, service};
+use polargraph_server::{auth::ApiKeyLayer, proto, service, telemetry, ui_api};
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -76,16 +85,41 @@ struct Cli {
     )]
     backup_dir: Option<PathBuf>,
 
-    /// Log filter directive (same syntax as `RUST_LOG`).
+    /// Log level / filter directive (same syntax as `RUST_LOG`).
     ///
     /// Examples: `info`, `polargraph_server=debug`, `warn,polargraph_storage=trace`
     #[arg(
-        long = "log",
+        long = "log-level",
         env = "RUST_LOG",
         default_value = "info",
-        value_name = "FILTER"
+        value_name = "LEVEL"
     )]
-    log_filter: String,
+    log_level: String,
+
+    /// Log output format.
+    ///
+    /// `pretty` — human-readable output (default for development).
+    /// `json`   — newline-delimited JSON (recommended for production/containers).
+    #[arg(
+        long = "log-format",
+        env = "LOG_FORMAT",
+        default_value = "pretty",
+        value_name = "FORMAT"
+    )]
+    log_format: String,
+
+    /// TCP port for the Prometheus `/metrics` HTTP endpoint.
+    #[arg(
+        long = "metrics-port",
+        env = "POLARGRAPH_METRICS_PORT",
+        default_value_t = 9090u16,
+        value_name = "PORT"
+    )]
+    metrics_port: u16,
+
+    /// Disable the Prometheus metrics endpoint entirely.
+    #[arg(long = "no-metrics", default_value_t = false)]
+    no_metrics: bool,
 
     /// Run retention on startup: delete triples whose transaction time is older
     /// than this many seconds. Requires the store to be opened but runs before
@@ -121,6 +155,38 @@ struct Cli {
         value_name = "URL"
     )]
     replica_of: Option<String>,
+
+    /// API key required on all gRPC and HTTP management requests.
+    ///
+    /// Repeat to allow multiple keys (enables zero-downtime rotation).
+    /// `POLARGRAPH_API_KEY` accepts a comma-separated list.
+    #[arg(
+        long = "api-key",
+        env = "POLARGRAPH_API_KEY",
+        value_name = "KEY",
+        value_delimiter = ','
+    )]
+    api_keys: Vec<String>,
+
+    /// Suppress the "no API key configured" warning at startup.
+    #[arg(long = "no-auth", default_value_t = false)]
+    no_auth: bool,
+
+    /// TCP port for the web management UI.
+    ///
+    /// The UI is served separately from the gRPC port and the Prometheus
+    /// metrics port. Disable with `--no-ui`.
+    #[arg(
+        long = "ui-port",
+        env = "POLARGRAPH_UI_PORT",
+        default_value_t = 8080u16,
+        value_name = "PORT"
+    )]
+    ui_port: u16,
+
+    /// Disable the web management UI entirely.
+    #[arg(long = "no-ui", default_value_t = false)]
+    no_ui: bool,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -130,18 +196,48 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // ── Tracing ───────────────────────────────────────────────────────────────
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_new(&cli.log_filter)
-                .with_context(|| format!("invalid log filter: {:?}", cli.log_filter))?,
-        )
-        .init();
+    let filter = EnvFilter::try_new(&cli.log_level)
+        .with_context(|| format!("invalid log filter: {:?}", cli.log_level))?;
+
+    match cli.log_format.as_str() {
+        "json" => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .init();
+        }
+    }
+
+    // ── Prometheus metrics ────────────────────────────────────────────────────
+    let metrics_handle = if !cli.no_metrics {
+        let handle = PrometheusBuilder::new()
+            .install_recorder()
+            .context("failed to install Prometheus metrics recorder")?;
+        Some(handle)
+    } else {
+        None
+    };
+
+    if cli.api_keys.is_empty() && !cli.no_auth {
+        warn!("no API key configured — all requests are unauthenticated; use --api-key or POLARGRAPH_API_KEY to enable auth");
+    }
 
     info!(
         data_dir   = %cli.data_dir.display(),
         listen     = %cli.listen_addr,
         backup_dir = ?cli.backup_dir,
         replica_of = ?cli.replica_of,
+        replica_mode = cli.replica_of.is_some(),
+        metrics_enabled = !cli.no_metrics,
+        ui_enabled = !cli.no_ui,
+        ui_port = cli.ui_port,
+        auth_enabled = !cli.api_keys.is_empty(),
+        log_format = %cli.log_format,
         "polargraphd starting"
     );
 
@@ -192,8 +288,34 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ── Metrics HTTP server ───────────────────────────────────────────────────
+    if let Some(handle) = metrics_handle {
+        let metrics_addr = SocketAddr::from(([0, 0, 0, 0], cli.metrics_port));
+        tokio::spawn(async move {
+            let app = Router::new().route(
+                "/metrics",
+                get(move || {
+                    let h = handle.clone();
+                    async move { h.render() }
+                }),
+            );
+            axum::Server::bind(&metrics_addr)
+                .serve(app.into_make_service())
+                .await
+                .expect("metrics HTTP server error");
+        });
+        info!(port = cli.metrics_port, "Prometheus /metrics endpoint listening");
+    }
+
     // ── gRPC server ───────────────────────────────────────────────────────────
-    let svc = if let Some(primary_addr) = &replica_address {
+    let api_keys = Arc::new(cli.api_keys.clone());
+    let auth_layer = if cli.api_keys.is_empty() {
+        ApiKeyLayer::disabled()
+    } else {
+        ApiKeyLayer::new(cli.api_keys.clone())
+    };
+
+    let pg_server = if let Some(primary_addr) = &replica_address {
         let (server, rs) = service::PolarGraphServer::new_replica(store.clone(), primary_addr)
             .context("failed to initialise replica PolarGraphServer")?;
 
@@ -204,17 +326,39 @@ async fn main() -> Result<()> {
             wal_client::run_replication(repl_store, repl_state).await;
         });
 
-        PolarGraphServiceServer::new(server)
+        server
     } else {
-        PolarGraphServiceServer::new(
-            PolarGraphServer::new_with_backup_dir(store, cli.backup_dir.as_deref())
-                .context("failed to initialise PolarGraphServer")?,
-        )
+        PolarGraphServer::new_with_backup_dir(store, cli.backup_dir.as_deref())
+            .context("failed to initialise PolarGraphServer")?
     };
+
+    // ── Management UI HTTP server ─────────────────────────────────────────────
+    if !cli.no_ui {
+        let ui_state = Arc::new(ui_api::UiState {
+            service: pg_server.clone(),
+            api_keys: Arc::clone(&api_keys),
+            start_time: std::time::Instant::now(),
+            data_dir: cli.data_dir.display().to_string(),
+            grpc_addr: cli.listen_addr.to_string(),
+        });
+        let ui_addr = SocketAddr::from(([0, 0, 0, 0], cli.ui_port));
+        tokio::spawn(async move {
+            let app = ui_api::build_ui_router(ui_state);
+            axum::Server::bind(&ui_addr)
+                .serve(app.into_make_service())
+                .await
+                .expect("UI HTTP server error");
+        });
+        info!(port = cli.ui_port, "management UI listening at http://0.0.0.0:{}", cli.ui_port);
+    }
+
+    let svc = PolarGraphServiceServer::new(pg_server);
 
     info!(addr = %cli.listen_addr, "listening");
 
     Server::builder()
+        .layer(auth_layer)
+        .layer(telemetry::TelemetryLayer)
         .add_service(svc)
         .serve_with_shutdown(cli.listen_addr, shutdown_signal())
         .await

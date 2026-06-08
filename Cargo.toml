@@ -40,7 +40,11 @@ anyhow       = { version = "1" }
 
 # logging / tracing
 tracing             = { version = "0.1" }
-tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber  = { version = "0.3", features = ["env-filter", "json"] }
+
+# metrics
+metrics                     = { version = "0.23" }
+metrics-exporter-prometheus = { version = "0.15" }
 
 # hashing / IDs
 uuid         = { version = "1", features = ["v7", "serde"] }
@@ -58,6 +62,9 @@ hdrhistogram = { version = "7" }
 
 # memory-mapped files
 memmap2      = { version = "0.9" }
+
+# constant-time comparison (timing-attack prevention)
+subtle       = { version = "2" }
 
 # testing
 tempfile     = { version = "3" }

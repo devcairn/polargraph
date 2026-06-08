@@ -4,7 +4,9 @@
 //! The replica tests require real TCP sockets and a live gRPC server.
 
 use polargraph_server::{
+    auth::ApiKeyLayer,
     proto::{
+        polar_graph_service_client::PolarGraphServiceClient,
         polar_graph_service_server::{PolarGraphService, PolarGraphServiceServer},
         term::Kind as TermKind,
         triple::Kind as TripleKind,
@@ -2387,4 +2389,302 @@ async fn replica_receives_triples_inserted_after_connect() {
         .into_inner();
 
     assert_eq!(resp.bindings.len(), 1, "replica sees post-connect triple via WAL");
+}
+
+// ── API key authentication tests ──────────────────────────────────────────────
+//
+// Auth is implemented as a tower layer at the transport level, so these tests
+// require a live TCP server and a real gRPC client channel.
+
+/// Start a PolarGraphServer with an `ApiKeyLayer` and return its address.
+async fn start_server_with_keys(
+    store: TripleStore,
+    keys: Vec<String>,
+) -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
+    let svc = PolarGraphServer::new(store).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let auth = ApiKeyLayer::new(keys);
+
+    tokio::spawn(async move {
+        Server::builder()
+            .layer(auth)
+            .add_service(PolarGraphServiceServer::new(svc))
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async { drop(shutdown_rx.await) },
+            )
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (addr, shutdown_tx)
+}
+
+/// Open an unauthenticated gRPC client for the given address.
+async fn grpc_client(addr: SocketAddr) -> PolarGraphServiceClient<tonic::transport::Channel> {
+    let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    PolarGraphServiceClient::new(channel)
+}
+
+/// Wrap a request body with an `Authorization: Bearer <key>` metadata header.
+fn bearer<T>(body: T, key: &str) -> Request<T> {
+    let mut req = Request::new(body);
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {key}").parse().unwrap());
+    req
+}
+
+#[tokio::test]
+async fn auth_request_without_key_returns_unauthenticated() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (addr, _shutdown) = start_server_with_keys(store, vec!["valid-key".into()]).await;
+
+    let mut client = grpc_client(addr).await;
+    let (_, node_a) = new_node();
+    let (_, node_b) = new_node();
+
+    let err = client
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(node_a, "knows", node_b)],
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn auth_request_with_correct_key_succeeds() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (addr, _shutdown) = start_server_with_keys(store, vec!["valid-key".into()]).await;
+
+    let mut client = grpc_client(addr).await;
+    let (_, node_a) = new_node();
+    let (_, node_b) = new_node();
+
+    let resp = client
+        .insert(bearer(InsertRequest {
+            triples: vec![rel(node_a, "knows", node_b)],
+        }, "valid-key"))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp.commit_ts > 0);
+}
+
+#[tokio::test]
+async fn auth_request_with_wrong_key_returns_unauthenticated() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (addr, _shutdown) = start_server_with_keys(store, vec!["valid-key".into()]).await;
+
+    let mut client = grpc_client(addr).await;
+    let (_, node_a) = new_node();
+    let (_, node_b) = new_node();
+
+    let err = client
+        .insert(bearer(InsertRequest {
+            triples: vec![rel(node_a, "knows", node_b)],
+        }, "wrong-key"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn auth_replica_status_exempt_from_auth() {
+    // ReplicaStatus must succeed even without an API key.
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (addr, _shutdown) = start_server_with_keys(store, vec!["valid-key".into()]).await;
+
+    let mut client = grpc_client(addr).await;
+
+    let resp = client
+        .replica_status(Request::new(ReplicaStatusRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(!resp.is_replica, "primary reports is_replica=false without auth key");
+}
+
+#[tokio::test]
+async fn auth_disabled_all_requests_pass() {
+    // When no keys are configured the layer is transparent (verified via direct call).
+    let (svc, _dir) = open();
+    let (_, node_a) = new_node();
+    let (_, node_b) = new_node();
+
+    let resp = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(node_a, "knows", node_b)],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp.commit_ts > 0);
+}
+
+#[tokio::test]
+async fn auth_multiple_keys_any_accepted() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (addr, _shutdown) =
+        start_server_with_keys(store, vec!["key-a".into(), "key-b".into()]).await;
+
+    let mut client = grpc_client(addr).await;
+
+    // key-a works
+    let (_, a1) = new_node();
+    let (_, a2) = new_node();
+    client
+        .insert(bearer(InsertRequest { triples: vec![rel(a1, "x", a2)] }, "key-a"))
+        .await
+        .unwrap();
+
+    // key-b works
+    let (_, b1) = new_node();
+    let (_, b2) = new_node();
+    client
+        .insert(bearer(InsertRequest { triples: vec![rel(b1, "x", b2)] }, "key-b"))
+        .await
+        .unwrap();
+
+    // wrong key fails
+    let (_, c1) = new_node();
+    let (_, c2) = new_node();
+    let err = client
+        .insert(bearer(InsertRequest { triples: vec![rel(c1, "x", c2)] }, "key-c"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+}
+
+// ── Management UI smoke tests ─────────────────────────────────────────────────
+
+/// Spin up a UI HTTP server bound to a random port.
+async fn start_ui_http(
+    store: TripleStore,
+    api_keys: Vec<String>,
+) -> (String, tokio::sync::oneshot::Sender<()>, TempDir) {
+    use polargraph_server::ui_api;
+
+    let dir = TempDir::new().unwrap();
+    let svc = PolarGraphServer::new(store).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let state = Arc::new(ui_api::UiState {
+        service: svc,
+        api_keys: Arc::new(api_keys),
+        start_time: std::time::Instant::now(),
+        data_dir: dir.path().display().to_string(),
+        grpc_addr: "127.0.0.1:50051".into(),
+    });
+    let app = ui_api::build_ui_router(state);
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let server = axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service());
+        tokio::select! {
+            _ = server => {}
+            _ = shutdown_rx => {}
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    (format!("http://{addr}"), shutdown_tx, dir)
+}
+
+#[tokio::test]
+async fn ui_get_root_returns_html() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (base, shutdown, _dir) = start_ui_http(store, vec![]).await;
+
+    let client = reqwest::Client::new();
+    let res = client.get(format!("{base}/")).send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    let body = res.text().await.unwrap();
+    assert!(body.contains("PolarGraph"), "HTML should contain 'PolarGraph'");
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn ui_api_status_returns_expected_fields() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (base, shutdown, _dir) = start_ui_http(store, vec![]).await;
+
+    let client = reqwest::Client::new();
+    let res = client.get(format!("{base}/api/status")).send().await.unwrap();
+    let status = res.status();
+    let body_text = res.text().await.unwrap_or_default();
+    assert_eq!(status, 200, "expected 200 but got {status}; body: {body_text}");
+
+    let json: serde_json::Value = serde_json::from_str(&body_text).unwrap();
+    assert!(json.get("version").is_some(), "missing 'version'");
+    assert!(json.get("uptime_secs").is_some(), "missing 'uptime_secs'");
+    assert!(json.get("data_dir").is_some(), "missing 'data_dir'");
+    assert!(json.get("auth_enabled").is_some(), "missing 'auth_enabled'");
+    assert_eq!(json["auth_enabled"], false);
+    assert_eq!(json["is_replica"], false);
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn ui_api_requires_auth_when_keys_configured() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (base, shutdown, _dir) = start_ui_http(store, vec!["secret".into()]).await;
+
+    let client = reqwest::Client::new();
+
+    // No key → 401
+    let res = client.get(format!("{base}/api/status")).send().await.unwrap();
+    assert_eq!(res.status(), 401);
+
+    // Wrong key → 401
+    let res = client
+        .get(format!("{base}/api/status"))
+        .header("Authorization", "Bearer wrong")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 401);
+
+    // Correct key → 200
+    let res = client
+        .get(format!("{base}/api/status"))
+        .header("Authorization", "Bearer secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let json: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(json["auth_enabled"], true);
+
+    // GET / (UI HTML) is always accessible without auth
+    let res = client.get(format!("{base}/")).send().await.unwrap();
+    assert_eq!(res.status(), 200);
+
+    let _ = shutdown.send(());
 }

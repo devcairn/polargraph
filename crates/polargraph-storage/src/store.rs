@@ -493,6 +493,11 @@ impl TripleStore {
         Ok(())
     }
 
+    /// Return the number of named HNSW vector spaces in this store.
+    pub fn hnsw_space_count(&self) -> usize {
+        self.inner.hnsw_spaces.read().unwrap().len()
+    }
+
     /// Search for the `k` nearest neighbors of `query` in a named HNSW space.
     ///
     /// Returns `(NodeId, cosine_similarity)` pairs ordered by decreasing similarity.

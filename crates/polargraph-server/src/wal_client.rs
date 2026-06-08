@@ -78,6 +78,7 @@ async fn connect_and_stream(
     while let Some(entry) = stream.message().await? {
         store.apply_replicated_batch(entry.sequence_number, &entry.write_batch)?;
         state.record_catchup(entry.sequence_number);
+        metrics::gauge!("polargraph_wal_applied_seq").set(entry.sequence_number as f64);
     }
 
     Ok(())

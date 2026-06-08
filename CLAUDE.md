@@ -141,6 +141,10 @@ query layers over gRPC.
 | `proto` | Generated types from `polargraph.proto` (tonic/prost) |
 | `service` | `PolarGraphServer` — implements all RPCs; carries `NodeTypeRegistry` and `EdgeTypeRegistry` |
 | `convert` | Conversions between proto wire types and Rust domain types |
+| `auth` | `ApiKeyLayer` / `ApiKeyService` — tower middleware for gRPC auth; `check_bearer_auth` shared with UI |
+| `telemetry` | `TelemetryLayer` — per-RPC structured logging and Prometheus counters |
+| `ui_api` | `UiState`, `build_ui_router` — axum REST handlers + embedded SPA for the management UI |
+| `wal_client` | `run_replication` — WAL streaming client (replica mode) |
 
 Configuration via CLI flags or environment variables (flags take priority):
 
@@ -148,8 +152,15 @@ Configuration via CLI flags or environment variables (flags take priority):
 |---|---|---|---|
 | `--data-dir PATH` | `POLARGRAPH_DATA_DIR` | `/data` | RocksDB data directory |
 | `--listen ADDR` | `POLARGRAPH_LISTEN_ADDR` | `0.0.0.0:50051` | gRPC listen address |
-| `--log FILTER` | `RUST_LOG` | `info` | Log filter (same syntax as `RUST_LOG`) |
+| `--log-level FILTER` | `RUST_LOG` | `info` | Log level / filter directive |
+| `--log-format FORMAT` | `LOG_FORMAT` | `pretty` | Log format: `pretty` or `json` |
 | `--backup-dir PATH` | `POLARGRAPH_BACKUP_DIR` | *(none)* | Backup directory (optional) |
+| `--metrics-port PORT` | `POLARGRAPH_METRICS_PORT` | `9090` | Prometheus /metrics HTTP port |
+| `--no-metrics` | — | false | Disable metrics endpoint |
+| `--api-key KEY` | `POLARGRAPH_API_KEY` | *(none)* | API key (repeatable; comma-separated in env) |
+| `--no-auth` | — | false | Suppress no-key warning at startup |
+| `--ui-port PORT` | `POLARGRAPH_UI_PORT` | `8080` | Management UI HTTP port |
+| `--no-ui` | — | false | Disable the management UI |
 
 ### `polargraph-import`
 
@@ -281,6 +292,9 @@ sort order and is cluster-safe without a central sequence generator.
 - [x] Compaction and bitemporal retention — `RetentionPolicy` in `polargraph-core::schema` (`tx_age_secs`, `vt_lookback_secs`); `CompactionManager` + `RetentionStats` in `polargraph-storage::compaction`; scans all 6 hexastore CFs, deletes expired entries via `WriteBatch`, triggers `compact_range_cf` on modified CFs; oracle changed to wall-clock µs (`max(committed+1, now_µs)`) so `tt` values are real timestamps; `TripleStore::insert_at_ts` (explicit tt, advances oracle) and `scan_cf_raw` / `compact_cf` helpers; `--retention-tx-age-secs` + `--retention-vt-lookback-secs` CLI flags run retention at startup; `RunRetention` gRPC RPC; 6 storage integration tests, 3 gRPC integration tests; documented in `docs/architecture.md`
 - [x] Bitemporal time-travel queries — `as_of_valid_time` and `as_of_tx_time` fields on `QueryRequest` proto; `Snapshot.vt_as_of: Option<i64>` + `Snapshot::with_vt_as_of()` in `polargraph-storage::mvcc`; vt filter applied inside `snapshot_scan_cf` **before** MVCC deduplication for correctness; `as_of_tx_time` overrides `snapshot_ts` in the gRPC handler; 6 gRPC integration tests; "Time-travel queries" section in `docs/architecture.md`
 - [x] WAL streaming replication — `WalStreamer` + `WalEntry` in `polargraph-storage::wal_stream`; `TripleStore::open_as_replica`, `apply_replicated_batch`, `last_applied_seq`, `latest_sequence_number`; `StreamWal` server-streaming gRPC RPC on primary; `run_replication` in `polargraph-server::wal_client` with exponential backoff (1s→30s); `ReplicaState` tracks `last_applied_seq` + lag; `--replica-of URL` takes gRPC address (no shared filesystem required); `FAILED_PRECONDITION` on all write RPCs and `StreamWal` on replicas; WAL retention 1 h / 512 MB on primary; `last_applied_seq` persisted to META CF for restart resumption; 5 gRPC integration tests; `docs/scaling.md` updated
+- [x] API key authentication — `ApiKeyLayer` + `ApiKeyService` in `polargraph-server::auth`; tower `Layer` applied at transport level via `Server::builder().layer()`; `Bearer <key>` and `ApiKey <key>` header formats; `subtle::ConstantTimeEq` constant-time comparison; multiple keys for zero-downtime rotation; `ReplicaStatus` exempt for health probes; `--api-key KEY` (repeatable) + `POLARGRAPH_API_KEY` (comma-separated); `--no-auth` suppresses startup warning; 6 gRPC integration tests + 7 unit tests; "Authentication" section in `docs/architecture.md`
+- [x] Observability — `TelemetryLayer` in `polargraph-server::telemetry`; tower middleware logs every RPC with method, peer, gRPC status, and duration; `tracing-subscriber` with `json` feature enables `--log-format json` (newline-delimited JSON) vs `pretty` (human-readable); `--log-level`/`RUST_LOG` replaces `--log`; `metrics` + `metrics-exporter-prometheus` crates; Prometheus `/metrics` HTTP endpoint via `axum 0.6` on `--metrics-port` (default 9090) / `POLARGRAPH_METRICS_PORT`; `--no-metrics` flag to disable; counters/gauges: `polargraph_rpc_requests_total{method,status}`, `polargraph_rpc_duration_seconds{method}`, `polargraph_triples_total`, `polargraph_vector_spaces_total`, `polargraph_wal_applied_seq`, `polargraph_wal_lag_entries`, `polargraph_backup_last_size_bytes`, `polargraph_compaction_deleted_total`; `docker-compose.yml` exposes port 9090 and sets `LOG_FORMAT=json`; "Observability" section in `docs/architecture.md`
+- [x] Management UI — `UiState` + `build_ui_router` in `polargraph-server::ui_api`; axum REST endpoints (`/api/status`, `/api/node-types`, `/api/edge-types`, `/api/metrics`, `/api/query`, `/api/insert`, `/api/search`) call into `PolarGraphService` trait in-process (no network hop); dark-theme SPA embedded via `include_str!("ui.html")` with 5 tabs (Query, Schema, Insert, Search, Status), auth overlay, localStorage key storage; `--ui-port PORT` (default 8080) / `POLARGRAPH_UI_PORT`; `--no-ui` to disable; `require_auth` reuses `check_bearer_auth` from `auth.rs`; 3 integration tests (GET /, status fields, 401 enforcement); "Management UI" section in `docs/architecture.md`
 
 ---
 

@@ -7,12 +7,15 @@ services:
     container_name: polargraphd
     ports:
       - "50051:50051"
+      - "9090:9090"
     volumes:
       - polargraph_data:/data
     environment:
       POLARGRAPH_DATA_DIR: /data
       POLARGRAPH_LISTEN_ADDR: "0.0.0.0:50051"
+      POLARGRAPH_METRICS_PORT: "9090"
       RUST_LOG: info
+      LOG_FORMAT: json
     restart: unless-stopped
 
 volumes:

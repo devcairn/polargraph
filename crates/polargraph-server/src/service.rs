@@ -254,6 +254,8 @@ impl PolarGraphService for PolarGraphServer {
         // Incrementally update the type cache for any __type triples.
         self.update_type_cache(&triples);
 
+        metrics::gauge!("polargraph_triples_total").increment(triples.len() as f64);
+
         Ok(Response::new(InsertResponse { commit_ts: commit_ts.0 }))
     }
 
@@ -345,6 +347,9 @@ impl PolarGraphService for PolarGraphServer {
         self.store
             .insert_vector(space, node_id, req.vector, mode)
             .map_err(storage_err_to_status)?;
+
+        metrics::gauge!("polargraph_vector_spaces_total")
+            .set(self.store.hnsw_space_count() as f64);
 
         Ok(Response::new(InsertVectorResponse {}))
     }
@@ -876,6 +881,7 @@ impl PolarGraphService for PolarGraphServer {
         let mgr = self.backup_manager.as_ref().ok_or_else(backup_not_configured)?;
         let info = mgr.create_backup().map_err(storage_err_to_status)?;
         info!(backup_id = info.backup_id, size_bytes = info.size_bytes, "backup created");
+        metrics::gauge!("polargraph_backup_last_size_bytes").set(info.size_bytes as f64);
         Ok(Response::new(CreateBackupResponse {
             backup_id: info.backup_id,
             size_bytes: info.size_bytes,
@@ -938,6 +944,8 @@ impl PolarGraphService for PolarGraphServer {
             duration_ms = stats.duration_ms,
             "retention run complete"
         );
+        metrics::counter!("polargraph_compaction_deleted_total")
+            .increment(stats.triples_deleted as u64);
         Ok(Response::new(RunRetentionResponse {
             triples_scanned: stats.triples_scanned as u64,
             triples_deleted: stats.triples_deleted as u64,
@@ -955,6 +963,8 @@ impl PolarGraphService for PolarGraphServer {
                 let last_applied_seq = state.last_applied_seq.load(Ordering::Relaxed);
                 let primary_latest = self.store.latest_sequence_number();
                 let replication_lag_entries = primary_latest.saturating_sub(last_applied_seq);
+                metrics::gauge!("polargraph_wal_applied_seq").set(last_applied_seq as f64);
+                metrics::gauge!("polargraph_wal_lag_entries").set(replication_lag_entries as f64);
                 ReplicaStatusResponse {
                     is_replica: true,
                     primary_address: state.primary_address.clone(),
