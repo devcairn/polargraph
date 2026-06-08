@@ -1176,6 +1176,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "polargraph-import"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "polargraph-core",
+ "polargraph-storage",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "polargraph-query"
 version = "0.1.0"
 dependencies = [
@@ -1202,6 +1216,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "tracing",
@@ -1222,6 +1237,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
  "uuid",
 ]

@@ -288,6 +288,7 @@ async fn run_read(mut client: PolarGraphServiceClient<Channel>, args: &Args) -> 
                 }),
             }],
             snapshot_ts: 0,
+            ..Default::default()
         };
         let t0 = Instant::now();
         let _resp: QueryResponse = client.query(req).await.context("query")?.into_inner();
@@ -363,6 +364,7 @@ async fn run_mixed(client: PolarGraphServiceClient<Channel>, args: &Args) -> Res
                         }),
                     }],
                     snapshot_ts: 0,
+                    ..Default::default()
                 };
                 let t0 = Instant::now();
                 let _ = cl.query(req).await;

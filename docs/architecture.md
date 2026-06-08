@@ -452,9 +452,15 @@ transaction time assigned to the write.
 ### Query
 
 `QueryRequest.patterns` is a list of `VarPattern`s evaluated as a conjunctive
-query. `snapshot_ts = 0` means "latest committed state"; any non-zero value
-reads at that exact transaction timestamp. The response is a list of `Binding`
-maps from variable name to `NodeId`.
+query. The response is a list of `Binding` maps from variable name to `NodeId`.
+
+Two optional fields enable point-in-time time-travel (see [Time-travel queries](#time-travel-queries)):
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `snapshot_ts` | `int64` | Read at this transaction timestamp (µs). 0 = latest. |
+| `as_of_tx_time` | `int64` | Override `snapshot_ts`: only triples committed at or before this wall-clock time are visible. 0 = use `snapshot_ts`. |
+| `as_of_valid_time` | `int64` | Additional valid-time filter: only triples whose `[vt_start, vt_end)` window contains this value are returned. 0 = no filter. |
 
 ### InsertVector / SearchVector
 
@@ -687,10 +693,361 @@ matches any type argument.
 
 ---
 
+## Backup and restore
+
+PolarGraph uses RocksDB's built-in `BackupEngine` for point-in-time backups.
+
+### Configuration
+
+Pass `--backup-dir <PATH>` (or set `POLARGRAPH_BACKUP_DIR`) when starting
+the server. The directory is created if it does not exist. Without this flag
+the `CreateBackup`, `ListBackups`, and `PurgeOldBackups` RPCs return
+`FAILED_PRECONDITION`.
+
+### How incremental backups work
+
+RocksDB's `BackupEngine` hard-links unchanged SST files between successive
+backups. Only SST files that were compacted or newly written since the previous
+backup are actually copied. This means:
+
+- The first backup copies everything.
+- Subsequent backups copy only the delta, typically a small fraction of the
+  total data size.
+- The sum of all backup sizes displayed by `ListBackups` is larger than the
+  actual disk usage because sizes are reported per-backup without accounting
+  for shared files.
+
+### Creating and managing backups
+
+```bash
+# Create a backup (incremental)
+grpcurl -plaintext -d '{}' localhost:50051 polargraph.v1.PolarGraphService/CreateBackup
+
+# List all backups
+grpcurl -plaintext -d '{}' localhost:50051 polargraph.v1.PolarGraphService/ListBackups
+
+# Keep only the 5 most recent backups
+grpcurl -plaintext -d '{"keep_n": 5}' localhost:50051 polargraph.v1.PolarGraphService/PurgeOldBackups
+```
+
+### Restore runbook (offline operation)
+
+Restore **cannot** be performed while the server is running. The server must
+be stopped first.
+
+```bash
+# 1. Stop the server (send SIGTERM or Ctrl-C).
+
+# 2. Find the backup ID to restore from:
+grpcurl -plaintext -d '{}' localhost:50051 polargraph.v1.PolarGraphService/ListBackups
+# (or inspect the backup directory directly)
+
+# 3. Run a one-shot restore process (Rust snippet / future polargraphd subcommand):
+#    BackupManager::open(backup_dir, &store)?
+#        .restore_from_backup(backup_id, restore_dir)?;
+#    (This is not yet exposed as a CLI command; use a small Rust program or
+#     the polargraph-storage library directly.)
+
+# 4. Restart the server pointing at the restored directory:
+polargraphd --data-dir /path/to/restore_dir --backup-dir /path/to/backup_dir
+```
+
+The `restore_from_backup` function in `polargraph-storage::backup::BackupManager`
+copies all SST files for the chosen backup ID into `restore_dir` and writes the
+RocksDB `CURRENT` file so the directory is immediately openable. The WAL
+directory is the same as the data directory (RocksDB default).
+
+---
+
+## Bulk import
+
+For large initial data loads, `polargraph-import` ingests N-Triples files
+directly into RocksDB via SST file ingestion — completely bypassing gRPC,
+the WAL write path, and per-insert MVCC overhead. Expected throughput is
+10–100× faster than streaming inserts over gRPC.
+
+### Use case
+
+Use `polargraph-import` when loading millions of triples into a fresh or
+offline database (knowledge graph seed data, migration from another store,
+test fixture load). It is **not** suitable for incremental updates to a live
+database — use the `Insert` RPC for that.
+
+### How to run
+
+```bash
+# Stop polargraphd first — SST ingestion requires exclusive DB access.
+
+polargraph-import \
+  --data-dir /var/lib/polargraph \
+  --input    ./dump.nt \
+  --batch-size 100000
+
+# Example output:
+# Imported 100000 triples (batch 1) in 312ms
+# Imported 100000 triples (batch 2) in 298ms
+# Total: 200000 triples in 612ms (326797 triples/sec)
+
+# Restart the server — all imported triples are immediately visible.
+polargraphd --data-dir /var/lib/polargraph
+```
+
+### N-Triples support
+
+`polargraph-import` handles the common N-Triples subset:
+
+| Input form | Storage result |
+|---|---|
+| `<uri> <uri> <uri> .` | `Triple::Relation` — subject/object URIs hashed to stable `NodeId`s |
+| `<uri> <uri> "literal" .` | `Triple::Property` — `Value::Text` |
+| `<uri> <uri> "literal"@lang .` | `Triple::Property` — language tag stripped |
+| Lines starting with `#` | Skipped (comments) |
+| Blank lines | Skipped |
+| `_:blank_node` objects | Skipped (not supported) |
+
+URIs are hashed to `NodeId` using xxHash3-128 — the same URI always
+produces the same `NodeId` across runs.
+
+### Why offline-only
+
+RocksDB SST file ingestion acquires exclusive locks on the column families
+being written. Running `polargraph-import` against a database that is also
+being served by `polargraphd` will cause RocksDB errors or data corruption.
+The gRPC `Insert` RPC is the correct path for concurrent writes to a live server.
+
+### Implementation
+
+`polargraph-storage::SstImporter` (in `sst_import.rs`):
+
+1. Buffers triples in memory.
+2. On `finish(&store)`: interns all predicates, acquires a commit timestamp
+   via `begin_commit()`, encodes keys for all 6 hexastore CFs, sorts per CF
+   (RocksDB SST requires sorted order), writes one `.sst` file per CF via
+   `SstFileWriter`, calls `db.ingest_external_file_cf()` for each CF, then
+   persists the updated oracle counter to the META CF.
+3. Returns `ImportStats { triples_imported, duration_ms }`.
+
+`polargraph-import/src/main.rs` drives `SstImporter` in batches (default
+100 000 triples/batch) and prints per-batch and summary progress lines.
+
+---
+
+## Compaction and retention
+
+PolarGraph stores every write as an immutable versioned entry. Without
+pruning, storage grows unboundedly. `CompactionManager` (in
+`polargraph-storage::compaction`) scans the six hexastore column families
+and deletes entries that have expired under a `RetentionPolicy`, then triggers
+a full RocksDB compaction on any CF that received deletions.
+
+### What timestamps are checked
+
+Every hexastore key ends with 8 bytes of `tt` (transaction time, microseconds
+since Unix epoch, wall-clock). The codec value bytes begin with the
+discriminant and carry `vt_start` and `vt_end` (also microseconds since epoch).
+
+`RetentionPolicy` has two independent knobs:
+
+| Field | Effect |
+|-------|--------|
+| `tx_age_secs` | Delete any triple whose `tt` is more than `tx_age_secs` seconds before now. This is the primary retention knob — it bounds how much transaction history is kept. |
+| `vt_lookback_secs` (optional) | Also delete triples whose `vt_end` (the end of their valid-time window) is more than `vt_lookback_secs` seconds in the past. Useful for purging facts whose real-world validity has ended. Disabled when `None`. |
+
+Either condition is sufficient for deletion — a triple matching either is
+removed from all six CFs atomically via a single `WriteBatch`.
+
+### Transaction time and the oracle
+
+The MVCC oracle uses `max(committed + 1, wall_clock_µs)` as the commit
+timestamp. This means `tt` values are real wall-clock times, so comparing
+them against `now - tx_age_secs * 1_000_000` is meaningful. When an existing
+store is opened, the oracle loads the last committed `tt` from the META CF
+and then immediately aligns with wall-clock time on the next commit.
+
+### How to trigger retention
+
+**At startup** — set `--retention-tx-age-secs N` (and optionally
+`--retention-vt-lookback-secs M`). Retention runs once before the server
+starts accepting connections:
+
+```bash
+polargraphd \
+  --data-dir /var/lib/polargraph \
+  --retention-tx-age-secs 2592000 \   # 30 days
+  --retention-vt-lookback-secs 86400    # 1 day
+```
+
+**Via gRPC** — the `RunRetention` RPC runs retention without a restart:
+
+```
+RunRetentionRequest {
+    tx_age_secs: 2592000,
+    vt_lookback_secs: 86400  // 0 = disabled
+}
+```
+
+Returns `RetentionStats { triples_scanned, triples_deleted, duration_ms }`.
+
+### Performance implications
+
+Retention does a **full scan** of all six hexastore CFs. Each row is checked
+against the policy; matching rows are batched into a `WriteBatch` and deleted.
+After deletion, `db.compact_range_cf` is called on each modified CF so that
+RocksDB reclaims the on-disk space promptly (rather than waiting for the next
+scheduled compaction). On a large store this can take tens of seconds.
+
+META and HNSW column families are never touched.
+
+---
+
+## Time-travel queries
+
+PolarGraph's bitemporal model stores two independent time axes on every triple:
+
+- **Transaction time (`tt`)** — when the triple was committed to the database.
+  Stored in the RocksDB key (last 8 bytes). Values are wall-clock microseconds
+  (`max(committed+1, now_µs)`), so they are comparable to real timestamps.
+- **Valid time (`vt_start` / `vt_end`)** — when the fact was true in the
+  real world, as asserted by the writer. Stored in the value bytes.
+  `vt_end = i64::MAX` (or proto `0`, which `convert.rs` maps to `END_OF_TIME`)
+  means the fact is open-ended.
+
+Both axes are independently filterable on the `Query` RPC.
+
+### Transaction-time filter (`as_of_tx_time`)
+
+```proto
+QueryRequest {
+    patterns: [...],
+    as_of_tx_time: 1_718_000_000_000_000   // unix µs
+}
+```
+
+Only triples whose `tt ≤ as_of_tx_time` are visible. This is equivalent to
+"what did the database look like at this wall-clock instant?" It is implemented
+by passing `as_of_tx_time` as the snapshot timestamp instead of `snapshot_ts`.
+
+Typical use cases:
+- **Audit**: replay what the system knew at a specific past moment.
+- **Debugging**: isolate the state before a bad write.
+
+### Valid-time filter (`as_of_valid_time`)
+
+```proto
+QueryRequest {
+    patterns: [...],
+    as_of_valid_time: 1_700_000_000_000_000   // unix µs
+}
+```
+
+Only triples whose valid-time window `[vt_start, vt_end)` contains
+`as_of_valid_time` are returned. Triples outside the window are skipped even
+if they are the latest version in the MVCC sense.
+
+Typical use cases:
+- **Historical state**: "What was Alice's role on January 1st?" — query with
+  `as_of_valid_time` set to the start of that day.
+- **Versioned facts**: store multiple non-overlapping versions of the same
+  (S, P) pair with different vt windows and query each independently.
+
+### Filter ordering and correctness
+
+The valid-time filter runs **inside** `snapshot_scan_cf`, before the MVCC
+deduplication step that picks the highest-`tt` entry for each `(S, P, O)`.
+
+This ordering is necessary for correctness. Consider two versions of the same
+fact:
+
+```
+version 1: tt=T1, vt=[100, 200)
+version 2: tt=T2, vt=[200, MAX)     (T2 > T1)
+```
+
+A query with `as_of_valid_time=150` should return version 1. If filtering
+happened _after_ deduplication, version 2 (the higher-`tt` entry) would
+be selected first, then rejected, leaving no result — incorrect. By filtering
+before deduplication each eligible version participates in the latest-version
+selection independently.
+
+### Combining both filters
+
+Both filters can be set simultaneously. A triple must satisfy **both** to
+appear in the results:
+
+```proto
+QueryRequest {
+    patterns: [...],
+    as_of_tx_time:    1_718_000_000_000_000,   // how the DB looked at this instant
+    as_of_valid_time: 1_700_000_000_000_000,   // what was "currently valid" then
+}
+```
+
+This is a full bitemporal point query — a precise snapshot along both axes.
+
+### Implementation
+
+- `Snapshot.vt_as_of: Option<i64>` — set by `Snapshot::with_vt_as_of(vt)`.
+- All `scan_*` methods on `Snapshot` forward `vt_as_of` to the underlying
+  `scan_*_at` methods on `TripleStore`.
+- `snapshot_scan_cf` in `store.rs` applies the valid-time filter inline before
+  updating the `latest` deduplication map.
+- The `datalog`, `eval`, and query planner layers need no changes — they call
+  `Snapshot` scan methods and inherit the filter transparently.
+
+---
+
+## Read replicas
+
+PolarGraph supports horizontal read scale-out via RocksDB secondary instances. A secondary instance opens the primary's data directory in read-only mode and periodically ingests new SST files without copying them.
+
+### Opening a secondary
+
+`TripleStore::open_secondary(data_dir, primary_path)` calls
+`DB::open_cf_descriptors_as_secondary` with all 8 column families (SPO, SOP,
+PSO, POS, OSP, OPS, META, HNSW). `data_dir` is a small local directory for
+RocksDB secondary metadata; `primary_path` is the primary's data directory
+(must be readable from the replica host).
+
+### Catch-up
+
+`TripleStore::try_catch_up_with_primary()` calls RocksDB's
+`try_catch_up_with_primary`, which re-reads the primary's MANIFEST and
+hard-links any new SST files into the secondary's view. PolarGraph then
+refreshes its in-memory predicate maps and advances the MVCC oracle to the
+latest transaction timestamp so that reads at `snapshot_ts=0` see the
+newest data.
+
+The `polargraphd` server spawns a background tokio task that calls this on the
+interval set by `--replica-catchup-interval-ms` (default 1 s).
+
+### Consistency model
+
+The secondary provides **eventual consistency**: reads may lag the primary by
+up to one catch-up interval. There is no read-your-own-writes guarantee.
+Transaction timestamps on the replica are always ≤ the primary's committed
+timestamp at the last catch-up.
+
+### Write blocking
+
+All storage-layer write operations (`db_write`, `intern_predicate`,
+`insert_vector`, `batch_insert_vectors`, `insert_at_ts`, `compact_cf`,
+`scan_cf_raw`) return `StorageError::ReadOnly` when called on a secondary. The
+gRPC service layer adds a second guard (`check_not_replica`) that returns
+`FAILED_PRECONDITION` before the request reaches the storage layer, giving
+clients a clear error message.
+
+### ReplicaStatus RPC
+
+The `ReplicaStatus` RPC returns:
+- `is_replica` — whether this instance is a secondary.
+- `primary_path` — the primary's data directory.
+- `last_catchup_at` — Unix microseconds of the most recent successful catch-up.
+- `catchup_count` — total successful catch-ups since server start.
+
+---
+
 ## Planned extensions
 
 | Feature | Notes |
 |---------|-------|
 | Replication | Log-structured writes, follower replay; oracle becomes distributed (Hybrid Logical Clocks) |
-| Compaction | Bitemporal tombstoning — purge superseded versions outside a retention window |
-| Bulk import | Direct SST file ingestion for large initial loads |

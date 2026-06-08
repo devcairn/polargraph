@@ -1,0 +1,23 @@
+[package]
+name        = "polargraph-import"
+description = "Bulk N-Triples importer for PolarGraph via SST file ingestion"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+rust-version.workspace = true
+
+[[bin]]
+name = "polargraph-import"
+path = "src/main.rs"
+
+[dependencies]
+polargraph-core    = { path = "../polargraph-core" }
+polargraph-storage = { path = "../polargraph-storage" }
+
+anyhow       = { workspace = true }
+clap         = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber  = { workspace = true }
+uuid         = { workspace = true }
+xxhash-rust  = { workspace = true }

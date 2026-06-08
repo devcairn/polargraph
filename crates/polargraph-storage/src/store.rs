@@ -53,6 +53,22 @@ use std::{
 };
 use tracing::info;
 
+// ── Store mode ────────────────────────────────────────────────────────────────
+
+/// Whether this `TripleStore` is the primary read-write instance or a replica
+/// that receives changes via WAL streaming replication from the primary.
+///
+/// In replica mode the underlying RocksDB is opened read-write so that the
+/// replication client can apply incoming write batches, but all public write
+/// APIs on `TripleStore` return `StorageError::ReadOnly` so application code
+/// cannot write through the replica directly.
+#[derive(Clone, Debug)]
+pub enum StoreMode {
+    Primary,
+    /// gRPC address of the primary (e.g. `"http://192.168.1.10:50051"`).
+    Replica { primary_address: String },
+}
+
 type DB = DBWithThreadMode<MultiThreaded>;
 
 // META key namespace for predicate table.
@@ -87,7 +103,12 @@ struct Inner {
     hnsw_spaces: RwLock<HashMap<String, HnswIndex>>,
     /// Path passed to `open()`, used to locate mmap `.vecs` files.
     data_dir: PathBuf,
+    /// Whether this is a primary or replica instance.
+    mode: StoreMode,
 }
+
+// META key for persisting the last replicated WAL sequence number.
+const META_LAST_REPL_SEQ: &[u8] = b"__replication__/last_seq";
 
 impl TripleStore {
     // ── lifecycle ─────────────────────────────────────────────────────────────
@@ -96,6 +117,9 @@ impl TripleStore {
         let mut db_opts = Options::default();
         db_opts.create_if_missing(true);
         db_opts.create_missing_column_families(true);
+        // Keep WAL files for up to 1 hour so replicas can catch up after a gap.
+        db_opts.set_wal_ttl_seconds(3600);
+        db_opts.set_wal_size_limit_mb(512);
 
         let cf_descriptors: Vec<ColumnFamilyDescriptor> = cf::ALL
             .iter()
@@ -132,8 +156,153 @@ impl TripleStore {
                 next_pred_id: RwLock::new(next_pred_id),
                 hnsw_spaces: RwLock::new(hnsw_spaces),
                 data_dir: path.to_path_buf(),
+                mode: StoreMode::Primary,
             }),
         })
+    }
+
+    /// Open a replica store at `path`.
+    ///
+    /// Identical to `open()` except the mode is set to `Replica`. The
+    /// underlying RocksDB is opened read-write so the replication client can
+    /// apply incoming write batches, but all public write APIs return
+    /// `StorageError::ReadOnly`.
+    ///
+    /// `primary_address` is the gRPC endpoint of the primary, e.g.
+    /// `"http://192.168.1.10:50051"`. It is stored for use by the caller to
+    /// create a `WalReplicationClient`.
+    pub fn open_as_replica(path: &Path, primary_address: String) -> Result<Self, StorageError> {
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+        db_opts.set_wal_ttl_seconds(3600);
+        db_opts.set_wal_size_limit_mb(512);
+
+        let cf_descriptors: Vec<ColumnFamilyDescriptor> = cf::ALL
+            .iter()
+            .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()))
+            .collect();
+
+        let db = DB::open_cf_descriptors(&db_opts, path, cf_descriptors)?;
+
+        let vectors_dir = path.join("vectors");
+        std::fs::create_dir_all(&vectors_dir)?;
+
+        let (fwd, rev, next_pred_id) = Self::load_predicates(&db)?;
+        let oracle_ts = Self::load_oracle_ts(&db)?;
+        let oracle = TimestampOracle::new(oracle_ts);
+        let hnsw_spaces = Self::load_hnsw_spaces(&db, &vectors_dir)?;
+
+        let total_nodes: usize = hnsw_spaces.values().map(|i| i.len()).sum();
+        info!(
+            path = %path.display(),
+            primary_address = %primary_address,
+            predicates = fwd.len(),
+            oracle_ts,
+            hnsw_spaces = hnsw_spaces.len(),
+            hnsw_nodes = total_nodes,
+            "TripleStore opened as replica"
+        );
+
+        Ok(Self {
+            inner: Arc::new(Inner {
+                db,
+                oracle,
+                fwd: RwLock::new(fwd),
+                rev: RwLock::new(rev),
+                next_pred_id: RwLock::new(next_pred_id),
+                hnsw_spaces: RwLock::new(hnsw_spaces),
+                data_dir: path.to_path_buf(),
+                mode: StoreMode::Replica { primary_address },
+            }),
+        })
+    }
+
+    /// Return `true` if this store is a replica (write ops blocked at the API level).
+    pub fn is_replica(&self) -> bool {
+        matches!(self.inner.mode, StoreMode::Replica { .. })
+    }
+
+    /// Return the primary's gRPC address if this is a replica; `None` otherwise.
+    pub fn primary_address(&self) -> Option<&str> {
+        match &self.inner.mode {
+            StoreMode::Replica { primary_address } => Some(primary_address.as_str()),
+            StoreMode::Primary => None,
+        }
+    }
+
+    /// Apply a raw WAL batch received from the primary.
+    ///
+    /// Writes the deserialized `WriteBatch` directly to RocksDB (bypassing the
+    /// replica write guard), persists `seq` as the new `last_applied_seq`, and
+    /// refreshes the in-memory predicate map and oracle so that subsequent reads
+    /// reflect the newly written data.
+    ///
+    /// Only valid on a replica store; returns `StorageError::ReadOnly` otherwise.
+    pub fn apply_replicated_batch(&self, seq: u64, batch_data: &[u8]) -> Result<(), StorageError> {
+        if !self.is_replica() {
+            return Err(StorageError::ReadOnly(
+                "apply_replicated_batch is only valid on a replica".into(),
+            ));
+        }
+
+        // Apply the raw write batch from the primary.
+        let batch = WriteBatch::from_data(batch_data);
+        self.inner.db.write(batch)?;
+
+        // Persist the sequence number so we can resume after a restart.
+        let meta_cf = self.cf_handle(cf::META)?;
+        let mut seq_batch = WriteBatch::default();
+        seq_batch.put_cf(&meta_cf, META_LAST_REPL_SEQ, seq.to_be_bytes());
+        self.inner.db.write(seq_batch)?;
+
+        // Refresh in-memory structures that the write batch may have updated.
+        let (fwd, rev, next_pred_id) = Self::load_predicates(&self.inner.db)?;
+        let oracle_ts = Self::load_oracle_ts(&self.inner.db)?;
+        *self.inner.fwd.write().unwrap() = fwd;
+        *self.inner.rev.write().unwrap() = rev;
+        *self.inner.next_pred_id.write().unwrap() = next_pred_id;
+        self.inner.oracle.advance_to(polargraph_core::temporal::Timestamp(oracle_ts));
+
+        Ok(())
+    }
+
+    /// Return the last WAL sequence number applied by this replica.
+    ///
+    /// Reads `__replication__/last_seq` from the META CF. Returns 0 if no
+    /// batches have been applied yet.
+    pub fn last_applied_seq(&self) -> u64 {
+        let meta_cf = match self.cf_handle(cf::META) {
+            Ok(cf) => cf,
+            Err(_) => return 0,
+        };
+        match self.inner.db.get_cf(&meta_cf, META_LAST_REPL_SEQ) {
+            Ok(Some(v)) if v.len() == 8 => u64::from_be_bytes(v[..8].try_into().unwrap()),
+            _ => 0,
+        }
+    }
+
+    /// Return the current RocksDB WAL sequence number.
+    ///
+    /// Used by the primary to report replication lag in `ReplicaStatus`.
+    pub fn latest_sequence_number(&self) -> u64 {
+        self.inner.db.latest_sequence_number()
+    }
+
+    fn read_only_err() -> StorageError {
+        StorageError::ReadOnly(
+            "write operations are not supported on a read replica".to_string(),
+        )
+    }
+
+    /// Provides read access to the underlying RocksDB instance.
+    ///
+    /// Used by `BackupManager` to pass the live DB to `BackupEngine::create_new_backup_flush`.
+    pub(crate) fn with_db<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&DB) -> R,
+    {
+        f(&self.inner.db)
     }
 
     fn load_predicates(
@@ -285,6 +454,9 @@ impl TripleStore {
         vector: Vec<f32>,
         mode: StorageMode,
     ) -> Result<(), StorageError> {
+        if self.is_replica() {
+            return Err(Self::read_only_err());
+        }
         let mut spaces = self.inner.hnsw_spaces.write().unwrap();
         let idx = spaces.entry(space.to_string()).or_insert_with(|| {
             match mode {
@@ -378,6 +550,9 @@ impl TripleStore {
         items: &[(NodeId, Vec<f32>)],
         mode: StorageMode,
     ) -> (usize, Vec<(usize, StorageError)>) {
+        if self.is_replica() {
+            return (0, vec![(0, Self::read_only_err())]);
+        }
         let hnsw_cf = match self.cf_handle(cf::HNSW) {
             Ok(cf) => cf,
             Err(e) => return (0, vec![(0, e)]),
@@ -432,7 +607,7 @@ impl TripleStore {
     // Useful for tests and simple read paths that don't need a named snapshot.
 
     pub fn scan_by_subject(&self, subject: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.scan_by_subject_at(subject, self.inner.oracle.read_ts())
+        self.scan_by_subject_at(subject, self.inner.oracle.read_ts(), None)
     }
 
     pub fn scan_by_subject_predicate(
@@ -440,11 +615,11 @@ impl TripleStore {
         subject: &NodeId,
         predicate: &str,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.scan_by_subject_predicate_at(subject, predicate, self.inner.oracle.read_ts())
+        self.scan_by_subject_predicate_at(subject, predicate, self.inner.oracle.read_ts(), None)
     }
 
     pub fn scan_by_predicate(&self, predicate: &str) -> Result<Vec<Triple>, StorageError> {
-        self.scan_by_predicate_at(predicate, self.inner.oracle.read_ts())
+        self.scan_by_predicate_at(predicate, self.inner.oracle.read_ts(), None)
     }
 
     pub fn scan_by_predicate_object(
@@ -452,11 +627,11 @@ impl TripleStore {
         predicate: &str,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.scan_by_predicate_object_at(predicate, object, self.inner.oracle.read_ts())
+        self.scan_by_predicate_object_at(predicate, object, self.inner.oracle.read_ts(), None)
     }
 
     pub fn scan_by_object(&self, object: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.scan_by_object_at(object, self.inner.oracle.read_ts())
+        self.scan_by_object_at(object, self.inner.oracle.read_ts(), None)
     }
 
     pub fn scan_by_subject_object(
@@ -464,11 +639,11 @@ impl TripleStore {
         subject: &NodeId,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.scan_by_subject_object_at(subject, object, self.inner.oracle.read_ts())
+        self.scan_by_subject_object_at(subject, object, self.inner.oracle.read_ts(), None)
     }
 
     pub fn scan_all(&self) -> Result<Vec<Triple>, StorageError> {
-        self.scan_all_at(self.inner.oracle.read_ts())
+        self.scan_all_at(self.inner.oracle.read_ts(), None)
     }
 
     // ── predicate interning ───────────────────────────────────────────────────
@@ -476,6 +651,9 @@ impl TripleStore {
     pub fn intern_predicate(&self, pred: &str) -> Result<PredId, StorageError> {
         if let Some(&id) = self.inner.fwd.read().unwrap().get(pred) {
             return Ok(id);
+        }
+        if self.is_replica() {
+            return Err(Self::read_only_err());
         }
         let mut fwd = self.inner.fwd.write().unwrap();
         if let Some(&id) = fwd.get(pred) {
@@ -513,9 +691,10 @@ impl TripleStore {
         &self,
         subject: &NodeId,
         snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
         let prefix = keys::spo_prefix_s(subject);
-        self.snapshot_scan_spo(&prefix, snapshot_ts)
+        self.snapshot_scan_spo(&prefix, snapshot_ts, vt_as_of)
     }
 
     pub(crate) fn scan_by_subject_predicate_at(
@@ -523,26 +702,28 @@ impl TripleStore {
         subject: &NodeId,
         predicate: &str,
         snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
         let p = match self.predicate_id(predicate) {
             Some(id) => id,
             None => return Ok(vec![]),
         };
         let prefix = keys::spo_prefix_sp(subject, p);
-        self.snapshot_scan_spo(&prefix, snapshot_ts)
+        self.snapshot_scan_spo(&prefix, snapshot_ts, vt_as_of)
     }
 
     pub(crate) fn scan_by_predicate_at(
         &self,
         predicate: &str,
         snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
         let p = match self.predicate_id(predicate) {
             Some(id) => id,
             None => return Ok(vec![]),
         };
         let prefix = keys::pso_prefix_p(p);
-        self.snapshot_scan_cf(cf::PSO, &prefix, snapshot_ts, |key, value| {
+        self.snapshot_scan_cf(cf::PSO, &prefix, snapshot_ts, vt_as_of, |key, value| {
             let dk = keys::decode_pso(key)?;
             Ok((dk.subject, dk.pred_id, dk.object, dk.tt, value.to_vec()))
         })
@@ -553,13 +734,14 @@ impl TripleStore {
         predicate: &str,
         object: &NodeId,
         snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
         let p = match self.predicate_id(predicate) {
             Some(id) => id,
             None => return Ok(vec![]),
         };
         let prefix = keys::pos_prefix_po(p, object);
-        self.snapshot_scan_cf(cf::POS, &prefix, snapshot_ts, |key, value| {
+        self.snapshot_scan_cf(cf::POS, &prefix, snapshot_ts, vt_as_of, |key, value| {
             let dk = keys::decode_pos(key)?;
             Ok((dk.subject, dk.pred_id, dk.object, dk.tt, value.to_vec()))
         })
@@ -569,9 +751,10 @@ impl TripleStore {
         &self,
         object: &NodeId,
         snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
         let prefix = keys::osp_prefix_o(object);
-        self.snapshot_scan_cf(cf::OSP, &prefix, snapshot_ts, |key, value| {
+        self.snapshot_scan_cf(cf::OSP, &prefix, snapshot_ts, vt_as_of, |key, value| {
             let dk = keys::decode_osp(key)?;
             Ok((dk.subject, dk.pred_id, dk.object, dk.tt, value.to_vec()))
         })
@@ -583,9 +766,10 @@ impl TripleStore {
         subject: &NodeId,
         object: &NodeId,
         snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
         let prefix = keys::sop_prefix_so(subject, object);
-        self.snapshot_scan_cf(cf::SOP, &prefix, snapshot_ts, |key, value| {
+        self.snapshot_scan_cf(cf::SOP, &prefix, snapshot_ts, vt_as_of, |key, value| {
             let dk = keys::decode_sop(key)?;
             Ok((dk.subject, dk.pred_id, dk.object, dk.tt, value.to_vec()))
         })
@@ -595,9 +779,10 @@ impl TripleStore {
     pub(crate) fn scan_all_at(
         &self,
         snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
         // Empty prefix matches every key in the CF.
-        self.snapshot_scan_spo(&[], snapshot_ts)
+        self.snapshot_scan_spo(&[], snapshot_ts, vt_as_of)
     }
 
     // ── snapshot scan implementation ──────────────────────────────────────────
@@ -607,8 +792,9 @@ impl TripleStore {
         &self,
         prefix: &[u8],
         snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.snapshot_scan_cf(cf::SPO, prefix, snapshot_ts, |key, value| {
+        self.snapshot_scan_cf(cf::SPO, prefix, snapshot_ts, vt_as_of, |key, value| {
             let dk = keys::decode_spo(key)?;
             Ok((dk.subject, dk.pred_id, dk.object, dk.tt, value.to_vec()))
         })
@@ -618,14 +804,17 @@ impl TripleStore {
     ///
     /// 1. Prefix-scan the given CF.
     /// 2. Discard entries with `tt > snapshot_ts` (not yet committed at our snapshot).
-    /// 3. Group by (subject, pred_id, object): keep only the entry with the
-    ///    highest `tt` (latest committed version).
-    /// 4. Reconstruct and return `Triple` values.
+    /// 3. If `vt_as_of` is set, discard entries whose valid-time window does not
+    ///    cover the requested point (`vt_start <= vt_as_of < vt_end`).
+    /// 4. Group by (subject, pred_id, object): keep only the entry with the
+    ///    highest `tt` (latest committed version satisfying both filters).
+    /// 5. Reconstruct and return `Triple` values.
     fn snapshot_scan_cf(
         &self,
         cf_name: &str,
         prefix: &[u8],
         snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
         decode_key: impl Fn(&[u8], &[u8]) -> Result<(NodeId, PredId, NodeId, Timestamp, Vec<u8>), StorageError>,
     ) -> Result<Vec<Triple>, StorageError> {
         let cf = self.cf_handle(cf_name)?;
@@ -635,7 +824,8 @@ impl TripleStore {
             .iterator_cf(&cf, IteratorMode::From(prefix, Direction::Forward));
 
         // Map: (subject, pred_id, object) → (tt, value_bytes)
-        // We keep only the latest version visible at snapshot_ts.
+        // We keep only the latest version visible at snapshot_ts that also
+        // satisfies the optional valid-time filter.
         let mut latest: HashMap<(NodeId, PredId, NodeId), (Timestamp, Vec<u8>)> = HashMap::new();
 
         for item in iter {
@@ -649,6 +839,24 @@ impl TripleStore {
             // Skip uncommitted-at-snapshot entries.
             if tt > snapshot_ts {
                 continue;
+            }
+
+            // Valid-time filter: keep only entries whose vt window covers vt_as_of.
+            // Checked before updating the latest map so that we pick the highest-tt
+            // version that is actually valid at the requested point in time.
+            if let Some(vt) = vt_as_of {
+                let pass = match codec::decode_value(&value_bytes) {
+                    Ok(DecodedValue::Relation { temporal, .. }) => {
+                        temporal.vt_start.0 <= vt && vt < temporal.vt_end.0
+                    }
+                    Ok(DecodedValue::Property { temporal, .. }) => {
+                        temporal.vt_start.0 <= vt && vt < temporal.vt_end.0
+                    }
+                    Err(_) => false,
+                };
+                if !pass {
+                    continue;
+                }
             }
 
             let slot = latest.entry((subject, pred_id, object)).or_insert((Timestamp(i64::MIN), vec![]));
@@ -688,6 +896,9 @@ impl TripleStore {
     }
 
     pub(crate) fn db_write(&self, batch: WriteBatch) -> Result<(), StorageError> {
+        if self.is_replica() {
+            return Err(Self::read_only_err());
+        }
         Ok(self.inner.db.write(batch)?)
     }
 
@@ -704,6 +915,79 @@ impl TripleStore {
             .db
             .cf_handle(name)
             .ok_or_else(|| StorageError::MissingCf(name.to_owned()))
+    }
+
+    /// Insert a triple at an explicit transaction timestamp, bypassing the oracle.
+    ///
+    /// Advances the oracle to at least `tt` so that subsequent reads see this
+    /// triple. Useful in tests and offline tools that need control over `tt`.
+    pub fn insert_at_ts(&self, triple: &Triple, tt: Timestamp) -> Result<(), StorageError> {
+        if self.is_replica() {
+            return Err(Self::read_only_err());
+        }
+        let (s, pred_str, o, value_bytes) = match triple {
+            Triple::Relation { subject, predicate, object, edge_id, temporal } => {
+                let v = codec::encode_relation(edge_id, temporal);
+                (*subject, predicate.0.clone(), *object, v)
+            }
+            Triple::Property { subject, predicate, value, temporal } => {
+                let v = codec::encode_property(value, temporal)?;
+                let sentinel = polargraph_core::id::NodeId(
+                    uuid::Uuid::from_bytes(keys::PROPERTY_SENTINEL),
+                );
+                (*subject, predicate.0.clone(), sentinel, v)
+            }
+        };
+        let p = self.intern_predicate(&pred_str)?;
+        let mut batch = WriteBatch::default();
+        self.batch_triple(&mut batch, s, p, o, tt, &value_bytes)?;
+        self.db_write(batch)?;
+        // Advance oracle so subsequent scans can see this triple.
+        self.inner.oracle.advance_to(tt);
+        Ok(())
+    }
+
+    /// Trigger a full RocksDB compaction on the named column family.
+    ///
+    /// Used by `CompactionManager` after issuing deletes to reclaim disk space.
+    pub fn compact_cf(&self, cf_name: &str) -> Result<(), StorageError> {
+        if self.is_replica() {
+            return Err(Self::read_only_err());
+        }
+        let cf = self.cf_handle(cf_name)?;
+        self.inner.db.compact_range_cf(&cf, None::<&[u8]>, None::<&[u8]>);
+        Ok(())
+    }
+
+    /// Iterate all (key, value) pairs in a hexastore CF without snapshot filtering.
+    ///
+    /// Used by `CompactionManager` to scan for expired triples. The callback
+    /// receives raw bytes and returns `true` to mark the key for deletion.
+    pub fn scan_cf_raw<F>(&self, cf_name: &str, mut should_delete: F) -> Result<usize, StorageError>
+    where
+        F: FnMut(&[u8], &[u8]) -> bool,
+    {
+        if self.is_replica() {
+            return Err(Self::read_only_err());
+        }
+        let cf = self.cf_handle(cf_name)?;
+        let iter = self.inner.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+        let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
+        for item in iter {
+            let (k, v) = item?;
+            if should_delete(&k, &v) {
+                keys_to_delete.push(k.to_vec());
+            }
+        }
+        let count = keys_to_delete.len();
+        if !keys_to_delete.is_empty() {
+            let mut batch = WriteBatch::default();
+            for key in keys_to_delete {
+                batch.delete_cf(&cf, &key);
+            }
+            self.db_write(batch)?;
+        }
+        Ok(count)
     }
 
     // ── reconstruction ────────────────────────────────────────────────────────

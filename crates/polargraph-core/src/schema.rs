@@ -180,6 +180,20 @@ impl EdgeTypeDef {
     }
 }
 
+/// Policy controlling bitemporal data retention.
+///
+/// Any triple matching either condition is eligible for deletion by
+/// [`CompactionManager::run_retention`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionPolicy {
+    /// Delete triples whose transaction time (`tt`) is older than this many
+    /// seconds relative to the time `run_retention` is called.
+    pub tx_age_secs: u64,
+    /// If `Some(n)`, also delete triples whose `vt_end` is more than `n`
+    /// seconds in the past. `None` keeps all valid-time history.
+    pub vt_lookback_secs: Option<u64>,
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ members = [
     "crates/polargraph-query",
     "crates/polargraph-server",
     "crates/polargraph-bench",
+    "crates/polargraph-import",
 ]
 
 [workspace.package]

@@ -34,10 +34,13 @@ polargraph/
     ├── polargraph-storage/     # RocksDB triple store + MVCC
     ├── polargraph-query/       # query planner + projection (stubs)
     ├── polargraph-server/      # gRPC binary (skeleton)
-    └── polargraph-bench/       # end-to-end benchmark scenarios (binary)
+    ├── polargraph-bench/       # end-to-end benchmark scenarios (binary)
+    └── polargraph-import/      # bulk N-Triples importer via SST ingestion (binary)
 ```
 
 Dependency order (no cycles): `core` ← `storage` ← `query` ← `server` ← `bench`
+                                                    ↑
+                                           `polargraph-import` also depends only on `core` + `storage`
 
 ---
 
@@ -61,6 +64,9 @@ cargo bench -p polargraph-storage
 
 # Build the end-to-end bench binary (requires a running polargraphd for most scenarios)
 cargo build -p polargraph-bench
+
+# Build the bulk import binary (run while polargraphd is stopped)
+cargo build -p polargraph-import
 
 # Check without linking
 cargo check
@@ -107,6 +113,9 @@ RocksDB-backed persistence. Owns the hexastore layout and MVCC layer.
 | `error` | `StorageError` |
 | `hnsw` | `HnswIndex` — pure-Rust HNSW, named-space key helpers, serialize/deserialize |
 | `registry` | `NodeTypeRegistry`, `EdgeTypeRegistry`, `ValidationError` |
+| `sst_import` | `SstImporter`, `ImportStats` — bulk triple import via RocksDB SST file ingestion |
+| `compaction` | `CompactionManager`, `RetentionStats` — bitemporal retention scan + RocksDB compaction |
+| `store` | `StoreMode` (`Primary`/`Secondary`); `TripleStore::open_secondary` + `try_catch_up_with_primary` — read-only secondary instance |
 
 `TripleStore` is `Clone` (Arc-backed). Prefer passing it by clone rather
 than wrapping it again in Arc.
@@ -140,6 +149,22 @@ Configuration via CLI flags or environment variables (flags take priority):
 | `--data-dir PATH` | `POLARGRAPH_DATA_DIR` | `/data` | RocksDB data directory |
 | `--listen ADDR` | `POLARGRAPH_LISTEN_ADDR` | `0.0.0.0:50051` | gRPC listen address |
 | `--log FILTER` | `RUST_LOG` | `info` | Log filter (same syntax as `RUST_LOG`) |
+| `--backup-dir PATH` | `POLARGRAPH_BACKUP_DIR` | *(none)* | Backup directory (optional) |
+
+### `polargraph-import`
+
+Binary crate (`polargraph-import`). Bulk-imports N-Triples files directly
+into RocksDB via SST file ingestion — no server required.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--data-dir PATH` | *(required)* | RocksDB data directory |
+| `--input FILE` | *(required)* | N-Triples input file |
+| `--batch-size N` | `100000` | Triples per SST import batch |
+| `--temp-dir PATH` | `<data-dir>/sst_tmp` | Temporary SST file directory |
+
+**Must be run while `polargraphd` is stopped** — SST ingestion requires
+exclusive DB access.
 
 ---
 
@@ -251,6 +276,11 @@ sort order and is cluster-safe without a central sequence generator.
 - [x] Filtered vector search cache — `Arc<RwLock<HashMap<String, HashSet<NodeId>>>>` type cache in `PolarGraphServer`; populated at startup from existing `__type` triples, updated incrementally on every `Insert` commit; `SearchVectorFiltered(NodeTypeFilter)` reads cache instead of calling `scan_by_predicate`; also fixed O(|allowed|) `Vec::contains` post-filter to O(1) `HashSet::contains`; 13× speedup (6.8 ms → 515 µs at 5K nodes)
 - [x] VectorSeedQuery RPC — `ScoredBinding`, `VectorSeedQueryRequest/Response` proto messages; `execute_query_seeded` in `polargraph-query::datalog` (generalises `execute_query` with caller-supplied initial bindings); `vector_seed_query` handler in `polargraph-server::service` (ANN → seed bindings → Datalog join → scored results, with optional NodeType/Reachability pre-filter); 4 integration tests; `docs/architecture.md` VectorSeedQuery section
 - [x] Memmap HNSW vector storage — `StorageMode` enum (`Memory` / `Mmap`) in `polargraph-core::schema`; `MmapState` in `polargraph-storage::hnsw` (flat `.vecs` file, `memmap2::MmapMut`, OS page-in on demand); `VectorStorage` enum in `HnswIndex`; `insert_vector` / `batch_insert_vectors` take `StorageMode`; `load_hnsw_spaces` reopens mmap files at startup; `storage_mode` string field on `VectorSpaceDefProto` and round-trips through `convert.rs`; service looks up space def to pass mode; 4 unit tests (insert/search, recall parity, persistence, batch); 2 gRPC integration tests
+- [x] Backup and restore — `BackupManager` in `polargraph-storage::backup` wraps RocksDB `BackupEngine`; incremental SST hard-linking; `create_backup`, `list_backups`, `restore_from_backup`, `purge_old_backups` on `BackupManager`; `--backup-dir PATH` CLI flag + `POLARGRAPH_BACKUP_DIR` env var; `CreateBackup`, `ListBackups`, `PurgeOldBackups` gRPC RPCs; `FailedPrecondition` when backup dir not configured; restore is offline (documented in `docs/architecture.md` with runbook); 4 unit tests, 7 gRPC integration tests
+- [x] Bulk import via SST ingestion — `SstImporter` in `polargraph-storage::sst_import`; buffers triples, sorts per CF, writes via `SstFileWriter`, ingests with `ingest_external_file_cf`, advances MVCC oracle; `polargraph-import` binary crate (`crates/polargraph-import`) with N-Triples parser, clap CLI (`--data-dir`, `--input`, `--batch-size`, `--temp-dir`), per-batch progress output; URI → stable `NodeId` via xxHash3-128; offline-only (requires exclusive DB access — server must be stopped); 6 storage integration tests, 7 import unit tests; documented in `docs/architecture.md`
+- [x] Compaction and bitemporal retention — `RetentionPolicy` in `polargraph-core::schema` (`tx_age_secs`, `vt_lookback_secs`); `CompactionManager` + `RetentionStats` in `polargraph-storage::compaction`; scans all 6 hexastore CFs, deletes expired entries via `WriteBatch`, triggers `compact_range_cf` on modified CFs; oracle changed to wall-clock µs (`max(committed+1, now_µs)`) so `tt` values are real timestamps; `TripleStore::insert_at_ts` (explicit tt, advances oracle) and `scan_cf_raw` / `compact_cf` helpers; `--retention-tx-age-secs` + `--retention-vt-lookback-secs` CLI flags run retention at startup; `RunRetention` gRPC RPC; 6 storage integration tests, 3 gRPC integration tests; documented in `docs/architecture.md`
+- [x] Bitemporal time-travel queries — `as_of_valid_time` and `as_of_tx_time` fields on `QueryRequest` proto; `Snapshot.vt_as_of: Option<i64>` + `Snapshot::with_vt_as_of()` in `polargraph-storage::mvcc`; vt filter applied inside `snapshot_scan_cf` **before** MVCC deduplication for correctness; `as_of_tx_time` overrides `snapshot_ts` in the gRPC handler; 6 gRPC integration tests; "Time-travel queries" section in `docs/architecture.md`
+- [x] WAL streaming replication — `WalStreamer` + `WalEntry` in `polargraph-storage::wal_stream`; `TripleStore::open_as_replica`, `apply_replicated_batch`, `last_applied_seq`, `latest_sequence_number`; `StreamWal` server-streaming gRPC RPC on primary; `run_replication` in `polargraph-server::wal_client` with exponential backoff (1s→30s); `ReplicaState` tracks `last_applied_seq` + lag; `--replica-of URL` takes gRPC address (no shared filesystem required); `FAILED_PRECONDITION` on all write RPCs and `StreamWal` on replicas; WAL retention 1 h / 512 MB on primary; `last_applied_seq` persisted to META CF for restart resumption; 5 gRPC integration tests; `docs/scaling.md` updated
 
 ---
 

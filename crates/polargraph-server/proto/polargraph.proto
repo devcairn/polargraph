@@ -93,7 +93,15 @@ message QueryRequest {
     repeated VarPattern patterns    = 1;
     /// Read snapshot timestamp (microseconds since epoch).
     /// 0 or omitted means "latest committed state".
-    int64               snapshot_ts = 2;
+    int64               snapshot_ts      = 2;
+    /// Valid-time point-in-time filter (unix microseconds).
+    /// When non-zero, only triples whose valid-time window [vt_start, vt_end)
+    /// contains this value are returned. 0 = no valid-time filter.
+    int64               as_of_valid_time = 3;
+    /// Transaction-time point-in-time filter (unix microseconds).
+    /// When non-zero, overrides snapshot_ts — only triples committed at or
+    /// before this wall-clock time are visible. 0 = use snapshot_ts (or latest).
+    int64               as_of_tx_time    = 4;
 }
 
 /// One satisfying assignment of all variables in the query.
@@ -371,6 +379,91 @@ message VectorSeedQueryResponse {
     repeated ScoredBinding bindings = 1;
 }
 
+// ── Backup ────────────────────────────────────────────────────────────────────
+
+/// Metadata for a single RocksDB backup.
+message BackupInfo {
+    uint32 backup_id  = 1;
+    /// Unix timestamp (seconds since epoch) when the backup was created.
+    int64  timestamp  = 2;
+    uint64 size_bytes = 3;
+    uint32 num_files  = 4;
+}
+
+message CreateBackupRequest {}
+
+message CreateBackupResponse {
+    uint32 backup_id  = 1;
+    uint64 size_bytes = 2;
+    /// Unix timestamp (seconds since epoch) of the new backup.
+    int64  created_at = 3;
+}
+
+message ListBackupsRequest {}
+
+message ListBackupsResponse {
+    repeated BackupInfo backups = 1;
+}
+
+message PurgeOldBackupsRequest {
+    /// Number of most-recent backups to keep. Older ones are deleted.
+    uint32 keep_n = 1;
+}
+
+message PurgeOldBackupsResponse {
+    uint32 deleted_count = 1;
+}
+
+// ── Retention ─────────────────────────────────────────────────────────────────
+
+message RunRetentionRequest {
+    /// Delete triples whose transaction time is older than this many seconds.
+    uint64 tx_age_secs = 1;
+    /// Also delete triples whose vt_end is more than this many seconds in the
+    /// past. Set to 0 to disable valid-time lookback (keep all valid-time history).
+    uint64 vt_lookback_secs = 2;
+}
+
+message RunRetentionResponse {
+    uint64 triples_scanned = 1;
+    uint64 triples_deleted = 2;
+    uint64 duration_ms     = 3;
+}
+
+// ── WAL streaming replication ─────────────────────────────────────────────────
+
+message StreamWalRequest {
+    /// WAL sequence number to start streaming from. 0 means start from the
+    /// beginning of available WAL (subject to WAL retention settings).
+    uint64 since_seq = 1;
+}
+
+/// A single WAL entry: one committed write batch and its sequence number.
+message WalEntry {
+    uint64 sequence_number = 1;
+    /// Raw serialised RocksDB WriteBatch bytes.
+    bytes  write_batch     = 2;
+}
+
+// ── Replica status ────────────────────────────────────────────────────────────
+
+message ReplicaStatusRequest {}
+
+message ReplicaStatusResponse {
+    /// True if this server is running as a read replica.
+    bool   is_replica              = 1;
+    /// gRPC address of the primary (e.g. "http://host:50051"). Empty on primary.
+    string primary_address         = 2;
+    /// Unix microseconds of the most recent successful WAL apply. 0 if never.
+    int64  last_catchup_at         = 3;
+    /// Total number of WAL batches applied since server start.
+    uint64 catchup_count           = 4;
+    /// Last WAL sequence number applied by this replica. 0 if none yet.
+    uint64 last_applied_seq        = 5;
+    /// Approximate number of WAL entries this replica is behind the primary.
+    uint64 replication_lag_entries = 6;
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 service PolarGraphService {
@@ -435,4 +528,31 @@ service PolarGraphService {
     /// conjunctive Datalog query. Returns scored binding rows that satisfy
     /// both the vector similarity criterion and all graph patterns.
     rpc VectorSeedQuery(VectorSeedQueryRequest) returns (VectorSeedQueryResponse);
+
+    /// Create a new incremental backup of the live store.
+    /// Returns FAILED_PRECONDITION if the server was not started with --backup-dir.
+    rpc CreateBackup(CreateBackupRequest) returns (CreateBackupResponse);
+
+    /// List all available backups with ID, timestamp, size, and file count.
+    /// Returns FAILED_PRECONDITION if the server was not started with --backup-dir.
+    rpc ListBackups(ListBackupsRequest) returns (ListBackupsResponse);
+
+    /// Delete all but the keep_n most recent backups.
+    /// Returns FAILED_PRECONDITION if the server was not started with --backup-dir.
+    /// Note: restore is an offline operation — see docs/architecture.md.
+    rpc PurgeOldBackups(PurgeOldBackupsRequest) returns (PurgeOldBackupsResponse);
+
+    /// Scan all hexastore column families and delete triples whose
+    /// transaction time or valid-time window has expired per the supplied policy.
+    /// Triggers a full RocksDB compaction on any CF that had deletions.
+    rpc RunRetention(RunRetentionRequest) returns (RunRetentionResponse);
+
+    /// Return replication status for this server instance.
+    /// `is_replica` is false and all other fields are zero/empty on the primary.
+    rpc ReplicaStatus(ReplicaStatusRequest) returns (ReplicaStatusResponse);
+
+    /// Stream WAL entries from the primary. Returns FAILED_PRECONDITION on a replica.
+    /// The stream runs indefinitely until the client disconnects; new entries are
+    /// delivered within ~50 ms of commit.
+    rpc StreamWal(StreamWalRequest) returns (stream WalEntry);
 }

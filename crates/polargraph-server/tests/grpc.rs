@@ -1,31 +1,35 @@
 //! Integration tests for the gRPC service handlers.
 //!
-//! Tests call service methods directly (no live server socket) so they are
-//! fast and parallelisable. The full proto serialisation path is still
-//! exercised because we construct real proto request messages and inspect
-//! real proto response messages.
+//! Most tests call service methods directly (no live server socket) for speed.
+//! The replica tests require real TCP sockets and a live gRPC server.
 
 use polargraph_server::{
     proto::{
-        polar_graph_service_server::PolarGraphService,
+        polar_graph_service_server::{PolarGraphService, PolarGraphServiceServer},
         term::Kind as TermKind,
         triple::Kind as TripleKind,
         value::Kind as ValueKind,
         search_vector_filtered_request::Filter,
         vector_seed_query_request::Filter as SeedFilter,
-        BatchInsertVectorsRequest, EdgeTypeDef, FieldDef, GetEdgeTypeRequest,
-        GetNodeTypeRequest, InsertRequest, InsertVectorRequest, ListEdgeTypesRequest,
-        ListNodeTypesRequest, ListPredicatesBetweenRequest, NodeId, NodeTypeDef, NodeTypeFilter,
-        PropertyTriple, QueryRequest, ReachableRequest, RegisterEdgeTypeRequest,
-        RegisterNodeTypeRequest, RelationTriple, SearchVectorFilteredRequest,
-        SearchVectorInSetRequest, SearchVectorRequest, Term, Triple, ValidateEdgeRequest,
-        ValidateNodeRequest, Value, VarPattern, VectorItem, VectorSeedQueryRequest, VectorSpaceDef,
+        BatchInsertVectorsRequest, CreateBackupRequest, EdgeTypeDef, FieldDef,
+        GetEdgeTypeRequest, GetNodeTypeRequest, InsertRequest, InsertVectorRequest,
+        ListBackupsRequest, ListEdgeTypesRequest, ListNodeTypesRequest,
+        ListPredicatesBetweenRequest, NodeId, NodeTypeDef, NodeTypeFilter,
+        PropertyTriple, PurgeOldBackupsRequest, QueryRequest, ReachableRequest,
+        RegisterEdgeTypeRequest, RegisterNodeTypeRequest, RelationTriple,
+        ReplicaStatusRequest, RunRetentionRequest, StreamWalRequest,
+        SearchVectorFilteredRequest, SearchVectorInSetRequest, SearchVectorRequest,
+        Term, Triple, ValidateEdgeRequest, ValidateNodeRequest, Value, VarPattern,
+        VectorItem, VectorSeedQueryRequest, VectorSpaceDef,
     },
     service::PolarGraphServer,
+    wal_client,
 };
+use polargraph_core::temporal::Timestamp;
 use polargraph_storage::TripleStore;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tempfile::TempDir;
-use tonic::Request;
+use tonic::{transport::Server, Request};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -121,6 +125,7 @@ async fn insert_batch_all_triples_committed() {
         .query(Request::new(QueryRequest {
             patterns: vec![pattern(bound(&alice), "", any())],
             snapshot_ts: ts,
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -176,7 +181,7 @@ async fn insert_empty_predicate_returns_invalid_argument() {
 async fn query_empty_patterns_returns_invalid_argument() {
     let (svc, _dir) = open();
     let err = svc
-        .query(Request::new(QueryRequest { patterns: vec![], snapshot_ts: 0 }))
+        .query(Request::new(QueryRequest { patterns: vec![], snapshot_ts: 0, ..Default::default() }))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -202,6 +207,7 @@ async fn query_with_object_variable_binds_objects() {
         .query(Request::new(QueryRequest {
             patterns: vec![pattern(bound(&alice), "knows", var("who"))],
             snapshot_ts: ts,
+            ..Default::default()
         }))
         .await.unwrap().into_inner();
 
@@ -232,6 +238,7 @@ async fn query_snapshot_at_old_ts_excludes_later_writes() {
         .query(Request::new(QueryRequest {
             patterns: vec![pattern(bound(&alice), "knows", var("x"))],
             snapshot_ts: ts1,
+            ..Default::default()
         }))
         .await.unwrap().into_inner();
 
@@ -252,6 +259,7 @@ async fn query_at_ts_zero_sees_latest() {
         .query(Request::new(QueryRequest {
             patterns: vec![pattern(bound(&alice), "knows", var("x"))],
             snapshot_ts: 0,
+            ..Default::default()
         }))
         .await.unwrap().into_inner();
 
@@ -281,6 +289,7 @@ async fn two_pattern_join_via_service() {
                 pattern(var("colleague"), "reports-to", var("mgr")),
             ],
             snapshot_ts: ts,
+            ..Default::default()
         }))
         .await.unwrap().into_inner();
 
@@ -296,6 +305,7 @@ async fn query_no_match_returns_empty_bindings() {
         .query(Request::new(QueryRequest {
             patterns: vec![pattern(bound(&nobody), "knows", var("x"))],
             snapshot_ts: 0,
+            ..Default::default()
         }))
         .await.unwrap().into_inner();
 
@@ -1676,4 +1686,705 @@ async fn mmap_storage_mode_round_trips_in_node_type() {
     let vs = resp.definition.unwrap().vector_space.unwrap();
     assert_eq!(vs.storage_mode, "mmap");
     assert_eq!(vs.dimensions, 8);
+}
+
+// ── Backup tests ──────────────────────────────────────────────────────────────
+
+fn open_with_backup() -> (PolarGraphServer, TempDir, TempDir) {
+    let data_dir = TempDir::new().unwrap();
+    let backup_dir = TempDir::new().unwrap();
+    let store = TripleStore::open(data_dir.path()).unwrap();
+    let svc = PolarGraphServer::new_with_backup_dir(store, Some(backup_dir.path())).unwrap();
+    (svc, data_dir, backup_dir)
+}
+
+#[tokio::test]
+async fn backup_create_unconfigured_returns_precondition() {
+    let (svc, _dir) = open();
+    let err = svc.create_backup(Request::new(CreateBackupRequest {})).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn backup_list_unconfigured_returns_precondition() {
+    let (svc, _dir) = open();
+    let err = svc.list_backups(Request::new(ListBackupsRequest {})).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn backup_purge_unconfigured_returns_precondition() {
+    let (svc, _dir) = open();
+    let err = svc
+        .purge_old_backups(Request::new(PurgeOldBackupsRequest { keep_n: 3 }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn backup_create_and_list() {
+    let (svc, _data, _backup) = open_with_backup();
+
+    let resp = svc
+        .create_backup(Request::new(CreateBackupRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.backup_id, 1);
+    assert!(resp.size_bytes > 0);
+    // created_at is a Unix timestamp; must be a plausible value (after year 2020).
+    assert!(resp.created_at > 1_577_836_800);
+
+    let resp = svc
+        .list_backups(Request::new(ListBackupsRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.backups.len(), 1);
+    assert_eq!(resp.backups[0].backup_id, 1);
+}
+
+#[tokio::test]
+async fn backup_purge_removes_old_backups() {
+    let (svc, _data, _backup) = open_with_backup();
+
+    svc.create_backup(Request::new(CreateBackupRequest {})).await.unwrap();
+    svc.create_backup(Request::new(CreateBackupRequest {})).await.unwrap();
+    svc.create_backup(Request::new(CreateBackupRequest {})).await.unwrap();
+
+    let resp = svc
+        .purge_old_backups(Request::new(PurgeOldBackupsRequest { keep_n: 1 }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.deleted_count, 2);
+
+    let resp = svc
+        .list_backups(Request::new(ListBackupsRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.backups.len(), 1);
+}
+
+// ── RunRetention tests ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn run_retention_deletes_old_triples() {
+    let (svc, _dir) = open();
+    let (_core_s, proto_s) = new_node();
+
+    // Insert a triple via the normal path (recent tt).
+    let insert_req = InsertRequest {
+        triples: vec![text_prop(proto_s.clone(), "label", "hello")],
+    };
+    svc.insert(Request::new(insert_req)).await.unwrap();
+
+    // Plant an old triple directly via the store (tt = 1 µs since epoch).
+    let (core_old, _) = new_node();
+    let old_triple = polargraph_core::triple::Triple::Property {
+        subject: core_old,
+        predicate: polargraph_core::triple::Predicate::new("label"),
+        value: polargraph_core::value::Value::Text("ancient".into()),
+        temporal: polargraph_core::temporal::BiTemporalRange {
+            vt_start: Timestamp(0),
+            vt_end: Timestamp(i64::MAX),
+            tt: Timestamp(0),
+        },
+    };
+    svc.store().insert_at_ts(&old_triple, Timestamp(1)).unwrap();
+
+    // Run retention with 2-second tx_age — old triple's tt(1 µs) is < (now - 2s).
+    let resp = svc
+        .run_retention(Request::new(RunRetentionRequest {
+            tx_age_secs: 2,
+            vt_lookback_secs: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // 6 CF copies of the old triple should be gone.
+    assert_eq!(resp.triples_deleted, 6);
+    assert!(resp.triples_scanned >= 6);
+}
+
+#[tokio::test]
+async fn run_retention_recent_triple_survives() {
+    let (svc, _dir) = open();
+    let (_, proto_s) = new_node();
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(proto_s, "label", "current")],
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .run_retention(Request::new(RunRetentionRequest {
+            tx_age_secs: 2,
+            vt_lookback_secs: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.triples_deleted, 0);
+}
+
+#[tokio::test]
+async fn run_retention_zero_vt_lookback_disables_vt_check() {
+    let (svc, _dir) = open();
+    let (core_s, _) = new_node();
+
+    // Triple with vt_end in the past (1 µs since epoch), recent tt.
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+    let triple = polargraph_core::triple::Triple::Property {
+        subject: core_s,
+        predicate: polargraph_core::triple::Predicate::new("label"),
+        value: polargraph_core::value::Value::Text("expired_vt".into()),
+        temporal: polargraph_core::temporal::BiTemporalRange {
+            vt_start: Timestamp(0),
+            vt_end: Timestamp(1),  // expired long ago
+            tt: Timestamp(0),
+        },
+    };
+    svc.store().insert_at_ts(&triple, Timestamp(now_us)).unwrap();
+
+    // vt_lookback_secs = 0 means disabled → triple survives (tx is recent).
+    let resp = svc
+        .run_retention(Request::new(RunRetentionRequest {
+            tx_age_secs: 1_000_000_000, // 31+ years — effectively disable tx check
+            vt_lookback_secs: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.triples_deleted, 0);
+}
+
+// ── Time-travel (as_of) tests ─────────────────────────────────────────────────
+
+fn rel_with_vt(subject: NodeId, predicate: &str, object: NodeId, vt_start: i64, vt_end: i64) -> Triple {
+    Triple {
+        kind: Some(TripleKind::Relation(RelationTriple {
+            subject: Some(subject),
+            predicate: predicate.into(),
+            object: Some(object),
+            vt_start,
+            vt_end,
+        })),
+    }
+}
+
+fn text_prop_with_vt(subject: NodeId, predicate: &str, text: &str, vt_start: i64, vt_end: i64) -> Triple {
+    Triple {
+        kind: Some(TripleKind::Property(PropertyTriple {
+            subject: Some(subject),
+            predicate: predicate.into(),
+            value: Some(Value { kind: Some(ValueKind::TextVal(text.into())) }),
+            vt_start,
+            vt_end,
+        })),
+    }
+}
+
+/// as_of_valid_time=0 is the same as no filter: returns the latest version.
+#[tokio::test]
+async fn as_of_valid_time_zero_sees_latest() {
+    let (svc, _dir) = open();
+    let (_, alice) = new_node();
+    let (_, bob) = new_node();
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel_with_vt(alice.clone(), "knows", bob.clone(), 1000, 0)],
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(bound(&alice), "knows", var("x"))],
+            snapshot_ts: 0,
+            as_of_valid_time: 0,
+            as_of_tx_time: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.bindings.len(), 1);
+}
+
+/// A triple with vt_start=1000, vt_end=2000 is visible at vt=1500 but not at vt=2500.
+#[tokio::test]
+async fn as_of_valid_time_filters_expired_triples() {
+    let (svc, _dir) = open();
+    let (_, alice) = new_node();
+    let (_, bob) = new_node();
+
+    // Triple valid in [1000, 2000).
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel_with_vt(alice.clone(), "knows", bob.clone(), 1000, 2000)],
+    }))
+    .await
+    .unwrap();
+
+    // Inside the valid window.
+    let resp_inside = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(bound(&alice), "knows", var("x"))],
+            snapshot_ts: 0,
+            as_of_valid_time: 1500,
+            as_of_tx_time: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Outside the valid window (after vt_end).
+    let resp_outside = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(bound(&alice), "knows", var("x"))],
+            snapshot_ts: 0,
+            as_of_valid_time: 2500,
+            as_of_tx_time: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp_inside.bindings.len(), 1, "triple should be visible inside its vt window");
+    assert!(resp_outside.bindings.is_empty(), "triple should be invisible after its vt window ends");
+}
+
+/// Two versions of the same (S,P) with non-overlapping vt ranges. Querying at
+/// different as_of_valid_time values returns the correct version.
+#[tokio::test]
+async fn as_of_valid_time_returns_correct_version() {
+    let (svc, _dir) = open();
+    let (_, alice) = new_node();
+
+    // Version 1: vt=[1000, 2000)
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop_with_vt(alice.clone(), "status", "active", 1000, 2000)],
+    }))
+    .await
+    .unwrap();
+
+    // Version 2: vt=[2000, ∞)  (vt_end=0 → END_OF_TIME)
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop_with_vt(alice.clone(), "status", "retired", 2000, 0)],
+    }))
+    .await
+    .unwrap();
+
+    // at vt=1500: version 1 should match (1000 ≤ 1500 < 2000).
+    let resp_v1 = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(bound(&alice), "status", any())],
+            snapshot_ts: 0,
+            as_of_valid_time: 1500,
+            as_of_tx_time: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // at vt=2500: version 2 should match (2000 ≤ 2500 < MAX).
+    let resp_v2 = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(bound(&alice), "status", any())],
+            snapshot_ts: 0,
+            as_of_valid_time: 2500,
+            as_of_tx_time: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // as_of_valid_time=0 (no filter): latest committed version (v2) wins.
+    let resp_latest = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(bound(&alice), "status", any())],
+            snapshot_ts: 0,
+            as_of_valid_time: 0,
+            as_of_tx_time: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp_v1.bindings.len(), 1, "vt=1500 should see version 1 (active window)");
+    assert_eq!(resp_v2.bindings.len(), 1, "vt=2500 should see version 2 (active window)");
+    assert_eq!(resp_latest.bindings.len(), 1, "no filter should see current state");
+}
+
+/// as_of_tx_time before the insert: triple is not yet visible.
+#[tokio::test]
+async fn as_of_tx_time_before_insert_sees_nothing() {
+    let (svc, _dir) = open();
+    let (_, alice) = new_node();
+    let (_, bob) = new_node();
+
+    // Record a wall-clock timestamp before the insert.
+    let t_before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(alice.clone(), "knows", bob)],
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(bound(&alice), "knows", var("x"))],
+            snapshot_ts: 0,
+            as_of_valid_time: 0,
+            as_of_tx_time: t_before,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp.bindings.is_empty(), "triple must not be visible before its commit time");
+}
+
+/// as_of_tx_time at the commit timestamp: triple becomes visible.
+#[tokio::test]
+async fn as_of_tx_time_at_commit_sees_triple() {
+    let (svc, _dir) = open();
+    let (_, alice) = new_node();
+    let (_, bob) = new_node();
+
+    let commit_ts = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(alice.clone(), "knows", bob)],
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .commit_ts;
+
+    let resp = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(bound(&alice), "knows", var("x"))],
+            snapshot_ts: 0,
+            as_of_valid_time: 0,
+            as_of_tx_time: commit_ts,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.bindings.len(), 1, "triple must be visible at its commit time");
+}
+
+/// Combining as_of_tx_time and as_of_valid_time: both filters must be satisfied.
+#[tokio::test]
+async fn as_of_tx_and_vt_combined_filter() {
+    let (svc, _dir) = open();
+    let (_, alice) = new_node();
+    let (_, bob) = new_node();
+
+    // Triple valid in [1000, 3000), committed now.
+    let commit_ts = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel_with_vt(alice.clone(), "knows", bob, 1000, 3000)],
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .commit_ts;
+
+    // Both filters satisfied: tx_time = commit_ts, vt = 2000 (inside [1000, 3000)).
+    let resp_ok = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(bound(&alice), "knows", var("x"))],
+            snapshot_ts: 0,
+            as_of_valid_time: 2000,
+            as_of_tx_time: commit_ts,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // vt filter fails (4000 is outside [1000, 3000)).
+    let resp_vt_fail = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(bound(&alice), "knows", var("x"))],
+            snapshot_ts: 0,
+            as_of_valid_time: 4000,
+            as_of_tx_time: commit_ts,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp_ok.bindings.len(), 1, "triple passes both filters");
+    assert!(resp_vt_fail.bindings.is_empty(), "triple fails vt filter");
+}
+
+// ── Read replica tests (WAL streaming) ───────────────────────────────────────
+//
+// These tests require a live gRPC server and real TCP connections since WAL
+// streaming is a network protocol. We bind to port 0 (OS-assigned) to avoid
+// conflicts between parallel test runs.
+
+/// Start a PolarGraphServer as a real gRPC server on a random TCP port.
+/// Returns the address and a shutdown channel.
+async fn start_primary_server(
+    store: TripleStore,
+) -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
+    let svc = PolarGraphServer::new(store).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(PolarGraphServiceServer::new(svc))
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async { drop(shutdown_rx.await) },
+            )
+            .await
+            .unwrap();
+    });
+
+    // Small delay for the server to start accepting connections.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (addr, shutdown_tx)
+}
+
+/// Open a replica store pointing at `primary_address` and start the WAL
+/// replication task. Returns the PolarGraphServer (for direct RPC calls) and
+/// the replica's TempDir.
+async fn open_wal_replica(
+    primary_address: String,
+) -> (PolarGraphServer, TempDir) {
+    let replica_dir = TempDir::new().unwrap();
+    let replica_store =
+        TripleStore::open_as_replica(replica_dir.path(), primary_address.clone()).unwrap();
+    let (server, rs) =
+        PolarGraphServer::new_replica(replica_store.clone(), &primary_address).unwrap();
+    let repl_store = replica_store;
+    let repl_state = Arc::clone(&rs);
+    tokio::spawn(async move {
+        wal_client::run_replication(repl_store, repl_state).await;
+    });
+    (server, replica_dir)
+}
+
+#[tokio::test]
+async fn replica_streams_triples_from_primary() {
+    let primary_dir = TempDir::new().unwrap();
+    let primary_store = TripleStore::open(primary_dir.path()).unwrap();
+
+    let (addr, _shutdown) = start_primary_server(primary_store.clone()).await;
+    let primary_addr = format!("http://{addr}");
+
+    // Insert a triple on the primary.
+    let (_, alice) = new_node();
+    let (_, bob) = new_node();
+    let primary = PolarGraphServer::new(primary_store.clone()).unwrap();
+    primary
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(alice.clone(), "knows", bob.clone())],
+        }))
+        .await
+        .unwrap();
+
+    // Open a replica and wait for WAL delivery.
+    let (replica, _replica_dir) = open_wal_replica(primary_addr).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let resp = replica
+        .query(Request::new(QueryRequest {
+            patterns: vec![VarPattern {
+                subject: Some(bound(&alice)),
+                predicate: "knows".into(),
+                object: Some(var("x")),
+            }],
+            snapshot_ts: 0,
+            as_of_valid_time: 0,
+            as_of_tx_time: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.bindings.len(), 1, "replica receives triple via WAL stream");
+    assert_eq!(resp.bindings[0].vars["x"].bytes, bob.bytes);
+}
+
+#[tokio::test]
+async fn replica_write_rpcs_return_failed_precondition() {
+    let replica_dir = TempDir::new().unwrap();
+    let replica_store =
+        TripleStore::open_as_replica(replica_dir.path(), "http://127.0.0.1:1".into()).unwrap();
+    let (replica, _rs) =
+        PolarGraphServer::new_replica(replica_store, "http://127.0.0.1:1").unwrap();
+
+    let (_, node) = new_node();
+    let (_, node2) = new_node();
+
+    let err = replica
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(node.clone(), "x", node2.clone())],
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "Insert on replica");
+
+    let err = replica
+        .insert_vector(Request::new(InsertVectorRequest {
+            node_id: Some(node.clone()),
+            vector: vec![1.0, 0.0],
+            space: "default".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "InsertVector on replica");
+
+    let err = replica
+        .register_node_type(Request::new(RegisterNodeTypeRequest {
+            definition: Some(NodeTypeDef {
+                type_name: "Foo".into(),
+                fields: vec![],
+                vector_space: None,
+            }),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "RegisterNodeType on replica");
+
+    let err = replica
+        .register_edge_type(Request::new(RegisterEdgeTypeRequest {
+            definition: Some(polargraph_server::proto::EdgeTypeDef {
+                predicate: "foo".into(),
+                domain: String::new(),
+                range: String::new(),
+                fields: vec![],
+            }),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "RegisterEdgeType on replica");
+
+    let err = replica
+        .run_retention(Request::new(RunRetentionRequest {
+            tx_age_secs: 1,
+            vt_lookback_secs: 0,
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "RunRetention on replica");
+
+    let err = replica
+        .create_backup(Request::new(CreateBackupRequest {}))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "CreateBackup on replica");
+}
+
+#[tokio::test]
+async fn stream_wal_on_replica_returns_failed_precondition() {
+    // StreamWal should be rejected on a replica node.
+    let replica_dir = TempDir::new().unwrap();
+    let primary_dir = TempDir::new().unwrap();
+    let primary_store = TripleStore::open(primary_dir.path()).unwrap();
+    let (addr, _shutdown) = start_primary_server(primary_store).await;
+    let primary_addr = format!("http://{addr}");
+
+    let replica_store =
+        TripleStore::open_as_replica(replica_dir.path(), primary_addr.clone()).unwrap();
+    let (replica_svc, _rs) =
+        PolarGraphServer::new_replica(replica_store, &primary_addr).unwrap();
+
+    let err = replica_svc
+        .stream_wal(Request::new(StreamWalRequest { since_seq: 0 }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "StreamWal on replica");
+}
+
+#[tokio::test]
+async fn replica_status_rpc() {
+    // Primary: is_replica = false.
+    let (primary, _dir) = open();
+    let status = primary
+        .replica_status(Request::new(ReplicaStatusRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!status.is_replica, "primary reports is_replica=false");
+    assert!(status.primary_address.is_empty(), "primary has no primary_address");
+    assert_eq!(status.catchup_count, 0);
+
+    // Replica: is_replica = true, primary_address is set.
+    let replica_dir = TempDir::new().unwrap();
+    let replica_store =
+        TripleStore::open_as_replica(replica_dir.path(), "http://127.0.0.1:1".into()).unwrap();
+    let (replica, _rs) =
+        PolarGraphServer::new_replica(replica_store, "http://127.0.0.1:1").unwrap();
+    let status = replica
+        .replica_status(Request::new(ReplicaStatusRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(status.is_replica, "replica reports is_replica=true");
+    assert_eq!(status.primary_address, "http://127.0.0.1:1");
+    assert_eq!(status.last_applied_seq, 0, "no batches applied yet");
+}
+
+#[tokio::test]
+async fn replica_receives_triples_inserted_after_connect() {
+    // Insert a triple AFTER the replica starts; verify it arrives via streaming.
+    let primary_dir = TempDir::new().unwrap();
+    let primary_store = TripleStore::open(primary_dir.path()).unwrap();
+    let (addr, _shutdown) = start_primary_server(primary_store.clone()).await;
+    let primary_addr = format!("http://{addr}");
+
+    // Start replica first (nothing in DB yet).
+    let (replica, _replica_dir) = open_wal_replica(primary_addr).await;
+
+    // Insert on primary after replica is running.
+    let (_, alice) = new_node();
+    let (_, bob) = new_node();
+    let primary = PolarGraphServer::new(primary_store).unwrap();
+    primary
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(alice.clone(), "follows", bob.clone())],
+        }))
+        .await
+        .unwrap();
+
+    // Allow WAL delivery.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let resp = replica
+        .query(Request::new(QueryRequest {
+            patterns: vec![VarPattern {
+                subject: Some(bound(&alice)),
+                predicate: "follows".into(),
+                object: Some(var("y")),
+            }],
+            snapshot_ts: 0,
+            as_of_valid_time: 0,
+            as_of_tx_time: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.bindings.len(), 1, "replica sees post-connect triple via WAL");
 }

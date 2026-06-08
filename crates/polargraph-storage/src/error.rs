@@ -20,4 +20,7 @@ pub enum StorageError {
 
     #[error("Write conflict: {0}")]
     WriteConflict(ConflictError),
+
+    #[error("{0}")]
+    ReadOnly(String),
 }

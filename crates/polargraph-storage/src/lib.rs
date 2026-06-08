@@ -13,17 +13,25 @@
 //! | OSP | obj→subject→pred | "all edges to O"                      |
 //! | OPS | obj→pred→subject | "all edges to O with predicate P"     |
 
+pub mod backup;
 pub mod cf;
 pub mod codec;
+pub mod compaction;
 pub mod error;
 pub mod hnsw;
 pub mod keys;
 pub mod mvcc;
 pub mod registry;
+pub mod sst_import;
 pub mod store;
+pub mod wal_stream;
 
+pub use backup::BackupManager;
+pub use compaction::{CompactionManager, RetentionStats};
 pub use error::StorageError;
 pub use mvcc::{ConflictError, Snapshot, Transaction};
-pub use polargraph_core::schema::VectorSpaceDef;
+pub use polargraph_core::schema::{RetentionPolicy, VectorSpaceDef};
 pub use registry::{EdgeTypeRegistry, NodeTypeRegistry, ValidationError, SCHEMA_REGISTRY_NODE};
-pub use store::TripleStore;
+pub use sst_import::{ImportStats, SstImporter};
+pub use store::{StoreMode, TripleStore};
+pub use wal_stream::{WalEntry, WalStreamer};

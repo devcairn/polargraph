@@ -35,9 +35,12 @@ use polargraph_core::{
     triple::Triple,
 };
 use rocksdb::{Direction, IteratorMode, WriteBatch};
-use std::sync::{
-    atomic::{AtomicI64, Ordering},
-    Arc, Mutex, MutexGuard,
+use std::{
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tracing::debug;
 
@@ -80,14 +83,40 @@ impl TimestampOracle {
         Timestamp(self.inner.committed.load(Ordering::SeqCst))
     }
 
+    /// Advance `committed` to at least `ts` if `ts` is larger.
+    ///
+    /// Used by `insert_at_ts` so that subsequent reads can see explicitly-
+    /// timestamped triples without going through the full commit path.
+    pub(crate) fn advance_to(&self, ts: Timestamp) {
+        let mut current = self.inner.committed.load(Ordering::SeqCst);
+        while ts.0 > current {
+            match self.inner.committed.compare_exchange(
+                current,
+                ts.0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(new_current) => current = new_current,
+            }
+        }
+    }
+
     /// Acquire the commit lock and advance the counter.
     ///
-    /// Returns the new commit timestamp plus the guard. The guard must be held
-    /// until the WriteBatch is flushed to RocksDB — releasing it earlier would
-    /// allow another transaction to read a timestamp that isn't durable yet.
+    /// The commit timestamp is `max(committed + 1, now_µs)` so that `tt` is
+    /// both monotonically increasing (MVCC correctness) and anchored to real
+    /// wall-clock time (bitemporal retention). The guard must be held until the
+    /// WriteBatch is flushed to RocksDB.
     pub(crate) fn begin_commit(&self) -> (Timestamp, MutexGuard<'_, ()>) {
         let guard = self.inner.commit_lock.lock().unwrap();
-        let new_ts = self.inner.committed.fetch_add(1, Ordering::SeqCst) + 1;
+        let wall = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_micros() as i64)
+            .unwrap_or(0);
+        let prev = self.inner.committed.load(Ordering::SeqCst);
+        let new_ts = std::cmp::max(prev + 1, wall);
+        self.inner.committed.store(new_ts, Ordering::SeqCst);
         (Timestamp(new_ts), guard)
     }
 }
@@ -140,7 +169,7 @@ impl Transaction {
     /// Snapshot reads — see state as of `read_ts`. ─────────────────────────
 
     pub fn scan_by_subject(&self, subject: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_subject_at(subject, self.read_ts)
+        self.store.scan_by_subject_at(subject, self.read_ts, None)
     }
 
     pub fn scan_by_subject_predicate(
@@ -148,11 +177,11 @@ impl Transaction {
         subject: &NodeId,
         predicate: &str,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_subject_predicate_at(subject, predicate, self.read_ts)
+        self.store.scan_by_subject_predicate_at(subject, predicate, self.read_ts, None)
     }
 
     pub fn scan_by_predicate(&self, predicate: &str) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_predicate_at(predicate, self.read_ts)
+        self.store.scan_by_predicate_at(predicate, self.read_ts, None)
     }
 
     pub fn scan_by_predicate_object(
@@ -160,11 +189,11 @@ impl Transaction {
         predicate: &str,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_predicate_object_at(predicate, object, self.read_ts)
+        self.store.scan_by_predicate_object_at(predicate, object, self.read_ts, None)
     }
 
     pub fn scan_by_object(&self, object: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_object_at(object, self.read_ts)
+        self.store.scan_by_object_at(object, self.read_ts, None)
     }
 
     pub fn scan_by_subject_object(
@@ -172,11 +201,11 @@ impl Transaction {
         subject: &NodeId,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_subject_object_at(subject, object, self.read_ts)
+        self.store.scan_by_subject_object_at(subject, object, self.read_ts, None)
     }
 
     pub fn scan_all(&self) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_all_at(self.read_ts)
+        self.store.scan_all_at(self.read_ts, None)
     }
 
     /// Commit the transaction.
@@ -279,18 +308,34 @@ impl Transaction {
 ///
 /// All scans return only triples committed at or before `ts`, with each
 /// (subject, predicate, object) deduplicated to its latest version.
+///
+/// `vt_as_of`: when `Some(t)`, scans additionally filter to triples whose
+/// valid-time window covers `t` (`vt_start ≤ t < vt_end`).  `None` means no
+/// valid-time filter — all triples visible at `ts` are returned regardless of
+/// their valid-time range.
 pub struct Snapshot {
     store: TripleStore,
     pub ts: Timestamp,
+    /// Optional valid-time point-in-time filter (unix µs).
+    pub vt_as_of: Option<i64>,
 }
 
 impl Snapshot {
     pub(crate) fn new(store: TripleStore, ts: Timestamp) -> Self {
-        Self { store, ts }
+        Self { store, ts, vt_as_of: None }
+    }
+
+    /// Set the valid-time filter for this snapshot.
+    ///
+    /// All subsequent scans will restrict results to triples whose valid-time
+    /// window `[vt_start, vt_end)` contains `vt` (i.e. `vt_start ≤ vt < vt_end`).
+    pub fn with_vt_as_of(mut self, vt: i64) -> Self {
+        self.vt_as_of = Some(vt);
+        self
     }
 
     pub fn scan_by_subject(&self, subject: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_subject_at(subject, self.ts)
+        self.store.scan_by_subject_at(subject, self.ts, self.vt_as_of)
     }
 
     pub fn scan_by_subject_predicate(
@@ -298,11 +343,11 @@ impl Snapshot {
         subject: &NodeId,
         predicate: &str,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_subject_predicate_at(subject, predicate, self.ts)
+        self.store.scan_by_subject_predicate_at(subject, predicate, self.ts, self.vt_as_of)
     }
 
     pub fn scan_by_predicate(&self, predicate: &str) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_predicate_at(predicate, self.ts)
+        self.store.scan_by_predicate_at(predicate, self.ts, self.vt_as_of)
     }
 
     pub fn scan_by_predicate_object(
@@ -310,11 +355,11 @@ impl Snapshot {
         predicate: &str,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_predicate_object_at(predicate, object, self.ts)
+        self.store.scan_by_predicate_object_at(predicate, object, self.ts, self.vt_as_of)
     }
 
     pub fn scan_by_object(&self, object: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_object_at(object, self.ts)
+        self.store.scan_by_object_at(object, self.ts, self.vt_as_of)
     }
 
     pub fn scan_by_subject_object(
@@ -322,11 +367,11 @@ impl Snapshot {
         subject: &NodeId,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_subject_object_at(subject, object, self.ts)
+        self.store.scan_by_subject_object_at(subject, object, self.ts, self.vt_as_of)
     }
 
     pub fn scan_all(&self) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_all_at(self.ts)
+        self.store.scan_all_at(self.ts, self.vt_as_of)
     }
 }
 

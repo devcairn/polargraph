@@ -17,6 +17,7 @@ thiserror   = { workspace = true }
 tracing     = { workspace = true }
 uuid        = { workspace = true }
 memmap2     = { workspace = true }
+tokio       = { workspace = true }
 
 [dev-dependencies]
 tempfile    = { workspace = true }

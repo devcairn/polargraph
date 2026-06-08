@@ -3,6 +3,7 @@
 
 pub mod convert;
 pub mod service;
+pub mod wal_client;
 
 pub mod proto {
     tonic::include_proto!("polargraph.v1");

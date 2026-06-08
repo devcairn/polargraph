@@ -16,7 +16,9 @@ The core engine is working end-to-end. Here's what's fully operational:
 
 **Schema registries**: `NodeTypeRegistry` and `EdgeTypeRegistry` support runtime registration of type schemas with domain/range constraints, required/optional field declarations, and property-map validation. `EdgeTypeRegistry::list_predicates_between` queries which predicates are valid between two node types.
 
-**Server** (`polargraph-server`): The gRPC server (`polargraphd`) implements 18 RPCs: `Insert`, `Query`, `InsertVector`, `SearchVector`, `Reachable`, `RegisterNodeType`, `GetNodeType`, `ListNodeTypes`, `ValidateNode`, `RegisterEdgeType`, `GetEdgeType`, `ListEdgeTypes`, `ValidateEdge`, `ListPredicatesBetween`, `SearchVectorFiltered`, `SearchVectorInSet`, `BatchInsertVectors`, `VectorSeedQuery`. CLI flags and env-var fallbacks are wired up. Docker packaging is in place.
+**Server** (`polargraph-server`): The gRPC server (`polargraphd`) implements 22 RPCs: `Insert`, `Query` (with bitemporal `as_of_valid_time` / `as_of_tx_time` time-travel), `InsertVector`, `SearchVector`, `Reachable`, `RegisterNodeType`, `GetNodeType`, `ListNodeTypes`, `ValidateNode`, `RegisterEdgeType`, `GetEdgeType`, `ListEdgeTypes`, `ValidateEdge`, `ListPredicatesBetween`, `SearchVectorFiltered`, `SearchVectorInSet`, `BatchInsertVectors`, `VectorSeedQuery`, `CreateBackup`, `ListBackups`, `PurgeOldBackups`, `RunRetention`. CLI flags and env-var fallbacks are wired up. Docker packaging is in place.
+
+**Backup** (`polargraph-storage::backup`): `BackupManager` wraps RocksDB's `BackupEngine` for incremental point-in-time backups. Enabled with `--backup-dir PATH`. Unchanged SST files are hard-linked between backups (space-efficient). Restore is an offline operation documented in `docs/architecture.md`.
 
 ---
 
@@ -54,6 +56,33 @@ pre-filters before the Datalog join, using the same type cache as
 cover the pattern join, type-filtered seeds, empty-patterns pass-through, and
 the no-edges zero-result case.
 
+### ~~Backup and restore~~ ✓ Done
+
+**Implemented June 2026.** `polargraph-storage::backup::BackupManager` wraps
+RocksDB's `BackupEngine`. Three new gRPC RPCs — `CreateBackup`, `ListBackups`,
+`PurgeOldBackups` — are available when the server is started with
+`--backup-dir <PATH>`. Incremental backups hard-link unchanged SST files so
+only the delta is copied on each run. Restore is an offline operation: stop the
+server, call `restore_from_backup`, restart against the restored directory. Full
+runbook in `docs/architecture.md`.
+
+### ~~Bitemporal time-travel queries~~ ✓ Done
+
+**Implemented June 2026.** `QueryRequest` now carries two optional filter fields:
+
+- `as_of_tx_time` (int64, unix µs) — only triples committed at or before this
+  wall-clock time are visible. Maps directly to the MVCC snapshot timestamp,
+  since the oracle uses wall-clock µs.
+- `as_of_valid_time` (int64, unix µs) — only triples whose valid-time window
+  `[vt_start, vt_end)` contains this value are returned. The filter runs inside
+  `snapshot_scan_cf` **before** MVCC deduplication, which is the correct order
+  for accurate historical reconstruction.
+
+Both filters are independent and can be combined for a full bitemporal point
+query. 6 gRPC integration tests cover: zero-value pass-through, window boundary
+behaviour, two-version correctness, tx-time before/after commit, and the
+combined case. Documented in `docs/architecture.md` under "Time-travel queries".
+
 ### Schema-aware query optimisation
 
 `EdgeTypeRegistry` knows which predicates are valid between which node types. The query planner can use this to prune bind patterns early — if a pattern has a bound predicate and a bound object type, only SPO/SOP scans where the subject type matches the domain need to be considered. This is a pure optimisation and does not change query semantics.
@@ -70,9 +99,17 @@ The Docker image lacks a health probe. Add a minimal `Health` RPC (or a lightwei
 
 Build on the dynamic node type registry to add optional predicate-level constraints: allowed value types, cardinality, inverse-predicate declarations, and subtype relationships. All constraints are stored as triples, so they participate in bitemporal versioning — schema changes are auditable and reversible. The query planner should be able to use type information for better index selection.
 
-### Bulk import via SST ingestion
+### ~~Bulk import via SST ingestion~~ ✅ Done
 
-`TripleStore::insert` goes through the write path one triple at a time, which is fine for transactional workloads but slow for large initial loads. RocksDB's SST file ingestion (`IngestExternalFile`) allows bulk-loading pre-sorted key files at close to storage bandwidth. A `polargraph-import` tool (or a `bulk_insert` API) should build all six CF files in parallel, sort them, and ingest them atomically. This is important for the practical use case of bootstrapping a large knowledge graph from an existing dataset.
+**Implemented June 2026.** `polargraph-storage::SstImporter` buffers triples
+in memory, sorts keys per column family, writes SST files via
+`SstFileWriter`, and ingests them using `ingest_external_file_cf`. The
+`polargraph-import` binary reads N-Triples (`.nt`) files, hashes URIs to
+stable `NodeId`s via xxHash3-128, and processes them in configurable batches
+(default 100 000 triples). Predicates are automatically interned before each
+batch; the MVCC oracle is advanced atomically so imported data is immediately
+visible via normal queries. The tool is offline-only — the server must be
+stopped before running. See `docs/architecture.md` for the full runbook.
 
 ### ~~Disk-backed HNSW (memmap paging)~~ ✅ Done
 
@@ -93,11 +130,19 @@ A lightweight HTTP/JSON API alongside the existing gRPC interface. The primary t
 
 ### Replication
 
-Log-structured writes are already partially implied by the append-only bitemporal model. The path forward is to extract a structured write log from the MVCC commit path and stream it to follower replicas. The `TimestampOracle` becomes a distributed Hybrid Logical Clock (HLC) so followers can participate in reads without a round-trip to the primary. Read-scale-out is the first target; write distribution comes later.
+**Read replicas via RocksDB secondary instances** (done — `docs/scaling.md`). `TripleStore::open_secondary` opens any running instance as a read-only secondary against a shared data directory. `try_catch_up_with_primary` pulls new SST files non-destructively. `--replica-of PATH` CLI flag, background catch-up task, and `ReplicaStatus` RPC are implemented. Consistency model is eventual; shared-filesystem access is required.
 
-### Compaction and retention policies
+**Next step: log-shipping replication.** The RocksDB secondary approach requires shared filesystem access. A network-transparent replication path would stream the write log (MVCC commit batches + oracle advances) over gRPC so replicas can run on separate hosts without shared storage. The `TimestampOracle` would need to become a distributed Hybrid Logical Clock (HLC) to preserve global monotonicity across nodes. Write distribution (active-active) comes after single-primary log shipping is stable.
 
-The bitemporal model means the store grows monotonically — superseded fact versions are never deleted by default. A configurable retention policy should allow purging versions outside a rolling window (e.g. "keep the last 90 days of transaction history, but retain all valid-time versions"). The compaction job runs as a background RocksDB compaction filter, so it doesn't block reads or writes.
+### ~~Compaction and retention policies~~ (done)
+
+`CompactionManager::run_retention` in `polargraph-storage::compaction` scans
+all six hexastore CFs and deletes entries that exceed a `RetentionPolicy`
+(tx-time age or valid-time lookback). After deletion it triggers
+`compact_range_cf` on modified CFs to reclaim disk space. The `RunRetention`
+gRPC RPC allows triggering this at runtime; `--retention-tx-age-secs` runs it
+at startup. The oracle was changed to wall-clock µs so `tt` values are real
+timestamps and can be compared against retention windows meaningfully.
 
 ### Distributed sharding
 
