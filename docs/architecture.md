@@ -590,8 +590,24 @@ Flags take priority.
 | `--data-dir PATH` | `POLARGRAPH_DATA_DIR` | `/data` | RocksDB data directory (created if absent) |
 | `--listen ADDR` | `POLARGRAPH_LISTEN_ADDR` | `0.0.0.0:50051` | gRPC listen address |
 | `--log FILTER` | `RUST_LOG` | `info` | Log filter (same syntax as `RUST_LOG`) |
+| `--query-timeout-ms MS` | `POLARGRAPH_QUERY_TIMEOUT_MS` | `30000` | Max query execution time in ms; 0 = unlimited |
 
 The server handles graceful shutdown on SIGTERM and Ctrl-C.
+
+### Query timeouts
+
+The `--query-timeout-ms` flag (default 30 000 ms / 30 s) limits how long a
+single `Query`, `VectorSeedQuery`, or `Reachable` RPC may run. When the
+deadline is exceeded the RPC returns `DEADLINE_EXCEEDED` with a message of the
+form `"query exceeded timeout of Xms"`.
+
+Set the value to `0` to disable the timeout entirely. This is not recommended
+in production because badly written recursive rules on dense graphs can
+produce fixed-point evaluation that runs indefinitely.
+
+The deadline propagates through the full call stack — conjunctive joins,
+hybrid derived-fact evaluation, and the fixed-point loop in `execute_recursive`
+all check it at iteration boundaries.
 
 ---
 
@@ -1255,6 +1271,62 @@ the `PolarGraphServer` handle. Handlers call into the gRPC service trait
 directly in-process — no network hop. The REST → gRPC adaptor is thin:
 JSON request bodies are decoded and forwarded as tonic `Request<T>` values,
 and tonic `Response<T>` values are serialised back to JSON.
+
+---
+
+## Graceful shutdown
+
+`polargraphd` handles SIGTERM and SIGINT (Ctrl-C) without dropping in-flight
+requests.
+
+### How it works
+
+All concurrent components — the gRPC server, the WAL replication client, and
+the metrics/UI HTTP servers — share a single `tokio_util::sync::CancellationToken`.
+When a shutdown signal is received:
+
+1. The signal is logged (`received shutdown signal signal=SIGTERM`).
+2. The `CancellationToken` is cancelled.
+3. tonic's `serve_with_shutdown` stops accepting new connections and waits
+   for all in-flight RPCs to complete before returning.
+4. The WAL replication loop exits cleanly at its next `tokio::select!` point
+   (between stream messages or backoff sleeps).
+5. The metrics and UI HTTP servers drain their in-flight HTTP requests via
+   axum's `with_graceful_shutdown`.
+6. `main` logs each stopped component in sequence, then returns, dropping
+   the `Arc<TripleStore>` which triggers RocksDB WAL flush and close.
+
+### Shutdown sequence log
+
+```
+INFO  polargraphd: received shutdown signal signal=SIGTERM
+INFO  polargraphd: draining in-flight requests max_wait_secs=10
+INFO  polargraphd: gRPC server stopped
+INFO  polargraphd: WAL replication stopped      # replica mode only
+INFO  polargraphd: HTTP servers stopped
+INFO  polargraphd: RocksDB closed
+INFO  polargraphd: shutdown complete
+```
+
+### Timeout and force-exit
+
+| Flag | Env variable | Default | Description |
+|------|-------------|---------|-------------|
+| `--shutdown-timeout-ms MS` | `POLARGRAPH_SHUTDOWN_TIMEOUT_MS` | `10000` | Max milliseconds to drain before force-exit |
+
+A watchdog task starts as soon as the token is cancelled.  If any component
+is still running when the timeout elapses the process calls
+`std::process::exit(1)` and logs an error.  This prevents a stuck RPC from
+blocking container orchestrators indefinitely.
+
+### RocksDB WAL flushing
+
+RocksDB's own write-ahead log is separate from PolarGraph's WAL replication
+stream.  When the `Arc<TripleStore>` drops at the end of `main`, RocksDB
+flushes its memtable and syncs the WAL to disk automatically — no explicit
+flush call is needed.  The `INFO: RocksDB closed` log line appears after
+this drop, so data committed before the shutdown signal is guaranteed to be
+durable on disk.
 
 ---
 

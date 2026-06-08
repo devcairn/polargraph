@@ -32,6 +32,7 @@ tracing             = { workspace = true }
 tracing-subscriber  = { workspace = true }
 clap                = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util   = { workspace = true }
 subtle       = { workspace = true }
 tower        = { version = "0.4" }
 http         = { version = "0.2" }
@@ -45,5 +46,6 @@ tonic-build = { workspace = true }
 [dev-dependencies]
 tempfile    = { workspace = true }
 tokio       = { workspace = true }
+tokio-util  = { workspace = true }
 reqwest     = { version = "0.11", features = ["json"] }
 serde_json  = { workspace = true }

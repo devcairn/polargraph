@@ -66,5 +66,8 @@ memmap2      = { version = "0.9" }
 # constant-time comparison (timing-attack prevention)
 subtle       = { version = "2" }
 
+# async utilities (CancellationToken, etc.)
+tokio-util   = { version = "0.7" }
+
 # testing
 tempfile     = { version = "3" }

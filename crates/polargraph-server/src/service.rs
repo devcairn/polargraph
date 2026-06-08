@@ -35,6 +35,7 @@ use crate::{
 use polargraph_core::{id::NodeId, schema::{RetentionPolicy, StorageMode}, triple::Triple, value::Value};
 use polargraph_query::datalog::{
     execute_query, execute_query_seeded, reachable_from, reachable_from_hops, Bindings, Query,
+    QueryError,
 };
 use polargraph_storage::{BackupManager, CompactionManager, EdgeTypeRegistry, NodeTypeRegistry, StorageError, TripleStore, WalStreamer};
 use std::{
@@ -44,6 +45,7 @@ use std::{
         atomic::{AtomicI64, AtomicU64, Ordering},
         Arc, RwLock,
     },
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -103,6 +105,8 @@ pub struct PolarGraphServer {
     backup_manager: Option<Arc<BackupManager>>,
     /// Non-None when this server is a read replica.
     replica_state: Option<Arc<ReplicaState>>,
+    /// Maximum time in milliseconds for a single query. 0 = no limit.
+    query_timeout_ms: u64,
 }
 
 impl PolarGraphServer {
@@ -130,7 +134,13 @@ impl PolarGraphServer {
         let backup_manager = backup_dir
             .map(|dir| BackupManager::open(dir, &store).map(Arc::new))
             .transpose()?;
-        Ok(Self { store, registry, edge_registry, type_cache, backup_manager, replica_state: None })
+        Ok(Self { store, registry, edge_registry, type_cache, backup_manager, replica_state: None, query_timeout_ms: 30_000 })
+    }
+
+    /// Set the maximum query execution time in milliseconds. 0 disables the timeout.
+    pub fn with_query_timeout_ms(mut self, ms: u64) -> Self {
+        self.query_timeout_ms = ms;
+        self
     }
 
     /// Create a replica (read-only) server.
@@ -153,6 +163,7 @@ impl PolarGraphServer {
             type_cache,
             backup_manager: None,
             replica_state: Some(replica_state.clone()),
+            query_timeout_ms: 30_000,
         };
         Ok((server, replica_state))
     }
@@ -176,6 +187,16 @@ impl PolarGraphServer {
         }
         info!(types = cache.len(), "type cache built");
         Ok(cache)
+    }
+
+    /// Compute a query deadline from `query_timeout_ms`. Returns `None` when
+    /// timeout is disabled (value is 0).
+    fn make_deadline(&self) -> Option<Instant> {
+        if self.query_timeout_ms == 0 {
+            None
+        } else {
+            Some(Instant::now() + Duration::from_millis(self.query_timeout_ms))
+        }
     }
 
     /// Returns a `FailedPrecondition` status if this is a read replica.
@@ -302,7 +323,8 @@ impl PolarGraphService for PolarGraphServer {
             query.patterns.len(), snapshot.ts.0, snapshot.vt_as_of
         );
 
-        let results = execute_query(&query, &snapshot).map_err(storage_err_to_status)?;
+        let results = execute_query(&query, &snapshot, self.make_deadline())
+            .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
 
         let bindings = results.iter().map(convert::binding_to_proto).collect();
 
@@ -433,12 +455,13 @@ impl PolarGraphService for PolarGraphServer {
                 )?;
 
                 let snapshot = self.store.snapshot(self.store.begin().read_ts);
+                let deadline = self.make_deadline();
                 let allowed: HashSet<NodeId> = if f.max_hops == 0 {
-                    reachable_from(from, &f.predicate, &snapshot)
+                    reachable_from(from, &f.predicate, &snapshot, deadline)
                 } else {
-                    reachable_from_hops(from, &f.predicate, &snapshot, f.max_hops as usize)
+                    reachable_from_hops(from, &f.predicate, &snapshot, f.max_hops as usize, deadline)
                 }
-                .map_err(storage_err_to_status)?;
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
 
                 let candidates = self.store.search_vector_ef(space, &req.query, ef, ef);
                 let results: Vec<_> = candidates
@@ -587,12 +610,13 @@ impl PolarGraphService for PolarGraphServer {
             start, req.predicate, req.max_hops
         );
 
+        let deadline = self.make_deadline();
         let reachable_set = if req.max_hops == 0 {
-            reachable_from(start, &req.predicate, &snapshot)
+            reachable_from(start, &req.predicate, &snapshot, deadline)
         } else {
-            reachable_from_hops(start, &req.predicate, &snapshot, req.max_hops as usize)
+            reachable_from_hops(start, &req.predicate, &snapshot, req.max_hops as usize, deadline)
         }
-        .map_err(storage_err_to_status)?;
+        .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
 
         let node_ids = reachable_set
             .into_iter()
@@ -793,12 +817,13 @@ impl PolarGraphService for PolarGraphServer {
                         .ok_or_else(|| Status::invalid_argument("from_node is required"))?,
                 )?;
                 let snap = self.store.snapshot(self.store.begin().read_ts);
+                let deadline = self.make_deadline();
                 let allowed: HashSet<NodeId> = if f.max_hops == 0 {
-                    reachable_from(from, &f.predicate, &snap)
+                    reachable_from(from, &f.predicate, &snap, deadline)
                 } else {
-                    reachable_from_hops(from, &f.predicate, &snap, f.max_hops as usize)
+                    reachable_from_hops(from, &f.predicate, &snap, f.max_hops as usize, deadline)
                 }
-                .map_err(storage_err_to_status)?;
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
                 self.store
                     .search_vector_ef(space, &req.query_vector, ef, ef)
                     .into_iter()
@@ -845,8 +870,8 @@ impl PolarGraphService for PolarGraphServer {
             query.patterns.push(p);
         }
 
-        let results = execute_query_seeded(&query, &snapshot, initial)
-            .map_err(storage_err_to_status)?;
+        let results = execute_query_seeded(&query, &snapshot, initial, self.make_deadline())
+            .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
 
         // Step 4: attach scores by looking up the seed variable in each result.
         let bindings = results
@@ -1035,6 +1060,16 @@ fn backup_not_configured() -> Status {
     Status::failed_precondition(
         "backup not configured: start polargraphd with --backup-dir <PATH>",
     )
+}
+
+fn query_err_to_status(err: QueryError, timeout_ms: u64) -> Status {
+    match err {
+        QueryError::Timeout => Status::deadline_exceeded(format!(
+            "query exceeded timeout of {}ms",
+            timeout_ms
+        )),
+        QueryError::Storage(se) => storage_err_to_status(se),
+    }
 }
 
 fn storage_err_to_status(err: StorageError) -> Status {

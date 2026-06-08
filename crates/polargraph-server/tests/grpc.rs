@@ -31,6 +31,7 @@ use polargraph_core::temporal::Timestamp;
 use polargraph_storage::TripleStore;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Request};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -2180,8 +2181,9 @@ async fn open_wal_replica(
         PolarGraphServer::new_replica(replica_store.clone(), &primary_address).unwrap();
     let repl_store = replica_store;
     let repl_state = Arc::clone(&rs);
+    let token = tokio_util::sync::CancellationToken::new();
     tokio::spawn(async move {
-        wal_client::run_replication(repl_store, repl_state).await;
+        wal_client::run_replication(repl_store, repl_state, token).await;
     });
     (server, replica_dir)
 }
@@ -2687,4 +2689,233 @@ async fn ui_api_requires_auth_when_keys_configured() {
     assert_eq!(res.status(), 200);
 
     let _ = shutdown.send(());
+}
+
+// ── Graceful-shutdown tests ───────────────────────────────────────────────────
+//
+// These tests drive shutdown via a CancellationToken instead of real OS
+// signals (the signal path is just another cancel() call under the hood).
+
+/// Start a gRPC server wired to a CancellationToken for shutdown.
+/// Returns (addr, token, JoinHandle).
+async fn start_server_with_token(
+    store: TripleStore,
+) -> (SocketAddr, CancellationToken, tokio::task::JoinHandle<()>) {
+    let svc = PolarGraphServer::new(store).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let token = CancellationToken::new();
+    let drain_token = token.clone();
+
+    let jh = tokio::spawn(async move {
+        Server::builder()
+            .add_service(PolarGraphServiceServer::new(svc))
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async move { drain_token.cancelled().await },
+            )
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (addr, token, jh)
+}
+
+#[tokio::test]
+async fn shutdown_token_stops_server() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (addr, token, jh) = start_server_with_token(store).await;
+
+    // Verify server is reachable before shutdown.
+    let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = PolarGraphServiceClient::new(channel);
+    client
+        .list_node_types(Request::new(polargraph_server::proto::ListNodeTypesRequest {}))
+        .await
+        .unwrap();
+
+    // Trigger shutdown via the token.
+    token.cancel();
+
+    // Server task should exit within a reasonable deadline.
+    let result = tokio::time::timeout(Duration::from_secs(5), jh).await;
+    assert!(result.is_ok(), "server task should complete after token cancelled");
+}
+
+#[tokio::test]
+async fn shutdown_rejects_new_connections_after_drain() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (addr, token, jh) = start_server_with_token(store).await;
+
+    // Cancel and wait for the server to stop.
+    token.cancel();
+    tokio::time::timeout(Duration::from_secs(5), jh)
+        .await
+        .expect("server did not stop in time")
+        .unwrap();
+
+    // A new TCP connection attempt should be refused (or fail to connect).
+    let result = tokio::time::timeout(
+        Duration::from_millis(500),
+        tonic::transport::Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect(),
+    )
+    .await;
+
+    // Either a timeout or a connection error is acceptable — the server is gone.
+    match result {
+        Ok(Ok(_)) => {
+            // Connected (unlikely — the port may have been reused); try an RPC.
+            // We just assert the server task is not running any more, which the
+            // join above already confirmed.
+        }
+        Ok(Err(_)) | Err(_) => {
+            // Expected: connection refused or timed out.
+        }
+    }
+}
+
+#[tokio::test]
+async fn wal_client_stops_on_cancellation() {
+    // Start a primary.
+    let primary_dir = TempDir::new().unwrap();
+    let primary_store = TripleStore::open(primary_dir.path()).unwrap();
+    let (addr, _primary_shutdown, _primary_jh) = start_server_with_token(primary_store).await;
+    let primary_addr = format!("http://{addr}");
+
+    // Open a replica and start the WAL task with its own token.
+    let replica_dir = TempDir::new().unwrap();
+    let replica_store =
+        TripleStore::open_as_replica(replica_dir.path(), primary_addr.clone()).unwrap();
+    let (_, rs) = PolarGraphServer::new_replica(replica_store.clone(), &primary_addr).unwrap();
+    let wal_token = CancellationToken::new();
+    let wal_store = replica_store;
+    let wal_state = Arc::clone(&rs);
+    let cancel_token = wal_token.clone();
+    let wal_jh = tokio::spawn(async move {
+        wal_client::run_replication(wal_store, wal_state, wal_token).await;
+    });
+
+    // Let the WAL client establish its stream.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Cancel and confirm the WAL task exits.
+    cancel_token.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(5), wal_jh).await;
+    assert!(result.is_ok(), "WAL replication task should exit after cancellation");
+}
+
+// ── Query timeout tests ───────────────────────────────────────────────────────
+
+fn open_with_timeout(timeout_ms: u64) -> (PolarGraphServer, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let svc = PolarGraphServer::new(store)
+        .unwrap()
+        .with_query_timeout_ms(timeout_ms);
+    (svc, dir)
+}
+
+#[tokio::test]
+async fn query_timeout_fires_on_large_recursive_query() {
+    // Build a 300-node chain: node[0]→node[1]→…→node[299].
+    // Reachable (transitive closure) without a timeout would run ~300 fixed-point
+    // iterations. With a 1ms timeout the deadline check fires before completion.
+    let (svc, _dir) = open_with_timeout(1);
+
+    let nodes: Vec<_> = (0..300).map(|_| new_node()).collect();
+    let triples: Vec<Triple> = nodes
+        .windows(2)
+        .map(|w| rel(w[0].1.clone(), "next", w[1].1.clone()))
+        .collect();
+    svc.insert(Request::new(InsertRequest { triples })).await.unwrap();
+
+    let err = svc
+        .reachable(Request::new(ReachableRequest {
+            start:     Some(nodes[0].1.clone()),
+            predicate: "next".into(),
+            max_hops:  0,
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.code(),
+        tonic::Code::DeadlineExceeded,
+        "expected DeadlineExceeded, got: {err:?}"
+    );
+    assert!(err.message().contains("1ms"), "message should include timeout: {}", err.message());
+}
+
+#[tokio::test]
+async fn query_completes_within_generous_timeout() {
+    let (svc, _dir) = open_with_timeout(30_000);
+
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    let (_, c) = new_node();
+
+    // Cyclic: A→B→C→A
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            rel(a.clone(), "edge", b.clone()),
+            rel(b.clone(), "edge", c.clone()),
+            rel(c.clone(), "edge", a.clone()),
+        ],
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .reachable(Request::new(ReachableRequest {
+            start:     Some(a.clone()),
+            predicate: "edge".into(),
+            max_hops:  0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.node_ids.len(), 3, "a, b, c all reachable in a cycle");
+}
+
+#[tokio::test]
+async fn query_timeout_zero_disables_timeout() {
+    // timeout_ms = 0 → no limit; even a non-trivial query must complete.
+    let (svc, _dir) = open_with_timeout(0);
+
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    let (_, c) = new_node();
+
+    // Cyclic: A→B→C→A
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            rel(a.clone(), "edge", b.clone()),
+            rel(b.clone(), "edge", c.clone()),
+            rel(c.clone(), "edge", a.clone()),
+        ],
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .reachable(Request::new(ReachableRequest {
+            start:     Some(a.clone()),
+            predicate: "edge".into(),
+            max_hops:  0,
+        }))
+        .await
+        .expect("query should complete without timeout when timeout_ms=0")
+        .into_inner();
+
+    assert_eq!(resp.node_ids.len(), 3);
 }

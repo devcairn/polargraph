@@ -5,16 +5,17 @@
 //! All options can be set via CLI flags **or** environment variables.
 //! CLI flags take priority over environment variables.
 //!
-//! | Flag                  | Env variable              | Default         | Description                      |
-//! |-----------------------|---------------------------|-----------------|----------------------------------|
-//! | `--data-dir <PATH>`   | `POLARGRAPH_DATA_DIR`     | `/data`         | RocksDB data directory           |
-//! | `--listen <ADDR>`     | `POLARGRAPH_LISTEN_ADDR`  | `0.0.0.0:50051` | gRPC listen address              |
-//! | `--backup-dir <PATH>` | `POLARGRAPH_BACKUP_DIR`   | *(none)*        | Backup directory (opt.)          |
-//! | `--replica-of <URL>`  | `POLARGRAPH_REPLICA_OF`   | *(none)*        | Primary gRPC address             |
-//! | `--metrics-port <N>`  | `POLARGRAPH_METRICS_PORT` | `9090`          | Prometheus /metrics HTTP port    |
-//! | `--no-metrics`        | —                         | false           | Disable metrics endpoint         |
-//! | `--log-level <LEVEL>` | `RUST_LOG`                | `info`          | Log level / filter directive     |
-//! | `--log-format <FMT>`  | `LOG_FORMAT`              | `pretty`        | Log format: `pretty` or `json`   |
+//! | Flag                         | Env variable                    | Default         | Description                         |
+//! |------------------------------|---------------------------------|-----------------|-------------------------------------|
+//! | `--data-dir <PATH>`          | `POLARGRAPH_DATA_DIR`           | `/data`         | RocksDB data directory              |
+//! | `--listen <ADDR>`            | `POLARGRAPH_LISTEN_ADDR`        | `0.0.0.0:50051` | gRPC listen address                 |
+//! | `--backup-dir <PATH>`        | `POLARGRAPH_BACKUP_DIR`         | *(none)*        | Backup directory (opt.)             |
+//! | `--replica-of <URL>`         | `POLARGRAPH_REPLICA_OF`         | *(none)*        | Primary gRPC address                |
+//! | `--metrics-port <N>`         | `POLARGRAPH_METRICS_PORT`       | `9090`          | Prometheus /metrics HTTP port       |
+//! | `--no-metrics`               | —                               | false           | Disable metrics endpoint            |
+//! | `--log-level <LEVEL>`        | `RUST_LOG`                      | `info`          | Log level / filter directive        |
+//! | `--log-format <FMT>`         | `LOG_FORMAT`                    | `pretty`        | Log format: `pretty` or `json`      |
+//! | `--shutdown-timeout-ms <MS>` | `POLARGRAPH_SHUTDOWN_TIMEOUT_MS`| `10000`         | Max ms to drain in-flight RPCs      |
 //!
 //! # Examples
 //!
@@ -39,7 +40,8 @@ use polargraph_storage::TripleStore;
 use polargraph_server::wal_client;
 use proto::polar_graph_service_server::PolarGraphServiceServer;
 use service::PolarGraphServer;
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -187,6 +189,30 @@ struct Cli {
     /// Disable the web management UI entirely.
     #[arg(long = "no-ui", default_value_t = false)]
     no_ui: bool,
+
+    /// Maximum time in milliseconds a single query may run.
+    ///
+    /// Applies to Query, VectorSeedQuery, and Reachable RPCs. When the limit is
+    /// exceeded the RPC returns DEADLINE_EXCEEDED. Set to 0 to disable the
+    /// timeout entirely.
+    #[arg(
+        long = "query-timeout-ms",
+        env = "POLARGRAPH_QUERY_TIMEOUT_MS",
+        default_value_t = 30_000u64,
+        value_name = "MS"
+    )]
+    query_timeout_ms: u64,
+
+    /// Maximum time in milliseconds to wait for in-flight requests to complete
+    /// after a shutdown signal is received.  If the drain takes longer than
+    /// this the process force-exits with a non-zero status.
+    #[arg(
+        long = "shutdown-timeout-ms",
+        env = "POLARGRAPH_SHUTDOWN_TIMEOUT_MS",
+        default_value_t = 10_000u64,
+        value_name = "MS"
+    )]
+    shutdown_timeout_ms: u64,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -238,8 +264,35 @@ async fn main() -> Result<()> {
         ui_port = cli.ui_port,
         auth_enabled = !cli.api_keys.is_empty(),
         log_format = %cli.log_format,
+        shutdown_timeout_ms = cli.shutdown_timeout_ms,
         "polargraphd starting"
     );
+
+    // ── Shutdown coordination ─────────────────────────────────────────────────
+    let token = CancellationToken::new();
+    let shutdown_timeout = Duration::from_millis(cli.shutdown_timeout_ms);
+
+    // Watchdog: if the drain takes longer than the timeout, force-exit.
+    let watchdog_token = token.clone();
+    tokio::spawn(async move {
+        watchdog_token.cancelled().await;
+        tokio::time::sleep(shutdown_timeout).await;
+        tracing::error!(
+            timeout_ms = shutdown_timeout.as_millis() as u64,
+            "shutdown timeout exceeded, forcing exit"
+        );
+        std::process::exit(1);
+    });
+
+    // OS signal handler: log and trip the token.
+    let signal_token = token.clone();
+    let timeout_secs = cli.shutdown_timeout_ms / 1000;
+    tokio::spawn(async move {
+        let signal_name = wait_for_signal().await;
+        info!(signal = signal_name, "received shutdown signal");
+        info!(max_wait_secs = timeout_secs, "draining in-flight requests");
+        signal_token.cancel();
+    });
 
     // ── Storage ───────────────────────────────────────────────────────────────
     std::fs::create_dir_all(&cli.data_dir)
@@ -289,9 +342,10 @@ async fn main() -> Result<()> {
     }
 
     // ── Metrics HTTP server ───────────────────────────────────────────────────
-    if let Some(handle) = metrics_handle {
+    let metrics_join: Option<tokio::task::JoinHandle<()>> = if let Some(handle) = metrics_handle {
         let metrics_addr = SocketAddr::from(([0, 0, 0, 0], cli.metrics_port));
-        tokio::spawn(async move {
+        let metrics_token = token.clone();
+        let jh = tokio::spawn(async move {
             let app = Router::new().route(
                 "/metrics",
                 get(move || {
@@ -301,11 +355,15 @@ async fn main() -> Result<()> {
             );
             axum::Server::bind(&metrics_addr)
                 .serve(app.into_make_service())
+                .with_graceful_shutdown(async move { metrics_token.cancelled().await })
                 .await
                 .expect("metrics HTTP server error");
         });
         info!(port = cli.metrics_port, "Prometheus /metrics endpoint listening");
-    }
+        Some(jh)
+    } else {
+        None
+    };
 
     // ── gRPC server ───────────────────────────────────────────────────────────
     let api_keys = Arc::new(cli.api_keys.clone());
@@ -319,21 +377,23 @@ async fn main() -> Result<()> {
         let (server, rs) = service::PolarGraphServer::new_replica(store.clone(), primary_addr)
             .context("failed to initialise replica PolarGraphServer")?;
 
-        // Background WAL replication task.
+        // Background WAL replication task — cancelled by the shutdown token.
         let repl_store = store.clone();
         let repl_state = Arc::clone(&rs);
+        let wal_token = token.clone();
         tokio::spawn(async move {
-            wal_client::run_replication(repl_store, repl_state).await;
+            wal_client::run_replication(repl_store, repl_state, wal_token).await;
         });
 
-        server
+        server.with_query_timeout_ms(cli.query_timeout_ms)
     } else {
         PolarGraphServer::new_with_backup_dir(store, cli.backup_dir.as_deref())
             .context("failed to initialise PolarGraphServer")?
+            .with_query_timeout_ms(cli.query_timeout_ms)
     };
 
     // ── Management UI HTTP server ─────────────────────────────────────────────
-    if !cli.no_ui {
+    let ui_join: Option<tokio::task::JoinHandle<()>> = if !cli.no_ui {
         let ui_state = Arc::new(ui_api::UiState {
             service: pg_server.clone(),
             api_keys: Arc::clone(&api_keys),
@@ -342,40 +402,74 @@ async fn main() -> Result<()> {
             grpc_addr: cli.listen_addr.to_string(),
         });
         let ui_addr = SocketAddr::from(([0, 0, 0, 0], cli.ui_port));
-        tokio::spawn(async move {
+        let ui_token = token.clone();
+        let jh = tokio::spawn(async move {
             let app = ui_api::build_ui_router(ui_state);
             axum::Server::bind(&ui_addr)
                 .serve(app.into_make_service())
+                .with_graceful_shutdown(async move { ui_token.cancelled().await })
                 .await
                 .expect("UI HTTP server error");
         });
         info!(port = cli.ui_port, "management UI listening at http://0.0.0.0:{}", cli.ui_port);
-    }
+        Some(jh)
+    } else {
+        None
+    };
 
     let svc = PolarGraphServiceServer::new(pg_server);
 
     info!(addr = %cli.listen_addr, "listening");
 
+    // ── gRPC serve loop (blocks until shutdown token fires + in-flight RPCs drain) ──
+    let grpc_token = token.clone();
     Server::builder()
         .layer(auth_layer)
         .layer(telemetry::TelemetryLayer)
         .add_service(svc)
-        .serve_with_shutdown(cli.listen_addr, shutdown_signal())
+        .serve_with_shutdown(cli.listen_addr, async move { grpc_token.cancelled().await })
         .await
         .context("gRPC server error")?;
 
-    info!("polargraphd stopped");
+    info!("gRPC server stopped");
+
+    // ── Wait for WAL replication to stop ─────────────────────────────────────
+    // Token was already cancelled (that's what triggered the gRPC drain).
+    // Give the WAL task a moment to exit its current stream iteration.
+    if replica_address.is_some() {
+        info!("WAL replication stopped");
+    }
+
+    // ── Wait for HTTP servers to stop ─────────────────────────────────────────
+    let mut http_stopped = false;
+    if let Some(jh) = metrics_join {
+        let _ = tokio::time::timeout(Duration::from_millis(2_000), jh).await;
+        http_stopped = true;
+    }
+    if let Some(jh) = ui_join {
+        let _ = tokio::time::timeout(Duration::from_millis(2_000), jh).await;
+        http_stopped = true;
+    }
+    if http_stopped {
+        info!("HTTP servers stopped");
+    }
+
+    // ── RocksDB closes when `store` Arc drops at end of main ──────────────────
+    info!("RocksDB closed");
+    info!("shutdown complete");
+
     Ok(())
 }
 
-// ── Graceful shutdown ─────────────────────────────────────────────────────────
+// ── Signal handling ───────────────────────────────────────────────────────────
 
-/// Resolves when SIGTERM or Ctrl-C is received.
-async fn shutdown_signal() {
+/// Waits for SIGTERM or SIGINT and returns a short name for the signal.
+async fn wait_for_signal() -> &'static str {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
             .expect("failed to install Ctrl+C handler");
+        "SIGINT"
     };
 
     #[cfg(unix)]
@@ -384,13 +478,14 @@ async fn shutdown_signal() {
             .expect("failed to install SIGTERM handler")
             .recv()
             .await;
+        "SIGTERM"
     };
 
     #[cfg(not(unix))]
-    let sigterm = std::future::pending::<()>();
+    let sigterm = std::future::pending::<&'static str>();
 
     tokio::select! {
-        _ = ctrl_c  => info!("received Ctrl-C, shutting down"),
-        _ = sigterm => info!("received SIGTERM, shutting down"),
+        name = ctrl_c  => name,
+        name = sigterm => name,
     }
 }

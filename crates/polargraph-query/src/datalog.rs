@@ -51,6 +51,17 @@ use polargraph_core::{
 };
 use polargraph_storage::{Snapshot, StorageError};
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+// ── Error type ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, thiserror::Error)]
+pub enum QueryError {
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
+    #[error("query timed out")]
+    Timeout,
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -226,7 +237,8 @@ pub fn execute_query_seeded(
     query: &Query,
     snapshot: &Snapshot,
     initial: Vec<Bindings>,
-) -> Result<Vec<Bindings>, StorageError> {
+    deadline: Option<Instant>,
+) -> Result<Vec<Bindings>, QueryError> {
     if initial.is_empty() {
         return Ok(vec![]);
     }
@@ -234,6 +246,10 @@ pub fn execute_query_seeded(
     let mut solutions = initial;
 
     for vp in &query.patterns {
+        if deadline.map(|d| Instant::now() > d).unwrap_or(false) {
+            return Err(QueryError::Timeout);
+        }
+
         let mut next = Vec::new();
 
         for bindings in solutions {
@@ -262,8 +278,8 @@ pub fn execute_query_seeded(
 /// Returns all binding sets that satisfy every pattern in the query.
 /// An empty query returns a single empty binding (vacuously satisfied).
 /// A query with unsatisfiable patterns returns an empty vec.
-pub fn execute_query(query: &Query, snapshot: &Snapshot) -> Result<Vec<Bindings>, StorageError> {
-    execute_query_seeded(query, snapshot, vec![HashMap::new()])
+pub fn execute_query(query: &Query, snapshot: &Snapshot, deadline: Option<Instant>) -> Result<Vec<Bindings>, QueryError> {
+    execute_query_seeded(query, snapshot, vec![HashMap::new()], deadline)
 }
 
 // ── Recursive Datalog ─────────────────────────────────────────────────────────
@@ -360,7 +376,8 @@ pub fn execute_recursive(
     seed: &[(String, NodeId, NodeId)],
     rules: &[Rule],
     snapshot: &Snapshot,
-) -> Result<DerivedFacts, StorageError> {
+    deadline: Option<Instant>,
+) -> Result<DerivedFacts, QueryError> {
     // Initialise derived facts from the seed.
     let mut derived: DerivedFacts = HashMap::new();
     for (pred, s, o) in seed {
@@ -369,13 +386,17 @@ pub fn execute_recursive(
 
     // Fixed-point iteration — keep going as long as any new fact is added.
     loop {
+        if deadline.map(|d| Instant::now() > d).unwrap_or(false) {
+            return Err(QueryError::Timeout);
+        }
+
         let mut added_any = false;
 
         for rule in rules {
             // Evaluate the rule body conjunctively, consulting derived facts
             // for derived predicates and storage for base predicates.
             let body_query = Query { patterns: rule.body.clone() };
-            let solutions = execute_query_hybrid(&body_query, snapshot, &derived)?;
+            let solutions = execute_query_hybrid(&body_query, snapshot, &derived, deadline)?;
 
             // Extract head variable bindings to produce new derived facts.
             let entry = derived.entry(rule.head_predicate.clone()).or_default();
@@ -418,7 +439,8 @@ pub fn reachable_from_hops(
     predicate: &str,
     snapshot: &Snapshot,
     max_hops: usize,
-) -> Result<HashSet<NodeId>, StorageError> {
+    deadline: Option<Instant>,
+) -> Result<HashSet<NodeId>, QueryError> {
     if max_hops == 0 {
         return Ok(HashSet::new());
     }
@@ -427,6 +449,10 @@ pub fn reachable_from_hops(
     let mut frontier: Vec<NodeId> = vec![start];
 
     for _ in 0..max_hops {
+        if deadline.map(|d| Instant::now() > d).unwrap_or(false) {
+            return Err(QueryError::Timeout);
+        }
+
         let mut next: Vec<NodeId> = Vec::new();
         for node in &frontier {
             let triples = snapshot.scan_by_subject_predicate(node, predicate)?;
@@ -451,7 +477,8 @@ pub fn reachable_from(
     start: NodeId,
     predicate: &str,
     snapshot: &Snapshot,
-) -> Result<HashSet<NodeId>, StorageError> {
+    deadline: Option<Instant>,
+) -> Result<HashSet<NodeId>, QueryError> {
     // Seed: direct neighbours of start via the given predicate.
     let direct = evaluate(
         &Pattern::new().with_subject(start).with_predicate(predicate),
@@ -484,7 +511,7 @@ pub fn reachable_from(
             .object(Term::var("z")),
     ])];
 
-    let derived = execute_recursive(&seed, &rules, snapshot)?;
+    let derived = execute_recursive(&seed, &rules, snapshot, deadline)?;
 
     // Collect all objects reachable from `start` (subject == start).
     let reachable = derived
@@ -503,10 +530,15 @@ fn execute_query_hybrid(
     query: &Query,
     snapshot: &Snapshot,
     derived: &DerivedFacts,
-) -> Result<Vec<Bindings>, StorageError> {
+    deadline: Option<Instant>,
+) -> Result<Vec<Bindings>, QueryError> {
     let mut solutions: Vec<Bindings> = vec![HashMap::new()];
 
     for vp in &query.patterns {
+        if deadline.map(|d| Instant::now() > d).unwrap_or(false) {
+            return Err(QueryError::Timeout);
+        }
+
         let mut next = Vec::new();
 
         for bindings in solutions {
@@ -639,7 +671,7 @@ mod tests {
             VarPattern::new().subject(bound(alice)).predicate("knows").object(var("who"))
         );
 
-        let results = execute_query(&q, &snap).unwrap();
+        let results = execute_query(&q, &snap, None).unwrap();
         assert_eq!(results.len(), 2);
         let who = collect_var(&results, "who");
         assert!(who.contains(&bob));
@@ -658,7 +690,7 @@ mod tests {
             VarPattern::new().subject(bound(nobody)).predicate("knows").object(var("x"))
         );
 
-        assert!(execute_query(&q, &snap).unwrap().is_empty());
+        assert!(execute_query(&q, &snap, None).unwrap().is_empty());
     }
 
     // ── two-pattern join ──────────────────────────────────────────────────────
@@ -687,7 +719,7 @@ mod tests {
             .pattern(VarPattern::new().subject(bound(alice)).predicate("reports-to").object(var("mgr")))
             .pattern(VarPattern::new().subject(var("colleague")).predicate("reports-to").object(var("mgr")));
 
-        let results = execute_query(&q, &snap).unwrap();
+        let results = execute_query(&q, &snap, None).unwrap();
 
         // alice, bob, carol all report to mgr_a → 3 results (including alice herself)
         assert_eq!(results.len(), 3, "expected alice, bob, carol as colleagues");
@@ -715,7 +747,7 @@ mod tests {
             .pattern(VarPattern::new().subject(bound(alice)).predicate("reports-to").object(var("m")))
             .pattern(VarPattern::new().subject(var("c")).predicate("reports-to").object(var("m")));
 
-        let results = execute_query(&q, &snap).unwrap();
+        let results = execute_query(&q, &snap, None).unwrap();
         // Every result must have ?m = mgr.
         for b in &results {
             assert_eq!(b["m"], mgr, "?m must always be the same manager");
@@ -745,7 +777,7 @@ mod tests {
             .pattern(VarPattern::new().subject(bound(alice)).predicate("knows").object(var("b")))
             .pattern(VarPattern::new().subject(var("b")).predicate("knows").object(var("c")));
 
-        let results = execute_query(&q, &snap).unwrap();
+        let results = execute_query(&q, &snap, None).unwrap();
 
         // (alice→bob→dave) and (alice→carol→dave) → 2 paths, both end at dave
         assert_eq!(results.len(), 2);
@@ -779,7 +811,7 @@ mod tests {
             .pattern(VarPattern::new().subject(var("proj")).predicate("uses-tech").object(var("tech")))
             .pattern(VarPattern::new().subject(var("tech")).predicate("vendor").object(var("vendor")));
 
-        let results = execute_query(&q, &snap).unwrap();
+        let results = execute_query(&q, &snap, None).unwrap();
         assert_eq!(results.len(), 2);
 
         let vendors = collect_var(&results, "vendor");
@@ -805,7 +837,7 @@ mod tests {
             VarPattern::new().subject(var("x")).predicate("knows").object(var("x"))
         );
 
-        let results = execute_query(&q, &snap).unwrap();
+        let results = execute_query(&q, &snap, None).unwrap();
         assert_eq!(results.len(), 1, "only the self-loop satisfies x == x");
         assert_eq!(results[0]["x"], alice);
     }
@@ -831,7 +863,7 @@ mod tests {
             .pattern(VarPattern::new().subject(var("x")).predicate("knows").object(var("x")));
 
         // carol has no self-loop so its binding is eliminated; only ?x = bob survives.
-        let results = execute_query(&q, &snap).unwrap();
+        let results = execute_query(&q, &snap, None).unwrap();
         assert!(results.iter().all(|b| b.get("x") == Some(&bob)));
     }
 
@@ -852,7 +884,7 @@ mod tests {
             VarPattern::new().subject(var("who")).predicate("name").object(Term::Any)
         );
 
-        let results = execute_query(&q, &snap).unwrap();
+        let results = execute_query(&q, &snap, None).unwrap();
         assert_eq!(results.len(), 2);
         let who = collect_var(&results, "who");
         assert!(who.contains(&alice));
@@ -876,7 +908,7 @@ mod tests {
         );
 
         // "name" is a property predicate — object is a Value, not a NodeId.
-        let results = execute_query(&q, &snap).unwrap();
+        let results = execute_query(&q, &snap, None).unwrap();
         assert!(results.is_empty(), "object var cannot bind to scalar property value");
     }
 
@@ -887,7 +919,7 @@ mod tests {
         let (store, _dir) = open();
         let snap = commit(&store, vec![]);
         let q = Query::new(); // no patterns
-        let results = execute_query(&q, &snap).unwrap();
+        let results = execute_query(&q, &snap, None).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].is_empty());
     }
@@ -907,7 +939,7 @@ mod tests {
             .pattern(VarPattern::new().subject(var("x")).predicate("owns-project").object(var("proj")));
 
         // bob has no "owns-project" edges → second pattern fails → no results.
-        let results = execute_query(&q, &snap).unwrap();
+        let results = execute_query(&q, &snap, None).unwrap();
         assert!(results.is_empty());
     }
 
@@ -945,7 +977,7 @@ mod tests {
             ])
         ];
 
-        let derived = execute_recursive(&s, &rules, &snap).unwrap();
+        let derived = execute_recursive(&s, &rules, &snap, None).unwrap();
         let tc = derived.get("tc").unwrap();
 
         assert!(tc.contains(&(a, b)), "a→b should be reachable");
@@ -979,7 +1011,7 @@ mod tests {
             ])
         ];
 
-        let derived = execute_recursive(&s, &rules, &snap).unwrap();
+        let derived = execute_recursive(&s, &rules, &snap, None).unwrap();
         let tc = derived.get("tc").unwrap();
 
         assert!(tc.contains(&(a, b)));
@@ -1011,7 +1043,7 @@ mod tests {
         ];
 
         // Must terminate and not loop forever.
-        let derived = execute_recursive(&s, &rules, &snap).unwrap();
+        let derived = execute_recursive(&s, &rules, &snap, None).unwrap();
         let tc = derived.get("tc").unwrap();
 
         // A can reach B, C, and back to A through the cycle.
@@ -1037,7 +1069,7 @@ mod tests {
             ])
         ];
 
-        let derived = execute_recursive(&s, &rules, &snap).unwrap();
+        let derived = execute_recursive(&s, &rules, &snap, None).unwrap();
         let tc = derived.get("tc").unwrap();
         assert_eq!(tc.len(), 1);
         assert!(tc.contains(&(a, b)));
@@ -1058,7 +1090,7 @@ mod tests {
             ])
         ];
 
-        let derived = execute_recursive(&[], &rules, &snap).unwrap();
+        let derived = execute_recursive(&[], &rules, &snap, None).unwrap();
         // No seed → no derived facts (the base case for tc has nothing to expand).
         assert!(derived.get("tc").map_or(true, |s| s.is_empty()));
     }
@@ -1081,7 +1113,7 @@ mod tests {
             rel(c, "knows", d),
         ]);
 
-        let reachable = reachable_from(a, "knows", &snap).unwrap();
+        let reachable = reachable_from(a, "knows", &snap, None).unwrap();
         assert!(reachable.contains(&b));
         assert!(reachable.contains(&c));
         assert!(reachable.contains(&d));
@@ -1103,7 +1135,7 @@ mod tests {
             rel(c, "knows", d),
         ]);
 
-        let reachable = reachable_from(a, "knows", &snap).unwrap();
+        let reachable = reachable_from(a, "knows", &snap, None).unwrap();
         assert_eq!(reachable.len(), 3);
         assert!(reachable.contains(&b));
         assert!(reachable.contains(&c));
@@ -1123,7 +1155,7 @@ mod tests {
             rel(c, "knows", a),
         ]);
 
-        let reachable = reachable_from(a, "knows", &snap).unwrap();
+        let reachable = reachable_from(a, "knows", &snap, None).unwrap();
         // b and c are reachable; a itself via cycle.
         assert!(reachable.contains(&b));
         assert!(reachable.contains(&c));
@@ -1140,7 +1172,7 @@ mod tests {
         // b and c are connected but a has no outgoing "knows" edges.
         let snap = commit(&store, vec![rel(b, "knows", c)]);
 
-        let reachable = reachable_from(a, "knows", &snap).unwrap();
+        let reachable = reachable_from(a, "knows", &snap, None).unwrap();
         assert!(reachable.is_empty());
     }
 
@@ -1151,7 +1183,7 @@ mod tests {
 
         let snap = commit(&store, vec![rel(a, "knows", a)]);
 
-        let reachable = reachable_from(a, "knows", &snap).unwrap();
+        let reachable = reachable_from(a, "knows", &snap, None).unwrap();
         assert!(reachable.contains(&a), "self-loop: a knows itself");
     }
 
@@ -1168,8 +1200,63 @@ mod tests {
             rel(b, "manages", c),
         ]);
 
-        let reachable = reachable_from(a, "knows", &snap).unwrap();
+        let reachable = reachable_from(a, "knows", &snap, None).unwrap();
         assert!(reachable.contains(&b));
         assert!(!reachable.contains(&c), "c only reachable via 'manages', not 'knows'");
+    }
+
+    // ── deadline / timeout ────────────────────────────────────────────────────
+
+    #[test]
+    fn execute_recursive_expired_deadline_returns_timeout() {
+        let (store, _dir) = open();
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let snap = commit(&store, vec![rel(a, "edge", b)]);
+
+        // A deadline that is already in the past fires on the first iteration.
+        let expired = Some(Instant::now() - std::time::Duration::from_millis(1));
+        let s = seed(&[("tc", a, b)]);
+        let rules = vec![
+            Rule::new("tc", "x", "z").with_body(vec![
+                VarPattern::new().subject(Term::var("x")).predicate("tc").object(Term::var("y")),
+                VarPattern::new().subject(Term::var("y")).predicate("edge").object(Term::var("z")),
+            ])
+        ];
+
+        let result = execute_recursive(&s, &rules, &snap, expired);
+        assert!(matches!(result, Err(QueryError::Timeout)), "expected Timeout, got {result:?}");
+    }
+
+    #[test]
+    fn execute_query_expired_deadline_returns_timeout() {
+        let (store, _dir) = open();
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let snap = commit(&store, vec![rel(a, "knows", b)]);
+
+        let expired = Some(Instant::now() - std::time::Duration::from_millis(1));
+        let q = Query::new().pattern(
+            VarPattern::new().subject(Term::Bound(a)).predicate("knows").object(Term::var("x"))
+        );
+
+        let result = execute_query(&q, &snap, expired);
+        assert!(matches!(result, Err(QueryError::Timeout)), "expected Timeout, got {result:?}");
+    }
+
+    #[test]
+    fn execute_query_none_deadline_never_times_out() {
+        let (store, _dir) = open();
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let snap = commit(&store, vec![rel(a, "knows", b)]);
+
+        let q = Query::new().pattern(
+            VarPattern::new().subject(Term::Bound(a)).predicate("knows").object(Term::var("x"))
+        );
+
+        let result = execute_query(&q, &snap, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
     }
 }

@@ -22,8 +22,8 @@ pub mod planner;
 pub mod projection;
 
 pub use datalog::{
-    execute_query, execute_recursive, reachable_from, Bindings, DerivedFacts, Query, Rule, Term,
-    VarPattern,
+    execute_query, execute_query_seeded, execute_recursive, reachable_from, reachable_from_hops,
+    Bindings, DerivedFacts, Query, QueryError, Rule, Term, VarPattern,
 };
 pub use eval::evaluate;
 pub use planner::{choose_index, IndexChoice, Pattern};
