@@ -1,4 +1,5 @@
 //! gRPC service implementation.
+#![allow(clippy::result_large_err)]
 
 use crate::{
     convert,
@@ -9,6 +10,7 @@ use crate::{
         BackupInfo as ProtoBackupInfo,
         BatchInsertError, BatchInsertVectorsRequest, BatchInsertVectorsResponse,
         CreateBackupRequest, CreateBackupResponse,
+        ExplainResponse, PlanNode,
         GetEdgeTypeRequest, GetEdgeTypeResponse,
         GetNodeTypeRequest, GetNodeTypeResponse,
         InsertRequest, InsertResponse, InsertVectorRequest, InsertVectorResponse,
@@ -37,6 +39,7 @@ use polargraph_query::datalog::{
     execute_query, execute_query_seeded, reachable_from, reachable_from_hops, Bindings, Query,
     QueryError,
 };
+use polargraph_query::explain::explain_query;
 use polargraph_storage::{BackupManager, CompactionManager, EdgeTypeRegistry, NodeTypeRegistry, StorageError, TripleStore, WalStreamer};
 use std::{
     collections::{HashMap, HashSet},
@@ -107,6 +110,8 @@ pub struct PolarGraphServer {
     replica_state: Option<Arc<ReplicaState>>,
     /// Maximum time in milliseconds for a single query. 0 = no limit.
     query_timeout_ms: u64,
+    /// Emit a warn! when a query RPC takes longer than this many ms. 0 = disabled.
+    slow_query_ms: u64,
 }
 
 impl PolarGraphServer {
@@ -134,13 +139,40 @@ impl PolarGraphServer {
         let backup_manager = backup_dir
             .map(|dir| BackupManager::open(dir, &store).map(Arc::new))
             .transpose()?;
-        Ok(Self { store, registry, edge_registry, type_cache, backup_manager, replica_state: None, query_timeout_ms: 30_000 })
+        Ok(Self { store, registry, edge_registry, type_cache, backup_manager, replica_state: None, query_timeout_ms: 30_000, slow_query_ms: 1_000 })
     }
 
     /// Set the maximum query execution time in milliseconds. 0 disables the timeout.
     pub fn with_query_timeout_ms(mut self, ms: u64) -> Self {
         self.query_timeout_ms = ms;
         self
+    }
+
+    /// Set the slow-query threshold in milliseconds. Queries exceeding this
+    /// duration emit a `warn!` and increment `polargraph_slow_queries_total`.
+    /// 0 disables slow-query logging.
+    pub fn with_slow_query_ms(mut self, ms: u64) -> Self {
+        self.slow_query_ms = ms;
+        self
+    }
+
+    /// Check whether `elapsed` crosses the slow-query threshold and, if so,
+    /// log a warning and increment the Prometheus counter.
+    fn check_slow_query(&self, method: &'static str, elapsed: Duration, extra: &str) {
+        if self.slow_query_ms == 0 {
+            return;
+        }
+        let duration_ms = elapsed.as_millis() as u64;
+        if duration_ms >= self.slow_query_ms {
+            warn!(
+                method,
+                duration_ms,
+                threshold_ms = self.slow_query_ms,
+                extra,
+                "slow query detected"
+            );
+            metrics::counter!("polargraph_slow_queries_total", "method" => method).increment(1);
+        }
     }
 
     /// Create a replica (read-only) server.
@@ -164,6 +196,7 @@ impl PolarGraphServer {
             backup_manager: None,
             replica_state: Some(replica_state.clone()),
             query_timeout_ms: 30_000,
+            slow_query_ms: 1_000,
         };
         Ok((server, replica_state))
     }
@@ -298,6 +331,8 @@ impl PolarGraphService for PolarGraphServer {
             .map(convert::var_pattern_from_proto)
             .collect::<Result<_, _>>()?;
 
+        let pattern_count = patterns.len();
+
         // Build query.
         let mut query = Query::new();
         for p in patterns {
@@ -323,8 +358,10 @@ impl PolarGraphService for PolarGraphServer {
             query.patterns.len(), snapshot.ts.0, snapshot.vt_as_of
         );
 
+        let t0 = Instant::now();
         let results = execute_query(&query, &snapshot, self.make_deadline())
             .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
+        self.check_slow_query("Query", t0.elapsed(), &format!("patterns={pattern_count}"));
 
         let bindings = results.iter().map(convert::binding_to_proto).collect();
 
@@ -611,12 +648,18 @@ impl PolarGraphService for PolarGraphServer {
         );
 
         let deadline = self.make_deadline();
+        let t0 = Instant::now();
         let reachable_set = if req.max_hops == 0 {
             reachable_from(start, &req.predicate, &snapshot, deadline)
         } else {
             reachable_from_hops(start, &req.predicate, &snapshot, req.max_hops as usize, deadline)
         }
         .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
+        self.check_slow_query(
+            "Reachable",
+            t0.elapsed(),
+            &format!("predicate={} max_hops={}", req.predicate, req.max_hops),
+        );
 
         let node_ids = reachable_set
             .into_iter()
@@ -870,8 +913,14 @@ impl PolarGraphService for PolarGraphServer {
             query.patterns.push(p);
         }
 
+        let t0 = Instant::now();
         let results = execute_query_seeded(&query, &snapshot, initial, self.make_deadline())
             .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
+        self.check_slow_query(
+            "VectorSeedQuery",
+            t0.elapsed(),
+            &format!("space={space} k={k} patterns={}", query.patterns.len()),
+        );
 
         // Step 4: attach scores by looking up the seed variable in each result.
         let bindings = results
@@ -1009,6 +1058,47 @@ impl PolarGraphService for PolarGraphServer {
             },
         };
         Ok(Response::new(resp))
+    }
+
+    /// Return the static execution plan for a query without running it.
+    async fn explain_query(
+        &self,
+        request: Request<QueryRequest>,
+    ) -> Result<Response<ExplainResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.patterns.is_empty() {
+            return Err(Status::invalid_argument("query must contain at least one pattern"));
+        }
+
+        let patterns: Vec<_> = req
+            .patterns
+            .iter()
+            .map(convert::var_pattern_from_proto)
+            .collect::<Result<_, _>>()?;
+
+        let mut query = Query::new();
+        for p in patterns {
+            query.patterns.push(p);
+        }
+
+        let plan = explain_query(&query, &[]);
+
+        let nodes: Vec<PlanNode> = plan
+            .steps
+            .iter()
+            .map(|step| PlanNode {
+                node_type: step.node_type.clone(),
+                description: step.description.clone(),
+                index_used: step.index_used.clone(),
+                children: vec![],
+            })
+            .collect();
+
+        Ok(Response::new(ExplainResponse {
+            plan_text: plan.plan_text,
+            nodes,
+        }))
     }
 
     /// Stream WAL entries to a replica. Primary-only.

@@ -464,6 +464,28 @@ message ReplicaStatusResponse {
     uint64 replication_lag_entries = 6;
 }
 
+// ── ExplainQuery ──────────────────────────────────────────────────────────────
+
+/// Static execution plan for a query, as returned by ExplainQuery.
+message ExplainResponse {
+    /// Human-readable plan summary (multi-line text).
+    string plan_text = 1;
+    /// One node per top-level plan step.
+    repeated PlanNode nodes = 2;
+}
+
+/// A single node in the query execution plan tree.
+message PlanNode {
+    /// Node kind: "PatternScan", "RecursiveJoin", or "VectorSearch".
+    string node_type = 1;
+    /// Human-readable description of this step.
+    string description = 2;
+    /// Column family used for the scan (e.g. "SPO", "POS", "OSP", "full scan").
+    string index_used = 3;
+    /// Child nodes (e.g. body patterns of a RecursiveJoin).
+    repeated PlanNode children = 4;
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 service PolarGraphService {
@@ -555,4 +577,8 @@ service PolarGraphService {
     /// The stream runs indefinitely until the client disconnects; new entries are
     /// delivered within ~50 ms of commit.
     rpc StreamWal(StreamWalRequest) returns (stream WalEntry);
+
+    /// Return the static execution plan for a query without running it.
+    /// No database access is performed — pure static analysis of index selection.
+    rpc ExplainQuery(QueryRequest) returns (ExplainResponse);
 }

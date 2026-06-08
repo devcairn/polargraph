@@ -167,7 +167,6 @@ impl Transaction {
     }
 
     /// Snapshot reads — see state as of `read_ts`. ─────────────────────────
-
     pub fn scan_by_subject(&self, subject: &NodeId) -> Result<Vec<Triple>, StorageError> {
         self.store.scan_by_subject_at(subject, self.read_ts, None)
     }

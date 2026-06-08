@@ -305,6 +305,7 @@ impl TripleStore {
         f(&self.inner.db)
     }
 
+    #[allow(clippy::type_complexity)]
     fn load_predicates(
         db: &DB,
     ) -> Result<(HashMap<String, PredId>, HashMap<PredId, String>, PredId), StorageError> {
@@ -390,7 +391,7 @@ impl TripleStore {
             );
             for item in iter {
                 let (key, value) = item?;
-                if !key.starts_with(&*node_prefix) { break; }
+                if !key.starts_with(&node_prefix) { break; }
                 if key.len() < id_start + 16      { continue; }
                 let id = NodeId(uuid::Uuid::from_bytes(
                     key[id_start..id_start + 16].try_into().unwrap(),
@@ -578,7 +579,7 @@ impl TripleStore {
         let mut inserted = 0usize;
         let mut errors: Vec<(usize, StorageError)> = Vec::new();
 
-        for (_i, (node_id, vector)) in items.iter().enumerate() {
+        for (node_id, vector) in items.iter() {
             let modified = idx.insert(*node_id, vector.clone());
             for id in &modified {
                 let serialized = idx.serialize_node_for(*id);

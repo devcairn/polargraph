@@ -277,9 +277,15 @@ pub struct HnswIndex {
     pub(crate) mmap_state: Option<MmapState>,
 }
 
+impl Default for HnswIndex {
+    fn default() -> Self {
+        Self::with_params(DEFAULT_M, DEFAULT_M_MAX0, DEFAULT_EF_CONSTRUCTION)
+    }
+}
+
 impl HnswIndex {
     pub fn new() -> Self {
-        Self::with_params(DEFAULT_M, DEFAULT_M_MAX0, DEFAULT_EF_CONSTRUCTION)
+        Self::default()
     }
 
     pub fn with_params(m: usize, m_max0: usize, ef_construction: usize) -> Self {

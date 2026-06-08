@@ -122,7 +122,7 @@ fn main() -> Result<()> {
     let mut skipped = 0usize;
 
     for line in reader.lines() {
-        line_num += 1;
+        line_num = line_num.wrapping_add(1);
         let line = line.with_context(|| format!("I/O error reading line {line_num}"))?;
 
         match parse_line(&line) {

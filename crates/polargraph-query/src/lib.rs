@@ -18,6 +18,7 @@
 
 pub mod datalog;
 pub mod eval;
+pub mod explain;
 pub mod planner;
 pub mod projection;
 
@@ -26,5 +27,6 @@ pub use datalog::{
     Bindings, DerivedFacts, Query, QueryError, Rule, Term, VarPattern,
 };
 pub use eval::evaluate;
+pub use explain::{explain_query, ExplainPlan, ExplainStep};
 pub use planner::{choose_index, IndexChoice, Pattern};
 pub use projection::{apply_view, ProjectedTriple};

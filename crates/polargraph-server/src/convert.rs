@@ -3,6 +3,8 @@
 //! Every function that can fail returns `Result<_, tonic::Status>` so callers
 //! can propagate errors directly as gRPC status codes.
 
+#![allow(clippy::result_large_err)]
+
 use crate::proto::{
     self,
     triple::Kind as TripleKind,

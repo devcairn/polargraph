@@ -213,6 +213,18 @@ struct Cli {
         value_name = "MS"
     )]
     shutdown_timeout_ms: u64,
+
+    /// Emit a warning when any query RPC (Query, VectorSeedQuery, Reachable)
+    /// takes longer than this many milliseconds.  Also increments the
+    /// `polargraph_slow_queries_total{method}` Prometheus counter.
+    /// Set to 0 to disable slow-query logging entirely.
+    #[arg(
+        long = "slow-query-ms",
+        env = "POLARGRAPH_SLOW_QUERY_MS",
+        default_value_t = 1_000u64,
+        value_name = "MS"
+    )]
+    slow_query_ms: u64,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -385,11 +397,14 @@ async fn main() -> Result<()> {
             wal_client::run_replication(repl_store, repl_state, wal_token).await;
         });
 
-        server.with_query_timeout_ms(cli.query_timeout_ms)
+        server
+            .with_query_timeout_ms(cli.query_timeout_ms)
+            .with_slow_query_ms(cli.slow_query_ms)
     } else {
         PolarGraphServer::new_with_backup_dir(store, cli.backup_dir.as_deref())
             .context("failed to initialise PolarGraphServer")?
             .with_query_timeout_ms(cli.query_timeout_ms)
+            .with_slow_query_ms(cli.slow_query_ms)
     };
 
     // ── Management UI HTTP server ─────────────────────────────────────────────

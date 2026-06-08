@@ -177,7 +177,7 @@ fn extend_bindings(
     match &vp.object {
         Term::Any => {} // nothing to bind
         Term::Bound(_) => {} // substitution already handled this; storage only returned matching triples
-        Term::Var(name) => {
+        Term::Var(_name) => {
             match triple {
                 Triple::Relation { object, .. } => {
                     if let Some(updated) = bind_term(&vp.object, *object, &out) {
@@ -342,10 +342,10 @@ impl Rule {
 /// Execute a set of recursive Datalog rules until a fixed point is reached.
 ///
 /// # Arguments
-/// * `seed`     – Initial (predicate, subject, object) tuples that prime the
-///               derived relations before the first rule application.
-/// * `rules`    – Rules applied iteratively. A rule's body may reference any
-///               predicate, including a derived one (for recursion).
+/// * `seed` – Initial (predicate, subject, object) tuples that prime the
+///   derived relations before the first rule application.
+/// * `rules` – Rules applied iteratively. A rule's body may reference any
+///   predicate, including a derived one (for recursion).
 /// * `snapshot` – Storage snapshot for base (EDB) fact lookups.
 ///
 /// # Returns

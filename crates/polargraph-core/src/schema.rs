@@ -26,15 +26,15 @@ pub enum FieldKind {
 impl FieldKind {
     /// Returns `true` if `value` is compatible with this kind.
     pub fn matches(self, value: &Value) -> bool {
-        match (self, value) {
-            (FieldKind::Bool,   Value::Bool(_))   => true,
-            (FieldKind::Int,    Value::Int(_))     => true,
-            (FieldKind::Float,  Value::Float(_))   => true,
-            (FieldKind::Text,   Value::Text(_))    => true,
-            (FieldKind::Blob,   Value::Blob(_))    => true,
-            (FieldKind::Vector, Value::Vector(_))  => true,
-            _ => false,
-        }
+        matches!(
+            (self, value),
+            (FieldKind::Bool,   Value::Bool(_))
+            | (FieldKind::Int,    Value::Int(_))
+            | (FieldKind::Float,  Value::Float(_))
+            | (FieldKind::Text,   Value::Text(_))
+            | (FieldKind::Blob,   Value::Blob(_))
+            | (FieldKind::Vector, Value::Vector(_))
+        )
     }
 }
 

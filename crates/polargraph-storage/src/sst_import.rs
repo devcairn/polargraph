@@ -105,9 +105,9 @@ impl SstImporter {
         let mut pred_ids: HashMap<String, u32> = HashMap::new();
         for triple in &self.triples {
             let pred_str = triple.predicate().0.clone();
-            if !pred_ids.contains_key(&pred_str) {
-                let id = store.intern_predicate(&pred_str)?;
-                pred_ids.insert(pred_str, id);
+            if let std::collections::hash_map::Entry::Vacant(e) = pred_ids.entry(pred_str) {
+                let id = store.intern_predicate(e.key())?;
+                e.insert(id);
             }
         }
 
@@ -151,6 +151,7 @@ impl SstImporter {
         // ── 4. Write SST files and ingest per CF ──────────────────────────────
         let opts = Options::default();
 
+        #[allow(clippy::type_complexity)]
         let cf_data: [(&str, &Vec<([u8; 44], Vec<u8>)>); 6] = [
             (cf::SPO, &spo_buf),
             (cf::SOP, &sop_buf),

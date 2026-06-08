@@ -611,6 +611,79 @@ all check it at iteration boundaries.
 
 ---
 
+### Slow query logging
+
+When a query RPC (`Query`, `VectorSeedQuery`, `Reachable`) takes longer than
+the configured threshold, PolarGraph emits a `WARN`-level log entry with
+structured fields and increments a Prometheus counter.
+
+| Flag | Env variable | Default | Description |
+|------|-------------|---------|-------------|
+| `--slow-query-ms MS` | `POLARGRAPH_SLOW_QUERY_MS` | `1000` | Threshold in ms; 0 = disabled |
+
+Log fields emitted on a slow query:
+
+```
+method       = "Query" | "VectorSeedQuery" | "Reachable"
+duration_ms  = <actual elapsed time>
+threshold_ms = <configured slow_query_ms>
+extra        = "patterns=N" | "predicate=P max_hops=H" | "space=S k=K patterns=N"
+message      = "slow query detected"
+```
+
+The Prometheus counter `polargraph_slow_queries_total{method}` increments on
+each slow query, making it easy to alert on sustained slow-query rates.
+
+---
+
+### Query planner (EXPLAIN)
+
+The `ExplainQuery` RPC accepts a `QueryRequest` and returns an `ExplainResponse`
+without touching storage — it performs pure static analysis of the execution plan.
+
+```protobuf
+rpc ExplainQuery(QueryRequest) returns (ExplainResponse);
+
+message ExplainResponse {
+    string plan_text = 1;        // human-readable multi-line plan
+    repeated PlanNode nodes = 2; // structured plan nodes
+}
+
+message PlanNode {
+    string node_type   = 1; // "PatternScan"
+    string description = 2; // e.g. "[?s, :knows, ?o]"
+    string index_used  = 3; // e.g. "POS  (predicate bound)"
+    repeated PlanNode children = 4;
+}
+```
+
+**Index selection** follows the hexastore table: after each pattern is
+evaluated, the variables it binds become "bound" for subsequent patterns. The
+planner simulates this symbolically — a `Var` slot is treated as bound if the
+variable was introduced by an earlier pattern.
+
+Example `plan_text` output:
+
+```
+Query Plan
+──────────
+Step 1: PatternScan  [?s, :knows, ?o]
+  Index: PSO  (predicate bound)
+  Binds: ?s, ?o
+
+Step 2: PatternScan  [?s, :name, ?n]
+  Index: SPO  (subject bound)
+  Binds: ?n
+
+Recursive rules: none
+Estimated steps: 2
+```
+
+The `polargraph_query::explain::explain_query` function in `polargraph-query`
+drives this analysis; it requires no storage access and runs in microseconds.
+
+---
+
 ## View system
 
 A `View` is a named lens over the graph defined by:
