@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: polargraph
+  namespace: polargraph
+  labels:
+    app: polargraph
+spec:
+  # Single replica by default.
+  # Increasing replicas requires either:
+  #   - Shared storage (ReadWriteMany PVC) for a multi-primary setup, or
+  #   - WAL streaming replication (--replica-of) for read replicas.
+  # See deploy/kubernetes/README.md for details.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: polargraph
+  template:
+    metadata:
+      labels:
+        app: polargraph
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: polargraph
+          # TODO: update OWNER to your GitHub org or username
+          image: ghcr.io/OWNER/polargraph:latest
+          imagePullPolicy: Always
+          ports:
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+            - name: ui
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: POLARGRAPH_DATA_DIR
+              value: /data
+            - name: POLARGRAPH_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: polargraph-secrets
+                  key: api-key
+          envFrom:
+            - configMapRef:
+                name: polargraph-config
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          livenessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: polargraph-data

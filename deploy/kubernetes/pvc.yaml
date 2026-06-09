@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: polargraph-data
+  namespace: polargraph
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  # Change to your cloud provider's storage class, e.g.:
+  #   AWS:   gp3
+  #   GCP:   standard or premium-rwo
+  #   Azure: managed-premium
+  storageClassName: standard

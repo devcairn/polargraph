@@ -652,6 +652,21 @@ impl TripleStore {
         self.scan_all_at(self.inner.oracle.read_ts(), None)
     }
 
+    /// Fast approximate triple count using RocksDB's built-in key estimate on
+    /// the SPO column family. Not exact — use for monitoring/health only.
+    pub fn estimate_triple_count(&self) -> u64 {
+        self.cf_handle(cf::SPO)
+            .ok()
+            .and_then(|cf| {
+                self.inner
+                    .db
+                    .property_int_value_cf(&cf, "rocksdb.estimate-num-keys")
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or(0)
+    }
+
     // ── predicate interning ───────────────────────────────────────────────────
 
     pub fn intern_predicate(&self, pred: &str) -> Result<PredId, StorageError> {

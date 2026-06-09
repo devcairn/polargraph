@@ -1,0 +1,25 @@
+# NOTE: HPA is provided for completeness but requires additional setup to be
+# meaningful. Scaling PolarGraph horizontally requires one of:
+#   - Shared ReadWriteMany storage so all replicas access the same RocksDB data
+#     (not supported by RocksDB's write path — read replicas only), or
+#   - WAL streaming replication: primary handles writes, replicas handle reads.
+# See deploy/kubernetes/README.md for the read-replica pattern.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: polargraph
+  namespace: polargraph
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: polargraph
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

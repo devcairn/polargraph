@@ -464,6 +464,33 @@ message ReplicaStatusResponse {
     uint64 replication_lag_entries = 6;
 }
 
+// ── Schema migrations ─────────────────────────────────────────────────────────
+
+message MigrateRequest {
+    /// When true, report which migrations would run without applying them.
+    bool dry_run = 1;
+}
+
+message MigrateResponse {
+    repeated uint32 applied_versions = 1;
+    repeated uint32 skipped_versions = 2;
+    string          summary          = 3;
+}
+
+message MigrationStatusRequest {}
+
+message MigrationStatusResponse {
+    uint32                      current_version = 1;
+    uint32                      latest_version  = 2;
+    repeated AppliedMigrationInfo applied       = 3;
+}
+
+message AppliedMigrationInfo {
+    uint32 version             = 1;
+    string description         = 2;
+    int64  applied_at_tx_time  = 3;
+}
+
 // ── ExplainQuery ──────────────────────────────────────────────────────────────
 
 /// Static execution plan for a query, as returned by ExplainQuery.
@@ -581,4 +608,13 @@ service PolarGraphService {
     /// Return the static execution plan for a query without running it.
     /// No database access is performed — pure static analysis of index selection.
     rpc ExplainQuery(QueryRequest) returns (ExplainResponse);
+
+    /// Apply any pending schema migrations and return the list of versions run.
+    /// When dry_run is true, reports what would be applied without making changes.
+    /// Returns FAILED_PRECONDITION on a read replica.
+    rpc MigrateSchema(MigrateRequest) returns (MigrateResponse);
+
+    /// Return the current and latest migration version, plus the full history
+    /// of applied migrations with timestamps.
+    rpc MigrationStatus(MigrationStatusRequest) returns (MigrationStatusResponse);
 }

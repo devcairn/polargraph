@@ -7,6 +7,7 @@ members = [
     "crates/polargraph-server",
     "crates/polargraph-bench",
     "crates/polargraph-import",
+    "crates/polargraph-rest",
 ]
 
 [workspace.package]
@@ -30,7 +31,7 @@ bytes        = { version = "1" }
 rocksdb      = { version = "0.22" }
 
 # gRPC / HTTP
-tonic        = { version = "0.11" }
+tonic        = { version = "0.11", features = ["tls"] }
 tonic-build  = { version = "0.11" }
 prost        = { version = "0.12" }
 
@@ -62,6 +63,9 @@ hdrhistogram = { version = "7" }
 
 # memory-mapped files
 memmap2      = { version = "0.9" }
+
+# TOML config file parsing
+toml         = { version = "0.8" }
 
 # constant-time comparison (timing-attack prevention)
 subtle       = { version = "2" }

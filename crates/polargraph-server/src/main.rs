@@ -2,11 +2,14 @@
 //!
 //! # Configuration
 //!
-//! All options can be set via CLI flags **or** environment variables.
-//! CLI flags take priority over environment variables.
+//! Settings can be supplied via a TOML config file, environment variables, or
+//! CLI flags.  Priority (highest wins):
+//!
+//!   **CLI flag > environment variable > config file > built-in default**
 //!
 //! | Flag                         | Env variable                    | Default         | Description                         |
 //! |------------------------------|---------------------------------|-----------------|-------------------------------------|
+//! | `--config <PATH>`            | `POLARGRAPH_CONFIG`             | *(auto-detect)* | TOML config file path               |
 //! | `--data-dir <PATH>`          | `POLARGRAPH_DATA_DIR`           | `/data`         | RocksDB data directory              |
 //! | `--listen <ADDR>`            | `POLARGRAPH_LISTEN_ADDR`        | `0.0.0.0:50051` | gRPC listen address                 |
 //! | `--backup-dir <PATH>`        | `POLARGRAPH_BACKUP_DIR`         | *(none)*        | Backup directory (opt.)             |
@@ -16,16 +19,26 @@
 //! | `--log-level <LEVEL>`        | `RUST_LOG`                      | `info`          | Log level / filter directive        |
 //! | `--log-format <FMT>`         | `LOG_FORMAT`                    | `pretty`        | Log format: `pretty` or `json`      |
 //! | `--shutdown-timeout-ms <MS>` | `POLARGRAPH_SHUTDOWN_TIMEOUT_MS`| `10000`         | Max ms to drain in-flight RPCs      |
+//! | `--tls-cert <PATH>`          | `POLARGRAPH_TLS_CERT`           | *(none)*        | PEM certificate file (enables TLS)  |
+//! | `--tls-key <PATH>`           | `POLARGRAPH_TLS_KEY`            | *(none)*        | PEM private key file (enables TLS)  |
+//! | `--replica-tls-ca <PATH>`    | `POLARGRAPH_REPLICA_TLS_CA`     | *(none)*        | CA cert for verifying the primary   |
 //!
 //! # Examples
 //!
 //! ```bash
-//! # Primary:
+//! # Primary (plaintext):
 //! polargraphd --data-dir /var/lib/polargraph --listen 127.0.0.1:50051
 //!
-//! # Replica:
-//! polargraphd --data-dir /var/lib/replica --listen 127.0.0.1:9091 \
-//!   --replica-of http://primary-host:50051
+//! # Primary (config file):
+//! polargraphd --config /etc/polargraph/polargraph.toml
+//!
+//! # Primary (TLS):
+//! polargraphd --data-dir /var/lib/polargraph \
+//!   --tls-cert /etc/pg/server.crt --tls-key /etc/pg/server.key
+//!
+//! # Replica connecting to TLS primary:
+//! polargraphd --data-dir /var/lib/replica --replica-of https://primary:50051 \
+//!   --replica-tls-ca /etc/pg/ca.crt
 //!
 //! # Production with JSON logging and Prometheus:
 //! LOG_FORMAT=json RUST_LOG=info polargraphd --data-dir /data
@@ -34,19 +47,23 @@
 use anyhow::{Context, Result};
 use axum::{routing::get, Router};
 use clap::Parser;
+use hyper::server::accept;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use polargraph_core::schema::RetentionPolicy;
-use polargraph_storage::TripleStore;
+use polargraph_storage::{MigrationRunner, TripleStore};
+use polargraph_server::config::{self, Config};
 use polargraph_server::wal_client;
 use proto::polar_graph_service_server::PolarGraphServiceServer;
 use service::PolarGraphServer;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use tokio_stream::{wrappers::TcpListenerStream, StreamExt as _};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
+use tonic_health::ServingStatus;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use polargraph_server::{auth::ApiKeyLayer, proto, service, telemetry, ui_api};
+use polargraph_server::{auth::ApiKeyLayer, proto, rate_limit::RateLimitLayer, retention_scheduler, service, telemetry, ui_api};
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -54,32 +71,32 @@ use polargraph_server::{auth::ApiKeyLayer, proto, service, telemetry, ui_api};
 #[derive(Debug, Parser)]
 #[command(name = "polargraphd", version, about, long_about = None)]
 struct Cli {
+    /// Path to a TOML configuration file.  When omitted the server tries
+    /// `./polargraph.toml` then `~/.config/polargraph/config.toml`.
+    #[arg(
+        long = "config",
+        env = "POLARGRAPH_CONFIG",
+        value_name = "PATH"
+    )]
+    config: Option<PathBuf>,
+
     /// Directory where RocksDB stores its data files.
-    ///
-    /// Created automatically if it does not exist.
     #[arg(
         long = "data-dir",
         env = "POLARGRAPH_DATA_DIR",
-        default_value = "/data",
         value_name = "PATH"
     )]
-    data_dir: PathBuf,
+    data_dir: Option<PathBuf>,
 
     /// Socket address the gRPC server will listen on.
     #[arg(
         long = "listen",
         env = "POLARGRAPH_LISTEN_ADDR",
-        default_value = "0.0.0.0:50051",
         value_name = "ADDR"
     )]
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
 
     /// Directory for storing RocksDB backup files.
-    ///
-    /// Created automatically if it does not exist. When not set, the
-    /// `CreateBackup`, `ListBackups`, and `PurgeOldBackups` RPCs return
-    /// `FAILED_PRECONDITION`. Restore is an offline operation — see
-    /// `docs/architecture.md` for the restore runbook.
     #[arg(
         long = "backup-dir",
         env = "POLARGRAPH_BACKUP_DIR",
@@ -88,44 +105,35 @@ struct Cli {
     backup_dir: Option<PathBuf>,
 
     /// Log level / filter directive (same syntax as `RUST_LOG`).
-    ///
-    /// Examples: `info`, `polargraph_server=debug`, `warn,polargraph_storage=trace`
     #[arg(
         long = "log-level",
         env = "RUST_LOG",
-        default_value = "info",
         value_name = "LEVEL"
     )]
-    log_level: String,
+    log_level: Option<String>,
 
-    /// Log output format.
-    ///
-    /// `pretty` — human-readable output (default for development).
-    /// `json`   — newline-delimited JSON (recommended for production/containers).
+    /// Log output format (`pretty` or `json`).
     #[arg(
         long = "log-format",
         env = "LOG_FORMAT",
-        default_value = "pretty",
         value_name = "FORMAT"
     )]
-    log_format: String,
+    log_format: Option<String>,
 
     /// TCP port for the Prometheus `/metrics` HTTP endpoint.
     #[arg(
         long = "metrics-port",
         env = "POLARGRAPH_METRICS_PORT",
-        default_value_t = 9090u16,
         value_name = "PORT"
     )]
-    metrics_port: u16,
+    metrics_port: Option<u16>,
 
     /// Disable the Prometheus metrics endpoint entirely.
     #[arg(long = "no-metrics", default_value_t = false)]
     no_metrics: bool,
 
     /// Run retention on startup: delete triples whose transaction time is older
-    /// than this many seconds. Requires the store to be opened but runs before
-    /// accepting gRPC connections. Omit to skip startup retention.
+    /// than this many seconds.
     #[arg(
         long = "retention-tx-age-secs",
         env = "POLARGRAPH_RETENTION_TX_AGE_SECS",
@@ -133,8 +141,7 @@ struct Cli {
     )]
     retention_tx_age_secs: Option<u64>,
 
-    /// When used with --retention-tx-age-secs, also delete triples whose
-    /// vt_end is more than this many seconds in the past.
+    /// Companion to --retention-tx-age-secs; also deletes triples with old vt_end.
     #[arg(
         long = "retention-vt-lookback-secs",
         env = "POLARGRAPH_RETENTION_VT_LOOKBACK_SECS",
@@ -142,15 +149,23 @@ struct Cli {
     )]
     retention_vt_lookback_secs: Option<u64>,
 
-    /// Open this instance as a streaming WAL replica of the primary at this
-    /// gRPC address.
-    ///
-    /// The replica opens its own independent RocksDB at `--data-dir` and
-    /// connects to the primary over gRPC to receive write batches in real time.
-    /// All write RPCs on the replica return FAILED_PRECONDITION. The
-    /// replication stream reconnects automatically on disconnect.
-    ///
-    /// Example: `http://primary-host:50051`
+    /// Enable the scheduled (periodic) retention background task.
+    #[arg(
+        long = "retention-schedule",
+        env = "POLARGRAPH_RETENTION_SCHEDULE",
+        default_value_t = false
+    )]
+    retention_schedule: bool,
+
+    /// Interval in seconds between scheduled retention passes (default: 3600).
+    #[arg(
+        long = "retention-interval-secs",
+        env = "POLARGRAPH_RETENTION_INTERVAL_SECS",
+        value_name = "SECS"
+    )]
+    retention_interval_secs: Option<u64>,
+
+    /// Open as a WAL replica of the primary at this gRPC address.
     #[arg(
         long = "replica-of",
         env = "POLARGRAPH_REPLICA_OF",
@@ -159,9 +174,6 @@ struct Cli {
     replica_of: Option<String>,
 
     /// API key required on all gRPC and HTTP management requests.
-    ///
-    /// Repeat to allow multiple keys (enables zero-downtime rotation).
-    /// `POLARGRAPH_API_KEY` accepts a comma-separated list.
     #[arg(
         long = "api-key",
         env = "POLARGRAPH_API_KEY",
@@ -175,56 +187,101 @@ struct Cli {
     no_auth: bool,
 
     /// TCP port for the web management UI.
-    ///
-    /// The UI is served separately from the gRPC port and the Prometheus
-    /// metrics port. Disable with `--no-ui`.
     #[arg(
         long = "ui-port",
         env = "POLARGRAPH_UI_PORT",
-        default_value_t = 8080u16,
         value_name = "PORT"
     )]
-    ui_port: u16,
+    ui_port: Option<u16>,
 
     /// Disable the web management UI entirely.
     #[arg(long = "no-ui", default_value_t = false)]
     no_ui: bool,
 
-    /// Maximum time in milliseconds a single query may run.
-    ///
-    /// Applies to Query, VectorSeedQuery, and Reachable RPCs. When the limit is
-    /// exceeded the RPC returns DEADLINE_EXCEEDED. Set to 0 to disable the
-    /// timeout entirely.
+    /// Maximum time in milliseconds a single query may run (0 = disabled).
     #[arg(
         long = "query-timeout-ms",
         env = "POLARGRAPH_QUERY_TIMEOUT_MS",
-        default_value_t = 30_000u64,
         value_name = "MS"
     )]
-    query_timeout_ms: u64,
+    query_timeout_ms: Option<u64>,
 
-    /// Maximum time in milliseconds to wait for in-flight requests to complete
-    /// after a shutdown signal is received.  If the drain takes longer than
-    /// this the process force-exits with a non-zero status.
+    /// Maximum time in milliseconds to wait for in-flight requests after shutdown.
     #[arg(
         long = "shutdown-timeout-ms",
         env = "POLARGRAPH_SHUTDOWN_TIMEOUT_MS",
-        default_value_t = 10_000u64,
         value_name = "MS"
     )]
-    shutdown_timeout_ms: u64,
+    shutdown_timeout_ms: Option<u64>,
 
-    /// Emit a warning when any query RPC (Query, VectorSeedQuery, Reachable)
-    /// takes longer than this many milliseconds.  Also increments the
-    /// `polargraph_slow_queries_total{method}` Prometheus counter.
-    /// Set to 0 to disable slow-query logging entirely.
+    /// Emit a warning when any query RPC takes longer than this many ms (0 = disabled).
     #[arg(
         long = "slow-query-ms",
         env = "POLARGRAPH_SLOW_QUERY_MS",
-        default_value_t = 1_000u64,
         value_name = "MS"
     )]
-    slow_query_ms: u64,
+    slow_query_ms: Option<u64>,
+
+    /// Maximum requests per second allowed per client IP (0 = disabled).
+    #[arg(
+        long = "rate-limit-rps",
+        env = "POLARGRAPH_RATE_LIMIT_RPS",
+        value_name = "N"
+    )]
+    rate_limit_rps: Option<u32>,
+
+    /// Path to PEM certificate file. When combined with --tls-key, enables TLS
+    /// on the gRPC server, management UI, and metrics endpoint.
+    #[arg(
+        long = "tls-cert",
+        env = "POLARGRAPH_TLS_CERT",
+        value_name = "PATH"
+    )]
+    tls_cert: Option<PathBuf>,
+
+    /// Path to PEM private key file. Must be supplied together with --tls-cert.
+    #[arg(
+        long = "tls-key",
+        env = "POLARGRAPH_TLS_KEY",
+        value_name = "PATH"
+    )]
+    tls_key: Option<PathBuf>,
+
+    /// CA certificate (PEM) used to verify the primary's TLS certificate when
+    /// running in replica mode. If not set, the replica connects without TLS.
+    #[arg(
+        long = "replica-tls-ca",
+        env = "POLARGRAPH_REPLICA_TLS_CA",
+        value_name = "PATH"
+    )]
+    replica_tls_ca: Option<PathBuf>,
+}
+
+// ── Merge helpers ─────────────────────────────────────────────────────────────
+
+/// Resolve a setting using the priority chain: CLI > env (already baked into
+/// `cli_val` by clap) > config file > built-in default.
+#[inline]
+fn resolve<T>(cli_val: Option<T>, config_val: Option<T>, default: T) -> T {
+    cli_val.or(config_val).unwrap_or(default)
+}
+
+/// Merge two optional `PathBuf`s, converting the config string to a path.
+#[inline]
+fn resolve_path(
+    cli_val: Option<PathBuf>,
+    config_val: Option<String>,
+    default: &str,
+) -> PathBuf {
+    cli_val
+        .or_else(|| config_val.map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(default))
+}
+
+/// Merge an optional `PathBuf` with no built-in default.
+#[inline]
+fn resolve_path_opt(cli_val: Option<PathBuf>, config_val: Option<String>) -> Option<PathBuf> {
+    cli_val.or_else(|| config_val.map(PathBuf::from))
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -233,26 +290,65 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // ── Tracing ───────────────────────────────────────────────────────────────
-    let filter = EnvFilter::try_new(&cli.log_level)
-        .with_context(|| format!("invalid log filter: {:?}", cli.log_level))?;
+    // ── Config file ───────────────────────────────────────────────────────────
+    let cfg: Config = config::load_config(cli.config.as_deref())
+        .context("failed to load configuration file")?;
 
-    match cli.log_format.as_str() {
+    // ── Merge: CLI/env > config file > built-in defaults ─────────────────────
+    let data_dir = resolve_path(cli.data_dir, cfg.server.data_dir, "/data");
+    let listen_addr: SocketAddr = cli.listen_addr.unwrap_or_else(|| {
+        cfg.server
+            .grpc_port
+            .map(|p| SocketAddr::from(([0, 0, 0, 0], p)))
+            .unwrap_or_else(|| "0.0.0.0:50051".parse().unwrap())
+    });
+    let backup_dir = resolve_path_opt(cli.backup_dir, cfg.storage.backup_dir);
+    let log_level = resolve(cli.log_level, cfg.observability.log_level, "info".to_string());
+    let log_format = resolve(cli.log_format, cfg.observability.log_format, "pretty".to_string());
+    let metrics_port = resolve(cli.metrics_port, cfg.server.metrics_port, 9090u16);
+    let no_metrics = cli.no_metrics || cfg.observability.no_metrics.unwrap_or(false);
+    let retention_tx_age_secs = cli.retention_tx_age_secs.or(cfg.storage.retention_tx_age_secs);
+    let retention_vt_lookback_secs = cli
+        .retention_vt_lookback_secs
+        .or(cfg.storage.retention_vt_lookback_secs);
+    let retention_schedule_enabled = cli.retention_schedule
+        || cfg.storage.retention_schedule.enabled.unwrap_or(false);
+    let retention_interval_secs = cli
+        .retention_interval_secs
+        .or(cfg.storage.retention_schedule.interval_secs)
+        .unwrap_or(3600);
+    let replica_of = cli.replica_of.or(cfg.replication.replica_of);
+    let api_keys: Vec<String> = if !cli.api_keys.is_empty() {
+        cli.api_keys
+    } else {
+        cfg.auth.api_keys.unwrap_or_default()
+    };
+    let no_auth = cli.no_auth || cfg.auth.no_auth.unwrap_or(false);
+    let ui_port = resolve(cli.ui_port, cfg.server.ui_port, 8080u16);
+    let no_ui = cli.no_ui || cfg.observability.no_ui.unwrap_or(false);
+    let query_timeout_ms = resolve(cli.query_timeout_ms, cfg.query.timeout_ms, 30_000u64);
+    let shutdown_timeout_ms = resolve(cli.shutdown_timeout_ms, cfg.server.shutdown_timeout_ms, 10_000u64);
+    let slow_query_ms = resolve(cli.slow_query_ms, cfg.query.slow_query_ms, 1_000u64);
+    let tls_cert = resolve_path_opt(cli.tls_cert, cfg.tls.cert);
+    let tls_key = resolve_path_opt(cli.tls_key, cfg.tls.key);
+    let replica_tls_ca = resolve_path_opt(cli.replica_tls_ca, cfg.replication.tls_ca);
+    let rate_limit_rps = resolve(cli.rate_limit_rps, cfg.rate_limit.max_rps, 0u32);
+
+    // ── Tracing ───────────────────────────────────────────────────────────────
+    let filter = EnvFilter::try_new(&log_level)
+        .with_context(|| format!("invalid log filter: {:?}", log_level))?;
+
+    match log_format.as_str() {
         "json" => {
-            tracing_subscriber::fmt()
-                .json()
-                .with_env_filter(filter)
-                .init();
+            tracing_subscriber::fmt().json().with_env_filter(filter).init();
         }
         _ => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(filter).init();
         }
     }
 
     // ── Prometheus metrics ────────────────────────────────────────────────────
-    let metrics_handle = if !cli.no_metrics {
+    let metrics_handle = if !no_metrics {
         let handle = PrometheusBuilder::new()
             .install_recorder()
             .context("failed to install Prometheus metrics recorder")?;
@@ -261,30 +357,57 @@ async fn main() -> Result<()> {
         None
     };
 
-    if cli.api_keys.is_empty() && !cli.no_auth {
+    if api_keys.is_empty() && !no_auth {
         warn!("no API key configured — all requests are unauthenticated; use --api-key or POLARGRAPH_API_KEY to enable auth");
     }
 
+    // ── TLS setup ─────────────────────────────────────────────────────────────
+    let tls_pem: Option<(Vec<u8>, Vec<u8>)> = match (&tls_cert, &tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert = tokio::fs::read(cert_path)
+                .await
+                .with_context(|| format!("failed to read TLS cert: {}", cert_path.display()))?;
+            let key = tokio::fs::read(key_path)
+                .await
+                .with_context(|| format!("failed to read TLS key: {}", key_path.display()))?;
+            info!(cert = %cert_path.display(), "TLS enabled");
+            Some((cert, key))
+        }
+        (None, None) => None,
+        _ => anyhow::bail!("--tls-cert and --tls-key must be supplied together"),
+    };
+
+    // CA cert for replica→primary TLS.
+    let replica_tls_ca_bytes: Option<Vec<u8>> = if let Some(ca_path) = &replica_tls_ca {
+        let ca = tokio::fs::read(ca_path)
+            .await
+            .with_context(|| format!("failed to read replica TLS CA: {}", ca_path.display()))?;
+        Some(ca)
+    } else {
+        None
+    };
+
     info!(
-        data_dir   = %cli.data_dir.display(),
-        listen     = %cli.listen_addr,
-        backup_dir = ?cli.backup_dir,
-        replica_of = ?cli.replica_of,
-        replica_mode = cli.replica_of.is_some(),
-        metrics_enabled = !cli.no_metrics,
-        ui_enabled = !cli.no_ui,
-        ui_port = cli.ui_port,
-        auth_enabled = !cli.api_keys.is_empty(),
-        log_format = %cli.log_format,
-        shutdown_timeout_ms = cli.shutdown_timeout_ms,
+        data_dir   = %data_dir.display(),
+        listen     = %listen_addr,
+        backup_dir = ?backup_dir,
+        replica_of = ?replica_of,
+        replica_mode = replica_of.is_some(),
+        metrics_enabled = !no_metrics,
+        ui_enabled = !no_ui,
+        ui_port = ui_port,
+        auth_enabled = !api_keys.is_empty(),
+        tls_enabled = tls_pem.is_some(),
+        log_format = %log_format,
+        shutdown_timeout_ms = shutdown_timeout_ms,
+        rate_limit_rps = rate_limit_rps,
         "polargraphd starting"
     );
 
     // ── Shutdown coordination ─────────────────────────────────────────────────
     let token = CancellationToken::new();
-    let shutdown_timeout = Duration::from_millis(cli.shutdown_timeout_ms);
+    let shutdown_timeout = Duration::from_millis(shutdown_timeout_ms);
 
-    // Watchdog: if the drain takes longer than the timeout, force-exit.
     let watchdog_token = token.clone();
     tokio::spawn(async move {
         watchdog_token.cancelled().await;
@@ -296,9 +419,8 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     });
 
-    // OS signal handler: log and trip the token.
     let signal_token = token.clone();
-    let timeout_secs = cli.shutdown_timeout_ms / 1000;
+    let timeout_secs = shutdown_timeout_ms / 1000;
     tokio::spawn(async move {
         let signal_name = wait_for_signal().await;
         info!(signal = signal_name, "received shutdown signal");
@@ -307,33 +429,46 @@ async fn main() -> Result<()> {
     });
 
     // ── Storage ───────────────────────────────────────────────────────────────
-    std::fs::create_dir_all(&cli.data_dir)
-        .with_context(|| format!("failed to create data dir: {}", cli.data_dir.display()))?;
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("failed to create data dir: {}", data_dir.display()))?;
 
-    let (store, replica_address) = if let Some(primary_addr) = &cli.replica_of {
-        let store = TripleStore::open_as_replica(&cli.data_dir, primary_addr.clone())
+    let (store, replica_address) = if let Some(primary_addr) = &replica_of {
+        let store = TripleStore::open_as_replica(&data_dir, primary_addr.clone())
             .with_context(|| {
                 format!(
                     "failed to open replica TripleStore at {} (primary={})",
-                    cli.data_dir.display(),
+                    data_dir.display(),
                     primary_addr
                 )
             })?;
         info!(primary = %primary_addr, "TripleStore opened as WAL replica");
         (store, Some(primary_addr.clone()))
     } else {
-        let store = TripleStore::open(&cli.data_dir)
-            .with_context(|| format!("failed to open TripleStore at {}", cli.data_dir.display()))?;
+        let store = TripleStore::open(&data_dir)
+            .with_context(|| format!("failed to open TripleStore at {}", data_dir.display()))?;
         info!("TripleStore ready");
         (store, None)
     };
 
+    // ── Schema migrations (primary only) ─────────────────────────────────────
+    if replica_address.is_none() {
+        let runner = MigrationRunner::new(store.clone());
+        let stats = runner
+            .run_pending()
+            .context("schema migration failed")?;
+        if stats.applied.is_empty() {
+            info!("schema migrations: database is up to date");
+        } else {
+            info!(applied = ?stats.applied, "schema migrations applied");
+        }
+    }
+
     // ── Startup retention (primary only) ──────────────────────────────────────
     if replica_address.is_none() {
-        if let Some(tx_age_secs) = cli.retention_tx_age_secs {
+        if let Some(tx_age_secs) = retention_tx_age_secs {
             let policy = RetentionPolicy {
                 tx_age_secs,
-                vt_lookback_secs: cli.retention_vt_lookback_secs,
+                vt_lookback_secs: retention_vt_lookback_secs,
             };
             info!(
                 tx_age_secs,
@@ -353,10 +488,45 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ── Scheduled retention (primary only) ────────────────────────────────────
+    if replica_address.is_none() && retention_schedule_enabled {
+        if let Some(tx_age_secs) = retention_tx_age_secs {
+            let policy = RetentionPolicy {
+                tx_age_secs,
+                vt_lookback_secs: retention_vt_lookback_secs,
+            };
+            let interval = Duration::from_secs(retention_interval_secs);
+            let sched_store = store.clone();
+            let sched_token = token.clone();
+            info!(
+                interval_secs = retention_interval_secs,
+                "spawning scheduled retention task"
+            );
+            tokio::spawn(async move {
+                retention_scheduler::run_retention_scheduler(
+                    sched_store,
+                    policy,
+                    interval,
+                    sched_token,
+                )
+                .await;
+            });
+        } else {
+            warn!("--retention-schedule enabled but no --retention-tx-age-secs set; scheduler not started");
+        }
+    }
+
+    // ── gRPC health check ─────────────────────────────────────────────────────
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("polargraph.v1.PolarGraphService", ServingStatus::Serving)
+        .await;
+
     // ── Metrics HTTP server ───────────────────────────────────────────────────
     let metrics_join: Option<tokio::task::JoinHandle<()>> = if let Some(handle) = metrics_handle {
-        let metrics_addr = SocketAddr::from(([0, 0, 0, 0], cli.metrics_port));
+        let metrics_addr = SocketAddr::from(([0, 0, 0, 0], metrics_port));
         let metrics_token = token.clone();
+        let tls = tls_pem.clone();
         let jh = tokio::spawn(async move {
             let app = Router::new().route(
                 "/metrics",
@@ -365,68 +535,93 @@ async fn main() -> Result<()> {
                     async move { h.render() }
                 }),
             );
-            axum::Server::bind(&metrics_addr)
-                .serve(app.into_make_service())
-                .with_graceful_shutdown(async move { metrics_token.cancelled().await })
-                .await
-                .expect("metrics HTTP server error");
+            if let Some((cert, key)) = tls {
+                serve_axum_tls(app, metrics_addr, cert, key, metrics_token)
+                    .await
+                    .expect("metrics HTTPS server error");
+            } else {
+                axum::Server::bind(&metrics_addr)
+                    .serve(app.into_make_service())
+                    .with_graceful_shutdown(async move { metrics_token.cancelled().await })
+                    .await
+                    .expect("metrics HTTP server error");
+            }
         });
-        info!(port = cli.metrics_port, "Prometheus /metrics endpoint listening");
+        info!(port = metrics_port, "Prometheus /metrics endpoint listening");
         Some(jh)
     } else {
         None
     };
 
-    // ── gRPC server ───────────────────────────────────────────────────────────
-    let api_keys = Arc::new(cli.api_keys.clone());
-    let auth_layer = if cli.api_keys.is_empty() {
+    // ── gRPC server setup ─────────────────────────────────────────────────────
+    let api_keys_arc = Arc::new(api_keys.clone());
+    let auth_layer = if api_keys.is_empty() {
         ApiKeyLayer::disabled()
     } else {
-        ApiKeyLayer::new(cli.api_keys.clone())
+        ApiKeyLayer::new(api_keys.clone())
+    };
+    let rate_layer = if rate_limit_rps > 0 {
+        info!(max_rps = rate_limit_rps, "per-client rate limiting enabled");
+        RateLimitLayer::new(rate_limit_rps)
+    } else {
+        RateLimitLayer::disabled()
     };
 
-    let pg_server = if let Some(primary_addr) = &replica_address {
+    let (pg_server, replica_state_for_ui) = if let Some(primary_addr) = &replica_address {
         let (server, rs) = service::PolarGraphServer::new_replica(store.clone(), primary_addr)
             .context("failed to initialise replica PolarGraphServer")?;
 
-        // Background WAL replication task — cancelled by the shutdown token.
+        // Background WAL replication task.
         let repl_store = store.clone();
         let repl_state = Arc::clone(&rs);
         let wal_token = token.clone();
+        let wal_health = health_reporter.clone();
+        let wal_ca = replica_tls_ca_bytes.clone();
         tokio::spawn(async move {
-            wal_client::run_replication(repl_store, repl_state, wal_token).await;
+            wal_client::run_replication(repl_store, repl_state, wal_token, Some(wal_health), wal_ca).await;
         });
 
-        server
-            .with_query_timeout_ms(cli.query_timeout_ms)
-            .with_slow_query_ms(cli.slow_query_ms)
+        let server = server
+            .with_query_timeout_ms(query_timeout_ms)
+            .with_slow_query_ms(slow_query_ms);
+
+        (server, Some(rs))
     } else {
-        PolarGraphServer::new_with_backup_dir(store, cli.backup_dir.as_deref())
+        let server = PolarGraphServer::new_with_backup_dir(store, backup_dir.as_deref())
             .context("failed to initialise PolarGraphServer")?
-            .with_query_timeout_ms(cli.query_timeout_ms)
-            .with_slow_query_ms(cli.slow_query_ms)
+            .with_query_timeout_ms(query_timeout_ms)
+            .with_slow_query_ms(slow_query_ms);
+        (server, None)
     };
 
     // ── Management UI HTTP server ─────────────────────────────────────────────
-    let ui_join: Option<tokio::task::JoinHandle<()>> = if !cli.no_ui {
+    let ui_join: Option<tokio::task::JoinHandle<()>> = if !no_ui {
         let ui_state = Arc::new(ui_api::UiState {
             service: pg_server.clone(),
-            api_keys: Arc::clone(&api_keys),
+            api_keys: Arc::clone(&api_keys_arc),
             start_time: std::time::Instant::now(),
-            data_dir: cli.data_dir.display().to_string(),
-            grpc_addr: cli.listen_addr.to_string(),
+            data_dir: data_dir.display().to_string(),
+            grpc_addr: listen_addr.to_string(),
+            replica_state: replica_state_for_ui.clone(),
         });
-        let ui_addr = SocketAddr::from(([0, 0, 0, 0], cli.ui_port));
+        let ui_addr = SocketAddr::from(([0, 0, 0, 0], ui_port));
         let ui_token = token.clone();
+        let tls = tls_pem.clone();
         let jh = tokio::spawn(async move {
             let app = ui_api::build_ui_router(ui_state);
-            axum::Server::bind(&ui_addr)
-                .serve(app.into_make_service())
-                .with_graceful_shutdown(async move { ui_token.cancelled().await })
-                .await
-                .expect("UI HTTP server error");
+            if let Some((cert, key)) = tls {
+                serve_axum_tls(app, ui_addr, cert, key, ui_token)
+                    .await
+                    .expect("UI HTTPS server error");
+            } else {
+                axum::Server::bind(&ui_addr)
+                    .serve(app.into_make_service())
+                    .with_graceful_shutdown(async move { ui_token.cancelled().await })
+                    .await
+                    .expect("UI HTTP server error");
+            }
         });
-        info!(port = cli.ui_port, "management UI listening at http://0.0.0.0:{}", cli.ui_port);
+        info!(port = ui_port, "management UI listening at http://0.0.0.0:{}", ui_port);
         Some(jh)
     } else {
         None
@@ -434,28 +629,41 @@ async fn main() -> Result<()> {
 
     let svc = PolarGraphServiceServer::new(pg_server);
 
-    info!(addr = %cli.listen_addr, "listening");
-
-    // ── gRPC serve loop (blocks until shutdown token fires + in-flight RPCs drain) ──
+    // ── gRPC serve loop ───────────────────────────────────────────────────────
+    info!(addr = %listen_addr, "listening");
     let grpc_token = token.clone();
-    Server::builder()
+
+    let mut builder = Server::builder()
+        .layer(rate_layer)
         .layer(auth_layer)
-        .layer(telemetry::TelemetryLayer)
-        .add_service(svc)
-        .serve_with_shutdown(cli.listen_addr, async move { grpc_token.cancelled().await })
-        .await
-        .context("gRPC server error")?;
+        .layer(telemetry::TelemetryLayer);
+
+    if let Some((cert_pem, key_pem)) = &tls_pem {
+        let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
+        let tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);
+        builder
+            .tls_config(tls_config)
+            .context("invalid TLS configuration")?
+            .add_service(health_service)
+            .add_service(svc)
+            .serve_with_shutdown(listen_addr, async move { grpc_token.cancelled().await })
+            .await
+            .context("gRPC server error")?;
+    } else {
+        builder
+            .add_service(health_service)
+            .add_service(svc)
+            .serve_with_shutdown(listen_addr, async move { grpc_token.cancelled().await })
+            .await
+            .context("gRPC server error")?;
+    }
 
     info!("gRPC server stopped");
 
-    // ── Wait for WAL replication to stop ─────────────────────────────────────
-    // Token was already cancelled (that's what triggered the gRPC drain).
-    // Give the WAL task a moment to exit its current stream iteration.
     if replica_address.is_some() {
         info!("WAL replication stopped");
     }
 
-    // ── Wait for HTTP servers to stop ─────────────────────────────────────────
     let mut http_stopped = false;
     if let Some(jh) = metrics_join {
         let _ = tokio::time::timeout(Duration::from_millis(2_000), jh).await;
@@ -469,16 +677,70 @@ async fn main() -> Result<()> {
         info!("HTTP servers stopped");
     }
 
-    // ── RocksDB closes when `store` Arc drops at end of main ──────────────────
     info!("RocksDB closed");
     info!("shutdown complete");
 
     Ok(())
 }
 
+// ── HTTPS helper for axum ─────────────────────────────────────────────────────
+
+/// Serve an axum router over TLS using tokio-rustls.
+///
+/// Accepts connections on `addr`, wraps each TCP stream with TLS, and serves
+/// using hyper's low-level `accept::from_stream` bridge.  Shuts down cleanly
+/// when `token` is cancelled.
+async fn serve_axum_tls(
+    app: Router,
+    addr: SocketAddr,
+    cert_pem: Vec<u8>,
+    key_pem: Vec<u8>,
+    token: CancellationToken,
+) -> anyhow::Result<()> {
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::TlsAcceptor;
+
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &*cert_pem)
+        .map(|r| r.map(|c| c.into_owned()))
+        .collect::<std::result::Result<_, _>>()
+        .context("failed to parse TLS certificate")?;
+
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut &*key_pem)
+        .context("failed to read TLS private key")?
+        .ok_or_else(|| anyhow::anyhow!("no private key found in PEM file"))?
+        .clone_key();
+
+    let tls_config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("failed to build TLS server config")?;
+
+    let acceptor = TlsAcceptor::from(Arc::new(tls_config));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind HTTPS on {addr}"))?;
+
+    let tls_stream = TcpListenerStream::new(listener).then(move |res| {
+        let acceptor = acceptor.clone();
+        async move {
+            let tcp = res.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            acceptor
+                .accept(tcp)
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        }
+    });
+
+    axum::Server::builder(accept::from_stream(tls_stream))
+        .serve(app.into_make_service())
+        .with_graceful_shutdown(async move { token.cancelled().await })
+        .await
+        .context("HTTPS server error")
+}
+
 // ── Signal handling ───────────────────────────────────────────────────────────
 
-/// Waits for SIGTERM or SIGINT and returns a short name for the signal.
 async fn wait_for_signal() -> &'static str {
     let ctrl_c = async {
         tokio::signal::ctrl_c()

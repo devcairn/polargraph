@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: polargraph-config
+  namespace: polargraph
+data:
+  LOG_FORMAT: "json"
+  RUST_LOG: "info"
+  POLARGRAPH_METRICS_PORT: "9090"
+  POLARGRAPH_GRPC_PORT: "50051"
+  POLARGRAPH_UI_PORT: "8080"

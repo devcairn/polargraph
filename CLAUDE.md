@@ -35,12 +35,14 @@ polargraph/
     ├── polargraph-query/       # query planner + projection (stubs)
     ├── polargraph-server/      # gRPC binary (skeleton)
     ├── polargraph-bench/       # end-to-end benchmark scenarios (binary)
-    └── polargraph-import/      # bulk N-Triples importer via SST ingestion (binary)
+    ├── polargraph-import/      # bulk N-Triples importer via SST ingestion (binary)
+    └── polargraph-rest/        # HTTP/JSON REST gateway — proxies to polargraphd over gRPC (binary)
 ```
 
 Dependency order (no cycles): `core` ← `storage` ← `query` ← `server` ← `bench`
                                                     ↑
                                            `polargraph-import` also depends only on `core` + `storage`
+                                           `polargraph-rest` depends only on the proto file (tonic client, no storage deps)
 
 ---
 
@@ -67,6 +69,9 @@ cargo build -p polargraph-bench
 
 # Build the bulk import binary (run while polargraphd is stopped)
 cargo build -p polargraph-import
+
+# Build the REST gateway binary
+cargo build -p polargraph-rest
 
 # Check without linking
 cargo check
@@ -142,14 +147,22 @@ query layers over gRPC.
 | `service` | `PolarGraphServer` — implements all RPCs; carries `NodeTypeRegistry` and `EdgeTypeRegistry` |
 | `convert` | Conversions between proto wire types and Rust domain types |
 | `auth` | `ApiKeyLayer` / `ApiKeyService` — tower middleware for gRPC auth; `check_bearer_auth` shared with UI |
+| `config` | `Config` structs + `load_config` — TOML config file parsing and auto-detection |
 | `telemetry` | `TelemetryLayer` — per-RPC structured logging and Prometheus counters |
 | `ui_api` | `UiState`, `build_ui_router` — axum REST handlers + embedded SPA for the management UI |
 | `wal_client` | `run_replication` — WAL streaming client (replica mode) |
 
-Configuration via CLI flags or environment variables (flags take priority):
+Configuration priority: **CLI flag > environment variable > config file > built-in default**
+
+Config file locations (searched in order when `--config` is not provided):
+1. `./polargraph.toml`
+2. `~/.config/polargraph/config.toml`
+
+See `polargraph.example.toml` in the repo root for a fully-commented example.
 
 | Flag | Env variable | Default | Description |
 |---|---|---|---|
+| `--config PATH` | `POLARGRAPH_CONFIG` | *(auto-detect)* | TOML config file path |
 | `--data-dir PATH` | `POLARGRAPH_DATA_DIR` | `/data` | RocksDB data directory |
 | `--listen ADDR` | `POLARGRAPH_LISTEN_ADDR` | `0.0.0.0:50051` | gRPC listen address |
 | `--log-level FILTER` | `RUST_LOG` | `info` | Log level / filter directive |
@@ -164,6 +177,10 @@ Configuration via CLI flags or environment variables (flags take priority):
 | `--query-timeout-ms MS` | `POLARGRAPH_QUERY_TIMEOUT_MS` | `30000` | Max query execution time (ms); 0 = unlimited |
 | `--shutdown-timeout-ms MS` | `POLARGRAPH_SHUTDOWN_TIMEOUT_MS` | `10000` | Max ms to drain in-flight requests before force-exit |
 | `--slow-query-ms MS` | `POLARGRAPH_SLOW_QUERY_MS` | `1000` | Log warn + increment counter when query exceeds this (ms); 0 = disabled |
+| `--tls-cert PATH` | `POLARGRAPH_TLS_CERT` | *(none)* | PEM certificate — enables TLS on gRPC + HTTP when combined with `--tls-key` |
+| `--tls-key PATH` | `POLARGRAPH_TLS_KEY` | *(none)* | PEM private key — must be supplied with `--tls-cert` |
+| `--replica-tls-ca PATH` | `POLARGRAPH_REPLICA_TLS_CA` | *(none)* | CA cert for verifying the primary's TLS certificate (replica mode only) |
+| `--rate-limit-rps N` | `POLARGRAPH_RATE_LIMIT_RPS` | `0` | Max requests/sec per client IP (token bucket); 0 = disabled |
 
 ### `polargraph-import`
 
@@ -179,6 +196,23 @@ into RocksDB via SST file ingestion — no server required.
 
 **Must be run while `polargraphd` is stopped** — SST ingestion requires
 exclusive DB access.
+
+### `polargraph-rest`
+
+Binary crate (`polargraph-rest`). HTTP/JSON REST gateway that proxies requests
+to a running `polargraphd` over gRPC. No RocksDB dependency — compiles only
+the generated proto client code via `tonic`.
+
+| Flag | Env variable | Default | Description |
+|---|---|---|---|
+| `--upstream URL` | `POLARGRAPH_UPSTREAM` | `http://localhost:50051` | gRPC server address |
+| `--listen ADDR` | `POLARGRAPH_REST_LISTEN` | `0.0.0.0:8000` | HTTP listen address |
+| `--api-key KEY` | `POLARGRAPH_REST_API_KEY` | *(none)* | Forwarded as `Authorization: Bearer` to upstream |
+| `--tls-ca PATH` | `POLARGRAPH_REST_TLS_CA` | *(none)* | PEM CA cert for upstream TLS verification |
+
+Endpoints: `POST /query`, `POST /insert`, `GET /triples`, `POST /vector/search`,
+`GET /health`, `POST /explain`. See `docs/architecture.md` (REST gateway section)
+for full documentation including the pattern string format.
 
 ---
 
@@ -302,6 +336,12 @@ sort order and is cluster-safe without a central sequence generator.
 - [x] Query timeouts — `QueryError` enum (`Timeout` + `Storage`) in `polargraph-query::datalog`; `deadline: Option<Instant>` propagated through `execute_query`, `execute_query_seeded`, `execute_recursive`, `execute_query_hybrid`, `reachable_from`, `reachable_from_hops`; checked at each iteration boundary; `query_timeout_ms: u64` field on `PolarGraphServer` (default 30 000); `with_query_timeout_ms()` builder method; `--query-timeout-ms MS` CLI flag + `POLARGRAPH_QUERY_TIMEOUT_MS` env var; 0 = disabled; maps `QueryError::Timeout` → `Status::deadline_exceeded`; applied to `Query`, `VectorSeedQuery`, `Reachable`, `SearchVectorFiltered(ReachabilityFilter)` RPCs; 3 unit tests in `polargraph-query::datalog::tests` + 3 gRPC integration tests; "Query timeouts" section in `docs/architecture.md`
 - [x] Slow query logging — `slow_query_ms: u64` on `PolarGraphServer` (default 1 000); `with_slow_query_ms()` builder; `check_slow_query()` helper emits `warn!` with structured fields (method, duration_ms, threshold_ms, extra); increments `polargraph_slow_queries_total{method}` Prometheus counter; applied to `Query`, `VectorSeedQuery`, `Reachable` RPCs; `--slow-query-ms MS` CLI flag + `POLARGRAPH_SLOW_QUERY_MS` env var; 0 = disabled; documented in `docs/architecture.md`
 - [x] ExplainQuery RPC — `ExplainResponse` + `PlanNode` proto messages; `ExplainQuery(QueryRequest) returns (ExplainResponse)` RPC (pure static analysis, no DB access); `polargraph_query::explain` module with `explain_query(query, rules) -> ExplainPlan`; symbolic binding-state tracking across patterns; index selection via same `choose_index` as evaluator; recursive rule detection; multi-line `plan_text` output; 4 unit tests in `polargraph-query::explain::tests`; "Query planner (EXPLAIN)" section in `docs/architecture.md`
+- [x] TLS — `--tls-cert` + `--tls-key` CLI flags (`POLARGRAPH_TLS_CERT` / `POLARGRAPH_TLS_KEY`) enable TLS on gRPC (via tonic `ServerTlsConfig`), management UI, and Prometheus metrics HTTP servers (via `tokio-rustls` + hyper `accept::from_stream`); `--replica-tls-ca PATH` (`POLARGRAPH_REPLICA_TLS_CA`) enables TLS on the WAL replication channel (tonic `ClientTlsConfig`); omitting both cert+key keeps plaintext mode unchanged; "TLS" section in `docs/architecture.md`
+- [x] gRPC health checks — `tonic-health 0.11` `HealthServer` added to the gRPC server; service status set to `Serving` at startup; WAL client toggles between `NotServing` (reconnecting) and `Serving` (stream active); `ReplicaState.connected: AtomicBool` tracks WAL connectivity; HTTP `GET /health` on the management UI server returns `{"status":"ok","mode":"primary"|"replica","triples":<n>}` (200) or `{"status":"degraded"}` (503) when replica is disconnected; 2 integration tests; "Health checks" section in `docs/architecture.md`
+- [x] TOML config file — `polargraph-server::config` module (`Config`, `ServerConfig`, `StorageConfig`, `ReplicationConfig`, `TlsConfig`, `AuthConfig`, `ObservabilityConfig`, `QueryConfig`); `load_config(Option<&Path>)` searches `./polargraph.toml` then `~/.config/polargraph/config.toml` if no explicit path given; `--config PATH` CLI flag + `POLARGRAPH_CONFIG` env var; priority chain CLI > env > config > default applied in `main.rs` via `resolve`/`resolve_path`/`resolve_path_opt` helpers; `polargraph.example.toml` fully-commented example at repo root; 5 unit tests; "Configuration file" section in `docs/architecture.md`
+- [x] Per-client rate limiting — `RateLimitLayer` + `RateLimitService` tower middleware in `polargraph-server::rate_limit`; `DashMap<IpAddr, TokenBucket>` for per-IP state (lock-free sharded map); token-bucket refill based on elapsed time; client IP resolved from `x-forwarded-for` header then `TcpConnectInfo` tonic extension; lazy stale-entry cleanup every 1 000 requests (entries idle >60 s removed); `RateLimitLayer::disabled()` / `is_enabled()`; `ReplicaStatus` exempt; `RESOURCE_EXHAUSTED` on quota exhaustion; `RateLimitConfig` section in `config.rs`; `--rate-limit-rps N` CLI flag + `POLARGRAPH_RATE_LIMIT_RPS` env var; layer applied before auth in gRPC `Server::builder()` chain; 4 unit tests + 2 gRPC integration tests; "Rate limiting" section in `docs/architecture.md`
+- [x] REST gateway — `polargraph-rest` binary crate (`crates/polargraph-rest`); axum 0.6 HTTP server proxies to polargraphd via tonic 0.11 gRPC client; `AuthInterceptor` tower layer forwards API key; `POST /query`, `POST /insert`, `GET /triples`, `POST /vector/search`, `GET /health`, `POST /explain` endpoints; pattern string parser (`?var :pred ?obj` format, UUID bound terms, `_` wildcard); gRPC status → HTTP status mapping (`NOT_FOUND`→404, `UNAUTHENTICATED`→401, `PERMISSION_DENIED`→403, `RESOURCE_EXHAUSTED`→429, `DEADLINE_EXCEEDED`→408, `INVALID_ARGUMENT`→400); TLS CA cert support via `--tls-ca`; lazy channel connect; 7 unit tests; "REST gateway" section in `docs/architecture.md`
+- [x] Schema migrations — `MigrationRunner` + `Migration` + `AppliedMigration` + `MigrationStats` in `polargraph-storage::migrations`; version stored in META CF under `__migrations__/version` (little-endian u32); applied records under `__migrations__/applied/<version>` as JSON; `MIGRATIONS` static list with 2 built-in versions (v1: baseline marker, v2: normalize node type schema records); auto-migration at server startup before gRPC accepts connections, skipped in replica mode; `MigrateSchema(MigrateRequest)` RPC (dry_run support, replica guard), `MigrationStatus` RPC; `rollback(to_version)` for reversals; 3 storage unit tests + 4 gRPC integration tests; "Schema migrations" section in `docs/architecture.md`
 
 ---
 

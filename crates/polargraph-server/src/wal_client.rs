@@ -1,34 +1,42 @@
 //! Replica-side WAL replication client.
 //!
-//! `WalReplicationClient` connects to the primary's gRPC endpoint, calls
-//! `StreamWal`, and applies each incoming write batch to the replica's local
-//! RocksDB via `TripleStore::apply_replicated_batch`. The `last_applied_seq`
-//! is persisted to the META CF so the stream can resume after a restart.
+//! Connects to the primary's gRPC endpoint, calls `StreamWal`, and applies
+//! each incoming write batch via `TripleStore::apply_replicated_batch`.
+//! The `last_applied_seq` is persisted to the META CF so the stream can
+//! resume after a restart.
 //!
-//! On any connection error the client reconnects with exponential backoff
-//! (starting at 1 s, capped at 30 s).  The loop exits cleanly when the
-//! supplied `CancellationToken` is cancelled.
+//! Reconnects with exponential backoff (1 s → 30 s) on any error.
+//! Exits cleanly when the supplied `CancellationToken` is cancelled.
 
 use crate::{
     proto::{polar_graph_service_client::PolarGraphServiceClient, StreamWalRequest},
     service::ReplicaState,
 };
 use polargraph_storage::TripleStore;
-use std::{sync::Arc, time::Duration};
+use std::{sync::{atomic::Ordering, Arc}, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
+use tonic_health::{server::HealthReporter, ServingStatus};
 use tracing::{info, warn};
 
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+const HEALTH_SVC: &str = "polargraph.v1.PolarGraphService";
 
 /// Runs the WAL replication loop for a replica.
 ///
-/// Returns when the `token` is cancelled.  Call from `tokio::spawn`.
+/// - `health` — optional health reporter; toggles the gRPC health status
+///   between `NotServing` (reconnecting) and `Serving` (stream active).
+/// - `tls_ca_pem` — when `Some`, the bytes are used as the PEM CA certificate
+///   for verifying the primary's TLS certificate. When `None`, no TLS.
+///
+/// Returns when `token` is cancelled.  Call from `tokio::spawn`.
 pub async fn run_replication(
     store: TripleStore,
     state: Arc<ReplicaState>,
     token: CancellationToken,
+    mut health: Option<HealthReporter>,
+    tls_ca_pem: Option<Vec<u8>>,
 ) {
     let primary_address = match store.primary_address() {
         Some(addr) => addr.to_owned(),
@@ -45,14 +53,19 @@ pub async fn run_replication(
             return;
         }
 
+        // Mark disconnected while attempting to (re)connect.
+        state.connected.store(false, Ordering::Relaxed);
+        if let Some(ref mut h) = health {
+            h.set_service_status(HEALTH_SVC, ServingStatus::NotServing).await;
+        }
+
         info!(primary = %primary_address, "WAL replication: connecting to primary");
 
-        match connect_and_stream(&store, &primary_address, &state, &token).await {
+        match connect_and_stream(&store, &primary_address, &state, &token, &tls_ca_pem, &mut health).await {
             Ok(()) => {
                 if token.is_cancelled() {
                     return;
                 }
-                // Stream ended cleanly (primary shutdown?). Reconnect after backoff.
                 warn!("WAL stream ended cleanly; will reconnect");
             }
             Err(e) => {
@@ -63,12 +76,13 @@ pub async fn run_replication(
             }
         }
 
+        state.connected.store(false, Ordering::Relaxed);
+
         tokio::select! {
             _ = tokio::time::sleep(backoff) => {}
             _ = token.cancelled() => { return; }
         }
 
-        // Exponential backoff, capped at BACKOFF_MAX.
         backoff = (backoff * 2).min(BACKOFF_MAX);
     }
 }
@@ -78,10 +92,18 @@ async fn connect_and_stream(
     primary_address: &str,
     state: &ReplicaState,
     token: &CancellationToken,
+    tls_ca_pem: &Option<Vec<u8>>,
+    health: &mut Option<HealthReporter>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let channel = Channel::from_shared(primary_address.to_owned())?
-        .connect()
-        .await?;
+    let endpoint = Channel::from_shared(primary_address.to_owned())?;
+
+    let channel = if let Some(ca_pem) = tls_ca_pem {
+        let ca_cert = tonic::transport::Certificate::from_pem(ca_pem);
+        let tls = tonic::transport::ClientTlsConfig::new().ca_certificate(ca_cert);
+        endpoint.tls_config(tls)?.connect().await?
+    } else {
+        endpoint.connect().await?
+    };
 
     let mut client = PolarGraphServiceClient::new(channel);
 
@@ -93,8 +115,14 @@ async fn connect_and_stream(
         .await?
         .into_inner();
 
-    // Reset backoff on successful connection.
+    // Stream established — mark connected and report Serving.
+    state.connected.store(true, Ordering::Relaxed);
+    if let Some(ref mut h) = health {
+        h.set_service_status(HEALTH_SVC, ServingStatus::Serving).await;
+    }
     info!("WAL replication: stream established");
+
+    // Reset backoff happens implicitly because next connect attempt starts fresh.
 
     loop {
         let maybe_entry = tokio::select! {

@@ -1,0 +1,153 @@
+# PolarGraph DB Engine — example configuration file
+#
+# Copy this file to polargraph.toml (or ~/.config/polargraph/config.toml) and
+# uncomment the settings you want to change.
+#
+# Priority order (highest wins):
+#   CLI flag  >  environment variable  >  config file  >  built-in default
+#
+# All paths may be absolute or relative to the working directory.
+
+# ── Server ────────────────────────────────────────────────────────────────────
+
+[server]
+
+# Directory where RocksDB stores its data files.
+# Equivalent to --data-dir / POLARGRAPH_DATA_DIR
+# data_dir = "/data"
+
+# Port the gRPC server listens on (always binds 0.0.0.0).
+# To bind a specific interface, use --listen on the CLI instead.
+# Equivalent to the port portion of --listen / POLARGRAPH_LISTEN_ADDR
+# grpc_port = 50051
+
+# TCP port for the web management UI.
+# Equivalent to --ui-port / POLARGRAPH_UI_PORT
+# ui_port = 8080
+
+# TCP port for the Prometheus /metrics HTTP endpoint.
+# Equivalent to --metrics-port / POLARGRAPH_METRICS_PORT
+# metrics_port = 9090
+
+# Milliseconds to wait for in-flight RPCs to drain before forcing exit.
+# Equivalent to --shutdown-timeout-ms / POLARGRAPH_SHUTDOWN_TIMEOUT_MS
+# shutdown_timeout_ms = 10000
+
+# ── Storage ───────────────────────────────────────────────────────────────────
+
+[storage]
+
+# Directory for incremental RocksDB backups.  Leave unset to disable backups.
+# Equivalent to --backup-dir / POLARGRAPH_BACKUP_DIR
+# backup_dir = "/var/lib/polargraph/backups"
+
+# Delete triples whose transaction time is older than this many seconds
+# (run once at startup).  Leave unset to skip startup retention.
+# Equivalent to --retention-tx-age-secs / POLARGRAPH_RETENTION_TX_AGE_SECS
+# retention_tx_age_secs = 2592000   # 30 days
+
+# Companion window: also expire triples whose valid-time end is this many
+# seconds in the past.  Only meaningful when retention_tx_age_secs is set.
+# Equivalent to --retention-vt-lookback-secs / POLARGRAPH_RETENTION_VT_LOOKBACK_SECS
+# retention_vt_lookback_secs = 604800   # 7 days
+
+# Scheduled (periodic) retention — fires a full retention pass in the background
+# at the configured interval.  Requires retention_tx_age_secs to be set.
+[storage.retention_schedule]
+# Enable the background task.
+# Equivalent to --retention-schedule / POLARGRAPH_RETENTION_SCHEDULE
+# enabled = false
+
+# How often to run the pass.  Defaults to 3600 (1 hour).
+# Equivalent to --retention-interval-secs / POLARGRAPH_RETENTION_INTERVAL_SECS
+# interval_secs = 3600
+
+# ── Replication ───────────────────────────────────────────────────────────────
+
+[replication]
+
+# gRPC address of the primary to replicate from.  Setting this enables
+# replica mode; all write RPCs will be rejected on the replica.
+# Equivalent to --replica-of / POLARGRAPH_REPLICA_OF
+# replica_of = "http://primary.example.com:50051"
+
+# Path to a PEM CA certificate used to verify the primary's TLS certificate.
+# Required when the primary serves TLS and the CA is not in the system pool.
+# Equivalent to --replica-tls-ca / POLARGRAPH_REPLICA_TLS_CA
+# tls_ca = "/etc/polargraph/ca.crt"
+
+# ── TLS ───────────────────────────────────────────────────────────────────────
+
+[tls]
+
+# Path to a PEM certificate file.  Enables TLS on gRPC, the management UI,
+# and the Prometheus endpoint when combined with `key`.
+# Equivalent to --tls-cert / POLARGRAPH_TLS_CERT
+# cert = "/etc/polargraph/server.crt"
+
+# Path to a PEM private key file.  Must be supplied together with `cert`.
+# Equivalent to --tls-key / POLARGRAPH_TLS_KEY
+# key = "/etc/polargraph/server.key"
+
+# ── Authentication ────────────────────────────────────────────────────────────
+
+[auth]
+
+# One or more API keys accepted on all gRPC and HTTP management requests.
+# Clients must send `Authorization: Bearer <key>` or `ApiKey <key>`.
+# Equivalent to --api-key (repeatable) / POLARGRAPH_API_KEY (comma-separated)
+# api_keys = ["change-me-key-1", "change-me-key-2"]
+
+# Set to true to suppress the "no API key configured" startup warning when
+# you intentionally run without authentication (e.g. in a private network).
+# Equivalent to --no-auth
+# no_auth = false
+
+# ── Observability ─────────────────────────────────────────────────────────────
+
+[observability]
+
+# Log level / filter directive.  Supports the same syntax as RUST_LOG:
+# a level name ("info", "debug", "warn", "error") or a directive like
+# "polargraph_server=debug,info".
+# Equivalent to --log-level / RUST_LOG
+# log_level = "info"
+
+# Log output format.  "pretty" is human-readable; "json" emits
+# newline-delimited JSON suitable for structured log ingestion.
+# Equivalent to --log-format / LOG_FORMAT
+# log_format = "pretty"
+
+# Set to true to disable the Prometheus /metrics HTTP endpoint entirely.
+# Equivalent to --no-metrics
+# no_metrics = false
+
+# Set to true to disable the web management UI entirely.
+# Equivalent to --no-ui
+# no_ui = false
+
+# ── Query ─────────────────────────────────────────────────────────────────────
+
+[query]
+
+# Maximum time in milliseconds a single query RPC may run.
+# Set to 0 to disable the timeout.
+# Equivalent to --query-timeout-ms / POLARGRAPH_QUERY_TIMEOUT_MS
+# timeout_ms = 30000
+
+# Emit a WARN log and increment polargraph_slow_queries_total when any query
+# RPC exceeds this many milliseconds.  Set to 0 to disable.
+# Equivalent to --slow-query-ms / POLARGRAPH_SLOW_QUERY_MS
+# slow_query_ms = 1000
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+
+[rate_limit]
+
+# Maximum gRPC requests per second allowed per client IP address.
+# Uses a token-bucket algorithm; each IP gets an independent bucket.
+# Client IP is resolved from the x-forwarded-for header (behind a proxy) or
+# the TCP peer address (direct connection).
+# Set to 0 to disable rate limiting entirely.
+# Equivalent to --rate-limit-rps / POLARGRAPH_RATE_LIMIT_RPS
+# max_rps = 0

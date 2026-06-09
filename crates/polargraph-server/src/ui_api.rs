@@ -14,7 +14,7 @@ use axum::{
 };
 use polargraph_core::{id::NodeId, triple::Triple, value::Value};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{sync::{atomic::Ordering, Arc}, time::Instant};
 use tonic::Request;
 use uuid::Uuid;
 
@@ -37,9 +37,11 @@ static UI_HTML: &str = include_str!("ui.html");
 pub struct UiState {
     pub service: PolarGraphServer,
     pub api_keys: Arc<Vec<String>>,
-    pub start_time: std::time::Instant,
+    pub start_time: Instant,
     pub data_dir: String,
     pub grpc_addr: String,
+    /// Set only on replicas — exposes WAL connectivity for the `/health` endpoint.
+    pub replica_state: Option<Arc<crate::service::ReplicaState>>,
 }
 
 // ── Router ────────────────────────────────────────────────────────────────────
@@ -47,6 +49,7 @@ pub struct UiState {
 pub fn build_ui_router(state: Arc<UiState>) -> Router {
     Router::new()
         .route("/", get(serve_ui))
+        .route("/health", get(health_check))
         .route("/api/status", get(api_status))
         .route("/api/node-types", get(api_node_types))
         .route("/api/edge-types", get(api_edge_types))
@@ -78,6 +81,43 @@ fn require_auth(headers: &HeaderMap, keys: &[String]) -> Option<Response> {
 /// Serve the management SPA (no auth required so the UI can load and prompt).
 async fn serve_ui() -> Html<&'static str> {
     Html(UI_HTML)
+}
+
+// ── GET /health ───────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    mode: &'static str,
+    triples: u64,
+}
+
+#[derive(Serialize)]
+struct DegradedResponse {
+    status: &'static str,
+}
+
+async fn health_check(State(state): State<Arc<UiState>>) -> Response {
+    let is_replica = state.service.store().is_replica();
+
+    // A replica is degraded when its WAL connection to the primary is down.
+    if is_replica {
+        let connected = state
+            .replica_state
+            .as_ref()
+            .map(|rs| rs.connected.load(Ordering::Relaxed))
+            .unwrap_or(false);
+
+        if !connected {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(DegradedResponse { status: "degraded" }))
+                .into_response();
+        }
+    }
+
+    let triples = state.service.store().estimate_triple_count();
+    let mode = if is_replica { "replica" } else { "primary" };
+
+    (StatusCode::OK, Json(HealthResponse { status: "ok", mode, triples })).into_response()
 }
 
 // ── /api/status ───────────────────────────────────────────────────────────────

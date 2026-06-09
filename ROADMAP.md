@@ -20,6 +20,8 @@ The core engine is working end-to-end. Here's what's fully operational:
 
 **Backup** (`polargraph-storage::backup`): `BackupManager` wraps RocksDB's `BackupEngine` for incremental point-in-time backups. Enabled with `--backup-dir PATH`. Unchanged SST files are hard-linked between backups (space-efficient). Restore is an offline operation documented in `docs/architecture.md`.
 
+**REST gateway** (`polargraph-rest`): A standalone `polargraph-rest` binary exposes HTTP/JSON endpoints (`POST /query`, `POST /insert`, `GET /triples`, `POST /vector/search`, `GET /health`, `POST /explain`) that proxy to a running `polargraphd` gRPC server. Useful for clients that cannot use a gRPC stub. Patterns use a `?var :pred ?obj` string format. Auth key forwarding, TLS CA support, and gRPC→HTTP status mapping are all wired up.
+
 ---
 
 ## Near-Term (next few weeks)
@@ -121,6 +123,48 @@ Documented in `docs/architecture.md` "Observability" section.
 ### Health-check endpoint
 
 The Docker image lacks a health probe. Add a minimal `Health` RPC (or a lightweight HTTP handler) that returns `OK` once the store is open. This is needed for container orchestration (Kubernetes liveness/readiness probes, `docker-compose` `healthcheck`).
+
+---
+
+## Production Readiness Backlog
+
+These items are actively being worked on and are required before PolarGraph can be considered production-ready for general deployment.
+
+### TLS (gRPC server + replica connection) 🔄 In Progress
+
+Encrypt traffic in transit for both client-to-server gRPC connections and the replica WAL streaming connection. The server should accept `--tls-cert` / `--tls-key` flags (PEM files) and the replica client should validate the server certificate. Mutual TLS (mTLS) is a stretch goal for service-to-service auth.
+
+### Health check (grpc.health.v1.Health + HTTP /health) 🔄 In Progress
+
+Implement the standard gRPC health checking protocol (`grpc.health.v1.Health/Check` and `Watch`) alongside a lightweight HTTP `GET /health` endpoint on the metrics or UI port. Required for Kubernetes liveness/readiness probes and `docker-compose healthcheck`. The check should report `SERVING` once the store is open and `NOT_SERVING` during startup/shutdown. Supersedes the near-term "Health-check endpoint" item.
+
+### Rate limiting (per-client token bucket, tower middleware) 🔄 In Progress
+
+Add a tower `Layer` that enforces a per-client (keyed by API key or peer IP) token-bucket rate limit on gRPC requests. Configurable via `--rate-limit-rps N` / `POLARGRAPH_RATE_LIMIT_RPS`. Requests exceeding the limit return `Status::resource_exhausted`. A Prometheus counter (`polargraph_rate_limited_total{client}`) tracks rejections. The middleware should sit between `ApiKeyLayer` and `TelemetryLayer` so rejected requests are still logged.
+
+### Config file (TOML/YAML as alternative to CLI flags) 🔄 In Progress
+
+Support loading server configuration from a TOML or YAML file (e.g. `polargraph.toml`) as an alternative to CLI flags and environment variables. Precedence: CLI flags > env vars > config file > built-in defaults. The config file path is set via `--config PATH` / `POLARGRAPH_CONFIG`. All existing flags should have config-file equivalents. Useful for Kubernetes ConfigMap mounts and reproducible deployments.
+
+### CI/CD (GitHub Actions: cargo test + clippy on PR) 📋 Planned
+
+Add a GitHub Actions workflow that runs `cargo test`, `cargo clippy -- -D warnings`, and `cargo fmt --check` on every pull request and push to `main`. Matrix should cover the MSRV (1.78) and stable. A separate job should build the Docker image to catch `Dockerfile` regressions. Failing checks block merge.
+
+### Kubernetes manifests (Deployment, Service, PVC, ConfigMap) 📋 Planned
+
+Add a `k8s/` directory with production-ready manifests: `Deployment` (with liveness/readiness probes pointing at the health endpoint), `Service` (ClusterIP for gRPC, optional LoadBalancer), `PersistentVolumeClaim` for the data directory, and `ConfigMap` / `Secret` for configuration and API keys. A `kustomization.yaml` should allow overlay-based environment customisation.
+
+### REST gateway (HTTP/JSON wrapper over gRPC) 📋 Planned
+
+Provide a thin HTTP/JSON translation layer for callers that cannot use gRPC. The gateway can be implemented as additional axum routes on the existing UI port (extending `ui_api`) or as a separate binary. Priority endpoints: `POST /triples` (Insert), `POST /query` (Query), `POST /vector/search` (SearchVector). Use `serde_json` for request/response mapping rather than introducing a code-generation dependency.
+
+### Scheduled compaction (cron-style RunRetention trigger) 📋 Planned
+
+Allow the server to run `RunRetention` automatically on a configurable schedule without requiring an external cron job or manual RPC call. Add `--compaction-schedule CRON` / `POLARGRAPH_COMPACTION_SCHEDULE` (standard 5-field cron expression, e.g. `0 2 * * *` for daily at 02:00). A `tokio` background task parses the schedule and calls the compaction manager at each firing, respecting the `CancellationToken` for graceful shutdown.
+
+### Schema migrations (versioned up/down) 📋 Planned
+
+As node and edge type schemas evolve, existing data may become invalid against the new schema. Add a migration framework: each schema change is a numbered migration with an `up` function (e.g. backfill a new required field, rename a predicate) and an optional `down` function. Migrations are stored as triples so the applied version is tracked bitemporally. The server refuses to start if the data-dir schema version is ahead of the binary's known migrations, preventing accidental rollbacks.
 
 ---
 

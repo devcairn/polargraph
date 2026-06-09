@@ -10,6 +10,7 @@ use crate::{
         BackupInfo as ProtoBackupInfo,
         BatchInsertError, BatchInsertVectorsRequest, BatchInsertVectorsResponse,
         CreateBackupRequest, CreateBackupResponse,
+        AppliedMigrationInfo,
         ExplainResponse, PlanNode,
         GetEdgeTypeRequest, GetEdgeTypeResponse,
         GetNodeTypeRequest, GetNodeTypeResponse,
@@ -18,6 +19,7 @@ use crate::{
         ListEdgeTypesRequest, ListEdgeTypesResponse,
         ListNodeTypesRequest, ListNodeTypesResponse,
         ListPredicatesBetweenRequest, ListPredicatesBetweenResponse,
+        MigrateRequest, MigrateResponse, MigrationStatusRequest, MigrationStatusResponse,
         PurgeOldBackupsRequest, PurgeOldBackupsResponse,
         QueryRequest, QueryResponse, ReachableRequest, ReachableResponse,
         RegisterEdgeTypeRequest, RegisterEdgeTypeResponse,
@@ -40,7 +42,7 @@ use polargraph_query::datalog::{
     QueryError,
 };
 use polargraph_query::explain::explain_query;
-use polargraph_storage::{BackupManager, CompactionManager, EdgeTypeRegistry, NodeTypeRegistry, StorageError, TripleStore, WalStreamer};
+use polargraph_storage::{BackupManager, CompactionManager, EdgeTypeRegistry, MigrationRunner, NodeTypeRegistry, StorageError, TripleStore, WalStreamer, MIGRATIONS};
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -63,6 +65,8 @@ pub struct ReplicaState {
     pub last_catchup_at: AtomicI64,
     pub catchup_count: AtomicU64,
     pub last_applied_seq: AtomicU64,
+    /// True while the WAL streaming connection to the primary is active.
+    pub connected: std::sync::atomic::AtomicBool,
 }
 
 impl ReplicaState {
@@ -72,6 +76,7 @@ impl ReplicaState {
             last_catchup_at: AtomicI64::new(0),
             catchup_count: AtomicU64::new(0),
             last_applied_seq: AtomicU64::new(0),
+            connected: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -1098,6 +1103,81 @@ impl PolarGraphService for PolarGraphServer {
         Ok(Response::new(ExplainResponse {
             plan_text: plan.plan_text,
             nodes,
+        }))
+    }
+
+    /// Apply pending schema migrations (or dry-run). Primary-only.
+    async fn migrate_schema(
+        &self,
+        request: Request<MigrateRequest>,
+    ) -> Result<Response<MigrateResponse>, Status> {
+        self.check_not_replica()?;
+        let dry_run = request.into_inner().dry_run;
+        let runner = MigrationRunner::new(self.store.clone());
+
+        if dry_run {
+            let current = runner.current_version().map_err(storage_err_to_status)?;
+            let pending: Vec<u32> = MIGRATIONS
+                .iter()
+                .filter(|m| m.version > current)
+                .map(|m| m.version)
+                .collect();
+            let skipped: Vec<u32> = MIGRATIONS
+                .iter()
+                .filter(|m| m.version <= current)
+                .map(|m| m.version)
+                .collect();
+            let summary = if pending.is_empty() {
+                "database is up to date (dry run)".to_string()
+            } else {
+                format!("would apply {} migration(s): {:?} (dry run)", pending.len(), pending)
+            };
+            return Ok(Response::new(MigrateResponse {
+                applied_versions: pending,
+                skipped_versions: skipped,
+                summary,
+            }));
+        }
+
+        let stats = runner.run_pending().map_err(storage_err_to_status)?;
+        info!(
+            applied = ?stats.applied,
+            skipped = ?stats.skipped,
+            "schema migration run complete"
+        );
+        let summary = if stats.applied.is_empty() {
+            "database is already up to date".to_string()
+        } else {
+            format!("applied {} migration(s): {:?}", stats.applied.len(), stats.applied)
+        };
+        Ok(Response::new(MigrateResponse {
+            applied_versions: stats.applied,
+            skipped_versions: stats.skipped,
+            summary,
+        }))
+    }
+
+    /// Return the current migration version and history.
+    async fn migration_status(
+        &self,
+        _request: Request<MigrationStatusRequest>,
+    ) -> Result<Response<MigrationStatusResponse>, Status> {
+        let runner = MigrationRunner::new(self.store.clone());
+        let current_version = runner.current_version().map_err(storage_err_to_status)?;
+        let latest_version = MigrationRunner::latest_version();
+        let applied = runner.list_applied().map_err(storage_err_to_status)?;
+        let applied_info: Vec<AppliedMigrationInfo> = applied
+            .into_iter()
+            .map(|m| AppliedMigrationInfo {
+                version: m.version,
+                description: m.description,
+                applied_at_tx_time: m.applied_at_tx_time,
+            })
+            .collect();
+        Ok(Response::new(MigrationStatusResponse {
+            current_version,
+            latest_version,
+            applied: applied_info,
         }))
     }
 

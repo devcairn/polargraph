@@ -1403,6 +1403,402 @@ durable on disk.
 
 ---
 
+## TLS
+
+PolarGraph supports mutual-TLS-free server-side TLS on all three network surfaces (gRPC, management UI HTTP, Prometheus metrics HTTP).
+
+### Enabling TLS
+
+Supply a PEM certificate and private key via CLI flags or environment variables:
+
+| Flag | Env variable | Description |
+|------|-------------|-------------|
+| `--tls-cert PATH` | `POLARGRAPH_TLS_CERT` | Path to PEM certificate (chain) file |
+| `--tls-key PATH` | `POLARGRAPH_TLS_KEY` | Path to PEM private key file |
+
+Both flags must be supplied together; omitting either keeps the server in plaintext mode.
+
+```bash
+# TLS-enabled primary
+polargraphd \
+  --tls-cert /etc/pg/server.crt \
+  --tls-key  /etc/pg/server.key
+```
+
+### gRPC TLS
+
+TLS on the gRPC server is provided by tonic's built-in `ServerTlsConfig` (rustls 0.22 backend).  Clients must connect using `https://` URLs.
+
+### HTTP TLS (UI + metrics)
+
+The management UI and Prometheus metrics HTTP servers use the same cert/key pair via a `tokio-rustls` TLS acceptor wrapped in hyper's `accept::from_stream` bridge.  Both servers honour graceful shutdown regardless of TLS mode.
+
+### Replica TLS
+
+When a replica connects to a TLS-enabled primary, supply the CA certificate used to sign the primary's cert:
+
+| Flag | Env variable | Description |
+|------|-------------|-------------|
+| `--replica-tls-ca PATH` | `POLARGRAPH_REPLICA_TLS_CA` | CA certificate for verifying the primary |
+
+```bash
+polargraphd --replica-of https://primary:50051 \
+            --replica-tls-ca /etc/pg/ca.crt
+```
+
+When not set the WAL client connects without TLS (existing behaviour).
+
+---
+
+## Health checks
+
+### gRPC health service (`grpc.health.v1.Health`)
+
+`polargraphd` registers the standard gRPC health service so load balancers and Kubernetes probes can use it.
+
+```
+grpc.health.v1.Health/Check
+  request:  { service: "polargraph.v1.PolarGraphService" }
+  response: { status: SERVING }  # primary always; replica when WAL stream active
+```
+
+Implementation: `tonic_health::server::health_reporter()` creates a `HealthReporter` + `HealthServer`.  The `HealthServer` is added to the tonic `Server::builder()` chain alongside the `PolarGraphServiceServer`.
+
+For replicas, the WAL replication loop calls:
+- `reporter.set_service_status("polargraph.v1.PolarGraphService", NotServing)` — while reconnecting.
+- `reporter.set_service_status("polargraph.v1.PolarGraphService", Serving)` — once the stream is established.
+
+### HTTP `/health` endpoint
+
+The management UI server (`--ui-port`, default 8080) exposes a lightweight HTTP health endpoint:
+
+```
+GET /health
+```
+
+**200 OK** — server is healthy:
+```json
+{ "status": "ok", "mode": "primary", "triples": 12345 }
+```
+
+**503 Service Unavailable** — replica is not connected to its primary:
+```json
+{ "status": "degraded" }
+```
+
+`mode` is `"primary"` or `"replica"`.  `triples` is a fast approximate count from RocksDB's `estimate-num-keys` property on the SPO column family (not exact; use for monitoring only).
+
+The `/health` endpoint requires no authentication and is always available regardless of `--api-key` configuration.
+
+---
+
+## Configuration file
+
+In addition to CLI flags and environment variables, `polargraphd` can read
+settings from a TOML file.  The priority order is:
+
+```
+CLI flag  >  environment variable  >  config file  >  built-in default
+```
+
+### Auto-detection
+
+When `--config` is not supplied, the server searches in order:
+
+1. `./polargraph.toml` (current working directory)
+2. `~/.config/polargraph/config.toml`
+
+If neither file exists the server starts normally using environment variables
+and built-in defaults.
+
+### Explicit path
+
+```bash
+polargraphd --config /etc/polargraph/polargraph.toml
+# or
+POLARGRAPH_CONFIG=/etc/polargraph/polargraph.toml polargraphd
+```
+
+An explicit path that does not exist or cannot be parsed is a fatal error.
+
+### File format
+
+```toml
+[server]
+data_dir            = "/var/lib/polargraph"
+grpc_port           = 50051    # port only; interface is always 0.0.0.0
+ui_port             = 8080
+metrics_port        = 9090
+shutdown_timeout_ms = 10000
+
+[storage]
+backup_dir               = "/var/lib/polargraph/backups"
+retention_tx_age_secs    = 2592000   # 30 days
+retention_vt_lookback_secs = 604800  # 7 days
+
+[replication]
+replica_of = "http://primary.example.com:50051"
+tls_ca     = "/etc/polargraph/ca.crt"
+
+[tls]
+cert = "/etc/polargraph/server.crt"
+key  = "/etc/polargraph/server.key"
+
+[auth]
+api_keys = ["key-one", "key-two"]
+no_auth  = false
+
+[observability]
+log_level  = "info"
+log_format = "pretty"   # or "json"
+no_metrics = false
+no_ui      = false
+
+[query]
+timeout_ms    = 30000
+slow_query_ms = 1000
+```
+
+Every key is optional.  Missing sections and missing keys within a section
+fall through to the next priority level (environment variable → built-in
+default).
+
+A fully-commented example file covering every option is provided at
+`polargraph.example.toml` in the repository root.
+
+### Override semantics for boolean flags
+
+The boolean flags `no_metrics`, `no_auth`, and `no_ui` follow **OR** semantics:
+setting the flag in the config file to `true` disables the feature; passing
+`--no-metrics` on the CLI also disables it.  There is no way to re-enable a
+feature that the config file has disabled without editing the config file,
+because the CLI flags can only assert `true`.
+
+---
+
+## Rate limiting
+
+`polargraphd` supports per-client-IP token-bucket rate limiting applied as a
+tower middleware layer (`RateLimitLayer`) immediately before authentication in
+the gRPC server pipeline.
+
+### Token-bucket algorithm
+
+Each unique client IP gets an independent bucket with capacity equal to
+`max_rps` tokens.  On every request:
+
+1. Elapsed seconds since the last request are computed and multiplied by
+   `max_rps` to calculate newly earned tokens.
+2. The bucket is refilled up to the configured cap.
+3. If `tokens >= 1.0` the request proceeds and one token is deducted.
+4. Otherwise `RESOURCE_EXHAUSTED` ("rate limit exceeded") is returned
+   immediately — no request body is parsed.
+
+### Client IP resolution
+
+The layer resolves the client IP in priority order:
+
+1. `x-forwarded-for` header — leftmost address (original client behind a proxy).
+2. `TcpConnectInfo` extension from tonic — the TCP peer address of a direct
+   connection.
+3. `0.0.0.0` fallback sentinel — all such clients share one bucket.
+
+For deployments behind a trusted reverse proxy, set `x-forwarded-for` at the
+proxy level so the layer sees the real client IP rather than the proxy's IP.
+
+### Exemptions
+
+`/polargraph.v1.PolarGraphService/ReplicaStatus` bypasses rate limiting so
+load-balancer health probes do not consume quota.
+
+### Stale-entry cleanup
+
+Every 1 000 requests the layer scans the bucket map and removes entries that
+have not received a request in the last 60 seconds, keeping memory bounded for
+transient clients.
+
+### Configuration
+
+| Flag | Env variable | Default | Description |
+|---|---|---|---|
+| `--rate-limit-rps N` | `POLARGRAPH_RATE_LIMIT_RPS` | `0` | Max requests/sec per client IP; 0 = disabled |
+
+TOML config file equivalent:
+
+```toml
+[rate_limit]
+max_rps = 100
+```
+
+When disabled (`max_rps = 0`) the layer is a zero-cost pass-through.
+
+---
+
+## REST gateway
+
+`polargraph-rest` is a standalone binary (`polargraph-rest`) that accepts
+HTTP/JSON requests and proxies them to a running `polargraphd` gRPC server.
+It is useful for clients that cannot use a gRPC stub — browsers, scripting
+environments, or languages without mature gRPC support.
+
+### Architecture
+
+```
+HTTP client
+    │  HTTP/JSON
+    ▼
+polargraph-rest  ──────  gRPC/proto  ──────▶  polargraphd
+  (axum 0.6)               (tonic 0.11)
+```
+
+The gateway holds a single pooled `tonic::transport::Channel` to the upstream
+and clones it cheaply per request. An `AuthInterceptor` tower layer
+automatically attaches the configured API key as an `Authorization: Bearer`
+header on every gRPC call.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/query` | Conjunctive graph query (patterns → bindings) |
+| `POST` | `/insert` | Insert a single relation triple |
+| `GET`  | `/triples` | Scan triples by subject/predicate/object filter |
+| `POST` | `/vector/search` | k-NN vector search in a named HNSW space |
+| `GET`  | `/health` | Proxy upstream `ReplicaStatus` as a health JSON |
+| `POST` | `/explain` | Static query plan (no DB access) |
+
+### Pattern string format (`/query` and `/explain`)
+
+Patterns are 3-token strings: `<subject> <predicate> <object>`.
+
+- `?varname` — variable; bound on first match, constrains subsequent matches
+- `_` — wildcard; matches anything but is not captured
+- UUID string — bound `NodeId` term
+- Predicate accepts an optional leading `:` (stripped automatically)
+
+Example:
+
+```json
+{
+  "patterns": ["?s :knows ?o", "?o :name ?n"],
+  "as_of_valid_time": null
+}
+```
+
+### CLI flags
+
+| Flag | Env variable | Default | Description |
+|------|---|---|---|
+| `--upstream URL` | `POLARGRAPH_UPSTREAM` | `http://localhost:50051` | gRPC server address |
+| `--listen ADDR` | `POLARGRAPH_REST_LISTEN` | `0.0.0.0:8000` | HTTP listen address |
+| `--api-key KEY` | `POLARGRAPH_REST_API_KEY` | *(none)* | Forwarded as `Authorization: Bearer` to upstream |
+| `--tls-ca PATH` | `POLARGRAPH_REST_TLS_CA` | *(none)* | PEM CA cert for upstream TLS verification |
+
+### Error mapping
+
+gRPC status codes map to HTTP status codes:
+
+| gRPC | HTTP |
+|------|------|
+| `NOT_FOUND` | 404 |
+| `UNAUTHENTICATED` | 401 |
+| `PERMISSION_DENIED` | 403 |
+| `RESOURCE_EXHAUSTED` | 429 |
+| `DEADLINE_EXCEEDED` | 408 |
+| `INVALID_ARGUMENT` | 400 |
+| anything else | 500 |
+
+### Known limitations
+
+- `/triples` does not return the predicate value when `predicate` is omitted
+  from the query params — the VarPattern proto does not support variable
+  predicates, so the response echoes back an empty string in that slot.
+- Only relation triples (NodeId → NodeId) are supported via `POST /insert`.
+  Property triples (scalar values) must be inserted via the gRPC API directly.
+
+---
+
+## Schema migrations
+
+PolarGraph ships a versioned migration system that applies schema changes to
+a live store at startup (and on demand via gRPC). Migrations run in ascending
+version order; each is a Rust function that receives the live `TripleStore`
+handle and can read or write META CF entries, insert triples, or invoke
+registry APIs.
+
+### Storage layout
+
+All migration state lives in the META column family:
+
+| Key | Value |
+|-----|-------|
+| `__migrations__/version` | Current schema version as a little-endian `u32` |
+| `__migrations__/applied/<version>` | JSON-encoded `AppliedMigration` record |
+
+On a fresh database the version key is absent (reads as `0`).
+
+### Built-in migrations
+
+| Version | Description |
+|---------|-------------|
+| 1 | `initial schema` — writes `__schema__/version = "1"` to META CF to establish the baseline |
+| 2 | `normalize node type schema records` — re-registers all existing node type schemas through `NodeTypeRegistry` to ensure new serde-defaulted fields (e.g. `storage_mode` on `VectorSpaceDef`) are serialized explicitly in older records |
+
+### Auto-migration on startup
+
+`main.rs` calls `MigrationRunner::new(store).run_pending()` before the gRPC
+server accepts connections. If any migration fails, the server exits with an
+error. On success, applied version numbers are logged at `info` level.
+
+Auto-migration is skipped in replica mode (replicas are read-only and receive
+changes via WAL streaming).
+
+### gRPC API
+
+```
+rpc MigrateSchema(MigrateRequest) returns (MigrateResponse)
+rpc MigrationStatus(MigrationStatusRequest) returns (MigrationStatusResponse)
+```
+
+**`MigrateSchema`**
+
+Applies all pending migrations. Setting `dry_run = true` reports what would
+run without making any changes. Returns `FAILED_PRECONDITION` on a replica.
+
+**`MigrationStatus`**
+
+Returns the current schema version, the latest available version, and the
+full history of applied migrations with wall-clock timestamps.
+
+### Adding a migration
+
+1. Write an `up` and `down` function with signature `fn(&TripleStore) -> Result<(), StorageError>`.
+2. Append a new `Migration` struct to the `MIGRATIONS` static list in `polargraph-storage/src/migrations.rs`. The version must be strictly greater than the previous entry.
+3. Add a test (at minimum: verify `run_pending()` applies the new version on a fresh database).
+
+```rust
+fn migration_v3_up(store: &TripleStore) -> Result<(), StorageError> {
+    // ... make changes via store.insert(), store.db_write(), etc.
+    Ok(())
+}
+
+fn migration_v3_down(_store: &TripleStore) -> Result<(), StorageError> {
+    Ok(())
+}
+
+pub static MIGRATIONS: &[Migration] = &[
+    // ... existing entries ...
+    Migration {
+        version: 3,
+        description: "add my new feature",
+        up: migration_v3_up,
+        down: migration_v3_down,
+    },
+];
+```
+
+---
+
 ## Planned extensions
 
 | Feature | Notes |

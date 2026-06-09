@@ -16,7 +16,8 @@ use polargraph_server::{
         BatchInsertVectorsRequest, CreateBackupRequest, EdgeTypeDef, FieldDef,
         GetEdgeTypeRequest, GetNodeTypeRequest, InsertRequest, InsertVectorRequest,
         ListBackupsRequest, ListEdgeTypesRequest, ListNodeTypesRequest,
-        ListPredicatesBetweenRequest, NodeId, NodeTypeDef, NodeTypeFilter,
+        ListPredicatesBetweenRequest, MigrateRequest, MigrationStatusRequest, NodeId,
+        NodeTypeDef, NodeTypeFilter,
         PropertyTriple, PurgeOldBackupsRequest, QueryRequest, ReachableRequest,
         RegisterEdgeTypeRequest, RegisterNodeTypeRequest, RelationTriple,
         ReplicaStatusRequest, RunRetentionRequest, StreamWalRequest,
@@ -33,6 +34,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Request};
+use axum;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -2183,7 +2185,7 @@ async fn open_wal_replica(
     let repl_state = Arc::clone(&rs);
     let token = tokio_util::sync::CancellationToken::new();
     tokio::spawn(async move {
-        wal_client::run_replication(repl_store, repl_state, token).await;
+        wal_client::run_replication(repl_store, repl_state, token, None, None).await;
     });
     (server, replica_dir)
 }
@@ -2596,6 +2598,7 @@ async fn start_ui_http(
         start_time: std::time::Instant::now(),
         data_dir: dir.path().display().to_string(),
         grpc_addr: "127.0.0.1:50051".into(),
+        replica_state: None,
     });
     let app = ui_api::build_ui_router(state);
 
@@ -2801,7 +2804,7 @@ async fn wal_client_stops_on_cancellation() {
     let wal_state = Arc::clone(&rs);
     let cancel_token = wal_token.clone();
     let wal_jh = tokio::spawn(async move {
-        wal_client::run_replication(wal_store, wal_state, wal_token).await;
+        wal_client::run_replication(wal_store, wal_state, wal_token, None, None).await;
     });
 
     // Let the WAL client establish its stream.
@@ -2918,4 +2921,327 @@ async fn query_timeout_zero_disables_timeout() {
         .into_inner();
 
     assert_eq!(resp.node_ids.len(), 3);
+}
+
+// ── Health check tests ────────────────────────────────────────────────────────
+
+/// Start a gRPC server that includes the tonic health service and verify that
+/// the Health RPC reports SERVING for the PolarGraph service name.
+#[tokio::test]
+async fn health_rpc_returns_serving_for_running_server() {
+    use tonic_health::{pb::health_client::HealthClient, pb::HealthCheckRequest, ServingStatus};
+
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let svc = PolarGraphServer::new(store).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let (mut reporter, health_service) = tonic_health::server::health_reporter();
+    reporter
+        .set_service_status("polargraph.v1.PolarGraphService", ServingStatus::Serving)
+        .await;
+
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(health_service)
+            .add_service(PolarGraphServiceServer::new(svc))
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async { drop(shutdown_rx.await) },
+            )
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+
+    let mut client = HealthClient::new(channel);
+    let resp = client
+        .check(HealthCheckRequest { service: "polargraph.v1.PolarGraphService".into() })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(
+        resp.status,
+        tonic_health::pb::health_check_response::ServingStatus::Serving as i32,
+        "health status should be SERVING"
+    );
+
+    let _ = shutdown_tx.send(());
+}
+
+/// Verify that the `/health` HTTP endpoint on the management UI returns 200
+/// with a JSON body containing `status: "ok"` for a primary server.
+#[tokio::test]
+async fn health_http_endpoint_returns_ok_for_primary() {
+    use polargraph_server::ui_api;
+
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let svc = PolarGraphServer::new(store).unwrap();
+
+    let state = Arc::new(ui_api::UiState {
+        service: svc,
+        api_keys: Arc::new(vec![]),
+        start_time: std::time::Instant::now(),
+        data_dir: dir.path().display().to_string(),
+        grpc_addr: "127.0.0.1:50051".into(),
+        replica_state: None,
+    });
+
+    let app = ui_api::build_ui_router(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service())
+            .with_graceful_shutdown(async { drop(shutdown_rx.await) })
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let resp = reqwest::get(format!("http://{addr}/health"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["mode"], "primary");
+    assert!(body["triples"].is_number());
+
+    let _ = shutdown_tx.send(());
+}
+
+// ── Rate limiting tests ───────────────────────────────────────────────────────
+//
+// Rate limiting is a tower layer at the transport level, so these tests use a
+// live TCP server and a real gRPC client channel — same pattern as the auth tests.
+
+use polargraph_server::rate_limit::RateLimitLayer;
+
+/// Start a server with rate limiting at `max_rps` requests per second.
+async fn start_server_with_rate_limit(
+    store: TripleStore,
+    max_rps: u32,
+) -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
+    let svc = PolarGraphServer::new(store).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let rate = RateLimitLayer::new(max_rps);
+
+    tokio::spawn(async move {
+        Server::builder()
+            .layer(rate)
+            .add_service(PolarGraphServiceServer::new(svc))
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async { drop(shutdown_rx.await) },
+            )
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (addr, shutdown_tx)
+}
+
+/// Build a gRPC request with an `x-forwarded-for` header to simulate a specific client IP.
+fn req_from_ip<T>(body: T, ip: &str) -> Request<T> {
+    let mut req = Request::new(body);
+    req.metadata_mut()
+        .insert("x-forwarded-for", ip.parse().unwrap());
+    req
+}
+
+#[tokio::test]
+async fn rate_limit_single_client_throttled_after_quota() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    // Allow only 3 requests per second so the test doesn't need to send thousands.
+    let (addr, _shutdown) = start_server_with_rate_limit(store, 3).await;
+
+    let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = PolarGraphServiceClient::new(channel);
+
+    let (_, na) = new_node();
+    let (_, nb) = new_node();
+
+    // The first 3 requests from this IP should succeed (bucket starts full).
+    for _ in 0..3 {
+        let result = client
+            .insert(req_from_ip(
+                InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())] },
+                "10.1.1.1",
+            ))
+            .await;
+        assert!(result.is_ok(), "expected success while within quota");
+    }
+
+    // The 4th request should be rejected.
+    let err = client
+        .insert(req_from_ip(
+            InsertRequest { triples: vec![rel(na, "knows", nb)] },
+            "10.1.1.1",
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.code(),
+        tonic::Code::ResourceExhausted,
+        "expected ResourceExhausted when quota exceeded"
+    );
+}
+
+#[tokio::test]
+async fn rate_limit_two_clients_have_independent_buckets() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    // Allow 2 requests per second per client.
+    let (addr, _shutdown) = start_server_with_rate_limit(store, 2).await;
+
+    let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = PolarGraphServiceClient::new(channel);
+
+    let (_, na) = new_node();
+    let (_, nb) = new_node();
+
+    // Exhaust client A's quota (2 requests).
+    for _ in 0..2 {
+        let result = client
+            .insert(req_from_ip(
+                InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())] },
+                "10.2.2.1",
+            ))
+            .await;
+        assert!(result.is_ok(), "A within quota");
+    }
+    let err = client
+        .insert(req_from_ip(
+            InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())] },
+            "10.2.2.1",
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::ResourceExhausted, "A should be throttled");
+
+    // Client B (different IP) still has its own full quota.
+    for _ in 0..2 {
+        let result = client
+            .insert(req_from_ip(
+                InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())] },
+                "10.2.2.2",
+            ))
+            .await;
+        assert!(result.is_ok(), "B should have its own independent bucket");
+    }
+}
+
+// ── Schema migration tests ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn migrate_schema_fresh_db_applies_all_migrations() {
+    let (svc, _dir) = open();
+    let resp = svc
+        .migrate_schema(Request::new(MigrateRequest { dry_run: false }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Both built-in migrations must have run.
+    assert_eq!(resp.applied_versions, vec![1, 2]);
+    assert!(resp.skipped_versions.is_empty());
+    assert!(resp.summary.contains("applied"));
+}
+
+#[tokio::test]
+async fn migrate_schema_already_at_latest_is_noop() {
+    let (svc, _dir) = open();
+    // First run applies everything.
+    svc.migrate_schema(Request::new(MigrateRequest { dry_run: false }))
+        .await
+        .unwrap();
+
+    // Second run must be a no-op.
+    let resp = svc
+        .migrate_schema(Request::new(MigrateRequest { dry_run: false }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp.applied_versions.is_empty());
+    assert_eq!(resp.skipped_versions, vec![1, 2]);
+    assert!(resp.summary.contains("up to date"));
+}
+
+#[tokio::test]
+async fn migrate_schema_dry_run_does_not_apply() {
+    let (svc, _dir) = open();
+
+    // dry_run = true: returns pending list without applying.
+    let resp = svc
+        .migrate_schema(Request::new(MigrateRequest { dry_run: true }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.applied_versions, vec![1, 2]);
+    assert!(resp.summary.contains("dry run"));
+
+    // The database should still be at version 0 (nothing was applied).
+    let status = svc
+        .migration_status(Request::new(MigrationStatusRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(status.current_version, 0);
+    assert!(status.applied.is_empty());
+}
+
+#[tokio::test]
+async fn migration_status_reflects_applied_state() {
+    let (svc, _dir) = open();
+    svc.migrate_schema(Request::new(MigrateRequest { dry_run: false }))
+        .await
+        .unwrap();
+
+    let status = svc
+        .migration_status(Request::new(MigrationStatusRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(status.current_version, 2);
+    assert_eq!(status.latest_version, 2);
+    assert_eq!(status.applied.len(), 2);
+    assert_eq!(status.applied[0].version, 1);
+    assert_eq!(status.applied[0].description, "initial schema");
+    assert!(status.applied[0].applied_at_tx_time > 0);
 }
