@@ -1,6 +1,8 @@
 //! gRPC service implementation.
 #![allow(clippy::result_large_err)]
 
+const STREAM_CHUNK_SIZE: usize = 500;
+
 use crate::{
     convert,
     proto::{
@@ -11,8 +13,7 @@ use crate::{
         BatchInsertError, BatchInsertVectorsRequest, BatchInsertVectorsResponse,
         CreateBackupRequest, CreateBackupResponse,
         AppliedMigrationInfo,
-        Binding,
-        CypherQueryRequest,
+        CypherBinding, CypherQueryRequest, CypherQueryResponse, CypherWriteRequest, CypherWriteResponse,
         ExplainResponse, PlanNode,
         GetEdgeTypeRequest, GetEdgeTypeResponse,
         GetNodeTypeRequest, GetNodeTypeResponse,
@@ -23,7 +24,7 @@ use crate::{
         ListPredicatesBetweenRequest, ListPredicatesBetweenResponse,
         MigrateRequest, MigrateResponse, MigrationStatusRequest, MigrationStatusResponse,
         PurgeOldBackupsRequest, PurgeOldBackupsResponse,
-        QueryRequest, QueryResponse, ReachableRequest, ReachableResponse,
+        QueryRequest, QueryResponse, QueryStreamChunk, ReachableRequest, ReachableResponse,
         RegisterEdgeTypeRequest, RegisterEdgeTypeResponse,
         RegisterNodeTypeRequest, RegisterNodeTypeResponse,
         ReplicaStatusRequest, ReplicaStatusResponse,
@@ -290,6 +291,8 @@ impl PolarGraphServer {
 #[tonic::async_trait]
 impl PolarGraphService for PolarGraphServer {
     type StreamWalStream = ReceiverStream<Result<WalEntry, Status>>;
+    type QueryStreamStream = ReceiverStream<Result<QueryStreamChunk, Status>>;
+    type CypherQueryStreamStream = ReceiverStream<Result<QueryStreamChunk, Status>>;
 
     /// Insert one or more triples atomically.
     async fn insert(
@@ -384,7 +387,7 @@ impl PolarGraphService for PolarGraphServer {
         let t0 = Instant::now();
         let results = if rules.is_empty() {
             // Fast path: pure conjunctive query against base facts only.
-            execute_query(&query, &snapshot, self.make_deadline())
+            execute_query(&query, &snapshot, self.make_deadline(), Some(&self.edge_registry))
                 .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
         } else {
             // Recursive path: run rules to fixed point, then evaluate patterns
@@ -948,7 +951,7 @@ impl PolarGraphService for PolarGraphServer {
         }
 
         let t0 = Instant::now();
-        let results = execute_query_seeded(&query, &snapshot, initial, self.make_deadline())
+        let results = execute_query_seeded(&query, &snapshot, initial, self.make_deadline(), Some(&self.edge_registry))
             .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
         self.check_slow_query(
             "VectorSeedQuery",
@@ -1214,11 +1217,18 @@ impl PolarGraphService for PolarGraphServer {
     async fn cypher_query(
         &self,
         request: Request<CypherQueryRequest>,
-    ) -> Result<Response<QueryResponse>, Status> {
+    ) -> Result<Response<CypherQueryResponse>, Status> {
         let req = request.into_inner();
 
         if req.cypher.is_empty() {
             return Err(Status::invalid_argument("cypher query string must not be empty"));
+        }
+
+        // Reject write statements early — CypherWrite is the right RPC for those.
+        if polargraph_query::cypher::is_write_statement(&req.cypher) {
+            return Err(Status::invalid_argument(
+                "CypherQuery does not accept write statements (CREATE/MERGE/SET/DELETE); use CypherWrite instead",
+            ));
         }
 
         // Parse the Cypher string into an AST.
@@ -1274,11 +1284,11 @@ impl PolarGraphService for PolarGraphServer {
                         b
                     })
                     .collect();
-                execute_query_seeded(&compiled.query, &snapshot, initial, deadline)
+                execute_query_seeded(&compiled.query, &snapshot, initial, deadline, Some(&self.edge_registry))
                     .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
             }
         } else if compiled.rules.is_empty() {
-            execute_query(&compiled.query, &snapshot, deadline)
+            execute_query(&compiled.query, &snapshot, deadline, Some(&self.edge_registry))
                 .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
         } else {
             let derived: DerivedFacts =
@@ -1299,25 +1309,143 @@ impl PolarGraphService for PolarGraphServer {
             polargraph_query::cypher::apply_value_filters(raw_results, &compiled.value_filters, &snapshot)
                 .map_err(storage_err_to_status)?;
 
-        // Apply LIMIT.
-        let limited: Vec<_> = match compiled.limit {
-            Some(n) => filtered.into_iter().take(n).collect(),
-            None => filtered,
-        };
+        // Apply aggregations, ORDER BY, SKIP, and LIMIT.
+        let agg_rows = polargraph_query::aggregation::apply_aggregations(
+            filtered,
+            &compiled.group_keys,
+            &compiled.aggregations,
+            &compiled.order_by,
+            compiled.skip,
+            compiled.limit,
+        );
 
-        // Build response — project bindings to the RETURN variables only.
-        let bindings = if compiled.return_vars.is_empty() {
-            limited.iter().map(convert::binding_to_proto).collect()
-        } else {
-            limited.iter().map(|b| {
-                let vars = compiled.return_vars.iter()
-                    .filter_map(|v| b.get(v).map(|&id| (v.clone(), convert::node_id_to_proto(id))))
+        // Build CypherQueryResponse rows.
+        let rows: Vec<CypherBinding> = agg_rows
+            .iter()
+            .map(|row| {
+                // Project group-key nodes to the declared return_vars (or all if unspecified).
+                let nodes = if compiled.return_vars.is_empty() {
+                    row.group_keys
+                        .iter()
+                        .map(|(k, &id)| (k.clone(), convert::node_id_to_proto(id)))
+                        .collect()
+                } else {
+                    compiled.return_vars
+                        .iter()
+                        .filter_map(|v| {
+                            row.group_keys.get(v).map(|&id| (v.clone(), convert::node_id_to_proto(id)))
+                        })
+                        .collect()
+                };
+                let values = row.agg_values
+                    .iter()
+                    .map(|(k, v)| (k.clone(), convert::value_to_proto(v)))
                     .collect();
-                Binding { vars }
-            }).collect()
+                CypherBinding { nodes, values }
+            })
+            .collect();
+
+        Ok(Response::new(CypherQueryResponse { rows }))
+    }
+
+    /// Parse and execute a Cypher write statement (CREATE, MERGE, SET, DELETE),
+    /// optionally preceded by a MATCH clause.
+    async fn cypher_write(
+        &self,
+        request: Request<CypherWriteRequest>,
+    ) -> Result<Response<CypherWriteResponse>, Status> {
+        self.check_not_replica()?;
+        let req = request.into_inner();
+
+        if req.cypher.is_empty() {
+            return Err(Status::invalid_argument("cypher write string must not be empty"));
+        }
+
+        let compiled = polargraph_query::cypher::parse_write(&req.cypher)
+            .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
+
+        let map_write_err = |e: polargraph_query::cypher::CypherWriteError| match e {
+            polargraph_query::cypher::CypherWriteError::UnboundVariable(v) => {
+                Status::invalid_argument(format!("unbound variable '{v}'"))
+            }
+            polargraph_query::cypher::CypherWriteError::Storage(se) => storage_err_to_status(se),
+            polargraph_query::cypher::CypherWriteError::Parse(pe) => {
+                Status::invalid_argument(format!("cypher parse error: {pe}"))
+            }
         };
 
-        Ok(Response::new(QueryResponse { bindings }))
+        let mut tx = self.store.begin();
+        let snapshot = self.store.snapshot(tx.read_ts);
+
+        let result = if let Some(ref mq) = compiled.match_query {
+            // MATCH + write: execute the match, then run the write ops for each row.
+            let raw = execute_query(&mq.query, &snapshot, None, None)
+                .map_err(|e| Status::internal(format!("match query error: {e}")))?;
+            let rows = polargraph_query::cypher::apply_value_filters(raw, &mq.value_filters, &snapshot)
+                .map_err(storage_err_to_status)?;
+
+            let mut all_ids: Vec<NodeId> = Vec::new();
+            let mut all_written: u64 = 0;
+            let mut all_deleted: u64 = 0;
+            for row in rows {
+                let mut row_bindings = row;
+                let r = polargraph_query::cypher::execute_write_ops(
+                    &compiled.writes, &mut tx, &snapshot, &mut row_bindings,
+                )
+                .map_err(&map_write_err)?;
+                all_ids.extend(r.created_ids);
+                all_written += r.triples_written;
+                all_deleted += r.triples_deleted;
+            }
+            polargraph_query::cypher::WriteResult {
+                created_ids: all_ids,
+                triples_written: all_written,
+                triples_deleted: all_deleted,
+            }
+        } else {
+            let mut bindings = HashMap::new();
+            polargraph_query::cypher::execute_write_ops(
+                &compiled.writes, &mut tx, &snapshot, &mut bindings,
+            )
+            .map_err(map_write_err)?
+        };
+
+        let commit_ts = tx.commit().map_err(storage_err_to_status)?;
+        debug!(
+            "cypher_write: created={} written={} deleted={} commit_ts={}",
+            result.created_ids.len(), result.triples_written, result.triples_deleted, commit_ts.0
+        );
+
+        // Update the type cache for any newly created typed nodes.
+        // We re-scan because the write result doesn't carry Triple objects.
+        if !result.created_ids.is_empty() {
+            let post_snap = self.store.snapshot(commit_ts);
+            let mut updates: Vec<(NodeId, String)> = Vec::new();
+            for node_id in &result.created_ids {
+                if let Ok(triples) = post_snap.scan_by_subject_predicate(node_id, "__type") {
+                    for t in triples {
+                        if let Triple::Property { subject, value: Value::Text(type_name), .. } = t {
+                            updates.push((subject, type_name));
+                        }
+                    }
+                }
+            }
+            if !updates.is_empty() {
+                let mut cache = self.type_cache.write().unwrap();
+                for (subject, type_name) in updates {
+                    cache.entry(type_name).or_default().insert(subject);
+                }
+            }
+        }
+
+        metrics::gauge!("polargraph_triples_total")
+            .increment(result.triples_written as f64);
+
+        Ok(Response::new(CypherWriteResponse {
+            created_node_ids: result.created_ids.iter().map(|id| id.as_bytes().to_vec()).collect(),
+            triples_written: result.triples_written,
+            triples_deleted: result.triples_deleted,
+        }))
     }
 
     /// Stream WAL entries to a replica. Primary-only.
@@ -1354,6 +1482,197 @@ impl PolarGraphService for PolarGraphServer {
         });
 
         Ok(Response::new(ReceiverStream::new(proto_rx)))
+    }
+
+    /// Stream a conjunctive query in chunks of `STREAM_CHUNK_SIZE` bindings.
+    async fn query_stream(
+        &self,
+        request: Request<QueryRequest>,
+    ) -> Result<Response<Self::QueryStreamStream>, Status> {
+        let req = request.into_inner();
+
+        if req.patterns.is_empty() {
+            return Err(Status::invalid_argument("query must contain at least one pattern"));
+        }
+
+        let patterns: Vec<_> = req
+            .patterns
+            .iter()
+            .map(convert::var_pattern_from_proto)
+            .collect::<Result<_, _>>()?;
+
+        let pattern_count = patterns.len();
+        let mut query = Query::new();
+        for p in patterns {
+            query.patterns.push(p);
+        }
+
+        let tx_ts = if req.as_of_tx_time != 0 { req.as_of_tx_time } else { req.snapshot_ts };
+        let mut snapshot = if tx_ts == 0 {
+            self.store.snapshot(self.store.begin().read_ts)
+        } else {
+            self.store.snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+        };
+        if req.as_of_valid_time != 0 {
+            snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
+        }
+
+        let rules: Vec<_> = req.rules.iter()
+            .map(convert::rule_from_proto)
+            .collect::<Result<_, _>>()?;
+
+        let t0 = Instant::now();
+        let results = if rules.is_empty() {
+            execute_query(&query, &snapshot, self.make_deadline(), Some(&self.edge_registry))
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+        } else {
+            let derived: DerivedFacts = execute_recursive(&[], &rules, &snapshot, self.make_deadline())
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
+            execute_query_hybrid(&query, &snapshot, &derived, self.make_deadline())
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+        };
+        self.check_slow_query("QueryStream", t0.elapsed(), &format!("patterns={pattern_count} rules={}", rules.len()));
+
+        let (tx, rx) = mpsc::channel::<Result<QueryStreamChunk, Status>>(4);
+        tokio::spawn(async move {
+            send_result_chunks(results, tx).await;
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    /// Stream a Cypher query in chunks of `STREAM_CHUNK_SIZE` bindings.
+    /// Respects the LIMIT clause in the Cypher string.
+    async fn cypher_query_stream(
+        &self,
+        request: Request<CypherQueryRequest>,
+    ) -> Result<Response<Self::CypherQueryStreamStream>, Status> {
+        let req = request.into_inner();
+
+        if req.cypher.is_empty() {
+            return Err(Status::invalid_argument("cypher query string must not be empty"));
+        }
+
+        let parsed = polargraph_query::cypher::parse(&req.cypher)
+            .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
+        let compiled = polargraph_query::cypher::compile(parsed);
+
+        let tx_ts = if req.as_of_tx_time != 0 { req.as_of_tx_time } else { 0 };
+        let mut snapshot = if tx_ts == 0 {
+            self.store.snapshot(self.store.begin().read_ts)
+        } else {
+            self.store.snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+        };
+        if req.as_of_valid_time != 0 {
+            snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
+        }
+
+        let deadline = self.make_deadline();
+        let t0 = Instant::now();
+
+        let raw_results = if let Some(vn) = compiled.vector_near {
+            if req.vector.is_empty() {
+                return Err(Status::invalid_argument(
+                    "VECTOR_NEAR requires a query vector in the request (field 'vector')",
+                ));
+            }
+            let space = &vn.space;
+            let k = vn.k as usize;
+            let ef = vn.ef.map(|e| e as usize)
+                .filter(|&e| e > 0)
+                .unwrap_or_else(|| if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize });
+            let seed_var = vn.seed_variable.clone();
+            let ann_hits = self
+                .store
+                .search_vector_ef(space, &req.vector, ef, ef)
+                .into_iter()
+                .take(k)
+                .collect::<Vec<_>>();
+            if ann_hits.is_empty() {
+                vec![]
+            } else {
+                let initial: Vec<Bindings> = ann_hits
+                    .iter()
+                    .map(|(id, _)| {
+                        let mut b = Bindings::new();
+                        b.insert(seed_var.clone(), *id);
+                        b
+                    })
+                    .collect();
+                execute_query_seeded(&compiled.query, &snapshot, initial, deadline, Some(&self.edge_registry))
+                    .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+            }
+        } else if compiled.rules.is_empty() {
+            execute_query(&compiled.query, &snapshot, deadline, Some(&self.edge_registry))
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+        } else {
+            let derived: DerivedFacts =
+                execute_recursive(&[], &compiled.rules, &snapshot, deadline)
+                    .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
+            execute_query_hybrid(&compiled.query, &snapshot, &derived, deadline)
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+        };
+
+        self.check_slow_query(
+            "CypherQueryStream",
+            t0.elapsed(),
+            &format!("patterns={} rules={}", compiled.query.patterns.len(), compiled.rules.len()),
+        );
+
+        let filtered =
+            polargraph_query::cypher::apply_value_filters(raw_results, &compiled.value_filters, &snapshot)
+                .map_err(storage_err_to_status)?;
+
+        let limited: Vec<_> = match compiled.limit {
+            Some(n) => filtered.into_iter().take(n).collect(),
+            None => filtered,
+        };
+
+        // Project to RETURN variables (same as cypher_query).
+        let projected: Vec<_> = if compiled.return_vars.is_empty() {
+            limited
+        } else {
+            limited.into_iter().map(|b| {
+                compiled.return_vars.iter()
+                    .filter_map(|v| b.get(v).map(|&id| (v.clone(), id)))
+                    .collect()
+            }).collect()
+        };
+
+        let (tx, rx) = mpsc::channel::<Result<QueryStreamChunk, Status>>(4);
+        tokio::spawn(async move {
+            send_result_chunks(projected, tx).await;
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+// ── Streaming helpers ─────────────────────────────────────────────────────────
+
+/// Split `results` into chunks of `STREAM_CHUNK_SIZE` and send each as a
+/// `QueryStreamChunk` on `tx`. The last chunk has `done = true`.
+async fn send_result_chunks(
+    results: Vec<polargraph_query::datalog::Bindings>,
+    tx: mpsc::Sender<Result<QueryStreamChunk, Status>>,
+) {
+    if results.is_empty() {
+        let _ = tx.send(Ok(QueryStreamChunk { results: vec![], chunk_index: 0, done: true })).await;
+        return;
+    }
+    let total = results.len();
+    let num_chunks = total.div_ceil(STREAM_CHUNK_SIZE);
+    for (chunk_index, chunk) in results.chunks(STREAM_CHUNK_SIZE).enumerate() {
+        let is_done = chunk_index + 1 == num_chunks;
+        let proto_results = chunk.iter().map(convert::binding_to_query_result).collect();
+        let msg = QueryStreamChunk {
+            results: proto_results,
+            chunk_index: chunk_index as u64,
+            done: is_done,
+        };
+        if tx.send(Ok(msg)).await.is_err() {
+            return;
+        }
     }
 }
 

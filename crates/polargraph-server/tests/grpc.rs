@@ -13,7 +13,7 @@ use polargraph_server::{
         value::Kind as ValueKind,
         search_vector_filtered_request::Filter,
         vector_seed_query_request::Filter as SeedFilter,
-        BatchInsertVectorsRequest, CreateBackupRequest, CypherQueryRequest, EdgeTypeDef, FieldDef,
+        BatchInsertVectorsRequest, CreateBackupRequest, CypherQueryRequest, CypherWriteRequest, EdgeTypeDef, FieldDef,
         GetEdgeTypeRequest, GetNodeTypeRequest, InsertRequest, InsertVectorRequest,
         ListBackupsRequest, ListEdgeTypesRequest, ListNodeTypesRequest,
         ListPredicatesBetweenRequest, MigrateRequest, MigrationStatusRequest, NodeId,
@@ -28,6 +28,7 @@ use polargraph_server::{
     service::PolarGraphServer,
     wal_client,
 };
+use tokio_stream::StreamExt as _;
 use polargraph_core::temporal::Timestamp;
 use polargraph_storage::TripleStore;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -3339,13 +3340,13 @@ async fn cypher_query_simple() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.bindings.len(), 1, "only alice→bob matches; carol is Robot");
+    assert_eq!(resp.rows.len(), 1, "only alice→bob matches; carol is Robot");
 
-    let bound_a = resp.bindings[0].vars.get("a").unwrap();
+    let bound_a = resp.rows[0].nodes.get("a").unwrap();
     let bound_a_core = polargraph_core::id::NodeId(
         uuid::Uuid::from_bytes(bound_a.bytes[..16].try_into().unwrap()),
     );
-    let bound_b = resp.bindings[0].vars.get("b").unwrap();
+    let bound_b = resp.rows[0].nodes.get("b").unwrap();
     let bound_b_core = polargraph_core::id::NodeId(
         uuid::Uuid::from_bytes(bound_b.bytes[..16].try_into().unwrap()),
     );
@@ -3387,21 +3388,21 @@ async fn cypher_query_recursive() {
 
     // All (src, dst) pairs where dst is reachable from src.
     // a→b, a→c, a→d, b→c, b→d, c→d = 6 pairs
-    assert_eq!(resp.bindings.len(), 6, "expected 6 transitive pairs");
+    assert_eq!(resp.rows.len(), 6, "expected 6 transitive pairs");
 
     // Collect all 'b' values that appear when 'a' is bound to a_core.
     let reachable_from_a: std::collections::HashSet<polargraph_core::id::NodeId> = resp
-        .bindings
+        .rows
         .iter()
         .filter(|binding| {
-            binding.vars.get("a").map(|n| {
+            binding.nodes.get("a").map(|n| {
                 polargraph_core::id::NodeId(
                     uuid::Uuid::from_bytes(n.bytes[..16].try_into().unwrap()),
                 ) == a_core
             }).unwrap_or(false)
         })
         .filter_map(|binding| {
-            binding.vars.get("b").map(|n| {
+            binding.nodes.get("b").map(|n| {
                 polargraph_core::id::NodeId(
                     uuid::Uuid::from_bytes(n.bytes[..16].try_into().unwrap()),
                 )
@@ -3484,7 +3485,7 @@ async fn cypher_vector_near_query() {
         .unwrap()
         .into_inner();
 
-    assert!(!resp.bindings.is_empty(), "expected at least one result from VECTOR_NEAR + cites");
+    assert!(!resp.rows.is_empty(), "expected at least one result from VECTOR_NEAR + cites");
 
     // All returned "b" nodes must be a1 or a2 (cited by ANN-hit nodes).
     let expected_b_ids: std::collections::HashSet<Vec<u8>> = vec![
@@ -3494,11 +3495,237 @@ async fn cypher_vector_near_query() {
     .into_iter()
     .collect();
 
-    for binding in &resp.bindings {
-        let b_id = binding.vars.get("b").expect("missing 'b' var");
+    for binding in &resp.rows {
+        let b_id = binding.nodes.get("b").expect("missing 'b' node binding");
         assert!(
             expected_b_ids.contains(&b_id.bytes),
             "unexpected b node in results (not cited by any ANN hit)"
         );
     }
+}
+
+// ── QueryStream tests ─────────────────────────────────────────────────────────
+
+/// Insert N edges and verify that QueryStream returns all of them in order across
+/// chunk boundaries, with exactly one chunk marked `done = true` (the last one).
+#[tokio::test]
+async fn query_stream_returns_all_results_in_order() {
+    let (svc, _dir) = open();
+
+    // Insert 12 distinct :likes edges — enough to span multiple chunks when
+    // STREAM_CHUNK_SIZE is tested with a small value in unit tests, and a
+    // reasonable dataset here.
+    let nodes: Vec<(polargraph_core::id::NodeId, NodeId)> = (0..13).map(|_| new_node()).collect();
+    let mut triples = vec![];
+    for i in 0..12 {
+        triples.push(rel(nodes[i].1.clone(), "likes", nodes[i + 1].1.clone()));
+    }
+    svc.insert(Request::new(InsertRequest { triples })).await.unwrap();
+
+    // Stream all :likes edges.
+    let mut stream = svc
+        .query_stream(Request::new(QueryRequest {
+            patterns: vec![pattern(var("a"), "likes", var("b"))],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Collect all QueryResult rows from the stream.
+    let mut all_rows: Vec<(Vec<u8>, Vec<u8>)> = vec![];
+    let mut last_done = false;
+    let mut chunk_count: u64 = 0;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        assert_eq!(chunk.chunk_index, chunk_count, "chunk_index must be monotonically increasing");
+        chunk_count += 1;
+        for row in &chunk.results {
+            let a = row.vars.get("a").expect("missing 'a' var").bytes.clone();
+            let b = row.vars.get("b").expect("missing 'b' var").bytes.clone();
+            all_rows.push((a, b));
+        }
+        if chunk.done {
+            last_done = true;
+            // No more chunks should follow after done=true.
+            assert!(stream.next().await.is_none(), "stream should end after done=true chunk");
+            break;
+        }
+    }
+
+    assert!(last_done, "stream must end with a chunk that has done=true");
+    assert_eq!(all_rows.len(), 12, "expected exactly 12 :likes edges");
+
+    // Verify every inserted edge appears in the results.
+    for i in 0..12usize {
+        let expected_a = nodes[i].0.as_bytes().to_vec();
+        let expected_b = nodes[i + 1].0.as_bytes().to_vec();
+        assert!(
+            all_rows.contains(&(expected_a, expected_b)),
+            "edge {i}→{} missing from stream results", i + 1
+        );
+    }
+}
+
+/// Verify that CypherQueryStream respects a LIMIT clause: only the first N
+/// results are returned, and the stream ends with `done = true`.
+#[tokio::test]
+async fn cypher_query_stream_respects_limit() {
+    let (svc, _dir) = open();
+
+    // Insert 10 :follows edges.
+    let nodes: Vec<(polargraph_core::id::NodeId, NodeId)> = (0..11).map(|_| new_node()).collect();
+    let mut triples = vec![];
+    for i in 0..10 {
+        triples.push(rel(nodes[i].1.clone(), "follows", nodes[i + 1].1.clone()));
+    }
+    svc.insert(Request::new(InsertRequest { triples })).await.unwrap();
+
+    // Query with LIMIT 3 — should receive exactly 3 results.
+    let mut stream = svc
+        .cypher_query_stream(Request::new(CypherQueryRequest {
+            cypher: "MATCH (a)-[:follows]->(b) RETURN a, b LIMIT 3".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut total_rows = 0usize;
+    let mut saw_done = false;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        total_rows += chunk.results.len();
+        if chunk.done {
+            saw_done = true;
+            break;
+        }
+    }
+
+    assert!(saw_done, "stream must end with done=true");
+    assert_eq!(total_rows, 3, "LIMIT 3 should produce exactly 3 results");
+}
+
+/// Unit test: verify the chunk-boundary arithmetic used by send_result_chunks.
+///
+/// With STREAM_CHUNK_SIZE=500: 1001 results → 3 chunks (500, 500, 1).
+/// The exact chunk sizes are not observable through the gRPC API (we can only
+/// count rows), so we verify the totals and that `done` is set on the last chunk.
+#[tokio::test]
+async fn query_stream_chunk_boundary_math() {
+    let (svc, _dir) = open();
+
+    // Insert 1001 distinct nodes with a self-linking :self edge.
+    // We want 1001 rows to cross the 500-boundary twice.
+    let nodes: Vec<(polargraph_core::id::NodeId, NodeId)> = (0..1001).map(|_| new_node()).collect();
+    let triples: Vec<_> = nodes.iter().map(|(_, n)| rel(n.clone(), "self", n.clone())).collect();
+    svc.insert(Request::new(InsertRequest { triples })).await.unwrap();
+
+    let mut stream = svc
+        .query_stream(Request::new(QueryRequest {
+            patterns: vec![pattern(var("x"), "self", var("y"))],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut total_rows = 0usize;
+    let mut chunk_indices: Vec<u64> = vec![];
+    let mut saw_done = false;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        chunk_indices.push(chunk.chunk_index);
+        total_rows += chunk.results.len();
+        if chunk.done {
+            saw_done = true;
+            break;
+        }
+    }
+
+    assert!(saw_done, "stream must end with done=true");
+    assert_eq!(total_rows, 1001, "all 1001 rows must be delivered");
+    // Chunk indices must be 0, 1, 2 (three chunks for 1001 rows at 500/chunk).
+    assert_eq!(chunk_indices, vec![0, 1, 2], "expected 3 chunks with sequential indices");
+}
+
+// ── CypherWrite ───────────────────────────────────────────────────────────────
+
+/// CREATE a node via CypherWrite, then query it back via CypherQuery.
+#[tokio::test]
+async fn cypher_write_create_node_then_query() {
+    let (svc, _dir) = open();
+
+    // Write: create a Person named Alice.
+    let write_resp = svc
+        .cypher_write(Request::new(CypherWriteRequest {
+            cypher: r#"CREATE (a:Person {name: "Alice", active: true})"#.to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(write_resp.created_node_ids.len(), 1, "should have created one node");
+    assert_eq!(write_resp.triples_written, 3, "__type + name + active = 3 triples");
+    assert_eq!(write_resp.triples_deleted, 0);
+
+    // Read back: MATCH all Person nodes and confirm Alice appears.
+    let query_resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: r#"MATCH (a:Person) RETURN a"#.to_string(),
+            as_of_valid_time: 0,
+            as_of_tx_time: 0,
+            vector: vec![],
+            ef: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(query_resp.rows.len(), 1, "expected exactly one Person");
+    let created_proto_id = &write_resp.created_node_ids[0];
+    let returned_id = query_resp.rows[0].nodes.get("a").expect("missing 'a' binding");
+    assert_eq!(&returned_id.bytes, created_proto_id, "returned node id must match created id");
+}
+
+/// MERGE is idempotent: two identical MERGEs produce exactly one node.
+#[tokio::test]
+async fn cypher_write_merge_is_idempotent() {
+    let (svc, _dir) = open();
+
+    let do_merge = || CypherWriteRequest {
+        cypher: r#"MERGE (c:Company {name: "Acme"})"#.to_string(),
+    };
+
+    let r1 = svc
+        .cypher_write(Request::new(do_merge()))
+        .await
+        .unwrap()
+        .into_inner();
+    let r2 = svc
+        .cypher_write(Request::new(do_merge()))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(r1.created_node_ids.len(), 1, "first MERGE should create the node");
+    assert_eq!(r2.created_node_ids.len(), 0, "second MERGE should be a no-op");
+
+    // Confirm only one Company node in the graph.
+    let query_resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: r#"MATCH (c:Company) RETURN c"#.to_string(),
+            as_of_valid_time: 0,
+            as_of_tx_time: 0,
+            vector: vec![],
+            ef: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(query_resp.rows.len(), 1, "expected exactly one Company node after two MERGEs");
 }
