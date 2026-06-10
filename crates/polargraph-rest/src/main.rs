@@ -551,6 +551,10 @@ struct CypherBody {
     as_of_valid_time: Option<i64>,
     #[serde(default)]
     as_of_tx_time: Option<i64>,
+    /// Query embedding vector for VECTOR_NEAR. Required when the Cypher string
+    /// contains VECTOR_NEAR(var, "space", k); omit or leave empty otherwise.
+    #[serde(default)]
+    vector: Vec<f32>,
 }
 
 async fn handle_cypher(
@@ -561,6 +565,7 @@ async fn handle_cypher(
         cypher: body.cypher,
         as_of_valid_time: body.as_of_valid_time.unwrap_or(0),
         as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
+        vector: body.vector,
     };
 
     let mut client = state.client.clone();

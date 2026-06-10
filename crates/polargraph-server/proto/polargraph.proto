@@ -541,6 +541,9 @@ message CypherQueryRequest {
     int64  as_of_valid_time = 2;
     /// Transaction-time snapshot override (unix microseconds). 0 = latest.
     int64  as_of_tx_time    = 3;
+    /// Query embedding vector for VECTOR_NEAR. Required when the Cypher string
+    /// contains VECTOR_NEAR(var, "space", k) in the WHERE clause; ignored otherwise.
+    repeated float vector   = 4;
 }
 
 // ── ExplainQuery ──────────────────────────────────────────────────────────────

@@ -3292,6 +3292,7 @@ async fn cypher_query_simple() {
             cypher: "MATCH (a:Person)-[:knows]->(b:Person) RETURN a, b".to_string(),
             as_of_valid_time: 0,
             as_of_tx_time: 0,
+            vector: vec![],
         }))
         .await
         .unwrap()
@@ -3336,6 +3337,7 @@ async fn cypher_query_recursive() {
             cypher: "MATCH (a)-[:follows*]->(b) RETURN a, b".to_string(),
             as_of_valid_time: 0,
             as_of_tx_time: 0,
+            vector: vec![],
         }))
         .await
         .unwrap()
@@ -3369,4 +3371,91 @@ async fn cypher_query_recursive() {
     assert!(reachable_from_a.contains(&c_core));
     assert!(reachable_from_a.contains(&d_core));
     assert_eq!(reachable_from_a.len(), 3);
+}
+
+#[tokio::test]
+async fn cypher_vector_near_query() {
+    // Register a node type with a 3-D vector space, insert 5 Document nodes
+    // with vectors, connect them with :cites edges, then run:
+    //   MATCH (a)-[:cites]->(b) WHERE VECTOR_NEAR(a, "docs", 3) RETURN b
+    //
+    // The ANN search seeds variable "a"; the graph pattern then joins to find
+    // all "b" nodes that the seed nodes cite.  Results must be non-empty and
+    // all "b" values must be directly cited by at least one ANN hit.
+    let (svc, _dir) = open();
+
+    // Register node type with vector space so insertions succeed.
+    svc.register_node_type(Request::new(RegisterNodeTypeRequest {
+        definition: Some(NodeTypeDef {
+            type_name: "Document".into(),
+            fields: vec![],
+            vector_space: Some(VectorSpaceDef {
+                space_name: "docs".into(),
+                dimensions: 3,
+                embedding_model: String::new(),
+                storage_mode: "memory".into(),
+            }),
+        }),
+    }))
+    .await
+    .unwrap();
+
+    // Create 5 nodes: a0..a4
+    let nodes: Vec<(polargraph_core::id::NodeId, NodeId)> = (0..5).map(|_| new_node()).collect();
+
+    // Vectors: a0 is near query [1,0,0]; a1 is slightly off; others are far.
+    let vectors: Vec<Vec<f32>> = vec![
+        vec![1.0, 0.0, 0.0],   // a0 — closest
+        vec![0.9, 0.1, 0.0],   // a1 — second
+        vec![0.8, 0.2, 0.0],   // a2 — third
+        vec![0.0, 0.0, 1.0],   // a3 — far
+        vec![0.0, 1.0, 0.0],   // a4 — far
+    ];
+
+    // Insert :cites edges: a0→a1, a1→a2, a3→a4 (a3/a4 are far from query)
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            rel(nodes[0].1.clone(), "cites", nodes[1].1.clone()),
+            rel(nodes[1].1.clone(), "cites", nodes[2].1.clone()),
+            rel(nodes[3].1.clone(), "cites", nodes[4].1.clone()),
+        ],
+    }))
+    .await
+    .unwrap();
+
+    // Insert vectors into the "docs" space.
+    for (i, (_, proto_node)) in nodes.iter().enumerate() {
+        insert_vec(&svc, proto_node.clone(), vectors[i].clone(), "docs").await;
+    }
+
+    // Query: ANN seeds (k=3) from [1,0,0] → a0, a1, a2 are top-3.
+    // Of those, a0 cites a1, a1 cites a2 — so b = {a1, a2}.
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: r#"MATCH (a)-[:cites]->(b) WHERE VECTOR_NEAR(a, "docs", 3) RETURN b"#.into(),
+            as_of_valid_time: 0,
+            as_of_tx_time: 0,
+            vector: vec![1.0, 0.0, 0.0],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(!resp.bindings.is_empty(), "expected at least one result from VECTOR_NEAR + cites");
+
+    // All returned "b" nodes must be a1 or a2 (cited by ANN-hit nodes).
+    let expected_b_ids: std::collections::HashSet<Vec<u8>> = vec![
+        nodes[1].0.as_bytes().to_vec(),
+        nodes[2].0.as_bytes().to_vec(),
+    ]
+    .into_iter()
+    .collect();
+
+    for binding in &resp.bindings {
+        let b_id = binding.vars.get("b").expect("missing 'b' var");
+        assert!(
+            expected_b_ids.contains(&b_id.bytes),
+            "unexpected b node in results (not cited by any ANN hit)"
+        );
+    }
 }

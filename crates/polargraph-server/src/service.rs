@@ -1231,8 +1231,40 @@ impl PolarGraphService for PolarGraphServer {
         let deadline = self.make_deadline();
         let t0 = Instant::now();
 
-        // Execute using the same path as the Query RPC.
-        let raw_results = if compiled.rules.is_empty() {
+        // Execute: VECTOR_NEAR path (ANN → seed bindings → query) or regular path.
+        let raw_results = if let Some(vn) = compiled.vector_near {
+            if req.vector.is_empty() {
+                return Err(Status::invalid_argument(
+                    "VECTOR_NEAR requires a query vector in the request (field 'vector')",
+                ));
+            }
+            let space = &vn.space;
+            let k = vn.k as usize;
+            let ef = k * 10;
+            let seed_var = vn.seed_variable.clone();
+
+            let ann_hits = self
+                .store
+                .search_vector_ef(space, &req.vector, ef, ef)
+                .into_iter()
+                .take(k)
+                .collect::<Vec<_>>();
+
+            if ann_hits.is_empty() {
+                vec![]
+            } else {
+                let initial: Vec<Bindings> = ann_hits
+                    .iter()
+                    .map(|(id, _)| {
+                        let mut b = Bindings::new();
+                        b.insert(seed_var.clone(), *id);
+                        b
+                    })
+                    .collect();
+                execute_query_seeded(&compiled.query, &snapshot, initial, deadline)
+                    .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+            }
+        } else if compiled.rules.is_empty() {
             execute_query(&compiled.query, &snapshot, deadline)
                 .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
         } else {
