@@ -133,6 +133,27 @@ curl -s -X POST http://localhost:8000/explain \
 
 Pattern strings: `?varname` for variables, `_` for wildcards, UUID or plain text for bound terms, optional `:` prefix on predicates.
 
+**Cypher query:**
+```bash
+curl -s -X POST http://localhost:8000/cypher \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d '{"cypher":"MATCH (a:Person)-[:knows]->(b:Person) WHERE a.name = \"Alice\" RETURN b"}'
+```
+
+**Vector + graph query (VECTOR_NEAR):**
+```bash
+curl -s -X POST http://localhost:8000/cypher \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d '{
+    "cypher": "MATCH (a:Document)-[:cites]->(b) WHERE VECTOR_NEAR(a, \"docs\", 10) RETURN b LIMIT 20",
+    "vector": [0.1, 0.2, 0.3]
+  }'
+```
+
+The `vector` field is required when `VECTOR_NEAR` appears in the query. Pass `"ef": N` to override the exploration factor for this request (0 = use server default).
+
 ---
 
 ## Workspace layout

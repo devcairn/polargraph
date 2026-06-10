@@ -348,6 +348,53 @@ avoiding per-item lock overhead. Returns count inserted and any per-item errors.
 
 ---
 
+## HNSW ef tuning
+
+The **exploration factor** (`ef`) controls the size of the candidate list
+maintained during ANN graph traversal at query time. A larger `ef` explores
+more of the graph before picking the final top-k, trading latency for recall.
+
+### Quality / speed tradeoff
+
+| ef | Character |
+|----|-----------|
+| 20 | Fastest; a few percent recall loss vs. brute force |
+| 50 | Safe default; good recall on most workloads |
+| 100+ | High-recall mode; noticeably slower on large indexes |
+
+**Rule of thumb:** `ef ≥ k`. Below `k` the search may not even fill the
+result set. The built-in fallback in `search_vector` uses
+`ef = max(ef_construction / 2, k)` when no caller `ef` is supplied.
+
+**Benchmark data point:** at 100K nodes / 128 dims / k=10, ef=50 runs ~583 µs
+p50; ef=20 roughly halves that at the cost of a few percent recall.
+
+### Three-level resolution hierarchy
+
+When a search request arrives, `ef` is resolved in priority order:
+
+1. **Cypher inline** — `VECTOR_NEAR(a, "space", 10, ef=100)` overrides
+   everything for that specific predicate in the query.
+2. **Per-request proto field** — the `ef` field on `SearchVectorRequest`,
+   `VectorSeedQueryRequest`, and `CypherQueryRequest`. A value of `0` means
+   "use the server default".
+3. **Server default** — `--default-vector-ef` CLI flag /
+   `POLARGRAPH_DEFAULT_VECTOR_EF` env var / `[query] default_vector_ef` in
+   the TOML config file. Built-in default: **50**.
+
+```toml
+[query]
+timeout_ms        = 30000
+slow_query_ms     = 1000
+default_vector_ef = 50    # override here to tune globally
+```
+
+This hierarchy lets you set a conservative global default while allowing
+latency-sensitive callers to drop ef and recall-critical callers to raise it,
+without server restarts.
+
+---
+
 ## Query layer
 
 ### Pattern evaluation (`polargraph_query::eval`)
@@ -576,6 +623,115 @@ message VectorSeedQueryRequest {
 message VectorSeedQueryResponse {
     repeated ScoredBinding bindings = 1;
 }
+```
+
+---
+
+## Cypher query surface
+
+PolarGraph supports a subset of Cypher as a higher-level query language that
+compiles down to the Datalog IR at the server. This lets clients write
+readable graph queries without constructing `VarPattern` lists by hand.
+
+### Supported syntax
+
+| Construct | Example |
+|-----------|---------|
+| Node label match | `MATCH (a:Person)` |
+| Relationship traversal | `MATCH (a)-[:knows]->(b)` |
+| Property filter | `WHERE a.name = "Alice"` |
+| Transitive closure | `MATCH (a)-[:knows*]->(b)` |
+| Vector predicate | `WHERE VECTOR_NEAR(a, "space", k)` or `WHERE VECTOR_NEAR(a, "space", k, ef=100)` |
+| Result projection | `RETURN a, b` |
+| Row limit | `LIMIT 20` |
+
+Unsupported Cypher features (aggregations, `CREATE`/`MERGE`, `WITH`, multiple
+`MATCH` clauses, `OPTIONAL MATCH`) are rejected with `INVALID_ARGUMENT`.
+
+### How it compiles to Datalog IR
+
+The Cypher parser (`polargraph_query::cypher`) translates each clause to
+equivalent Datalog structures before execution:
+
+- **Node patterns** like `(a:Person)` become a `VarPattern` binding the type
+  predicate: `[?a, :__type, "Person"]`.
+- **Relationship patterns** like `(a)-[:knows]->(b)` become
+  `[?a, :knows, ?b]`.
+- **`[:pred*]` transitive closure** generates a recursive `Rule` with
+  head predicate `pred_reach` and the two-hop body
+  `[?x, :pred, ?y], [?y, pred_reach, ?z]`, then queries the derived facts.
+- **`WHERE` value filters** on node properties are pushed down as additional
+  `VarPattern`s (`[?a, :name, "Alice"]` for equality tests).
+- **`VECTOR_NEAR`** routes through `VectorSeedQuery`: the predicate becomes the
+  seed variable, the rest of the `MATCH` body forms the graph patterns, and
+  `LIMIT` caps the returned rows.
+
+### `CypherQuery` RPC and `POST /cypher`
+
+**gRPC:**
+```proto
+rpc CypherQuery(CypherQueryRequest) returns (CypherQueryResponse);
+
+message CypherQueryRequest {
+    string         cypher       = 1;
+    repeated float vector       = 2;  // required when VECTOR_NEAR is present
+    uint32         ef           = 3;  // 0 = use server default
+    int64          snapshot_ts  = 4;
+}
+message CypherQueryResponse {
+    repeated ScoredBinding results = 1;
+}
+```
+
+**REST:**
+```
+POST /cypher
+Content-Type: application/json
+```
+
+Request body:
+```json
+{
+  "cypher":  "MATCH (a:Person)-[:knows]->(b) WHERE a.name = \"Alice\" RETURN b",
+  "vector":  [],        // required only when VECTOR_NEAR is used
+  "ef":      0,         // 0 = server default
+  "snapshot_ts": 0
+}
+```
+
+### Example queries
+
+```cypher
+-- Simple label match
+MATCH (a:Person) RETURN a LIMIT 10
+```
+
+```cypher
+-- Relationship traversal with property filter
+MATCH (a:Person)-[:knows]->(b:Person)
+WHERE a.name = "Alice"
+RETURN b
+```
+
+```cypher
+-- Transitive closure (arbitrary depth)
+MATCH (a:Person)-[:knows*]->(b:Person)
+RETURN b
+```
+
+```cypher
+-- Vector + graph (unified ANN seed query)
+-- vector is passed in the request body alongside the cypher string
+MATCH (a:Document)-[:cites]->(b:Document)
+WHERE VECTOR_NEAR(a, "doc_embeddings", 10)
+RETURN b LIMIT 20
+```
+
+```cypher
+-- Explicit ef override for high-recall search
+MATCH (a:Document)-[:cites]->(b:Document)
+WHERE VECTOR_NEAR(a, "doc_embeddings", 10, ef=100)
+RETURN b LIMIT 20
 ```
 
 ---
@@ -1685,6 +1841,51 @@ Example:
 }
 ```
 
+### Datalog rules in `/query`
+
+The `/query` endpoint accepts an optional `rules` array for recursive /
+derived-predicate queries. Each rule has the form:
+
+```json
+{
+  "rules": [
+    {
+      "head_predicate": "reachable",
+      "head_subject_var": "x",
+      "head_object_var": "z",
+      "body": ["?x :edge ?y", "?y :edge ?z"]
+    }
+  ],
+  "patterns": ["?src :reachable ?dst"]
+}
+```
+
+When rules are present the server runs them to a fixed point (deriving IDB
+facts), then evaluates `patterns` against the combined base + derived fact
+set. Body patterns follow the same 3-token string format as query patterns.
+
+### Edge properties in `/insert`
+
+`POST /insert` accepts an optional `properties` array to store scalar
+properties on the edge at insert time. The response includes `edge_id` — the
+UUID under which those properties are stored — so clients can query them later.
+
+```json
+{
+  "subject": "<uuid>",
+  "predicate": "works_at",
+  "object": "<uuid>",
+  "properties": [
+    {"name": "since", "value": {"int_val": 2019}},
+    {"name": "role",  "value": {"text_val": "engineer"}}
+  ]
+}
+```
+
+Value encoding mirrors the proto `Value` oneof: `bool_val`, `int_val`,
+`float_val`, `text_val`, `blob_val` (array of integers 0–255), `vec_val`
+(`{"values": [...]}`), or `null_val`.
+
 ### CLI flags
 
 | Flag | Env variable | Default | Description |
@@ -1713,8 +1914,9 @@ gRPC status codes map to HTTP status codes:
 - `/triples` does not return the predicate value when `predicate` is omitted
   from the query params — the VarPattern proto does not support variable
   predicates, so the response echoes back an empty string in that slot.
-- Only relation triples (NodeId → NodeId) are supported via `POST /insert`.
-  Property triples (scalar values) must be inserted via the gRPC API directly.
+- Node property triples (scalar values whose subject is a `NodeId`) must be
+  inserted via the gRPC API directly; `/insert` only creates relation triples
+  (with optional edge properties).
 
 ---
 
