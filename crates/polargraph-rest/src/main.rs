@@ -147,6 +147,9 @@ struct VectorSearchBody {
     top_k: u32,
     #[serde(default = "default_namespace")]
     namespace: String,
+    /// HNSW exploration factor. 0 or absent = use server default.
+    #[serde(default)]
+    ef: u32,
 }
 
 fn default_namespace() -> String {
@@ -505,6 +508,7 @@ async fn handle_vector_search(
         query: body.vector,
         k: body.top_k,
         space: body.namespace,
+        ef: body.ef,
     };
 
     let mut client = state.client.clone();
@@ -555,6 +559,9 @@ struct CypherBody {
     /// contains VECTOR_NEAR(var, "space", k); omit or leave empty otherwise.
     #[serde(default)]
     vector: Vec<f32>,
+    /// HNSW exploration factor override. 0 or absent = use server default.
+    #[serde(default)]
+    ef: u32,
 }
 
 async fn handle_cypher(
@@ -566,6 +573,7 @@ async fn handle_cypher(
         as_of_valid_time: body.as_of_valid_time.unwrap_or(0),
         as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
         vector: body.vector,
+        ef: body.ef,
     };
 
     let mut client = state.client.clone();

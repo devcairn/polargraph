@@ -140,6 +140,13 @@
 # Equivalent to --slow-query-ms / POLARGRAPH_SLOW_QUERY_MS
 # slow_query_ms = 1000
 
+# Default HNSW exploration factor for vector searches.
+# Higher = better recall but slower.  Must be >= k for meaningful results.
+# Per-request `ef` fields (on SearchVector, SearchVectorFiltered, etc.) override
+# this value when non-zero.
+# Equivalent to --default-vector-ef / POLARGRAPH_DEFAULT_VECTOR_EF
+# default_vector_ef = 50
+
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 
 [rate_limit]

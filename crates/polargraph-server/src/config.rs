@@ -153,6 +153,9 @@ pub struct QueryConfig {
     /// Log a warning when any query RPC exceeds this many ms (0 = disabled).
     /// Equivalent to `--slow-query-ms` / `POLARGRAPH_SLOW_QUERY_MS`.
     pub slow_query_ms: Option<u64>,
+    /// Default ef for HNSW vector searches (higher = better recall, slower).
+    /// Equivalent to `--default-vector-ef` / `POLARGRAPH_DEFAULT_VECTOR_EF`.
+    pub default_vector_ef: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -251,8 +254,9 @@ no_metrics = false
 no_ui      = false
 
 [query]
-timeout_ms    = 5000
-slow_query_ms = 250
+timeout_ms       = 5000
+slow_query_ms    = 250
+default_vector_ef = 100
 "#
         )
         .unwrap();
@@ -294,6 +298,7 @@ slow_query_ms = 250
 
         assert_eq!(cfg.query.timeout_ms, Some(5_000));
         assert_eq!(cfg.query.slow_query_ms, Some(250));
+        assert_eq!(cfg.query.default_vector_ef, Some(100));
     }
 
     #[test]

@@ -175,6 +175,9 @@ message SearchVectorRequest {
     uint32         k     = 2;
     /// Named HNSW space. Defaults to "default" if empty.
     string         space = 3;
+    /// HNSW exploration factor. Higher = better recall, slower.
+    /// 0 means use the server-wide default (--default-vector-ef, default 50).
+    uint32         ef    = 4;
 }
 
 message VectorSearchResult {
@@ -210,6 +213,8 @@ message SearchVectorFilteredRequest {
         NodeTypeFilter    node_type_filter    = 4;
         ReachabilityFilter reachability_filter = 5;
     }
+    /// HNSW exploration factor. 0 = use server default.
+    uint32         ef    = 6;
 }
 
 message SearchVectorFilteredResponse {
@@ -405,6 +410,8 @@ message VectorSeedQueryRequest {
         NodeTypeFilter     node_type_filter     = 7;
         ReachabilityFilter reachability_filter  = 8;
     }
+    /// HNSW exploration factor. 0 = use server default.
+    uint32              ef           = 9;
 }
 
 message VectorSeedQueryResponse {
@@ -544,6 +551,8 @@ message CypherQueryRequest {
     /// Query embedding vector for VECTOR_NEAR. Required when the Cypher string
     /// contains VECTOR_NEAR(var, "space", k) in the WHERE clause; ignored otherwise.
     repeated float vector   = 4;
+    /// HNSW exploration factor for VECTOR_NEAR. 0 = use server default.
+    uint32         ef       = 5;
 }
 
 // ── ExplainQuery ──────────────────────────────────────────────────────────────

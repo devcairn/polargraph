@@ -230,6 +230,15 @@ struct Cli {
     )]
     rate_limit_rps: Option<u32>,
 
+    /// Default HNSW exploration factor for vector searches (higher = better recall, slower).
+    /// Per-request `ef` fields override this value when non-zero. Default: 50.
+    #[arg(
+        long = "default-vector-ef",
+        env = "POLARGRAPH_DEFAULT_VECTOR_EF",
+        value_name = "N"
+    )]
+    default_vector_ef: Option<u32>,
+
     /// Path to PEM certificate file. When combined with --tls-key, enables TLS
     /// on the gRPC server, management UI, and metrics endpoint.
     #[arg(
@@ -333,6 +342,7 @@ async fn main() -> Result<()> {
     let tls_key = resolve_path_opt(cli.tls_key, cfg.tls.key);
     let replica_tls_ca = resolve_path_opt(cli.replica_tls_ca, cfg.replication.tls_ca);
     let rate_limit_rps = resolve(cli.rate_limit_rps, cfg.rate_limit.max_rps, 0u32);
+    let default_vector_ef = resolve(cli.default_vector_ef, cfg.query.default_vector_ef, 50u32);
 
     // ── Tracing ───────────────────────────────────────────────────────────────
     let filter = EnvFilter::try_new(&log_level)
@@ -583,14 +593,16 @@ async fn main() -> Result<()> {
 
         let server = server
             .with_query_timeout_ms(query_timeout_ms)
-            .with_slow_query_ms(slow_query_ms);
+            .with_slow_query_ms(slow_query_ms)
+            .with_default_vector_ef(default_vector_ef);
 
         (server, Some(rs))
     } else {
         let server = PolarGraphServer::new_with_backup_dir(store, backup_dir.as_deref())
             .context("failed to initialise PolarGraphServer")?
             .with_query_timeout_ms(query_timeout_ms)
-            .with_slow_query_ms(slow_query_ms);
+            .with_slow_query_ms(slow_query_ms)
+            .with_default_vector_ef(default_vector_ef);
         (server, None)
     };
 

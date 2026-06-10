@@ -350,7 +350,7 @@ async fn insert_vector_empty_vector_returns_invalid_argument() {
 async fn search_vector_empty_query_returns_invalid_argument() {
     let (svc, _dir) = open();
     let err = svc
-        .search_vector(Request::new(SearchVectorRequest { query: vec![], k: 5, space: String::new() }))
+        .search_vector(Request::new(SearchVectorRequest { query: vec![], k: 5, space: String::new(), ef: 0 }))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -390,6 +390,7 @@ async fn insert_then_search_vector_finds_nearest() {
             query: vec![1.0, 0.0, 0.0],
             k: 1,
             space: String::new(),
+            ef: 0,
         }))
         .await
         .unwrap()
@@ -408,6 +409,7 @@ async fn search_vector_empty_index_returns_empty() {
             query: vec![1.0, 0.0],
             k: 5,
             space: String::new(),
+            ef: 0,
         }))
         .await
         .unwrap()
@@ -434,11 +436,40 @@ async fn search_vector_default_k_when_zero() {
             query: vec![1.0, 0.0],
             k: 0,
             space: String::new(),
+            ef: 0,
         }))
         .await
         .unwrap()
         .into_inner();
     assert_eq!(resp.results.len(), 5);
+}
+
+#[tokio::test]
+async fn search_vector_respects_ef() {
+    // Verifies that the ef field is plumbed through — a very low ef=1 should
+    // still return a non-empty result (not an error), confirming the field is wired.
+    let (svc, _dir) = open();
+    let (_, id) = new_node();
+    svc.insert_vector(Request::new(InsertVectorRequest {
+        node_id: Some(id),
+        vector: vec![1.0, 0.0],
+        space: String::new(),
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .search_vector(Request::new(SearchVectorRequest {
+            query: vec![1.0, 0.0],
+            k: 1,
+            space: String::new(),
+            ef: 1,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(!resp.results.is_empty(), "ef=1 per-request override should still return a result");
 }
 
 #[tokio::test]
@@ -1165,6 +1196,7 @@ async fn insert_vector_named_space_is_independent() {
             query: vec![1.0, 0.0],
             k: 5,
             space: "space_a".into(),
+            ef: 0,
         }))
         .await
         .unwrap()
@@ -1268,6 +1300,7 @@ async fn batch_insert_vectors_inserts_all() {
             query: vec![1.0, 0.0, 0.0],
             k: 1,
             space: "default".into(),
+            ef: 0,
         }))
         .await
         .unwrap()
@@ -1375,6 +1408,7 @@ async fn search_vector_filtered_missing_filter_returns_invalid_argument() {
             query: vec![1.0, 0.0],
             k: 5,
             filter: None,
+            ef: 0,
         }))
         .await
         .unwrap_err();
@@ -1422,6 +1456,7 @@ async fn search_vector_filtered_by_node_type_returns_only_matching_nodes() {
             query: vec![1.0, 0.0, 0.0],
             k: 5,
             filter: Some(Filter::NodeTypeFilter(NodeTypeFilter { type_name: "Widget".into() })),
+            ef: 0,
         }))
         .await
         .unwrap()
@@ -1483,6 +1518,7 @@ async fn vector_seed_query_binds_seeds_to_graph_patterns() {
             patterns: vec![pattern(var("n"), "follows", var("friend"))],
             snapshot_ts: 0,
             filter: None,
+            ef: 0,
         }))
         .await
         .unwrap()
@@ -1533,6 +1569,7 @@ async fn vector_seed_query_with_node_type_filter() {
             filter: Some(SeedFilter::NodeTypeFilter(NodeTypeFilter {
                 type_name: "TypedNode".into(),
             })),
+            ef: 0,
         }))
         .await
         .unwrap()
@@ -1561,6 +1598,7 @@ async fn vector_seed_query_empty_patterns_returns_seed_bindings() {
             patterns: vec![],
             snapshot_ts: 0,
             filter: None,
+            ef: 0,
         }))
         .await
         .unwrap()
@@ -1599,6 +1637,7 @@ async fn vector_seed_query_seeds_with_no_edges_return_no_rows() {
             patterns: vec![pattern(var("n"), "knows", var("friend"))],
             snapshot_ts: 0,
             filter: None,
+            ef: 0,
         }))
         .await
         .unwrap()
@@ -1652,6 +1691,7 @@ async fn mmap_storage_mode_insert_and_search() {
             query: vec![1.0, 0.0, 0.0],
             k: 1,
             space: "mmap_space".into(),
+            ef: 0,
         }))
         .await
         .unwrap()
@@ -3293,6 +3333,7 @@ async fn cypher_query_simple() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![],
+            ef: 0,
         }))
         .await
         .unwrap()
@@ -3338,6 +3379,7 @@ async fn cypher_query_recursive() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![],
+            ef: 0,
         }))
         .await
         .unwrap()
@@ -3436,6 +3478,7 @@ async fn cypher_vector_near_query() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![1.0, 0.0, 0.0],
+            ef: 0,
         }))
         .await
         .unwrap()

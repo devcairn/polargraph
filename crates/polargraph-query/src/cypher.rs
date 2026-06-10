@@ -112,7 +112,7 @@ struct CypherPath {
 #[derive(Debug)]
 pub enum WhereClause {
     PropertyEq { var: String, prop: String, value: CypherValue },
-    VectorNear  { var: String, space: String, k: u32 },
+    VectorNear  { var: String, space: String, k: u32, ef: Option<u32> },
 }
 
 /// Parsed representation of a Cypher query.
@@ -137,11 +137,13 @@ pub struct ValueFilter {
     pub value: Value,
 }
 
-/// Compiled representation of a `VECTOR_NEAR(var, "space", k)` predicate.
+/// Compiled representation of a `VECTOR_NEAR(var, "space", k[, ef=N])` predicate.
 pub struct VectorNearClause {
     pub seed_variable: String,
     pub space: String,
     pub k: u32,
+    /// Explicit ef from `ef=N` syntax. `None` means use the server default.
+    pub ef: Option<u32>,
 }
 
 /// The result of compiling a `CypherQuery` to the Datalog IR.
@@ -619,8 +621,30 @@ impl Parser {
                     "VECTOR_NEAR: k must be a positive integer",
                 ));
             }
+            // Optional: , ef=<n>
+            let ef_val = if self.peek() == Some(&Token::Comma) {
+                self.advance(); // consume ','
+                let ef_name = self.expect_ident()?;
+                if !ef_name.eq_ignore_ascii_case("ef") {
+                    return Err(CypherError::at(
+                        self.current_pos(),
+                        format!("VECTOR_NEAR: expected 'ef', got {:?}", ef_name),
+                    ));
+                }
+                self.expect(&Token::Eq)?;
+                let n = self.expect_int()?;
+                if n <= 0 {
+                    return Err(CypherError::at(
+                        self.current_pos(),
+                        "VECTOR_NEAR: ef must be a positive integer",
+                    ));
+                }
+                Some(n as u32)
+            } else {
+                None
+            };
             self.expect(&Token::RParen)?;
-            Ok(WhereClause::VectorNear { var, space, k: k_val as u32 })
+            Ok(WhereClause::VectorNear { var, space, k: k_val as u32, ef: ef_val })
         } else {
             // Regular property filter: var.prop = value
             self.expect(&Token::Dot)?;
@@ -709,8 +733,8 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
                     value: value.to_core_value(),
                 });
             }
-            WhereClause::VectorNear { var, space, k } => {
-                vector_near = Some(VectorNearClause { seed_variable: var, space, k });
+            WhereClause::VectorNear { var, space, k, ef } => {
+                vector_near = Some(VectorNearClause { seed_variable: var, space, k, ef });
             }
         }
     }
@@ -1013,10 +1037,32 @@ mod tests {
         let q = parse(r#"MATCH (a:Document)-[:cites]->(b) WHERE VECTOR_NEAR(a, "doc_space", 10) RETURN b"#).unwrap();
         assert_eq!(q.where_clauses.len(), 1);
         match &q.where_clauses[0] {
-            WhereClause::VectorNear { var, space, k } => {
+            WhereClause::VectorNear { var, space, k, ef } => {
                 assert_eq!(var, "a");
                 assert_eq!(space, "doc_space");
                 assert_eq!(*k, 10);
+                assert_eq!(*ef, None);
+            }
+            other => panic!("expected VectorNear, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_vector_near_default_ef() {
+        let q = parse(r#"MATCH (a) WHERE VECTOR_NEAR(a, "s", 10) RETURN a"#).unwrap();
+        match &q.where_clauses[0] {
+            WhereClause::VectorNear { ef, .. } => assert_eq!(*ef, None),
+            other => panic!("expected VectorNear, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_vector_near_with_ef() {
+        let q = parse(r#"MATCH (a) WHERE VECTOR_NEAR(a, "s", 10, ef=100) RETURN a"#).unwrap();
+        match &q.where_clauses[0] {
+            WhereClause::VectorNear { k, ef, .. } => {
+                assert_eq!(*k, 10);
+                assert_eq!(*ef, Some(100));
             }
             other => panic!("expected VectorNear, got {:?}", other),
         }

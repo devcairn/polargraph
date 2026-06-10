@@ -119,6 +119,8 @@ pub struct PolarGraphServer {
     query_timeout_ms: u64,
     /// Emit a warn! when a query RPC takes longer than this many ms. 0 = disabled.
     slow_query_ms: u64,
+    /// Default HNSW exploration factor for all vector search RPCs.
+    default_vector_ef: u32,
 }
 
 impl PolarGraphServer {
@@ -146,7 +148,7 @@ impl PolarGraphServer {
         let backup_manager = backup_dir
             .map(|dir| BackupManager::open(dir, &store).map(Arc::new))
             .transpose()?;
-        Ok(Self { store, registry, edge_registry, type_cache, backup_manager, replica_state: None, query_timeout_ms: 30_000, slow_query_ms: 1_000 })
+        Ok(Self { store, registry, edge_registry, type_cache, backup_manager, replica_state: None, query_timeout_ms: 30_000, slow_query_ms: 1_000, default_vector_ef: 50 })
     }
 
     /// Set the maximum query execution time in milliseconds. 0 disables the timeout.
@@ -160,6 +162,13 @@ impl PolarGraphServer {
     /// 0 disables slow-query logging.
     pub fn with_slow_query_ms(mut self, ms: u64) -> Self {
         self.slow_query_ms = ms;
+        self
+    }
+
+    /// Set the default HNSW exploration factor for all vector search RPCs.
+    /// Per-request `ef` fields override this value when non-zero.
+    pub fn with_default_vector_ef(mut self, ef: u32) -> Self {
+        self.default_vector_ef = ef;
         self
     }
 
@@ -204,6 +213,7 @@ impl PolarGraphServer {
             replica_state: Some(replica_state.clone()),
             query_timeout_ms: 30_000,
             slow_query_ms: 1_000,
+            default_vector_ef: 50,
         };
         Ok((server, replica_state))
     }
@@ -448,10 +458,11 @@ impl PolarGraphService for PolarGraphServer {
         }
         let k = if req.k == 0 { 10 } else { req.k as usize };
         let space = if req.space.is_empty() { "default" } else { &req.space };
+        let ef = if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize };
 
-        debug!("search_vector: space={} dim={} k={k}", space, req.query.len());
+        debug!("search_vector: space={} dim={} k={k} ef={ef}", space, req.query.len());
 
-        let hits = self.store.search_vector(space, req.query, k);
+        let hits = self.store.search_vector_ef(space, &req.query, k, ef);
         let results = hits
             .into_iter()
             .map(|(id, score)| VectorSearchResult {
@@ -475,7 +486,7 @@ impl PolarGraphService for PolarGraphServer {
         }
         let k = if req.k == 0 { 10 } else { req.k as usize };
         let space = if req.space.is_empty() { "default" } else { &req.space };
-        let ef = k * 10;
+        let ef = if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize };
 
         match req.filter {
             // ── NodeTypeFilter: O(1) cache read, no triple scan ───────────────
@@ -851,7 +862,7 @@ impl PolarGraphService for PolarGraphServer {
 
         let k = if req.k == 0 { 10 } else { req.k as usize };
         let space = if req.space.is_empty() { "default" } else { &req.space };
-        let ef = k * 10;
+        let ef = if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize };
         let seed_var = req.seed_variable.clone();
 
         debug!(
@@ -1240,7 +1251,9 @@ impl PolarGraphService for PolarGraphServer {
             }
             let space = &vn.space;
             let k = vn.k as usize;
-            let ef = k * 10;
+            let ef = vn.ef.map(|e| e as usize)
+                .filter(|&e| e > 0)
+                .unwrap_or_else(|| if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize });
             let seed_var = vn.seed_variable.clone();
 
             let ann_hits = self
