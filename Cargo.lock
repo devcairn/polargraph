@@ -1672,6 +1672,7 @@ dependencies = [
  "clap",
  "hdrhistogram",
  "polargraph-core",
+ "polargraph-query",
  "polargraph-server",
  "polargraph-storage",
  "tempfile",

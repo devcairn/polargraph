@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use hdrhistogram::Histogram;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -75,6 +75,7 @@ enum Scenario {
     Mixed,
     Recovery,
     FilteredSearch,
+    VectorNearGraph,
 }
 
 // ── node ID helpers ───────────────────────────────────────────────────────────
@@ -138,6 +139,7 @@ fn relation_triple(subject: Vec<u8>, predicate: &str, object: Vec<u8>) -> ProtoT
             object: Some(proto_node_id(object)),
             vt_start: 0,
             vt_end: 0,
+            properties: vec![],
         })),
     }
 }
@@ -159,6 +161,7 @@ impl LatencyUs {
     fn p50(&self) -> u64 { self.0.value_at_quantile(0.50) }
     fn p95(&self) -> u64 { self.0.value_at_quantile(0.95) }
     fn p99(&self) -> u64 { self.0.value_at_quantile(0.99) }
+    fn mean(&self) -> f64 { self.0.mean() }
     fn count(&self) -> u64 { self.0.len() }
 }
 
@@ -609,6 +612,153 @@ async fn run_filtered_search(mut client: PolarGraphServiceClient<Channel>, args:
     Ok(())
 }
 
+// ── scenario: vector-near-graph ───────────────────────────────────────────────
+
+async fn run_vector_near_graph() -> Result<()> {
+    use polargraph_core::{
+        id::NodeId,
+        schema::StorageMode,
+        temporal::{BiTemporalRange, Timestamp},
+        triple::{Predicate, Triple},
+        value::Value,
+    };
+    use polargraph_query::datalog::{execute_query_seeded, Query, Term, VarPattern};
+    use polargraph_storage::TripleStore;
+
+    const DIMS: usize = 128;
+    const CITES_PER_NODE: usize = 5;
+    const SPACE: &str = "bench";
+    const ITERS: usize = 100;
+    const EF: usize = 50;
+    const K_VALUES: &[usize] = &[5, 10, 25];
+    const SCALES: &[usize] = &[1_000, 10_000, 100_000];
+
+    println!("\n[vector-near-graph] dims={DIMS} cites_per_node={CITES_PER_NODE} iters={ITERS}");
+    println!();
+
+    for &n in SCALES {
+        print!("  setup nodes={n:<7} ... ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let dir = tempfile::tempdir().context("tempdir")?;
+        let store = TripleStore::open(dir.path()).context("open store")?;
+
+        let mut seed = 0xDEAD_BEEF_u64.wrapping_add(n as u64);
+        let node_ids: Vec<NodeId> = (0..n).map(|_| NodeId::new()).collect();
+
+        // Batch-insert nodes: __type triple + vector
+        const TRI_BATCH: usize = 500;
+        let type_pred = Predicate::new("__type");
+        let cites_pred = Predicate::new("cites");
+
+        for chunk in node_ids.chunks(TRI_BATCH) {
+            let mut tx = store.begin();
+            for &id in chunk {
+                tx.insert(Triple::Property {
+                    subject: id,
+                    predicate: type_pred.clone(),
+                    value: Value::Text("Document".into()),
+                    temporal: BiTemporalRange::assert_now(Timestamp::now()),
+                });
+            }
+            tx.commit().context("commit type triples")?;
+
+            // Insert vectors
+            let items: Vec<(NodeId, Vec<f32>)> = chunk
+                .iter()
+                .map(|&id| (id, make_vec(&mut seed, DIMS)))
+                .collect();
+            store
+                .batch_insert_vectors(SPACE, &items, StorageMode::Memory);
+        }
+
+        // Insert :cites edges (each node cites 5 random others)
+        for chunk_start in (0..n).step_by(TRI_BATCH) {
+            let chunk_end = (chunk_start + TRI_BATCH).min(n);
+            let mut tx = store.begin();
+            for i in chunk_start..chunk_end {
+                for j in 1..=CITES_PER_NODE {
+                    let obj = (i + j * 7 + 3) % n; // deterministic spread
+                    tx.insert(Triple::Relation {
+                        subject: node_ids[i],
+                        predicate: cites_pred.clone(),
+                        object: node_ids[obj],
+                        temporal: BiTemporalRange::assert_now(Timestamp::now()),
+                        edge_id: polargraph_core::id::EdgeId::new(),
+                    });
+                }
+            }
+            tx.commit().context("commit cites triples")?;
+        }
+
+        println!("done");
+
+        // Take a snapshot for all queries
+        let snap_ts = store.begin().read_ts;
+        let snapshot = store.snapshot(snap_ts);
+
+        // Build the query: (?a, "cites", ?b) — subject is pre-seeded
+        let query = Query::new().pattern(
+            VarPattern::new()
+                .subject(Term::var("a"))
+                .predicate("cites")
+                .object(Term::var("b")),
+        );
+
+        for &k in K_VALUES {
+            let mut ann_hist = LatencyUs::new();
+            let mut graph_hist = LatencyUs::new();
+            let mut total_hist = LatencyUs::new();
+
+            for iter in 0..ITERS {
+                // Fresh query vector each iteration
+                let qvec = make_vec(&mut seed.wrapping_add(iter as u64 * 31), DIMS);
+
+                let t_total = Instant::now();
+
+                // ANN search
+                let t_ann = Instant::now();
+                let ann_results = store.search_vector_ef(SPACE, &qvec, k, EF);
+                ann_hist.record(t_ann.elapsed());
+
+                // Build seed bindings: one per ANN result, binding var "a"
+                let seed_bindings: Vec<HashMap<String, NodeId>> = ann_results
+                    .iter()
+                    .map(|(node_id, _)| {
+                        let mut b = HashMap::new();
+                        b.insert("a".to_string(), *node_id);
+                        b
+                    })
+                    .collect();
+
+                // Graph join
+                let t_graph = Instant::now();
+                let _results =
+                    execute_query_seeded(&query, &snapshot, seed_bindings, None)
+                        .context("execute_query_seeded")?;
+                graph_hist.record(t_graph.elapsed());
+
+                total_hist.record(t_total.elapsed());
+            }
+
+            println!(
+                "  vector-near-graph | nodes={n:<7} k={k:<3} | \
+                 p50={:>6}µs  p95={:>6}µs  p99={:>6}µs  mean={:>6.0}µs",
+                total_hist.p50(), total_hist.p95(), total_hist.p99(), total_hist.mean(),
+            );
+            println!(
+                "                    |               ann:  p50={:>6}µs  p95={:>6}µs  mean={:>6.0}µs  \
+                 graph: p50={:>6}µs  p95={:>6}µs  mean={:>6.0}µs",
+                ann_hist.p50(), ann_hist.p95(), ann_hist.mean(),
+                graph_hist.p50(), graph_hist.p95(), graph_hist.mean(),
+            );
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -629,6 +779,9 @@ async fn main() -> Result<()> {
         Scenario::Recovery => {
             run_recovery(&args).await?;
         }
+        Scenario::VectorNearGraph => {
+            run_vector_near_graph().await?;
+        }
         scenario => {
             let client = PolarGraphServiceClient::connect(args.addr.clone())
                 .await
@@ -638,7 +791,7 @@ async fn main() -> Result<()> {
                 Scenario::Read => run_read(client, &args).await?,
                 Scenario::Mixed => run_mixed(client, &args).await?,
                 Scenario::FilteredSearch => run_filtered_search(client, &args).await?,
-                Scenario::Recovery => unreachable!(),
+                Scenario::Recovery | Scenario::VectorNearGraph => unreachable!(),
             }
         }
     }

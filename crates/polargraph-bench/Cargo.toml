@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 polargraph-core    = { path = "../polargraph-core" }
 polargraph-storage = { path = "../polargraph-storage" }
+polargraph-query   = { path = "../polargraph-query" }
 polargraph-server  = { path = "../polargraph-server" }
 
 tokio        = { workspace = true }
