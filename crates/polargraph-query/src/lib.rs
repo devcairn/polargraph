@@ -16,6 +16,7 @@
 //! }
 //! ```
 
+pub mod cypher;
 pub mod datalog;
 pub mod eval;
 pub mod explain;

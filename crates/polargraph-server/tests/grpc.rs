@@ -13,7 +13,7 @@ use polargraph_server::{
         value::Kind as ValueKind,
         search_vector_filtered_request::Filter,
         vector_seed_query_request::Filter as SeedFilter,
-        BatchInsertVectorsRequest, CreateBackupRequest, EdgeTypeDef, FieldDef,
+        BatchInsertVectorsRequest, CreateBackupRequest, CypherQueryRequest, EdgeTypeDef, FieldDef,
         GetEdgeTypeRequest, GetNodeTypeRequest, InsertRequest, InsertVectorRequest,
         ListBackupsRequest, ListEdgeTypesRequest, ListNodeTypesRequest,
         ListPredicatesBetweenRequest, MigrateRequest, MigrationStatusRequest, NodeId,
@@ -68,6 +68,7 @@ fn rel(subject: NodeId, predicate: &str, object: NodeId) -> Triple {
             object: Some(object),
             vt_start: 0,
             vt_end: 0,
+            properties: vec![],
         })),
     }
 }
@@ -158,6 +159,7 @@ async fn insert_bad_node_id_length_returns_invalid_argument() {
             predicate: "knows".into(),
             object:    Some(NodeId { bytes: vec![0u8; 16] }),
             vt_start: 0, vt_end: 0,
+            properties: vec![],
         })),
     };
     let err = svc
@@ -1883,6 +1885,7 @@ fn rel_with_vt(subject: NodeId, predicate: &str, object: NodeId, vt_start: i64, 
             object: Some(object),
             vt_start,
             vt_end,
+            properties: vec![],
         })),
     }
 }
@@ -1918,7 +1921,8 @@ async fn as_of_valid_time_zero_sees_latest() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: 0,
-        }))
+        rules: vec![],
+    }))
         .await
         .unwrap()
         .into_inner();
@@ -1947,7 +1951,8 @@ async fn as_of_valid_time_filters_expired_triples() {
             snapshot_ts: 0,
             as_of_valid_time: 1500,
             as_of_tx_time: 0,
-        }))
+        rules: vec![],
+    }))
         .await
         .unwrap()
         .into_inner();
@@ -1959,7 +1964,8 @@ async fn as_of_valid_time_filters_expired_triples() {
             snapshot_ts: 0,
             as_of_valid_time: 2500,
             as_of_tx_time: 0,
-        }))
+        rules: vec![],
+    }))
         .await
         .unwrap()
         .into_inner();
@@ -1996,7 +2002,8 @@ async fn as_of_valid_time_returns_correct_version() {
             snapshot_ts: 0,
             as_of_valid_time: 1500,
             as_of_tx_time: 0,
-        }))
+        rules: vec![],
+    }))
         .await
         .unwrap()
         .into_inner();
@@ -2008,7 +2015,8 @@ async fn as_of_valid_time_returns_correct_version() {
             snapshot_ts: 0,
             as_of_valid_time: 2500,
             as_of_tx_time: 0,
-        }))
+        rules: vec![],
+    }))
         .await
         .unwrap()
         .into_inner();
@@ -2020,7 +2028,8 @@ async fn as_of_valid_time_returns_correct_version() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: 0,
-        }))
+        rules: vec![],
+    }))
         .await
         .unwrap()
         .into_inner();
@@ -2055,7 +2064,8 @@ async fn as_of_tx_time_before_insert_sees_nothing() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: t_before,
-        }))
+        rules: vec![],
+    }))
         .await
         .unwrap()
         .into_inner();
@@ -2085,7 +2095,8 @@ async fn as_of_tx_time_at_commit_sees_triple() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: commit_ts,
-        }))
+        rules: vec![],
+    }))
         .await
         .unwrap()
         .into_inner();
@@ -2117,7 +2128,8 @@ async fn as_of_tx_and_vt_combined_filter() {
             snapshot_ts: 0,
             as_of_valid_time: 2000,
             as_of_tx_time: commit_ts,
-        }))
+        rules: vec![],
+    }))
         .await
         .unwrap()
         .into_inner();
@@ -2129,7 +2141,8 @@ async fn as_of_tx_and_vt_combined_filter() {
             snapshot_ts: 0,
             as_of_valid_time: 4000,
             as_of_tx_time: commit_ts,
-        }))
+        rules: vec![],
+    }))
         .await
         .unwrap()
         .into_inner();
@@ -2223,6 +2236,7 @@ async fn replica_streams_triples_from_primary() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: 0,
+        rules: vec![],
         }))
         .await
         .unwrap()
@@ -2387,6 +2401,7 @@ async fn replica_receives_triples_inserted_after_connect() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: 0,
+        rules: vec![],
         }))
         .await
         .unwrap()
@@ -3244,4 +3259,114 @@ async fn migration_status_reflects_applied_state() {
     assert_eq!(status.applied[0].version, 1);
     assert_eq!(status.applied[0].description, "initial schema");
     assert!(status.applied[0].applied_at_tx_time > 0);
+}
+
+// ── CypherQuery ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn cypher_query_simple() {
+    let (svc, _dir) = open();
+    let (alice_core, alice) = new_node();
+    let (bob_core,   bob)   = new_node();
+    let (_carol_core, carol) = new_node();
+
+    // Insert: alice and bob are Person; carol is Robot.
+    // alice knows bob; alice knows carol.
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            text_prop(alice.clone(), "__type", "Person"),
+            text_prop(bob.clone(),   "__type", "Person"),
+            text_prop(carol.clone(), "__type", "Robot"),
+            rel(alice.clone(), "knows", bob.clone()),
+            rel(alice.clone(), "knows", carol.clone()),
+        ],
+    }))
+    .await
+    .unwrap();
+
+    // Query: who does a Person know who is also a Person?
+    // alice (Person) knows bob (Person) and carol (Robot).
+    // Expected: only alice→bob survives because carol is not a Person.
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (a:Person)-[:knows]->(b:Person) RETURN a, b".to_string(),
+            as_of_valid_time: 0,
+            as_of_tx_time: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.bindings.len(), 1, "only alice→bob matches; carol is Robot");
+
+    let bound_a = resp.bindings[0].vars.get("a").unwrap();
+    let bound_a_core = polargraph_core::id::NodeId(
+        uuid::Uuid::from_bytes(bound_a.bytes[..16].try_into().unwrap()),
+    );
+    let bound_b = resp.bindings[0].vars.get("b").unwrap();
+    let bound_b_core = polargraph_core::id::NodeId(
+        uuid::Uuid::from_bytes(bound_b.bytes[..16].try_into().unwrap()),
+    );
+    assert_eq!(bound_a_core, alice_core);
+    assert_eq!(bound_b_core, bob_core);
+}
+
+#[tokio::test]
+async fn cypher_query_recursive() {
+    let (svc, _dir) = open();
+    let (a_core, a) = new_node();
+    let (b_core, b) = new_node();
+    let (c_core, c) = new_node();
+    let (d_core, d) = new_node();
+
+    // Chain: a → b → c → d
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            rel(a.clone(), "follows", b.clone()),
+            rel(b.clone(), "follows", c.clone()),
+            rel(c.clone(), "follows", d.clone()),
+        ],
+    }))
+    .await
+    .unwrap();
+
+    // Transitive query: who does a reach via follows*?
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (a)-[:follows*]->(b) RETURN a, b".to_string(),
+            as_of_valid_time: 0,
+            as_of_tx_time: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // All (src, dst) pairs where dst is reachable from src.
+    // a→b, a→c, a→d, b→c, b→d, c→d = 6 pairs
+    assert_eq!(resp.bindings.len(), 6, "expected 6 transitive pairs");
+
+    // Collect all 'b' values that appear when 'a' is bound to a_core.
+    let reachable_from_a: std::collections::HashSet<polargraph_core::id::NodeId> = resp
+        .bindings
+        .iter()
+        .filter(|binding| {
+            binding.vars.get("a").map(|n| {
+                polargraph_core::id::NodeId(
+                    uuid::Uuid::from_bytes(n.bytes[..16].try_into().unwrap()),
+                ) == a_core
+            }).unwrap_or(false)
+        })
+        .filter_map(|binding| {
+            binding.vars.get("b").map(|n| {
+                polargraph_core::id::NodeId(
+                    uuid::Uuid::from_bytes(n.bytes[..16].try_into().unwrap()),
+                )
+            })
+        })
+        .collect();
+
+    assert!(reachable_from_a.contains(&b_core));
+    assert!(reachable_from_a.contains(&c_core));
+    assert!(reachable_from_a.contains(&d_core));
+    assert_eq!(reachable_from_a.len(), 3);
 }

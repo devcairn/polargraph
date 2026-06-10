@@ -11,6 +11,8 @@ use crate::{
         BatchInsertError, BatchInsertVectorsRequest, BatchInsertVectorsResponse,
         CreateBackupRequest, CreateBackupResponse,
         AppliedMigrationInfo,
+        Binding,
+        CypherQueryRequest,
         ExplainResponse, PlanNode,
         GetEdgeTypeRequest, GetEdgeTypeResponse,
         GetNodeTypeRequest, GetNodeTypeResponse,
@@ -38,8 +40,8 @@ use crate::{
 };
 use polargraph_core::{id::NodeId, schema::{RetentionPolicy, StorageMode}, triple::Triple, value::Value};
 use polargraph_query::datalog::{
-    execute_query, execute_query_seeded, reachable_from, reachable_from_hops, Bindings, Query,
-    QueryError,
+    execute_query, execute_query_hybrid, execute_query_seeded, execute_recursive,
+    reachable_from, reachable_from_hops, Bindings, DerivedFacts, Query, QueryError,
 };
 use polargraph_query::explain::explain_query;
 use polargraph_storage::{BackupManager, CompactionManager, EdgeTypeRegistry, MigrationRunner, NodeTypeRegistry, StorageError, TripleStore, WalStreamer, MIGRATIONS};
@@ -291,31 +293,32 @@ impl PolarGraphService for PolarGraphServer {
             return Err(Status::invalid_argument("insert request must contain at least one triple"));
         }
 
-        // Convert proto triples → core triples.
-        let triples: Vec<Triple> = req
-            .triples
-            .iter()
-            .map(convert::triple_from_proto)
-            .collect::<Result<_, _>>()?;
+        // Convert proto triples → core triples, collecting EdgeIds for relations.
+        let mut all_triples: Vec<Triple> = Vec::new();
+        let mut edge_ids: Vec<Vec<u8>> = Vec::new();
+        for proto_triple in &req.triples {
+            let (triples, edge_id) = convert::triples_from_proto(proto_triple)?;
+            all_triples.extend(triples);
+            if let Some(eid) = edge_id {
+                edge_ids.push(eid.0.as_bytes().to_vec());
+            }
+        }
 
-        debug!("insert: {} triple(s)", triples.len());
-
-        // Extract any __type updates before consuming the vec.
-        // This avoids a second allocation pass after the transaction.
+        debug!("insert: {} triple(s) ({} relation(s))", all_triples.len(), edge_ids.len());
 
         // Begin transaction, insert all, commit.
         let mut tx = self.store.begin();
-        for triple in &triples {
+        for triple in &all_triples {
             tx.insert(triple.clone());
         }
         let commit_ts = tx.commit().map_err(storage_err_to_status)?;
 
         // Incrementally update the type cache for any __type triples.
-        self.update_type_cache(&triples);
+        self.update_type_cache(&all_triples);
 
-        metrics::gauge!("polargraph_triples_total").increment(triples.len() as f64);
+        metrics::gauge!("polargraph_triples_total").increment(all_triples.len() as f64);
 
-        Ok(Response::new(InsertResponse { commit_ts: commit_ts.0 }))
+        Ok(Response::new(InsertResponse { commit_ts: commit_ts.0, edge_ids }))
     }
 
     /// Execute a conjunctive query and return all satisfying bindings.
@@ -363,10 +366,25 @@ impl PolarGraphService for PolarGraphServer {
             query.patterns.len(), snapshot.ts.0, snapshot.vt_as_of
         );
 
+        // Convert optional Datalog rules.
+        let rules: Vec<_> = req.rules.iter()
+            .map(convert::rule_from_proto)
+            .collect::<Result<_, _>>()?;
+
         let t0 = Instant::now();
-        let results = execute_query(&query, &snapshot, self.make_deadline())
-            .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
-        self.check_slow_query("Query", t0.elapsed(), &format!("patterns={pattern_count}"));
+        let results = if rules.is_empty() {
+            // Fast path: pure conjunctive query against base facts only.
+            execute_query(&query, &snapshot, self.make_deadline())
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+        } else {
+            // Recursive path: run rules to fixed point, then evaluate patterns
+            // against the combined base + derived fact set.
+            let derived: DerivedFacts = execute_recursive(&[], &rules, &snapshot, self.make_deadline())
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
+            execute_query_hybrid(&query, &snapshot, &derived, self.make_deadline())
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+        };
+        self.check_slow_query("Query", t0.elapsed(), &format!("patterns={pattern_count} rules={}", rules.len()));
 
         let bindings = results.iter().map(convert::binding_to_proto).collect();
 
@@ -1179,6 +1197,82 @@ impl PolarGraphService for PolarGraphServer {
             latest_version,
             applied: applied_info,
         }))
+    }
+
+    /// Parse and execute a Cypher query string.
+    async fn cypher_query(
+        &self,
+        request: Request<CypherQueryRequest>,
+    ) -> Result<Response<QueryResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.cypher.is_empty() {
+            return Err(Status::invalid_argument("cypher query string must not be empty"));
+        }
+
+        // Parse the Cypher string into an AST.
+        let parsed = polargraph_query::cypher::parse(&req.cypher)
+            .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
+
+        // Compile the AST into the Datalog IR.
+        let compiled = polargraph_query::cypher::compile(parsed);
+
+        // Resolve snapshot (same logic as the Query RPC).
+        let tx_ts = if req.as_of_tx_time != 0 { req.as_of_tx_time } else { 0 };
+        let mut snapshot = if tx_ts == 0 {
+            self.store.snapshot(self.store.begin().read_ts)
+        } else {
+            self.store.snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+        };
+        if req.as_of_valid_time != 0 {
+            snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
+        }
+
+        let deadline = self.make_deadline();
+        let t0 = Instant::now();
+
+        // Execute using the same path as the Query RPC.
+        let raw_results = if compiled.rules.is_empty() {
+            execute_query(&compiled.query, &snapshot, deadline)
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+        } else {
+            let derived: DerivedFacts =
+                execute_recursive(&[], &compiled.rules, &snapshot, deadline)
+                    .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
+            execute_query_hybrid(&compiled.query, &snapshot, &derived, deadline)
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+        };
+
+        self.check_slow_query(
+            "CypherQuery",
+            t0.elapsed(),
+            &format!("patterns={} rules={}", compiled.query.patterns.len(), compiled.rules.len()),
+        );
+
+        // Apply value filters (type constraints and WHERE clause checks).
+        let filtered =
+            polargraph_query::cypher::apply_value_filters(raw_results, &compiled.value_filters, &snapshot)
+                .map_err(storage_err_to_status)?;
+
+        // Apply LIMIT.
+        let limited: Vec<_> = match compiled.limit {
+            Some(n) => filtered.into_iter().take(n).collect(),
+            None => filtered,
+        };
+
+        // Build response — project bindings to the RETURN variables only.
+        let bindings = if compiled.return_vars.is_empty() {
+            limited.iter().map(convert::binding_to_proto).collect()
+        } else {
+            limited.iter().map(|b| {
+                let vars = compiled.return_vars.iter()
+                    .filter_map(|v| b.get(v).map(|&id| (v.clone(), convert::node_id_to_proto(id))))
+                    .collect();
+                Binding { vars }
+            }).collect()
+        };
+
+        Ok(Response::new(QueryResponse { bindings }))
     }
 
     /// Stream WAL entries to a replica. Primary-only.

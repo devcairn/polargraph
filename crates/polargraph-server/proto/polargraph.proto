@@ -28,6 +28,12 @@ message FloatArray {
 
 // ── Triples ───────────────────────────────────────────────────────────────────
 
+/// A named scalar property on an edge (subject is the edge's UUID).
+message EdgeProperty {
+    string name  = 1;
+    Value  value = 2;
+}
+
 /// A directed edge between two nodes.
 message RelationTriple {
     NodeId subject   = 1;
@@ -37,6 +43,9 @@ message RelationTriple {
     int64  vt_start  = 4;
     /// Valid-time end. Set to int64 max (9223372036854775807) for open-ended facts.
     int64  vt_end    = 5;
+    /// Optional scalar properties carried by this edge.
+    /// Each property is stored as a Property triple whose subject is the edge UUID.
+    repeated EdgeProperty properties = 6;
 }
 
 /// A scalar property on a node.
@@ -78,6 +87,22 @@ message VarPattern {
     Term   object    = 3;
 }
 
+/// A Datalog rule used in recursive queries.
+///
+/// Semantics: `head_predicate(head_subject_var, head_object_var) :- body`.
+/// The rule fires whenever all body patterns are satisfied, deriving a new
+/// (head_subject_var, head_object_var) pair under `head_predicate`.
+message DatalogRule {
+    /// Name of the derived (IDB) predicate this rule produces.
+    string              head_predicate    = 1;
+    /// Variable name in `body` that maps to the derived edge's subject.
+    string              head_subject_var  = 2;
+    /// Variable name in `body` that maps to the derived edge's object.
+    string              head_object_var   = 3;
+    /// Conjunctive body — all patterns must be satisfied simultaneously.
+    repeated VarPattern body              = 4;
+}
+
 // ── Requests and responses ────────────────────────────────────────────────────
 
 message InsertRequest {
@@ -87,6 +112,9 @@ message InsertRequest {
 message InsertResponse {
     /// Transaction time of the committed write, microseconds since epoch.
     int64 commit_ts = 1;
+    /// UUID bytes for each RelationTriple in the request (same order).
+    /// Use these to store or query edge properties by edge ID.
+    repeated bytes edge_ids = 2;
 }
 
 message QueryRequest {
@@ -102,6 +130,10 @@ message QueryRequest {
     /// When non-zero, overrides snapshot_ts — only triples committed at or
     /// before this wall-clock time are visible. 0 = use snapshot_ts (or latest).
     int64               as_of_tx_time    = 4;
+    /// Optional Datalog rules. When non-empty the server runs the rules to a
+    /// fixed point (deriving IDB facts) then evaluates `patterns` against the
+    /// combined base + derived fact set.
+    repeated DatalogRule rules           = 5;
 }
 
 /// One satisfying assignment of all variables in the query.
@@ -491,6 +523,26 @@ message AppliedMigrationInfo {
     int64  applied_at_tx_time  = 3;
 }
 
+// ── CypherQuery ───────────────────────────────────────────────────────────────
+
+/// Execute a query written in the supported Cypher subset.
+///
+/// The Cypher string is parsed and compiled to the internal Datalog IR, then
+/// evaluated by the same engine as the `Query` RPC. Returns bindings for the
+/// variables named in the RETURN clause (filtered to those variable names).
+message CypherQueryRequest {
+    /// Cypher query string, e.g.:
+    ///   MATCH (a:Person)-[:knows]->(b:Person)
+    ///   WHERE a.name = "Alice"
+    ///   RETURN a, b
+    ///   LIMIT 10
+    string cypher = 1;
+    /// Valid-time point-in-time filter (unix microseconds). 0 = no filter.
+    int64  as_of_valid_time = 2;
+    /// Transaction-time snapshot override (unix microseconds). 0 = latest.
+    int64  as_of_tx_time    = 3;
+}
+
 // ── ExplainQuery ──────────────────────────────────────────────────────────────
 
 /// Static execution plan for a query, as returned by ExplainQuery.
@@ -617,4 +669,10 @@ service PolarGraphService {
     /// Return the current and latest migration version, plus the full history
     /// of applied migrations with timestamps.
     rpc MigrationStatus(MigrationStatusRequest) returns (MigrationStatusResponse);
+
+    /// Parse and execute a Cypher query string. Supports a subset of openCypher:
+    /// MATCH, WHERE (= only), RETURN, LIMIT; directed relationships; transitive
+    /// closure with [:pred*] or [:pred*min..max].
+    /// Returns INVALID_ARGUMENT if the Cypher string cannot be parsed.
+    rpc CypherQuery(CypherQueryRequest) returns (QueryResponse);
 }

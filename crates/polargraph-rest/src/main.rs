@@ -82,24 +82,56 @@ struct AppState {
 
 // ── JSON request/response types ───────────────────────────────────────────────
 
+/// A Datalog rule in JSON form.
+///
+/// Example:
+/// ```json
+/// {
+///   "head_predicate": "reachable",
+///   "head_subject_var": "x",
+///   "head_object_var": "z",
+///   "body": ["?x :edge ?y", "?y :edge ?z"]
+/// }
+/// ```
+#[derive(Deserialize)]
+struct RuleJson {
+    head_predicate:   String,
+    head_subject_var: String,
+    head_object_var:  String,
+    /// Body patterns in the same `"?s :pred ?o"` format as query patterns.
+    body: Vec<String>,
+}
+
 #[derive(Deserialize)]
 struct QueryBody {
     patterns: Vec<String>,
-    /// Reserved for future Datalog rule support; accepted but not yet forwarded.
+    /// Datalog rules for recursive / derived-predicate queries.
     #[serde(default)]
-    #[allow(dead_code)]
-    rules: Vec<serde_json::Value>,
+    rules: Vec<RuleJson>,
     #[serde(default)]
     as_of_valid_time: Option<i64>,
     #[serde(default)]
     as_of_tx_time: Option<i64>,
 }
 
+/// A scalar property to attach to an edge at insert time.
+/// `value` follows the same JSON-encoding as `PropertyTriple.value`:
+/// `{"text_val":"hello"}`, `{"int_val":42}`, `{"float_val":3.14}`, `{"bool_val":true}`,
+/// `{"blob_val":"<base64>"}`, or `{"vec_val":{"values":[...]}}`.
+#[derive(Deserialize)]
+struct EdgePropertyJson {
+    name:  String,
+    value: serde_json::Value,
+}
+
 #[derive(Deserialize)]
 struct InsertBody {
-    subject: String,
+    subject:   String,
     predicate: String,
-    object: String,
+    object:    String,
+    /// Optional properties stored on the edge (accessible via the returned edge_id).
+    #[serde(default)]
+    properties: Vec<EdgePropertyJson>,
 }
 
 #[derive(Deserialize)]
@@ -175,6 +207,63 @@ fn parse_term(s: &str) -> Result<proto::Term, String> {
     })
 }
 
+// ── Rule / EdgeProperty conversion ───────────────────────────────────────────
+
+fn rule_to_proto(rule: &RuleJson) -> Result<proto::DatalogRule, String> {
+    let body = rule
+        .body
+        .iter()
+        .map(|p| parse_pattern(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(proto::DatalogRule {
+        head_predicate:   rule.head_predicate.clone(),
+        head_subject_var: rule.head_subject_var.clone(),
+        head_object_var:  rule.head_object_var.clone(),
+        body,
+    })
+}
+
+fn edge_property_to_proto(ep: &EdgePropertyJson) -> Result<proto::EdgeProperty, String> {
+    // Accept any JSON value and map it to the proto Value encoding.
+    let kind = if let Some(v) = ep.value.get("bool_val").and_then(|v| v.as_bool()) {
+        proto::value::Kind::BoolVal(v)
+    } else if let Some(v) = ep.value.get("int_val").and_then(|v| v.as_i64()) {
+        proto::value::Kind::IntVal(v)
+    } else if let Some(v) = ep.value.get("float_val").and_then(|v| v.as_f64()) {
+        proto::value::Kind::FloatVal(v)
+    } else if let Some(v) = ep.value.get("text_val").and_then(|v| v.as_str()) {
+        proto::value::Kind::TextVal(v.to_string())
+    } else if let Some(arr) = ep.value.get("blob_val").and_then(|v| v.as_array()) {
+        // blob_val is a JSON array of integers 0–255.
+        let bytes = arr
+            .iter()
+            .map(|b| b.as_u64().and_then(|n| u8::try_from(n).ok())
+                .ok_or_else(|| format!("blob_val elements must be integers 0–255 for property {:?}", ep.name)))
+            .collect::<Result<Vec<_>, _>>()?;
+        proto::value::Kind::BlobVal(bytes)
+    } else if let Some(arr) = ep.value.get("vec_val")
+        .and_then(|v| v.get("values"))
+        .and_then(|v| v.as_array())
+    {
+        let values = arr
+            .iter()
+            .map(|f| f.as_f64().map(|x| x as f32).ok_or_else(|| "vec_val elements must be numbers".to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        proto::value::Kind::VecVal(proto::FloatArray { values })
+    } else if ep.value.get("null_val").is_some() || ep.value.is_null() {
+        proto::value::Kind::NullVal(true)
+    } else {
+        return Err(format!(
+            "unrecognised value encoding for edge property {:?}: use {{\"text_val\":\"...\"}}, {{\"int_val\":N}}, etc.",
+            ep.name
+        ));
+    };
+    Ok(proto::EdgeProperty {
+        name:  ep.name.clone(),
+        value: Some(proto::Value { kind: Some(kind) }),
+    })
+}
+
 // ── gRPC status → HTTP status ─────────────────────────────────────────────────
 
 pub fn grpc_to_http_status(code: tonic::Code) -> StatusCode {
@@ -236,8 +325,17 @@ async fn handle_query(
         Err(e) => return e,
     };
 
+    let rules: Vec<proto::DatalogRule> = match body.rules.iter()
+        .map(rule_to_proto)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    };
+
     let req = proto::QueryRequest {
         patterns,
+        rules,
         snapshot_ts: 0,
         as_of_valid_time: body.as_of_valid_time.unwrap_or(0),
         as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
@@ -285,6 +383,14 @@ async fn handle_insert(
         }
     };
 
+    let properties: Vec<proto::EdgeProperty> = match body.properties.iter()
+        .map(edge_property_to_proto)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    };
+
     let triple = proto::Triple {
         kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
             subject: Some(subject),
@@ -292,6 +398,7 @@ async fn handle_insert(
             object: Some(object),
             vt_start: 0,
             vt_end: i64::MAX,
+            properties,
         })),
     };
 
@@ -301,7 +408,15 @@ async fn handle_insert(
         .await
     {
         Ok(r) => {
-            Json(serde_json::json!({ "ok": true, "tx_time": r.into_inner().commit_ts }))
+            let inner = r.into_inner();
+            // Return the edge_id UUID so clients can query edge properties later.
+            let edge_id = inner.edge_ids.first()
+                .filter(|b| b.len() == 16)
+                .map(|b| {
+                    let arr: [u8; 16] = b[..16].try_into().unwrap_or([0u8; 16]);
+                    Uuid::from_bytes(arr).to_string()
+                });
+            Json(serde_json::json!({ "ok": true, "tx_time": inner.commit_ts, "edge_id": edge_id }))
                 .into_response()
         }
         Err(e) => grpc_error(e),
@@ -352,6 +467,7 @@ async fn handle_triples(
         snapshot_ts: 0,
         as_of_valid_time: 0,
         as_of_tx_time: 0,
+        rules: vec![],
     };
 
     let mut client = state.client.clone();
@@ -426,6 +542,48 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+// ── POST /cypher ──────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CypherBody {
+    cypher: String,
+    #[serde(default)]
+    as_of_valid_time: Option<i64>,
+    #[serde(default)]
+    as_of_tx_time: Option<i64>,
+}
+
+async fn handle_cypher(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CypherBody>,
+) -> Response {
+    let req = proto::CypherQueryRequest {
+        cypher: body.cypher,
+        as_of_valid_time: body.as_of_valid_time.unwrap_or(0),
+        as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
+    };
+
+    let mut client = state.client.clone();
+    let resp = match client.cypher_query(tonic::Request::new(req)).await {
+        Ok(r) => r.into_inner(),
+        Err(e) => return grpc_error(e),
+    };
+
+    let results: Vec<serde_json::Value> = resp
+        .bindings
+        .into_iter()
+        .map(|b| {
+            let mut obj = serde_json::Map::new();
+            for (k, v) in b.vars {
+                obj.insert(k, serde_json::Value::String(node_id_to_uuid_string(&v)));
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+
+    Json(serde_json::json!({ "results": results })).into_response()
+}
+
 // ── POST /explain ─────────────────────────────────────────────────────────────
 
 async fn handle_explain(
@@ -437,8 +595,18 @@ async fn handle_explain(
         Err(e) => return e,
     };
 
+    // Rules are forwarded so the explain output reflects the full query shape.
+    let rules: Vec<proto::DatalogRule> = match body.rules.iter()
+        .map(rule_to_proto)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    };
+
     let req = proto::QueryRequest {
         patterns,
+        rules,
         snapshot_ts: 0,
         as_of_valid_time: body.as_of_valid_time.unwrap_or(0),
         as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
@@ -495,6 +663,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/query", post(handle_query))
+        .route("/cypher", post(handle_cypher))
         .route("/insert", post(handle_insert))
         .route("/triples", get(handle_triples))
         .route("/vector/search", post(handle_vector_search))

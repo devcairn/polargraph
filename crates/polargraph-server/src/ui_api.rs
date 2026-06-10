@@ -407,6 +407,7 @@ async fn api_query(
         snapshot_ts: 0,
         as_of_valid_time: body.as_of_valid_time,
         as_of_tx_time: body.as_of_tx_time,
+        rules: vec![],
     };
 
     match state.service.query(Request::new(req)).await {
@@ -482,6 +483,7 @@ async fn api_insert(
                 object: Some(object_id),
                 vt_start: 0,
                 vt_end: 0,
+                properties: vec![],
             })),
         }
     } else {
