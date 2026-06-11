@@ -19,7 +19,7 @@ use tonic::Request;
 use uuid::Uuid;
 
 use crate::{
-    auth::check_bearer_auth,
+    auth::{check_bearer_auth, KeyStore},
     proto::{
         self, term::Kind as TermKind, triple::Kind as TripleKind, value::Kind as ValueKind,
         polar_graph_service_server::PolarGraphService,
@@ -37,7 +37,8 @@ static UI_HTML: &str = include_str!("ui.html");
 
 pub struct UiState {
     pub service: PolarGraphServer,
-    pub api_keys: Arc<Vec<String>>,
+    /// Shared API key store — same `Arc<RwLock<...>>` used by `ApiKeyLayer`.
+    pub api_keys: KeyStore,
     pub start_time: Instant,
     pub data_dir: String,
     pub grpc_addr: String,
@@ -63,6 +64,9 @@ pub fn build_ui_router(state: Arc<UiState>) -> Router {
         .route("/api/backups", get(api_backups_list))
         .route("/api/backups/create", post(api_backups_create))
         .route("/api/backups/purge", post(api_backups_purge))
+        .route("/api/keys", get(api_keys_list))
+        .route("/api/keys/add", post(api_keys_add))
+        .route("/api/keys/revoke", post(api_keys_revoke))
         .with_state(state)
 }
 
@@ -80,6 +84,13 @@ fn require_auth(headers: &HeaderMap, keys: &[String]) -> Option<Response> {
                 .into_response(),
         )
     }
+}
+
+/// Auth check that reads from the shared `KeyStore`. The read lock is held only
+/// for the duration of the comparison and is dropped before returning.
+fn require_auth_ks(headers: &HeaderMap, store: &KeyStore) -> Option<Response> {
+    let keys = store.read().unwrap();
+    require_auth(headers, keys.as_slice())
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -145,7 +156,7 @@ async fn api_status(
     State(state): State<Arc<UiState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(err) = require_auth(&headers, &state.api_keys) {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
@@ -177,7 +188,7 @@ async fn api_status(
         primary_address,
         last_applied_seq,
         wal_lag_entries,
-        auth_enabled: !state.api_keys.is_empty(),
+        auth_enabled: !state.api_keys.read().unwrap().is_empty(),
     })
     .into_response()
 }
@@ -210,7 +221,7 @@ async fn api_node_types(
     State(state): State<Arc<UiState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(err) = require_auth(&headers, &state.api_keys) {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
@@ -269,7 +280,7 @@ async fn api_edge_types(
     State(state): State<Arc<UiState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(err) = require_auth(&headers, &state.api_keys) {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
@@ -321,7 +332,7 @@ async fn api_metrics(
     State(state): State<Arc<UiState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(err) = require_auth(&headers, &state.api_keys) {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
@@ -385,7 +396,7 @@ async fn api_query(
     headers: HeaderMap,
     Json(body): Json<QueryApiRequest>,
 ) -> Response {
-    if let Some(err) = require_auth(&headers, &state.api_keys) {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
@@ -464,7 +475,7 @@ async fn api_insert(
     headers: HeaderMap,
     Json(body): Json<InsertApiRequest>,
 ) -> Response {
-    if let Some(err) = require_auth(&headers, &state.api_keys) {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
@@ -548,7 +559,7 @@ async fn api_search(
     headers: HeaderMap,
     QueryParams(params): QueryParams<SearchParams>,
 ) -> Response {
-    if let Some(err) = require_auth(&headers, &state.api_keys) {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
@@ -658,7 +669,7 @@ async fn api_indexes(
     State(state): State<Arc<UiState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(err) = require_auth(&headers, &state.api_keys) {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
@@ -699,7 +710,7 @@ async fn api_stats(
     State(state): State<Arc<UiState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(err) = require_auth(&headers, &state.api_keys) {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
@@ -743,7 +754,7 @@ async fn api_backups_list(
     State(state): State<Arc<UiState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(err) = require_auth(&headers, &state.api_keys) {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
@@ -773,7 +784,7 @@ async fn api_backups_create(
     State(state): State<Arc<UiState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(err) = require_auth(&headers, &state.api_keys) {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
@@ -805,7 +816,7 @@ async fn api_backups_purge(
     headers: HeaderMap,
     Json(body): Json<PurgeApiBody>,
 ) -> Response {
-    if let Some(err) = require_auth(&headers, &state.api_keys) {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
@@ -829,4 +840,107 @@ async fn api_backups_purge(
             Json(serde_json::json!({"error": e.message()})),
         ).into_response(),
     }
+}
+
+// ── /api/keys ─────────────────────────────────────────────────────────────────
+
+async fn api_keys_list(
+    State(state): State<Arc<UiState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
+        return err;
+    }
+
+    let keys = state.api_keys.read().unwrap();
+    let auth_disabled = keys.is_empty();
+    let total = keys.len() as u32;
+    let prefixes: Vec<String> = keys
+        .iter()
+        .map(|k| {
+            let prefix: String = k.chars().take(4).collect();
+            format!("{prefix}****")
+        })
+        .collect();
+    drop(keys);
+
+    Json(serde_json::json!({
+        "keys": prefixes,
+        "total": total,
+        "auth_disabled": auth_disabled,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct KeyBody {
+    key: String,
+}
+
+async fn api_keys_add(
+    State(state): State<Arc<UiState>>,
+    headers: HeaderMap,
+    Json(body): Json<KeyBody>,
+) -> Response {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
+        return err;
+    }
+
+    if body.key.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "key must not be empty"})),
+        )
+            .into_response();
+    }
+
+    // Auth disabled when no keys are configured — block management operations.
+    {
+        let keys = state.api_keys.read().unwrap();
+        if keys.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "auth is disabled; restart with --api-key to enable key management"})),
+            )
+                .into_response();
+        }
+    }
+
+    let mut keys = state.api_keys.write().unwrap();
+    keys.push(body.key);
+    let total = keys.len() as u32;
+    drop(keys);
+
+    Json(serde_json::json!({"total": total})).into_response()
+}
+
+async fn api_keys_revoke(
+    State(state): State<Arc<UiState>>,
+    headers: HeaderMap,
+    Json(body): Json<KeyBody>,
+) -> Response {
+    if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
+        return err;
+    }
+
+    // Auth disabled — block management operations.
+    {
+        let keys = state.api_keys.read().unwrap();
+        if keys.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "auth is disabled; restart with --api-key to enable key management"})),
+            )
+                .into_response();
+        }
+    }
+
+    let mut keys = state.api_keys.write().unwrap();
+    let before = keys.len();
+    keys.retain(|k| k != &body.key);
+    let found = keys.len() < before;
+    let total = keys.len() as u32;
+    drop(keys);
+
+    Json(serde_json::json!({"found": found, "total": total})).into_response()
 }

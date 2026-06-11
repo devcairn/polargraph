@@ -4,11 +4,13 @@
 const STREAM_CHUNK_SIZE: usize = 500;
 
 use crate::{
+    auth::KeyStore,
     convert,
     proto::{
         polar_graph_service_server::PolarGraphService,
         search_vector_filtered_request::Filter,
         vector_seed_query_request::Filter as SeedFilter,
+        AddApiKeyRequest, AddApiKeyResponse,
         BackupInfo as ProtoBackupInfo,
         BatchInsertError, BatchInsertVectorsRequest, BatchInsertVectorsResponse,
         BeginTransactionRequest, BeginTransactionResponse,
@@ -20,6 +22,7 @@ use crate::{
         GetEdgeTypeRequest, GetEdgeTypeResponse,
         GetNodeTypeRequest, GetNodeTypeResponse,
         InsertRequest, InsertResponse, InsertVectorRequest, InsertVectorResponse,
+        ListApiKeysRequest, ListApiKeysResponse,
         ListBackupsRequest, ListBackupsResponse,
         ListEdgeTypesRequest, ListEdgeTypesResponse,
         ListNodeTypesRequest, ListNodeTypesResponse,
@@ -32,6 +35,7 @@ use crate::{
         RegisterEdgeTypeRequest, RegisterEdgeTypeResponse,
         RegisterNodeTypeRequest, RegisterNodeTypeResponse,
         ReplicaStatusRequest, ReplicaStatusResponse,
+        RevokeApiKeyRequest, RevokeApiKeyResponse,
         RollbackTransactionRequest, RollbackTransactionResponse,
         RunRetentionRequest, RunRetentionResponse,
         ScoredBinding,
@@ -149,6 +153,10 @@ pub struct PolarGraphServer {
     tx_map: Arc<TxMap>,
     /// Milliseconds of idle time after which an open transaction is rolled back. 0 = disabled.
     tx_idle_timeout_ms: u64,
+    /// Shared API key store — same `Arc<RwLock<...>>` used by `ApiKeyLayer`.
+    /// `None` when the server was started without auth (e.g. in tests that
+    /// don't pass a key store).
+    key_store: Option<KeyStore>,
 }
 
 impl PolarGraphServer {
@@ -189,6 +197,7 @@ impl PolarGraphServer {
             start_time: Instant::now(),
             tx_map: Arc::new(DashMap::new()),
             tx_idle_timeout_ms: 300_000,
+            key_store: None,
         })
     }
 
@@ -216,6 +225,13 @@ impl PolarGraphServer {
     /// Set the idle TTL for open transactions in milliseconds. 0 disables idle expiry.
     pub fn with_tx_idle_timeout_ms(mut self, ms: u64) -> Self {
         self.tx_idle_timeout_ms = ms;
+        self
+    }
+
+    /// Attach the shared API key store so the `AddApiKey`, `RevokeApiKey`,
+    /// and `ListApiKeys` RPCs can mutate the live key list.
+    pub fn with_key_store(mut self, store: KeyStore) -> Self {
+        self.key_store = Some(store);
         self
     }
 
@@ -264,6 +280,7 @@ impl PolarGraphServer {
             start_time: Instant::now(),
             tx_map: Arc::new(DashMap::new()),
             tx_idle_timeout_ms: 300_000,
+            key_store: None,
         };
         Ok((server, replica_state))
     }
@@ -2090,6 +2107,93 @@ impl PolarGraphService for PolarGraphServer {
         debug!(tx_id, "transaction rolled back");
 
         Ok(Response::new(RollbackTransactionResponse {}))
+    }
+
+    // ── API key management ────────────────────────────────────────────────────
+
+    async fn add_api_key(
+        &self,
+        request: Request<AddApiKeyRequest>,
+    ) -> Result<Response<AddApiKeyResponse>, Status> {
+        self.check_not_replica()?;
+        let key = request.into_inner().key;
+        if key.is_empty() {
+            return Err(Status::invalid_argument("key must not be empty"));
+        }
+        let store = self.key_store.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "auth is disabled; start the server with --api-key to enable key management",
+            )
+        })?;
+        // Reject management when auth is currently disabled (empty key list).
+        // An unauthenticated caller must not be able to silently enable auth.
+        {
+            let keys = store.read().unwrap();
+            if keys.is_empty() {
+                return Err(Status::failed_precondition(
+                    "auth is disabled; start the server with --api-key to enable key management",
+                ));
+            }
+        }
+        let mut keys = store.write().unwrap();
+        keys.push(key.clone());
+        let total_keys = keys.len() as u32;
+        drop(keys);
+        info!(total_keys, "api key added");
+        Ok(Response::new(AddApiKeyResponse { total_keys }))
+    }
+
+    async fn revoke_api_key(
+        &self,
+        request: Request<RevokeApiKeyRequest>,
+    ) -> Result<Response<RevokeApiKeyResponse>, Status> {
+        self.check_not_replica()?;
+        let key = request.into_inner().key;
+        let store = self.key_store.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "auth is disabled; start the server with --api-key to enable key management",
+            )
+        })?;
+        {
+            let keys = store.read().unwrap();
+            if keys.is_empty() {
+                return Err(Status::failed_precondition(
+                    "auth is disabled; start the server with --api-key to enable key management",
+                ));
+            }
+        }
+        let mut keys = store.write().unwrap();
+        let before = keys.len();
+        keys.retain(|k| k != &key);
+        let found = keys.len() < before;
+        let total_keys = keys.len() as u32;
+        drop(keys);
+        info!(found, total_keys, "api key revoked");
+        Ok(Response::new(RevokeApiKeyResponse { found, total_keys }))
+    }
+
+    async fn list_api_keys(
+        &self,
+        _request: Request<ListApiKeysRequest>,
+    ) -> Result<Response<ListApiKeysResponse>, Status> {
+        self.check_not_replica()?;
+        let Some(store) = &self.key_store else {
+            return Ok(Response::new(ListApiKeysResponse {
+                key_prefixes: vec![],
+                total_keys: 0,
+            }));
+        };
+        let keys = store.read().unwrap();
+        let total_keys = keys.len() as u32;
+        let key_prefixes = keys
+            .iter()
+            .map(|k| {
+                let prefix: String = k.chars().take(4).collect();
+                format!("{prefix}****")
+            })
+            .collect();
+        drop(keys);
+        Ok(Response::new(ListApiKeysResponse { key_prefixes, total_keys }))
     }
 }
 

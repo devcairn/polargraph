@@ -32,7 +32,7 @@ use polargraph_server::{
 use tokio_stream::StreamExt as _;
 use polargraph_core::temporal::Timestamp;
 use polargraph_storage::TripleStore;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::{Arc, RwLock}, time::Duration};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Request};
@@ -2484,7 +2484,7 @@ async fn start_server_with_keys(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let auth = ApiKeyLayer::new(keys);
+    let (auth, _key_store) = ApiKeyLayer::new(keys);
 
     tokio::spawn(async move {
         Server::builder()
@@ -2652,6 +2652,185 @@ async fn auth_multiple_keys_any_accepted() {
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }
 
+// ── Runtime API key management (gRPC) ────────────────────────────────────────
+//
+// These tests use a live TCP server so that the ApiKeyLayer tower middleware
+// is wired in exactly as it would be in production.
+
+/// Start a server with the given keys and also return the key store handle so
+/// tests can call AddApiKey / RevokeApiKey / ListApiKeys via a gRPC client.
+async fn start_server_with_keys_and_store(
+    store: TripleStore,
+    keys: Vec<String>,
+) -> (SocketAddr, polargraph_server::auth::KeyStore, tokio::sync::oneshot::Sender<()>) {
+    let (auth, key_store) = ApiKeyLayer::new(keys.clone());
+    let svc = PolarGraphServer::new(store)
+        .unwrap()
+        .with_key_store(key_store.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        Server::builder()
+            .layer(auth)
+            .add_service(PolarGraphServiceServer::new(svc))
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async { drop(shutdown_rx.await) },
+            )
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (addr, key_store, shutdown_tx)
+}
+
+#[tokio::test]
+async fn api_key_add_and_list() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (addr, _ks, _shutdown) =
+        start_server_with_keys_and_store(store, vec!["initial-key".into()]).await;
+    let mut client = grpc_client(addr).await;
+
+    // Add a second key.
+    let resp = client
+        .add_api_key(bearer(
+            polargraph_server::proto::AddApiKeyRequest { key: "new-key-abcd".into() },
+            "initial-key",
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.total_keys, 2);
+
+    // List — should see both, masked.
+    let list = client
+        .list_api_keys(bearer(
+            polargraph_server::proto::ListApiKeysRequest {},
+            "initial-key",
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(list.total_keys, 2);
+    // Each prefix should be 4 chars + "****" = 8 chars.
+    assert!(list.key_prefixes.iter().all(|p| p.ends_with("****")));
+    // Full keys must NOT appear.
+    assert!(!list.key_prefixes.iter().any(|p| p == "initial-key" || p == "new-key-abcd"));
+    // Masked prefixes should start with the right characters.
+    assert!(list.key_prefixes.iter().any(|p| p.starts_with("init")));
+    assert!(list.key_prefixes.iter().any(|p| p.starts_with("new-")));
+}
+
+#[tokio::test]
+async fn api_key_revoke_removes_key() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (addr, _ks, _shutdown) =
+        start_server_with_keys_and_store(store, vec!["keep-key".into(), "remove-key".into()]).await;
+    let mut client = grpc_client(addr).await;
+
+    // Revoke "remove-key".
+    let resp = client
+        .revoke_api_key(bearer(
+            polargraph_server::proto::RevokeApiKeyRequest { key: "remove-key".into() },
+            "keep-key",
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(resp.found, "key should have been found");
+    assert_eq!(resp.total_keys, 1);
+
+    // Revoking again — not found.
+    let resp2 = client
+        .revoke_api_key(bearer(
+            polargraph_server::proto::RevokeApiKeyRequest { key: "remove-key".into() },
+            "keep-key",
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!resp2.found, "second revoke should return found=false");
+    assert_eq!(resp2.total_keys, 1);
+}
+
+#[tokio::test]
+async fn api_key_new_key_works_for_auth() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (addr, _ks, _shutdown) =
+        start_server_with_keys_and_store(store, vec!["admin-key".into()]).await;
+    let mut client = grpc_client(addr).await;
+
+    // Add a second key via the management RPC.
+    client
+        .add_api_key(bearer(
+            polargraph_server::proto::AddApiKeyRequest { key: "user-key-xyz".into() },
+            "admin-key",
+        ))
+        .await
+        .unwrap();
+
+    // Immediately use the new key for an Insert.
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    let resp = client
+        .insert(bearer(
+            InsertRequest { triples: vec![rel(a, "knows", b)], ..Default::default() },
+            "user-key-xyz",
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(resp.commit_ts > 0, "insert with newly added key should succeed");
+}
+
+#[tokio::test]
+async fn api_key_disabled_returns_failed_precondition() {
+    // Server started with no keys at all — auth is disabled.
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    // Build server with empty key store (auth disabled) but wire the key store in.
+    let (auth, key_store) = ApiKeyLayer::new(vec![]);
+    let svc = PolarGraphServer::new(store)
+        .unwrap()
+        .with_key_store(key_store);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        Server::builder()
+            .layer(auth)
+            .add_service(PolarGraphServiceServer::new(svc))
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async { drop(shutdown_rx.await) },
+            )
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _s = shutdown_tx;
+
+    let mut client = grpc_client(addr).await;
+
+    // AddApiKey on a key-store-backed but auth-disabled server should return
+    // FailedPrecondition, because auth is currently disabled (empty key list).
+    let err = client
+        .add_api_key(Request::new(polargraph_server::proto::AddApiKeyRequest {
+            key: "new-key".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+}
+
 // ── Management UI smoke tests ─────────────────────────────────────────────────
 
 /// Spin up a UI HTTP server bound to a random port.
@@ -2669,7 +2848,7 @@ async fn start_ui_http(
 
     let state = Arc::new(ui_api::UiState {
         service: svc,
-        api_keys: Arc::new(api_keys),
+        api_keys: Arc::new(RwLock::new(api_keys)),
         start_time: std::time::Instant::now(),
         data_dir: dir.path().display().to_string(),
         grpc_addr: "127.0.0.1:50051".into(),
@@ -2781,7 +2960,7 @@ async fn start_ui_http_svc(
 
     let state = Arc::new(ui_api::UiState {
         service: svc,
-        api_keys: Arc::new(api_keys),
+        api_keys: Arc::new(RwLock::new(api_keys)),
         start_time: std::time::Instant::now(),
         data_dir: "/tmp".into(),
         grpc_addr: "127.0.0.1:50051".into(),
@@ -3150,7 +3329,7 @@ async fn health_http_endpoint_returns_ok_for_primary() {
 
     let state = Arc::new(ui_api::UiState {
         service: svc,
-        api_keys: Arc::new(vec![]),
+        api_keys: Arc::new(RwLock::new(vec![])),
         start_time: std::time::Instant::now(),
         data_dir: dir.path().display().to_string(),
         grpc_addr: "127.0.0.1:50051".into(),
@@ -4445,4 +4624,93 @@ async fn test_grpc_validate_ontology() {
         "expected 'inverse' violation type; got: {:?}",
         resp2.violations
     );
+}
+
+// ── UI key management tests ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ui_keys_list_with_auth_disabled() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    // Start with no keys — auth is disabled.
+    let (base, shutdown, _dir) = start_ui_http(store, vec![]).await;
+
+    let client = reqwest::Client::new();
+    let res = client.get(format!("{base}/api/keys")).send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    let json: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(json["auth_disabled"], true);
+    assert_eq!(json["total"], 0);
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn ui_keys_add_and_revoke() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (base, shutdown, _dir) = start_ui_http(store, vec!["admin".into()]).await;
+
+    let client = reqwest::Client::new();
+
+    // List — one key present.
+    let res = client
+        .get(format!("{base}/api/keys"))
+        .header("Authorization", "Bearer admin")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let json: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["auth_disabled"], false);
+
+    // Add a key.
+    let res = client
+        .post(format!("{base}/api/keys/add"))
+        .header("Authorization", "Bearer admin")
+        .json(&serde_json::json!({"key": "extra-key-xyz"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let json: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(json["total"], 2);
+
+    // List — two keys now.
+    let res = client
+        .get(format!("{base}/api/keys"))
+        .header("Authorization", "Bearer admin")
+        .send()
+        .await
+        .unwrap();
+    let json: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(json["total"], 2);
+
+    // Revoke the extra key.
+    let res = client
+        .post(format!("{base}/api/keys/revoke"))
+        .header("Authorization", "Bearer admin")
+        .json(&serde_json::json!({"key": "extra-key-xyz"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let json: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(json["found"], true);
+    assert_eq!(json["total"], 1);
+
+    // Revoke again — found=false.
+    let res = client
+        .post(format!("{base}/api/keys/revoke"))
+        .header("Authorization", "Bearer admin")
+        .json(&serde_json::json!({"key": "extra-key-xyz"}))
+        .send()
+        .await
+        .unwrap();
+    let json: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(json["found"], false);
+    assert_eq!(json["total"], 1);
+
+    let _ = shutdown.send(());
 }

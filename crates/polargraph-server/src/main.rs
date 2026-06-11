@@ -573,12 +573,7 @@ async fn main() -> Result<()> {
     };
 
     // ── gRPC server setup ─────────────────────────────────────────────────────
-    let api_keys_arc = Arc::new(api_keys.clone());
-    let auth_layer = if api_keys.is_empty() {
-        ApiKeyLayer::disabled()
-    } else {
-        ApiKeyLayer::new(api_keys.clone())
-    };
+    let (auth_layer, key_store) = ApiKeyLayer::new(api_keys);
     let rate_layer = if rate_limit_rps > 0 {
         info!(max_rps = rate_limit_rps, "per-client rate limiting enabled");
         RateLimitLayer::new(rate_limit_rps)
@@ -604,7 +599,8 @@ async fn main() -> Result<()> {
             .with_query_timeout_ms(query_timeout_ms)
             .with_slow_query_ms(slow_query_ms)
             .with_default_vector_ef(default_vector_ef)
-            .with_tx_idle_timeout_ms(tx_idle_timeout_ms);
+            .with_tx_idle_timeout_ms(tx_idle_timeout_ms)
+            .with_key_store(key_store.clone());
 
         (server, Some(rs))
     } else {
@@ -613,7 +609,8 @@ async fn main() -> Result<()> {
             .with_query_timeout_ms(query_timeout_ms)
             .with_slow_query_ms(slow_query_ms)
             .with_default_vector_ef(default_vector_ef)
-            .with_tx_idle_timeout_ms(tx_idle_timeout_ms);
+            .with_tx_idle_timeout_ms(tx_idle_timeout_ms)
+            .with_key_store(key_store.clone());
         (server, None)
     };
 
@@ -624,7 +621,7 @@ async fn main() -> Result<()> {
     let ui_join: Option<tokio::task::JoinHandle<()>> = if !no_ui {
         let ui_state = Arc::new(ui_api::UiState {
             service: pg_server.clone(),
-            api_keys: Arc::clone(&api_keys_arc),
+            api_keys: key_store.clone(),
             start_time: std::time::Instant::now(),
             data_dir: data_dir.display().to_string(),
             grpc_addr: listen_addr.to_string(),

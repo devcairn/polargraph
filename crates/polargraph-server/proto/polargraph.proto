@@ -729,6 +729,37 @@ message RollbackTransactionRequest {
 
 message RollbackTransactionResponse {}
 
+// ── API key management ────────────────────────────────────────────────────────
+
+message AddApiKeyRequest {
+    string key = 1;
+}
+
+message AddApiKeyResponse {
+    /// Total number of keys now configured (including the newly added one).
+    uint32 total_keys = 1;
+}
+
+message RevokeApiKeyRequest {
+    string key = 1;
+}
+
+message RevokeApiKeyResponse {
+    /// True when the key was present and has been removed.
+    bool found = 1;
+    /// Total number of keys remaining after the revocation.
+    uint32 total_keys = 2;
+}
+
+message ListApiKeysRequest {}
+
+message ListApiKeysResponse {
+    /// First 4 characters of each key followed by "****". Full values are
+    /// never returned.
+    repeated string key_prefixes = 1;
+    uint32 total_keys = 2;
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 service PolarGraphService {
@@ -883,4 +914,20 @@ service PolarGraphService {
     /// Returns NOT_FOUND if tx_id is unknown or has expired.
     /// Returns FAILED_PRECONDITION on a read replica.
     rpc RollbackTransaction(RollbackTransactionRequest) returns (RollbackTransactionResponse);
+
+    /// Add a new API key to the live key store. Takes effect immediately.
+    /// Returns FAILED_PRECONDITION when the server was started without any
+    /// keys (auth is disabled). Returns INVALID_ARGUMENT for an empty key.
+    /// Returns FAILED_PRECONDITION on a read replica.
+    rpc AddApiKey(AddApiKeyRequest) returns (AddApiKeyResponse);
+
+    /// Remove an API key from the live key store. The caller should immediately
+    /// stop using the revoked key. Returns FAILED_PRECONDITION when auth is
+    /// disabled. Returns FAILED_PRECONDITION on a read replica.
+    rpc RevokeApiKey(RevokeApiKeyRequest) returns (RevokeApiKeyResponse);
+
+    /// List all configured API keys as masked prefixes (first 4 chars + "****").
+    /// Never reveals full key values. Returns FAILED_PRECONDITION on a read
+    /// replica.
+    rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse);
 }

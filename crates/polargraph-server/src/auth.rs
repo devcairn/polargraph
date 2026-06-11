@@ -19,7 +19,7 @@
 use std::{
     future::Future,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, RwLock},
     task::{Context, Poll},
 };
 
@@ -31,28 +31,36 @@ use tower::{Layer, Service};
 /// gRPC method paths that bypass authentication.
 const EXEMPT_PATHS: &[&str] = &["/polargraph.v1.PolarGraphService/ReplicaStatus"];
 
+/// Shared, mutable API key list. Cloned into every request handler and the
+/// management service so keys added/revoked take effect on the next request.
+pub type KeyStore = Arc<RwLock<Vec<String>>>;
+
 // ── Layer ─────────────────────────────────────────────────────────────────────
 
 /// Tower layer that enforces API-key authentication on inbound gRPC requests.
 #[derive(Clone)]
 pub struct ApiKeyLayer {
-    keys: Arc<Vec<String>>,
+    keys: KeyStore,
 }
 
 impl ApiKeyLayer {
-    /// Create a layer that requires one of `keys` on every non-exempt request.
-    pub fn new(keys: Vec<String>) -> Self {
-        Self { keys: Arc::new(keys) }
+    /// Create a layer from `keys`. Returns both the layer and a shared
+    /// `KeyStore` handle so callers can add/revoke keys at runtime.
+    pub fn new(keys: Vec<String>) -> (Self, KeyStore) {
+        let store: KeyStore = Arc::new(RwLock::new(keys));
+        (Self { keys: Arc::clone(&store) }, store)
     }
 
-    /// Create a disabled layer — all requests pass through.
+    /// Create a disabled layer — all requests pass through. No `KeyStore` is
+    /// returned because auth is off; use [`Self::new`] with an empty vec when
+    /// you want a handle to later enable auth.
     pub fn disabled() -> Self {
-        Self { keys: Arc::new(vec![]) }
+        Self { keys: Arc::new(RwLock::new(vec![])) }
     }
 
     /// Returns `true` when at least one key is configured.
     pub fn is_enabled(&self) -> bool {
-        !self.keys.is_empty()
+        !self.keys.read().unwrap().is_empty()
     }
 }
 
@@ -70,7 +78,7 @@ impl<S> Layer<S> for ApiKeyLayer {
 #[derive(Clone)]
 pub struct ApiKeyService<S> {
     inner: S,
-    keys: Arc<Vec<String>>,
+    keys: KeyStore,
 }
 
 type BoxFuture<T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'static>>;
@@ -100,8 +108,12 @@ where
         let keys = Arc::clone(&self.keys);
 
         Box::pin(async move {
+            // Snapshot the key list under a brief read lock, then drop the guard
+            // before calling into the inner service.
+            let key_snapshot: Vec<String> = keys.read().unwrap().clone();
+
             // Auth disabled — pass through.
-            if keys.is_empty() {
+            if key_snapshot.is_empty() {
                 return inner.call(req).await;
             }
 
@@ -111,7 +123,7 @@ where
             }
 
             // Validate the Authorization header.
-            if !check_bearer_auth(req.headers(), &keys) {
+            if !check_bearer_auth(req.headers(), &key_snapshot) {
                 return Ok(Status::unauthenticated("missing or invalid api key").to_http());
             }
 
@@ -203,7 +215,7 @@ mod tests {
 
     #[test]
     fn layer_is_enabled_reflects_key_list() {
-        assert!(ApiKeyLayer::new(vec!["k".into()]).is_enabled());
+        assert!(ApiKeyLayer::new(vec!["k".into()]).0.is_enabled());
         assert!(!ApiKeyLayer::disabled().is_enabled());
     }
 }

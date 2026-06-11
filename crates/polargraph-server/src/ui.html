@@ -173,6 +173,7 @@ pre.codeblock{background:#161b22;border:1px solid #21262d;border-radius:6px;padd
     <button class="tab-btn" id="tabBtn-search" onclick="showTab('search')">Search</button>
     <button class="tab-btn" id="tabBtn-status" onclick="showTab('status')">Status</button>
     <button class="tab-btn" id="tabBtn-backups" onclick="showTab('backups')">Backups</button>
+    <button class="tab-btn" id="tabBtn-keys" onclick="showTab('keys')">Keys</button>
   </div>
 
   <div id="content">
@@ -295,6 +296,32 @@ pre.codeblock{background:#161b22;border:1px solid #21262d;border-radius:6px;padd
         <div style="font-size:12px;color:#6e7681">
           ⚠ Restore is an offline operation — stop the server, run <code>polargraphd</code> with
           <code>--restore-from-backup &lt;id&gt;</code>, then restart normally.
+        </div>
+      </div>
+    </div>
+
+    <!-- Keys panel -->
+    <div id="panel-keys" class="panel">
+      <div class="panel-title">API Key Management</div>
+      <div id="keys-disabled-warn" style="display:none;padding:10px 14px;border-radius:6px;border:1px solid #d29922;background:#2d2200;color:#d29922;font-size:13px;margin-bottom:18px">
+        Auth is disabled. Restart with <code>--api-key &lt;key&gt;</code> to enable key management.
+      </div>
+      <div id="keys-content" style="display:none">
+        <div class="panel-title" style="font-size:14px;margin-bottom:12px">Current Keys</div>
+        <div id="keys-table-wrap"><div class="empty-state">Loading…</div></div>
+        <hr class="divider">
+        <div class="panel-title" style="font-size:14px;margin-bottom:12px">Add Key</div>
+        <div class="input-row" style="max-width:480px;margin-bottom:8px">
+          <div class="form-group">
+            <label>New API key</label>
+            <input type="text" id="keys-new-input" placeholder="Enter new key…" autocomplete="off">
+          </div>
+          <button class="btn" onclick="addKey()">Add</button>
+        </div>
+        <div id="keys-add-msg" class="alert" style="max-width:480px"></div>
+        <hr class="divider">
+        <div style="font-size:12px;color:#6e7681">
+          ⚠ Keys are stored in memory only and are not persisted. Restarting the server reverts to the keys configured at startup.
         </div>
       </div>
     </div>
@@ -440,6 +467,7 @@ function showTab(name) {
   if (name === 'status') loadStatus();
   if (name === 'schema') renderSchemaDiagram();
   if (name === 'backups') loadBackups();
+  if (name === 'keys') loadKeys();
 }
 
 // ── Sidebar population ────────────────────────────────────────────────────────
@@ -948,6 +976,84 @@ async function purgeBackups() {
       msgEl.style.color = '#f85149';
       msgEl.style.display = 'block';
     }
+  }
+}
+
+// ── Key management ────────────────────────────────────────────────────────────
+async function loadKeys() {
+  const warnEl = document.getElementById('keys-disabled-warn');
+  const contentEl = document.getElementById('keys-content');
+  const tableWrap = document.getElementById('keys-table-wrap');
+  try {
+    const res = await apiFetch('/api/keys');
+    const data = await res.json();
+    if (data.auth_disabled) {
+      warnEl.style.display = 'block';
+      contentEl.style.display = 'none';
+      return;
+    }
+    warnEl.style.display = 'none';
+    contentEl.style.display = 'block';
+    const keys = data.keys || [];
+    if (keys.length === 0) {
+      tableWrap.innerHTML = '<div class="empty-state">No keys configured.</div>';
+    } else {
+      tableWrap.innerHTML = `<div class="table-wrap"><table>
+        <thead><tr><th>Key (masked)</th><th></th></tr></thead>
+        <tbody>${keys.map(k => `<tr>
+          <td class="mono">${esc(k)}</td>
+          <td style="text-align:right"><button class="btn btn-danger btn-sm" onclick="revokeKey('${esc(k)}')">Revoke</button></td>
+        </tr>`).join('')}</tbody>
+      </table></div>`;
+    }
+  } catch(e) {
+    tableWrap.innerHTML = `<div class="empty-state" style="color:#f85149">Failed to load keys: ${esc(e.message)}</div>`;
+  }
+}
+
+async function addKey() {
+  const input = document.getElementById('keys-new-input');
+  const msgEl = document.getElementById('keys-add-msg');
+  msgEl.className = 'alert';
+  msgEl.style.display = 'none';
+  const key = input.value.trim();
+  if (!key) {
+    msgEl.textContent = 'Key must not be empty.';
+    msgEl.className = 'alert alert-err show';
+    msgEl.style.display = '';
+    return;
+  }
+  try {
+    const res = await apiFetch('/api/keys/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    input.value = '';
+    msgEl.textContent = `Key added. Total keys: ${data.total}`;
+    msgEl.className = 'alert alert-ok show';
+    msgEl.style.display = '';
+    loadKeys();
+  } catch(e) {
+    msgEl.textContent = `Error: ${e.message}`;
+    msgEl.className = 'alert alert-err show';
+    msgEl.style.display = '';
+  }
+}
+
+async function revokeKey(maskedKey) {
+  // maskedKey is the masked prefix like "abcd****" — we can't revoke by prefix.
+  // The Revoke button is only useful for keys the operator knows in full.
+  // We prompt for the full key to confirm.
+  const full = prompt(`Enter the full key to revoke (you are revoking ${maskedKey}):`);
+  if (!full) return;
+  try {
+    const res = await apiFetch('/api/keys/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: full }) });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (!data.found) { alert('Key not found — check that you entered the exact key.'); return; }
+    alert(`Key revoked. ${data.total} key(s) remaining.`);
+    loadKeys();
+  } catch(e) {
+    alert(`Error: ${e.message}`);
   }
 }
 
