@@ -3735,6 +3735,185 @@ async fn cypher_write_merge_is_idempotent() {
     assert_eq!(query_resp.rows.len(), 1, "expected exactly one Company node after two MERGEs");
 }
 
+// ── Wire transactions ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn wire_tx_begin_returns_unique_ids() {
+    let (svc, _dir) = open();
+    let r1 = svc
+        .begin_transaction(Request::new(BeginTransactionRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let r2 = svc
+        .begin_transaction(Request::new(BeginTransactionRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!r1.tx_id.is_empty(), "tx_id must not be empty");
+    assert_ne!(r1.tx_id, r2.tx_id, "each begin must return a unique tx_id");
+    let _ = svc.rollback_transaction(Request::new(RollbackTransactionRequest { tx_id: r1.tx_id })).await;
+    let _ = svc.rollback_transaction(Request::new(RollbackTransactionRequest { tx_id: r2.tx_id })).await;
+}
+
+#[tokio::test]
+async fn wire_tx_commit_makes_triples_visible() {
+    let (svc, _dir) = open();
+    let (_alice_core, alice) = new_node();
+
+    let tx_id = svc
+        .begin_transaction(Request::new(BeginTransactionRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .tx_id;
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(alice.clone(), "status", "pending")],
+        tx_id: tx_id.clone(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    // Not visible outside the transaction yet.
+    let outside = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![VarPattern {
+                subject: Some(Term { kind: Some(TermKind::Bound(alice.clone())) }),
+                predicate: "status".to_string(),
+                object: Some(Term { kind: Some(TermKind::Var("v".to_string())) }),
+            }],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(outside.bindings.is_empty(), "triple should not be visible before commit");
+
+    let commit_resp = svc
+        .commit_transaction(Request::new(CommitTransactionRequest { tx_id }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(commit_resp.triples_written, 1);
+
+    let after = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![VarPattern {
+                subject: Some(Term { kind: Some(TermKind::Bound(alice.clone())) }),
+                predicate: "status".to_string(),
+                object: Some(Term { kind: Some(TermKind::Var("v".to_string())) }),
+            }],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(after.bindings.len(), 1, "committed triple must be visible");
+}
+
+#[tokio::test]
+async fn wire_tx_rollback_discards_triples() {
+    let (svc, _dir) = open();
+    let (_alice_core, alice) = new_node();
+
+    let tx_id = svc
+        .begin_transaction(Request::new(BeginTransactionRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .tx_id;
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(alice.clone(), "tag", "ephemeral")],
+        tx_id: tx_id.clone(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    svc.rollback_transaction(Request::new(RollbackTransactionRequest { tx_id }))
+        .await
+        .unwrap();
+
+    let resp = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![VarPattern {
+                subject: Some(Term { kind: Some(TermKind::Bound(alice.clone())) }),
+                predicate: "tag".to_string(),
+                object: Some(Term { kind: Some(TermKind::Var("v".to_string())) }),
+            }],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(resp.bindings.is_empty(), "rolled-back triple must not appear");
+}
+
+#[tokio::test]
+async fn wire_tx_write_your_own_reads() {
+    let (svc, _dir) = open();
+    let (_alice_core, alice) = new_node();
+
+    let tx_id = svc
+        .begin_transaction(Request::new(BeginTransactionRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .tx_id;
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(alice.clone(), "role", "admin")],
+        tx_id: tx_id.clone(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    // Within the same transaction, buffered triple should be readable.
+    let resp = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![VarPattern {
+                subject: Some(Term { kind: Some(TermKind::Bound(alice.clone())) }),
+                predicate: "role".to_string(),
+                object: Some(Term { kind: Some(TermKind::Var("v".to_string())) }),
+            }],
+            tx_id: tx_id.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.bindings.len(), 1, "write-your-own-reads must work within an open transaction");
+
+    let _ = svc.rollback_transaction(Request::new(RollbackTransactionRequest { tx_id })).await;
+}
+
+#[tokio::test]
+async fn wire_tx_rollback_removes_from_map() {
+    let (svc, _dir) = open();
+
+    let tx_id = svc
+        .begin_transaction(Request::new(BeginTransactionRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .tx_id;
+
+    svc.rollback_transaction(Request::new(RollbackTransactionRequest { tx_id: tx_id.clone() }))
+        .await
+        .unwrap();
+
+    // A second rollback should return NOT_FOUND.
+    let err = svc
+        .rollback_transaction(Request::new(RollbackTransactionRequest { tx_id }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+}
+
 // ── Diagnostics RPCs ──────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -3832,7 +4011,9 @@ async fn cypher_where_contains_finds_match() {
 
     svc.insert(Request::new(InsertRequest {
         triples: vec![
+            text_prop(alice.clone(), "__type", "Person"),
             text_prop(alice.clone(), "name", "Alice Smith"),
+            text_prop(bob.clone(),   "__type", "Person"),
             text_prop(bob.clone(),   "name", "Robert Jones"),
         ],
         ..Default::default()
@@ -3842,7 +4023,7 @@ async fn cypher_where_contains_finds_match() {
 
     let resp = svc
         .cypher_query(Request::new(CypherQueryRequest {
-            cypher: "MATCH (n) WHERE n.name CONTAINS \"Smith\" RETURN n".to_string(),
+            cypher: r#"MATCH (n:Person) WHERE n.name CONTAINS "Smith" RETURN n"#.to_string(),
             ..Default::default()
         }))
         .await
@@ -3868,7 +4049,9 @@ async fn cypher_where_starts_with_finds_match() {
 
     svc.insert(Request::new(InsertRequest {
         triples: vec![
+            text_prop(alice.clone(), "__type", "Person"),
             text_prop(alice.clone(), "name", "Alexandra Doe"),
+            text_prop(bob.clone(),   "__type", "Person"),
             text_prop(bob.clone(),   "name", "Robert Smith"),
         ],
         ..Default::default()
@@ -3878,7 +4061,7 @@ async fn cypher_where_starts_with_finds_match() {
 
     let resp = svc
         .cypher_query(Request::new(CypherQueryRequest {
-            cypher: "MATCH (n) WHERE n.name STARTS WITH \"Alex\" RETURN n".to_string(),
+            cypher: r#"MATCH (n:Person) WHERE n.name STARTS WITH "Alex" RETURN n"#.to_string(),
             ..Default::default()
         }))
         .await
@@ -3902,7 +4085,10 @@ async fn cypher_where_contains_no_match_returns_empty() {
     let (_n_core, n) = new_node();
 
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop(n.clone(), "name", "Alice")],
+        triples: vec![
+            text_prop(n.clone(), "__type", "Person"),
+            text_prop(n.clone(), "name", "Alice"),
+        ],
         ..Default::default()
     }))
     .await
@@ -3910,7 +4096,7 @@ async fn cypher_where_contains_no_match_returns_empty() {
 
     let resp = svc
         .cypher_query(Request::new(CypherQueryRequest {
-            cypher: "MATCH (n) WHERE n.name CONTAINS \"zzz\" RETURN n".to_string(),
+            cypher: r#"MATCH (n:Person) WHERE n.name CONTAINS "zzz" RETURN n"#.to_string(),
             ..Default::default()
         }))
         .await
@@ -3928,7 +4114,9 @@ async fn cypher_where_regex_finds_match() {
 
     svc.insert(Request::new(InsertRequest {
         triples: vec![
+            text_prop(alice.clone(), "__type", "Person"),
             text_prop(alice.clone(), "email", "alice@example.com"),
+            text_prop(bob.clone(),   "__type", "Person"),
             text_prop(bob.clone(),   "email", "bob_at_domain_dot_org"),
         ],
         ..Default::default()
@@ -3936,17 +4124,17 @@ async fn cypher_where_regex_finds_match() {
     .await
     .unwrap();
 
-    // Regex: match emails ending in .com
+    // Use [.]com to match literal dot without backslash escapes in Cypher string.
     let resp = svc
         .cypher_query(Request::new(CypherQueryRequest {
-            cypher: "MATCH (n) WHERE n.email =~ \".*\\.com$\" RETURN n".to_string(),
+            cypher: r#"MATCH (n:Person) WHERE n.email =~ ".*[.]com$" RETURN n"#.to_string(),
             ..Default::default()
         }))
         .await
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.rows.len(), 1, "only alice@example.com matches .*\\.com$");
+    assert_eq!(resp.rows.len(), 1, "only alice@example.com matches");
     let bound = resp.rows[0].nodes.get("n").unwrap();
     let bound_id = polargraph_core::id::NodeId(
         uuid::Uuid::from_bytes(bound.bytes[..16].try_into().unwrap()),
