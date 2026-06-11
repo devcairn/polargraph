@@ -3760,6 +3760,7 @@ async fn wire_tx_begin_returns_unique_ids() {
 async fn wire_tx_commit_makes_triples_visible() {
     let (svc, _dir) = open();
     let (_alice_core, alice) = new_node();
+    let (_bob_core, bob) = new_node();
 
     let tx_id = svc
         .begin_transaction(Request::new(BeginTransactionRequest {}))
@@ -3769,7 +3770,7 @@ async fn wire_tx_commit_makes_triples_visible() {
         .tx_id;
 
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop(alice.clone(), "status", "pending")],
+        triples: vec![rel(alice.clone(), "tx_edge", bob.clone())],
         tx_id: tx_id.clone(),
         ..Default::default()
     }))
@@ -3781,7 +3782,7 @@ async fn wire_tx_commit_makes_triples_visible() {
         .query(Request::new(QueryRequest {
             patterns: vec![VarPattern {
                 subject: Some(Term { kind: Some(TermKind::Bound(alice.clone())) }),
-                predicate: "status".to_string(),
+                predicate: "tx_edge".to_string(),
                 object: Some(Term { kind: Some(TermKind::Var("v".to_string())) }),
             }],
             ..Default::default()
@@ -3802,7 +3803,7 @@ async fn wire_tx_commit_makes_triples_visible() {
         .query(Request::new(QueryRequest {
             patterns: vec![VarPattern {
                 subject: Some(Term { kind: Some(TermKind::Bound(alice.clone())) }),
-                predicate: "status".to_string(),
+                predicate: "tx_edge".to_string(),
                 object: Some(Term { kind: Some(TermKind::Var("v".to_string())) }),
             }],
             ..Default::default()
@@ -3856,6 +3857,7 @@ async fn wire_tx_rollback_discards_triples() {
 async fn wire_tx_write_your_own_reads() {
     let (svc, _dir) = open();
     let (_alice_core, alice) = new_node();
+    let (_bob_core, bob) = new_node();
 
     let tx_id = svc
         .begin_transaction(Request::new(BeginTransactionRequest {}))
@@ -3865,7 +3867,7 @@ async fn wire_tx_write_your_own_reads() {
         .tx_id;
 
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop(alice.clone(), "role", "admin")],
+        triples: vec![rel(alice.clone(), "tx_wyr_edge", bob.clone())],
         tx_id: tx_id.clone(),
         ..Default::default()
     }))
@@ -3877,7 +3879,7 @@ async fn wire_tx_write_your_own_reads() {
         .query(Request::new(QueryRequest {
             patterns: vec![VarPattern {
                 subject: Some(Term { kind: Some(TermKind::Bound(alice.clone())) }),
-                predicate: "role".to_string(),
+                predicate: "tx_wyr_edge".to_string(),
                 object: Some(Term { kind: Some(TermKind::Var("v".to_string())) }),
             }],
             tx_id: tx_id.clone(),
