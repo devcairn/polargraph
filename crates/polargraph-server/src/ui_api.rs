@@ -24,8 +24,8 @@ use crate::{
         self, term::Kind as TermKind, triple::Kind as TripleKind, value::Kind as ValueKind,
         polar_graph_service_server::PolarGraphService,
         InsertRequest, ListEdgeTypesRequest, ListNodeTypesRequest, PropertyTriple, QueryRequest,
-        RelationTriple, ReplicaStatusRequest, Triple as ProtoTriple, Value as ProtoValue,
-        VarPattern,
+        RelationTriple, ReplicaStatusRequest, ShowIndexesRequest, ShowStatsRequest,
+        Triple as ProtoTriple, Value as ProtoValue, VarPattern,
     },
     service::PolarGraphServer,
 };
@@ -57,6 +57,8 @@ pub fn build_ui_router(state: Arc<UiState>) -> Router {
         .route("/api/query", post(api_query))
         .route("/api/insert", post(api_insert))
         .route("/api/search", get(api_search))
+        .route("/api/indexes", get(api_indexes))
+        .route("/api/stats", get(api_stats))
         .with_state(state)
 }
 
@@ -408,6 +410,7 @@ async fn api_query(
         as_of_valid_time: body.as_of_valid_time,
         as_of_tx_time: body.as_of_tx_time,
         rules: vec![],
+        ..Default::default()
     };
 
     match state.service.query(Request::new(req)).await {
@@ -500,7 +503,7 @@ async fn api_insert(
 
     match state
         .service
-        .insert(Request::new(InsertRequest { triples: vec![triple] }))
+        .insert(Request::new(InsertRequest { triples: vec![triple], ..Default::default() }))
         .await
     {
         Ok(resp) => {
@@ -642,5 +645,76 @@ fn format_value(v: &Value) -> String {
         Value::Text(s) => s.clone(),
         Value::Blob(b) => format!("<blob {} bytes>", b.len()),
         Value::Vector(fs) => format!("<vec dim={}>", fs.len()),
+    }
+}
+
+// ── /api/indexes ──────────────────────────────────────────────────────────────
+
+async fn api_indexes(
+    State(state): State<Arc<UiState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(err) = require_auth(&headers, &state.api_keys) {
+        return err;
+    }
+
+    match state.service.show_indexes(Request::new(ShowIndexesRequest {})).await {
+        Ok(r) => {
+            let resp = r.into_inner();
+            let cfs: Vec<serde_json::Value> = resp.column_families.into_iter().map(|cf| {
+                serde_json::json!({
+                    "name": cf.name,
+                    "approx_key_count": cf.approx_key_count,
+                    "approx_size_bytes": cf.approx_size_bytes,
+                })
+            }).collect();
+            let spaces: Vec<serde_json::Value> = resp.vector_spaces.into_iter().map(|vs| {
+                serde_json::json!({
+                    "name": vs.name,
+                    "dimensions": vs.dimensions,
+                    "node_count": vs.node_count,
+                    "storage_mode": vs.storage_mode,
+                })
+            }).collect();
+            Json(serde_json::json!({
+                "column_families": cfs,
+                "vector_spaces": spaces,
+                "predicate_count": resp.predicate_count,
+            })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.message()})),
+        ).into_response(),
+    }
+}
+
+// ── /api/stats ────────────────────────────────────────────────────────────────
+
+async fn api_stats(
+    State(state): State<Arc<UiState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(err) = require_auth(&headers, &state.api_keys) {
+        return err;
+    }
+
+    match state.service.show_stats(Request::new(ShowStatsRequest {})).await {
+        Ok(r) => {
+            let s = r.into_inner();
+            Json(serde_json::json!({
+                "live_sst_files": s.live_sst_files,
+                "total_sst_size_bytes": s.total_sst_size_bytes,
+                "memtable_size_bytes": s.memtable_size_bytes,
+                "mvcc_oracle_ts": s.mvcc_oracle_ts,
+                "predicate_intern_count": s.predicate_intern_count,
+                "open_transaction_count": s.open_transaction_count,
+                "mode": s.mode,
+            })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.message()})),
+        ).into_response(),
     }
 }

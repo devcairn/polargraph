@@ -9,8 +9,8 @@
 //! above and is handled by `projection::apply_view`.
 
 use crate::planner::{choose_index, IndexChoice, Pattern};
-use polargraph_core::{id::NodeId, triple::Triple};
-use polargraph_storage::{Snapshot, StorageError};
+use polargraph_core::{id::NodeId, triple::Triple, value::Value};
+use polargraph_storage::{EdgeTypeRegistry, Snapshot, StorageError};
 use tracing::warn;
 
 /// Evaluate a triple pattern against a snapshot.
@@ -21,6 +21,113 @@ use tracing::warn;
 pub fn evaluate(pattern: &Pattern, snapshot: &Snapshot) -> Result<Vec<Triple>, StorageError> {
     let choice = choose_index(pattern);
     execute(choice, snapshot)
+}
+
+/// Evaluate a pattern with optional schema-aware pruning.
+///
+/// When `registry` is `Some` and the pattern has a bound predicate whose
+/// `EdgeTypeDef` carries `domain` or `range` constraints, the evaluator first
+/// checks whether the bound subject/object node satisfies the type requirement
+/// (`__type` property). If not, it returns an empty result immediately,
+/// avoiding the hexastore scan entirely.
+///
+/// When `registry` is `None`, this is identical to [`evaluate`].
+pub fn evaluate_with_registry(
+    pattern: &Pattern,
+    snapshot: &Snapshot,
+    registry: Option<&EdgeTypeRegistry>,
+) -> Result<Vec<Triple>, StorageError> {
+    if let (Some(reg), Some(pred)) = (registry, &pattern.predicate) {
+        if let Some(def) = reg.get_edge_type(pred) {
+            if let (Some(domain), Some(subj)) = (&def.domain, pattern.subject) {
+                if !node_has_type(subj, domain, snapshot)? {
+                    return Ok(vec![]);
+                }
+            }
+            if let (Some(range), Some(obj)) = (&def.range, pattern.object) {
+                if !node_has_type(obj, range, snapshot)? {
+                    return Ok(vec![]);
+                }
+            }
+        }
+    }
+    evaluate(pattern, snapshot)
+}
+
+/// Returns `true` if `node` has a `__type` property equal to `expected_type`.
+fn node_has_type(node: NodeId, expected_type: &str, snapshot: &Snapshot) -> Result<bool, StorageError> {
+    let triples = snapshot.scan_by_subject_predicate(&node, "__type")?;
+    Ok(triples.iter().any(|t| matches!(
+        t,
+        Triple::Property { value: Value::Text(v), .. } if v == expected_type
+    )))
+}
+
+/// Evaluate a pattern against storage, then overlay pending (uncommitted)
+/// triples from an open transaction to implement write-your-own-reads.
+///
+/// Pending triples that match the pattern and are not already represented in
+/// the storage result are appended. Deduplication key: (subject, predicate)
+/// for property triples and (subject, predicate, object) for relations.
+pub fn evaluate_with_overlay(
+    pattern: &Pattern,
+    snapshot: &Snapshot,
+    pending: &[Triple],
+    registry: Option<&EdgeTypeRegistry>,
+) -> Result<Vec<Triple>, StorageError> {
+    let mut results = evaluate_with_registry(pattern, snapshot, registry)?;
+
+    for triple in pending {
+        if triple_matches_pattern(triple, pattern) && !results_contain_key(&results, triple) {
+            results.push(triple.clone());
+        }
+    }
+
+    Ok(results)
+}
+
+/// Returns `true` when `triple` satisfies every bound constraint in `pattern`.
+fn triple_matches_pattern(triple: &Triple, pattern: &Pattern) -> bool {
+    if let Some(s) = pattern.subject {
+        if triple.subject() != s {
+            return false;
+        }
+    }
+    if let Some(pred) = &pattern.predicate {
+        if triple.predicate().0 != *pred {
+            return false;
+        }
+    }
+    if let Some(obj) = pattern.object {
+        match triple {
+            Triple::Relation { object, .. } => {
+                if *object != obj {
+                    return false;
+                }
+            }
+            // Property triples carry a scalar value, not a NodeId object.
+            Triple::Property { .. } => return false,
+        }
+    }
+    true
+}
+
+/// Returns `true` when `results` already contains a triple with the same
+/// logical key as `candidate`:
+/// - Relation: (subject, predicate, object)
+/// - Property: (subject, predicate)
+fn results_contain_key(results: &[Triple], candidate: &Triple) -> bool {
+    results.iter().any(|r| match (r, candidate) {
+        (Triple::Relation { subject: rs, predicate: rp, object: ro, .. },
+         Triple::Relation { subject: cs, predicate: cp, object: co, .. }) => {
+            rs == cs && rp.0 == cp.0 && ro == co
+        }
+        (Triple::Property { subject: rs, predicate: rp, .. },
+         Triple::Property { subject: cs, predicate: cp, .. }) => {
+            rs == cs && rp.0 == cp.0
+        }
+        _ => false,
+    })
 }
 
 fn execute(choice: IndexChoice, snap: &Snapshot) -> Result<Vec<Triple>, StorageError> {
@@ -352,5 +459,147 @@ mod tests {
 
         let results = evaluate(&Pattern::new().with_subject(nobody), &snap).unwrap();
         assert!(results.is_empty());
+    }
+
+    // ── schema-aware pruning ──────────────────────────────────────────────────
+
+    fn open_with_edge_registry() -> (TripleStore, polargraph_storage::registry::EdgeTypeRegistry, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let store = TripleStore::open(dir.path()).unwrap();
+        let reg = polargraph_storage::registry::EdgeTypeRegistry::new(store.clone()).unwrap();
+        (store, reg, dir)
+    }
+
+    #[test]
+    fn typed_predicate_prunes_wrong_domain() {
+        use polargraph_core::schema::EdgeTypeDef;
+
+        let (store, reg, _dir) = open_with_edge_registry();
+
+        // Register: works_at requires domain=Person, range=Company
+        reg.register_edge_type(EdgeTypeDef::new(
+            "works_at",
+            Some("Person"),
+            Some("Company"),
+            vec![],
+        )).unwrap();
+
+        let alice = NodeId::new();
+        let acme  = NodeId::new();
+
+        // alice has __type=Robot (not Person) — works_at is constrained to Person subjects
+        let snap = commit_and_snap(&store, vec![
+            rel(alice, "works_at", acme),
+            prop(alice, "__type", "Robot"),
+            prop(acme,  "__type", "Company"),
+        ]);
+
+        let pattern = Pattern::new().with_subject(alice).with_predicate("works_at");
+        let results = evaluate_with_registry(&pattern, &snap, Some(&reg)).unwrap();
+
+        // Domain mismatch: alice is Robot, not Person → pruned to empty
+        assert!(results.is_empty(), "domain mismatch should prune the result set");
+    }
+
+    #[test]
+    fn typed_predicate_allows_correct_domain() {
+        use polargraph_core::schema::EdgeTypeDef;
+
+        let (store, reg, _dir) = open_with_edge_registry();
+
+        reg.register_edge_type(EdgeTypeDef::new(
+            "works_at",
+            Some("Person"),
+            Some("Company"),
+            vec![],
+        )).unwrap();
+
+        let alice = NodeId::new();
+        let acme  = NodeId::new();
+
+        let snap = commit_and_snap(&store, vec![
+            rel(alice, "works_at", acme),
+            prop(alice, "__type", "Person"),
+            prop(acme,  "__type", "Company"),
+        ]);
+
+        let pattern = Pattern::new().with_subject(alice).with_predicate("works_at");
+        let results = evaluate_with_registry(&pattern, &snap, Some(&reg)).unwrap();
+
+        assert_eq!(results.len(), 1, "correct domain should not prune the result");
+    }
+
+    #[test]
+    fn typed_predicate_prunes_wrong_range() {
+        use polargraph_core::schema::EdgeTypeDef;
+
+        let (store, reg, _dir) = open_with_edge_registry();
+
+        reg.register_edge_type(EdgeTypeDef::new(
+            "works_at",
+            Some("Person"),
+            Some("Company"),
+            vec![],
+        )).unwrap();
+
+        let alice = NodeId::new();
+        let acme  = NodeId::new();
+
+        // acme has __type=Project (not Company)
+        let snap = commit_and_snap(&store, vec![
+            rel(alice, "works_at", acme),
+            prop(alice, "__type", "Person"),
+            prop(acme,  "__type", "Project"),
+        ]);
+
+        let pattern = Pattern::new()
+            .with_subject(alice)
+            .with_predicate("works_at")
+            .with_object(acme);
+        let results = evaluate_with_registry(&pattern, &snap, Some(&reg)).unwrap();
+
+        assert!(results.is_empty(), "range mismatch should prune the result set");
+    }
+
+    #[test]
+    fn untyped_predicate_unaffected_by_registry() {
+        use polargraph_core::schema::EdgeTypeDef;
+
+        let (store, reg, _dir) = open_with_edge_registry();
+
+        // Register works_at, but query over "knows" which has no schema
+        reg.register_edge_type(EdgeTypeDef::new(
+            "works_at",
+            Some("Person"),
+            Some("Company"),
+            vec![],
+        )).unwrap();
+
+        let alice = NodeId::new();
+        let bob   = NodeId::new();
+
+        let snap = commit_and_snap(&store, vec![
+            rel(alice, "knows", bob),
+        ]);
+
+        let pattern = Pattern::new().with_subject(alice).with_predicate("knows");
+        let results = evaluate_with_registry(&pattern, &snap, Some(&reg)).unwrap();
+
+        // "knows" has no schema → no pruning → normal result
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn no_registry_behaves_identically_to_evaluate() {
+        let (store, _dir) = open();
+        let alice = NodeId::new();
+        let bob   = NodeId::new();
+
+        let snap = commit_and_snap(&store, vec![rel(alice, "knows", bob)]);
+        let pattern = Pattern::new().with_subject(alice).with_predicate("knows");
+
+        let a = evaluate(&pattern, &snap).unwrap();
+        let b = evaluate_with_registry(&pattern, &snap, None).unwrap();
+        assert_eq!(a.len(), b.len());
     }
 }

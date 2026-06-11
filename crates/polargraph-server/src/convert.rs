@@ -18,7 +18,7 @@ use polargraph_core::{
     triple::{Predicate, Triple},
     value::Value,
 };
-use polargraph_query::datalog::{Bindings, Term, VarPattern};
+use polargraph_query::datalog::{Bindings, Rule, Term, VarPattern};
 use tonic::Status;
 use uuid::Uuid;
 
@@ -76,7 +76,24 @@ pub fn temporal_from_proto(vt_start: i64, vt_end: i64) -> BiTemporalRange {
 
 // ── Triple ────────────────────────────────────────────────────────────────────
 
+/// Convert a single proto Triple to a single Rust Triple.
+///
+/// For `RelationTriple` this always generates a fresh `EdgeId` and ignores any
+/// `properties` field. Use [`triples_from_proto`] instead when you need edge
+/// properties to be expanded and/or need the `EdgeId` returned.
 pub fn triple_from_proto(proto: &proto::Triple) -> Result<Triple, Status> {
+    Ok(triples_from_proto(proto)?.0.remove(0))
+}
+
+/// Convert a proto Triple into one or more Rust Triples, returning the edge UUID
+/// for `RelationTriple` inputs so callers can store or surface it.
+///
+/// A `RelationTriple` with populated `properties` expands to:
+///   - one `Triple::Relation` (the edge itself)
+///   - one `Triple::Property` per edge property, with `subject = NodeId(edge_id)`
+///
+/// Returns `(triples, edge_id)` where `edge_id` is `Some` only for relation triples.
+pub fn triples_from_proto(proto: &proto::Triple) -> Result<(Vec<Triple>, Option<EdgeId>), Status> {
     match &proto.kind {
         Some(TripleKind::Relation(r)) => {
             let subject = node_id_from_proto(
@@ -88,13 +105,33 @@ pub fn triple_from_proto(proto: &proto::Triple) -> Result<Triple, Status> {
             if r.predicate.is_empty() {
                 return Err(Status::invalid_argument("relation predicate must not be empty"));
             }
-            Ok(Triple::Relation {
+            let edge_id = EdgeId::new();
+            let temporal = temporal_from_proto(r.vt_start, r.vt_end);
+            let relation = Triple::Relation {
                 subject,
                 predicate: Predicate::new(r.predicate.clone()),
                 object,
-                edge_id: EdgeId::new(),
-                temporal: temporal_from_proto(r.vt_start, r.vt_end),
-            })
+                edge_id,
+                temporal,
+            };
+            // Expand edge properties: stored as Property triples whose subject is
+            // NodeId(edge_id.0). Clients retrieve them by querying that UUID.
+            let mut triples = vec![relation];
+            for ep in &r.properties {
+                if ep.name.is_empty() {
+                    return Err(Status::invalid_argument("edge property name must not be empty"));
+                }
+                let value = value_from_proto(
+                    ep.value.as_ref().ok_or_else(|| Status::invalid_argument("edge property missing value"))?,
+                )?;
+                triples.push(Triple::Property {
+                    subject: NodeId(edge_id.0),
+                    predicate: Predicate::new(ep.name.clone()),
+                    value,
+                    temporal,
+                });
+            }
+            Ok((triples, Some(edge_id)))
         }
         Some(TripleKind::Property(p)) => {
             let subject = node_id_from_proto(
@@ -106,12 +143,12 @@ pub fn triple_from_proto(proto: &proto::Triple) -> Result<Triple, Status> {
             let value = value_from_proto(
                 p.value.as_ref().ok_or_else(|| Status::invalid_argument("property missing value"))?,
             )?;
-            Ok(Triple::Property {
+            Ok((vec![Triple::Property {
                 subject,
                 predicate: Predicate::new(p.predicate.clone()),
                 value,
                 temporal: temporal_from_proto(p.vt_start, p.vt_end),
-            })
+            }], None))
         }
         None => Err(Status::invalid_argument("triple has no kind set")),
     }
@@ -155,6 +192,55 @@ pub fn binding_to_proto(bindings: &Bindings) -> proto::Binding {
             .map(|(k, &v)| (k.clone(), node_id_to_proto(v)))
             .collect(),
     }
+}
+
+pub fn binding_to_query_result(bindings: &Bindings) -> proto::QueryResult {
+    proto::QueryResult {
+        vars: bindings
+            .iter()
+            .map(|(k, &v)| (k.clone(), node_id_to_proto(v)))
+            .collect(),
+    }
+}
+
+// ── CypherBinding ─────────────────────────────────────────────────────────────
+
+/// Convert an aggregated result row to a proto [`CypherBinding`].
+///
+/// `node_keys` — map of variable name → NodeId (group-key variables).
+/// `val_keys`  — map of alias → Value (computed aggregates / scalar results).
+pub fn cypher_binding_to_proto(
+    node_keys: &std::collections::HashMap<String, polargraph_core::id::NodeId>,
+    val_keys: &std::collections::HashMap<String, Value>,
+) -> proto::CypherBinding {
+    proto::CypherBinding {
+        nodes: node_keys.iter().map(|(k, &id)| (k.clone(), node_id_to_proto(id))).collect(),
+        values: val_keys.iter().map(|(k, v)| (k.clone(), value_to_proto(v))).collect(),
+    }
+}
+
+// ── Datalog rules ─────────────────────────────────────────────────────────────
+
+pub fn rule_from_proto(proto: &proto::DatalogRule) -> Result<Rule, Status> {
+    if proto.head_predicate.is_empty() {
+        return Err(Status::invalid_argument("rule head_predicate must not be empty"));
+    }
+    if proto.head_subject_var.is_empty() {
+        return Err(Status::invalid_argument("rule head_subject_var must not be empty"));
+    }
+    if proto.head_object_var.is_empty() {
+        return Err(Status::invalid_argument("rule head_object_var must not be empty"));
+    }
+    let body = proto
+        .body
+        .iter()
+        .map(var_pattern_from_proto)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Rule::new(
+        proto.head_predicate.clone(),
+        proto.head_subject_var.clone(),
+        proto.head_object_var.clone(),
+    ).with_body(body))
 }
 
 // ── Node type schema ──────────────────────────────────────────────────────────

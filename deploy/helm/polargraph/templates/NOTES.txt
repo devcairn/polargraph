@@ -1,0 +1,18 @@
+PolarGraph has been deployed.
+
+  Release:   {{ .Release.Name }}
+  Namespace: {{ include "polargraph.namespace" . }}
+  Image:     {{ include "polargraph.image" . }}
+
+gRPC endpoint (ClusterIP):
+  kubectl port-forward -n {{ include "polargraph.namespace" . }} svc/{{ include "polargraph.fullname" . }}-grpc 50051:{{ .Values.service.grpc.port }}
+
+Management UI:
+  kubectl port-forward -n {{ include "polargraph.namespace" . }} svc/{{ include "polargraph.fullname" . }}-ui 8080:{{ .Values.service.ui.port }}
+  Then open http://localhost:8080
+
+Prometheus metrics:
+  kubectl port-forward -n {{ include "polargraph.namespace" . }} svc/{{ include "polargraph.fullname" . }}-metrics 9090:{{ .Values.service.metrics.port }}
+
+⚠  The default API key is "changeme". Set a real key at install time:
+  helm upgrade {{ .Release.Name }} ./deploy/helm/polargraph --set auth.apiKey=<your-key>

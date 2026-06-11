@@ -1,0 +1,13 @@
+apiVersion: v2
+name: polargraph
+description: PolarGraph DB Engine — triple-store graph database with bitemporal versioning and vector search
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - graph-database
+  - triple-store
+  - vector-search
+maintainers:
+  - name: PolarGraph Contributors
+home: https://github.com/OWNER/polargraph

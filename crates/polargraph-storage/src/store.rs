@@ -667,6 +667,92 @@ impl TripleStore {
             .unwrap_or(0)
     }
 
+    // ── diagnostics ──────────────────────────────────────────────────────────
+
+    /// Current MVCC oracle timestamp (µs since Unix epoch).
+    pub fn oracle_ts(&self) -> i64 {
+        self.inner.oracle.read_ts().0
+    }
+
+    /// Number of interned predicates.
+    pub fn predicate_count(&self) -> u32 {
+        self.inner.fwd.read().unwrap().len() as u32
+    }
+
+    /// RocksDB estimated key count for a named column family.
+    pub fn cf_approx_key_count(&self, cf_name: &str) -> u64 {
+        self.cf_handle(cf_name)
+            .ok()
+            .and_then(|cf| {
+                self.inner
+                    .db
+                    .property_int_value_cf(&cf, "rocksdb.estimate-num-keys")
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or(0)
+    }
+
+    /// RocksDB total SST file size (bytes) for a named column family.
+    pub fn cf_approx_size_bytes(&self, cf_name: &str) -> u64 {
+        self.cf_handle(cf_name)
+            .ok()
+            .and_then(|cf| {
+                self.inner
+                    .db
+                    .property_int_value_cf(&cf, "rocksdb.total-sst-files-size")
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Sum of SST file sizes (bytes) across all column families.
+    pub fn db_total_sst_size_bytes(&self) -> u64 {
+        cf::ALL.iter().map(|name| self.cf_approx_size_bytes(name)).sum()
+    }
+
+    /// Sum of active memtable sizes (bytes) across all column families.
+    pub fn db_memtable_size_bytes(&self) -> u64 {
+        cf::ALL
+            .iter()
+            .filter_map(|name| self.cf_handle(name).ok())
+            .filter_map(|cf| {
+                self.inner
+                    .db
+                    .property_int_value_cf(&cf, "rocksdb.cur-size-all-mem-tables")
+                    .ok()
+                    .flatten()
+            })
+            .sum()
+    }
+
+    /// Count of live SST files across all column families (sum of num-live-versions).
+    pub fn db_live_sst_files(&self) -> u64 {
+        cf::ALL
+            .iter()
+            .filter_map(|name| self.cf_handle(name).ok())
+            .filter_map(|cf| {
+                self.inner
+                    .db
+                    .property_int_value_cf(&cf, "rocksdb.num-live-versions")
+                    .ok()
+                    .flatten()
+            })
+            .sum()
+    }
+
+    /// Snapshot of HNSW space names, node counts, and storage modes.
+    pub fn hnsw_spaces_info(&self) -> Vec<(String, usize, bool)> {
+        self.inner
+            .hnsw_spaces
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(name, idx)| (name.clone(), idx.len(), idx.is_mmap()))
+            .collect()
+    }
+
     // ── predicate interning ───────────────────────────────────────────────────
 
     pub fn intern_predicate(&self, pred: &str) -> Result<PredId, StorageError> {
@@ -916,6 +1002,101 @@ impl TripleStore {
         Ok(())
     }
 
+    // ── trigram index ─────────────────────────────────────────────────────────
+
+    /// Write trigram index entries for a text property into a caller-supplied batch.
+    ///
+    /// Appends one key per trigram extracted from `text` to the `tri` CF.
+    /// Called from `Transaction::commit()` for every `Triple::Property { value: Text(..) }`.
+    pub(crate) fn batch_text_trigrams(
+        &self,
+        batch: &mut WriteBatch,
+        subject: &NodeId,
+        pred_id: PredId,
+        text: &str,
+    ) -> Result<(), StorageError> {
+        let tri_cf = self.cf_handle(cf::TRI)?;
+        for trigram in keys::extract_trigrams(text) {
+            batch.put_cf(&tri_cf, keys::encode_tri(trigram, pred_id, subject), b"");
+        }
+        Ok(())
+    }
+
+    /// Prefix-scan the `tri` CF for all subjects that contain `trigram` under `pred_id`.
+    pub fn scan_trigram_candidates(&self, pred_id: keys::PredId, trigram: [u8; 3]) -> Vec<NodeId> {
+        let prefix = keys::tri_prefix_tp(trigram, pred_id);
+        let cf = match self.cf_handle(cf::TRI) {
+            Ok(cf) => cf,
+            Err(_) => return vec![],
+        };
+        let iter = self.inner.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+        let mut candidates = Vec::new();
+        for item in iter {
+            let Ok((key, _)) = item else { break };
+            if !key.starts_with(&prefix) { break; }
+            if let Ok(node_id) = keys::decode_tri_subject(&key) {
+                candidates.push(node_id);
+            }
+        }
+        candidates
+    }
+
+    /// Search for nodes whose `predicate` text value contains all trigrams of `query`.
+    ///
+    /// Returns `NodeId`s confirmed alive via MVCC snapshot scan. Stale trigram entries
+    /// (from updated/deleted values) are eliminated by the confirmation step.
+    pub fn text_search(
+        &self,
+        predicate: &str,
+        query: &str,
+        snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
+    ) -> Result<Vec<NodeId>, StorageError> {
+        let pred_id = match self.predicate_id(predicate) {
+            Some(id) => id,
+            None => return Ok(vec![]),
+        };
+
+        let trigrams = keys::extract_trigrams(query);
+        if trigrams.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Collect candidate sets per trigram then intersect smallest-first.
+        let mut candidate_sets: Vec<Vec<NodeId>> = trigrams
+            .iter()
+            .map(|tg| self.scan_trigram_candidates(pred_id, *tg))
+            .collect();
+        candidate_sets.sort_by_key(|s| s.len());
+
+        let mut candidates: std::collections::HashSet<NodeId> =
+            candidate_sets[0].iter().copied().collect();
+        for other_set in &candidate_sets[1..] {
+            let other: std::collections::HashSet<NodeId> = other_set.iter().copied().collect();
+            candidates.retain(|id| other.contains(id));
+        }
+
+        // Snapshot-confirm: the live text value must exist and contain the query.
+        // This eliminates stale TRI entries from superseded text values.
+        use polargraph_core::{triple::Triple, value::Value};
+        let query_lower = query.to_lowercase();
+        let mut result = Vec::new();
+        for node_id in candidates {
+            let triples = self.scan_by_subject_predicate_at(&node_id, predicate, snapshot_ts, vt_as_of)?;
+            let confirmed = triples.iter().any(|t| {
+                if let Triple::Property { value: Value::Text(text), .. } = t {
+                    text.to_lowercase().contains(&query_lower)
+                } else {
+                    false
+                }
+            });
+            if confirmed {
+                result.push(node_id);
+            }
+        }
+        Ok(result)
+    }
+
     pub(crate) fn db_write(&self, batch: WriteBatch) -> Result<(), StorageError> {
         if self.is_replica() {
             return Err(Self::read_only_err());
@@ -962,6 +1143,10 @@ impl TripleStore {
         let p = self.intern_predicate(&pred_str)?;
         let mut batch = WriteBatch::default();
         self.batch_triple(&mut batch, s, p, o, tt, &value_bytes)?;
+        // Trigram index for text properties.
+        if let Triple::Property { value: polargraph_core::value::Value::Text(text), .. } = triple {
+            self.batch_text_trigrams(&mut batch, &s, p, text)?;
+        }
         self.db_write(batch)?;
         // Advance oracle so subsequent scans can see this triple.
         self.inner.oracle.advance_to(tt);

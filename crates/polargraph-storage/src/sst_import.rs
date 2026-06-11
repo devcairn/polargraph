@@ -178,11 +178,19 @@ impl SstImporter {
             store.db_ref().ingest_external_file_cf(&cf, vec![sst_path])?;
         }
 
-        // ── 5. Persist oracle counter ─────────────────────────────────────────
+        // ── 5. Write trigram index entries for text properties via WriteBatch ──
+        let mut tri_batch = WriteBatch::default();
+        for triple in &self.triples {
+            if let Triple::Property { subject, value: polargraph_core::value::Value::Text(text), .. } = triple {
+                let p = *pred_ids.get(triple.predicate().0.as_str()).unwrap();
+                store.batch_text_trigrams(&mut tri_batch, subject, p, text)?;
+            }
+        }
+
+        // ── 6. Persist oracle counter ─────────────────────────────────────────
         let meta_cf = store.cf_handle(cf::META)?;
-        let mut batch = WriteBatch::default();
-        batch.put_cf(&meta_cf, META_ORACLE_CTR, commit_ts.0.to_be_bytes());
-        store.db_write(batch)?;
+        tri_batch.put_cf(&meta_cf, META_ORACLE_CTR, commit_ts.0.to_be_bytes());
+        store.db_write(tri_batch)?;
 
         Ok(ImportStats {
             triples_imported: n,

@@ -70,6 +70,9 @@ toml         = { version = "0.8" }
 # constant-time comparison (timing-attack prevention)
 subtle       = { version = "2" }
 
+# regular expression matching (full-text / trigram search)
+regex        = { version = "1" }
+
 # async utilities (CancellationToken, etc.)
 tokio-util   = { version = "0.7" }
 

@@ -112,6 +112,9 @@ struct QueryBody {
     as_of_valid_time: Option<i64>,
     #[serde(default)]
     as_of_tx_time: Option<i64>,
+    /// Open transaction ID to read from (write-your-own-reads overlay).
+    #[serde(default)]
+    tx_id: Option<String>,
 }
 
 /// A scalar property to attach to an edge at insert time.
@@ -132,6 +135,9 @@ struct InsertBody {
     /// Optional properties stored on the edge (accessible via the returned edge_id).
     #[serde(default)]
     properties: Vec<EdgePropertyJson>,
+    /// Open transaction ID to buffer this insert into instead of auto-committing.
+    #[serde(default)]
+    tx_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -302,6 +308,22 @@ fn node_id_to_uuid_string(nid: &proto::NodeId) -> String {
     }
 }
 
+fn proto_value_to_json(v: &proto::Value) -> serde_json::Value {
+    use proto::value::Kind;
+    match &v.kind {
+        Some(Kind::NullVal(_)) | None => serde_json::Value::Null,
+        Some(Kind::BoolVal(b)) => serde_json::Value::Bool(*b),
+        Some(Kind::IntVal(i)) => serde_json::json!(i),
+        Some(Kind::FloatVal(f)) => serde_json::json!(f),
+        Some(Kind::TextVal(s)) => serde_json::Value::String(s.clone()),
+        Some(Kind::BlobVal(b)) => {
+            let hex: String = b.iter().map(|x| format!("{:02x}", x)).collect();
+            serde_json::Value::String(hex)
+        }
+        Some(Kind::VecVal(fa)) => serde_json::json!(fa.values),
+    }
+}
+
 fn uuid_string_to_node_id(s: &str) -> Result<proto::NodeId, String> {
     Uuid::parse_str(s)
         .map(|u| proto::NodeId { bytes: u.as_bytes().to_vec() })
@@ -342,6 +364,8 @@ async fn handle_query(
         snapshot_ts: 0,
         as_of_valid_time: body.as_of_valid_time.unwrap_or(0),
         as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
+        tx_id: body.tx_id.unwrap_or_default(),
+        ..Default::default()
     };
 
     let mut client = state.client.clone();
@@ -407,7 +431,11 @@ async fn handle_insert(
 
     let mut client = state.client.clone();
     match client
-        .insert(tonic::Request::new(proto::InsertRequest { triples: vec![triple] }))
+        .insert(tonic::Request::new(proto::InsertRequest {
+            triples: vec![triple],
+            tx_id: body.tx_id.unwrap_or_default(),
+            ..Default::default()
+        }))
         .await
     {
         Ok(r) => {
@@ -471,6 +499,7 @@ async fn handle_triples(
         as_of_valid_time: 0,
         as_of_tx_time: 0,
         rules: vec![],
+        ..Default::default()
     };
 
     let mut client = state.client.clone();
@@ -562,6 +591,17 @@ struct CypherBody {
     /// HNSW exploration factor override. 0 or absent = use server default.
     #[serde(default)]
     ef: u32,
+    /// Open transaction ID to read from.
+    #[serde(default)]
+    tx_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CypherWriteBody {
+    cypher: String,
+    /// Open transaction ID to buffer writes into instead of auto-committing.
+    #[serde(default)]
+    tx_id: Option<String>,
 }
 
 async fn handle_cypher(
@@ -574,6 +614,8 @@ async fn handle_cypher(
         as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
         vector: body.vector,
         ef: body.ef,
+        tx_id: body.tx_id.unwrap_or_default(),
+        ..Default::default()
     };
 
     let mut client = state.client.clone();
@@ -583,18 +625,162 @@ async fn handle_cypher(
     };
 
     let results: Vec<serde_json::Value> = resp
-        .bindings
+        .rows
         .into_iter()
         .map(|b| {
             let mut obj = serde_json::Map::new();
-            for (k, v) in b.vars {
+            for (k, v) in b.nodes {
                 obj.insert(k, serde_json::Value::String(node_id_to_uuid_string(&v)));
+            }
+            for (k, v) in b.values {
+                obj.insert(k, proto_value_to_json(&v));
             }
             serde_json::Value::Object(obj)
         })
         .collect();
 
     Json(serde_json::json!({ "results": results })).into_response()
+}
+
+// ── POST /cypher/write ────────────────────────────────────────────────────────
+
+async fn handle_cypher_write(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CypherWriteBody>,
+) -> Response {
+    let req = proto::CypherWriteRequest {
+        cypher: body.cypher,
+        tx_id: body.tx_id.unwrap_or_default(),
+        ..Default::default()
+    };
+
+    let mut client = state.client.clone();
+    match client.cypher_write(tonic::Request::new(req)).await {
+        Ok(r) => {
+            let inner = r.into_inner();
+            let created_node_ids: Vec<String> = inner
+                .created_node_ids
+                .iter()
+                .filter(|b| b.len() == 16)
+                .map(|b| {
+                    let arr: [u8; 16] = b[..16].try_into().unwrap_or([0u8; 16]);
+                    Uuid::from_bytes(arr).to_string()
+                })
+                .collect();
+            Json(serde_json::json!({
+                "ok": true,
+                "created_node_ids": created_node_ids,
+                "triples_written": inner.triples_written,
+                "triples_deleted": inner.triples_deleted,
+            }))
+            .into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
+// ── POST /query/stream ────────────────────────────────────────────────────────
+
+async fn handle_query_stream(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<QueryBody>,
+) -> axum::response::Response {
+    let patterns = match parse_patterns(&body.patterns) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    let rules: Vec<proto::DatalogRule> = match body.rules.iter()
+        .map(rule_to_proto)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    };
+
+    let req = proto::QueryRequest {
+        patterns,
+        rules,
+        snapshot_ts: 0,
+        as_of_valid_time: body.as_of_valid_time.unwrap_or(0),
+        as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
+        ..Default::default()
+    };
+
+    let mut client = state.client.clone();
+    let grpc_stream = match client.query_stream(tonic::Request::new(req)).await {
+        Ok(r) => r.into_inner(),
+        Err(e) => return grpc_error(e),
+    };
+
+    ndjson_streaming_response(grpc_stream).await
+}
+
+// ── POST /cypher/stream ───────────────────────────────────────────────────────
+
+async fn handle_cypher_stream(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CypherBody>,
+) -> axum::response::Response {
+    let req = proto::CypherQueryRequest {
+        cypher: body.cypher,
+        as_of_valid_time: body.as_of_valid_time.unwrap_or(0),
+        as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
+        vector: body.vector,
+        ef: body.ef,
+        ..Default::default()
+    };
+
+    let mut client = state.client.clone();
+    let grpc_stream = match client.cypher_query_stream(tonic::Request::new(req)).await {
+        Ok(r) => r.into_inner(),
+        Err(e) => return grpc_error(e),
+    };
+
+    ndjson_streaming_response(grpc_stream).await
+}
+
+/// Consume a `QueryStreamChunk` gRPC stream and emit NDJSON via a streaming
+/// HTTP response body. Each `QueryResult` is written as one JSON object + "\n".
+async fn ndjson_streaming_response(
+    mut grpc_stream: tonic::codec::Streaming<proto::QueryStreamChunk>,
+) -> axum::response::Response {
+    use axum::http::header;
+
+    let (mut body_tx, body) = hyper::Body::channel();
+
+    tokio::spawn(async move {
+        loop {
+            match grpc_stream.message().await {
+                Ok(Some(chunk)) => {
+                    for result in chunk.results {
+                        let mut obj = serde_json::Map::new();
+                        for (k, v) in result.vars {
+                            obj.insert(k, serde_json::Value::String(node_id_to_uuid_string(&v)));
+                        }
+                        let mut line = serde_json::to_string(&serde_json::Value::Object(obj))
+                            .unwrap_or_else(|_| "{}".to_string());
+                        line.push('\n');
+                        if body_tx.send_data(bytes::Bytes::from(line)).await.is_err() {
+                            return;
+                        }
+                    }
+                    if chunk.done {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        // body_tx is dropped here, signalling EOF to the HTTP client
+    });
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .body(axum::body::boxed(body))
+        .unwrap()
 }
 
 // ── POST /explain ─────────────────────────────────────────────────────────────
@@ -623,6 +809,7 @@ async fn handle_explain(
         snapshot_ts: 0,
         as_of_valid_time: body.as_of_valid_time.unwrap_or(0),
         as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
+        ..Default::default()
     };
 
     let mut client = state.client.clone();
@@ -640,6 +827,106 @@ async fn handle_explain(
                 .collect();
             Json(serde_json::json!({ "plan_text": er.plan_text, "nodes": nodes }))
                 .into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
+// ── GET /indexes ──────────────────────────────────────────────────────────────
+
+async fn handle_indexes(State(state): State<Arc<AppState>>) -> Response {
+    let mut client = state.client.clone();
+    match client.show_indexes(tonic::Request::new(proto::ShowIndexesRequest {})).await {
+        Ok(r) => {
+            let resp = r.into_inner();
+            let cfs: Vec<serde_json::Value> = resp.column_families.into_iter().map(|cf| {
+                serde_json::json!({
+                    "name": cf.name,
+                    "approx_key_count": cf.approx_key_count,
+                    "approx_size_bytes": cf.approx_size_bytes,
+                })
+            }).collect();
+            let spaces: Vec<serde_json::Value> = resp.vector_spaces.into_iter().map(|vs| {
+                serde_json::json!({
+                    "name": vs.name,
+                    "dimensions": vs.dimensions,
+                    "node_count": vs.node_count,
+                    "storage_mode": vs.storage_mode,
+                })
+            }).collect();
+            Json(serde_json::json!({
+                "column_families": cfs,
+                "vector_spaces": spaces,
+                "predicate_count": resp.predicate_count,
+            })).into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
+// ── POST /tx/begin ────────────────────────────────────────────────────────────
+
+async fn handle_tx_begin(State(state): State<Arc<AppState>>) -> Response {
+    let mut client = state.client.clone();
+    match client.begin_transaction(tonic::Request::new(proto::BeginTransactionRequest {})).await {
+        Ok(r) => Json(serde_json::json!({ "tx_id": r.into_inner().tx_id })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+// ── POST /tx/commit ───────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct TxIdBody {
+    tx_id: String,
+}
+
+async fn handle_tx_commit(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TxIdBody>,
+) -> Response {
+    let req = proto::CommitTransactionRequest { tx_id: body.tx_id };
+    let mut client = state.client.clone();
+    match client.commit_transaction(tonic::Request::new(req)).await {
+        Ok(r) => {
+            let inner = r.into_inner();
+            Json(serde_json::json!({ "ok": true, "triples_written": inner.triples_written }))
+                .into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
+// ── POST /tx/rollback ─────────────────────────────────────────────────────────
+
+async fn handle_tx_rollback(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TxIdBody>,
+) -> Response {
+    let req = proto::RollbackTransactionRequest { tx_id: body.tx_id };
+    let mut client = state.client.clone();
+    match client.rollback_transaction(tonic::Request::new(req)).await {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+// ── GET /stats ────────────────────────────────────────────────────────────────
+
+async fn handle_stats(State(state): State<Arc<AppState>>) -> Response {
+    let mut client = state.client.clone();
+    match client.show_stats(tonic::Request::new(proto::ShowStatsRequest {})).await {
+        Ok(r) => {
+            let s = r.into_inner();
+            Json(serde_json::json!({
+                "live_sst_files": s.live_sst_files,
+                "total_sst_size_bytes": s.total_sst_size_bytes,
+                "memtable_size_bytes": s.memtable_size_bytes,
+                "mvcc_oracle_ts": s.mvcc_oracle_ts,
+                "predicate_intern_count": s.predicate_intern_count,
+                "open_transaction_count": s.open_transaction_count,
+                "mode": s.mode,
+            })).into_response()
         }
         Err(e) => grpc_error(e),
     }
@@ -676,12 +963,20 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/query", post(handle_query))
+        .route("/query/stream", post(handle_query_stream))
         .route("/cypher", post(handle_cypher))
+        .route("/cypher/write", post(handle_cypher_write))
+        .route("/cypher/stream", post(handle_cypher_stream))
         .route("/insert", post(handle_insert))
         .route("/triples", get(handle_triples))
         .route("/vector/search", post(handle_vector_search))
         .route("/health", get(handle_health))
         .route("/explain", post(handle_explain))
+        .route("/indexes", get(handle_indexes))
+        .route("/stats", get(handle_stats))
+        .route("/tx/begin", post(handle_tx_begin))
+        .route("/tx/commit", post(handle_tx_commit))
+        .route("/tx/rollback", post(handle_tx_rollback))
         .with_state(state);
 
     info!(addr = %args.listen, upstream = %args.upstream, "polargraph-rest listening");

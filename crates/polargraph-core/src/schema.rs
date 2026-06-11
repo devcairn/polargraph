@@ -150,8 +150,12 @@ impl NodeTypeDef {
 /// `predicate` is the relation name (e.g. `"works_at"`).  `domain` and
 /// `range` are optional node type names that constrain which node types may
 /// appear as subject and object respectively.  `fields` declares expected
-/// property triples on the edge itself (edge properties are not yet stored but
-/// the schema layer is ready for them).
+/// property predicates on the edge itself.
+///
+/// Edge properties are stored as `Triple::Property` triples whose subject is
+/// `NodeId(edge_id.0)` — the same UUID as the relation's `EdgeId`, reinterpreted
+/// as a node subject. Clients receive the edge UUID in `InsertResponse.edge_ids`
+/// and can query edge properties by that UUID.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EdgeTypeDef {
     /// The predicate string this schema governs.

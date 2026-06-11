@@ -11,6 +11,8 @@ use crate::{
         vector_seed_query_request::Filter as SeedFilter,
         BackupInfo as ProtoBackupInfo,
         BatchInsertError, BatchInsertVectorsRequest, BatchInsertVectorsResponse,
+        BeginTransactionRequest, BeginTransactionResponse,
+        CommitTransactionRequest, CommitTransactionResponse,
         CreateBackupRequest, CreateBackupResponse,
         AppliedMigrationInfo,
         CypherBinding, CypherQueryRequest, CypherQueryResponse, CypherWriteRequest, CypherWriteResponse,
@@ -28,24 +30,30 @@ use crate::{
         RegisterEdgeTypeRequest, RegisterEdgeTypeResponse,
         RegisterNodeTypeRequest, RegisterNodeTypeResponse,
         ReplicaStatusRequest, ReplicaStatusResponse,
+        RollbackTransactionRequest, RollbackTransactionResponse,
         RunRetentionRequest, RunRetentionResponse,
         ScoredBinding,
         SearchVectorFilteredRequest, SearchVectorFilteredResponse,
         SearchVectorInSetRequest, SearchVectorInSetResponse,
         SearchVectorRequest, SearchVectorResponse,
+        ShowIndexesRequest, ShowIndexesResponse,
+        ShowStatsRequest, ShowStatsResponse,
+        ColumnFamilyInfo, VectorSpaceInfo,
         StreamWalRequest, WalEntry,
         ValidateEdgeRequest, ValidateEdgeResponse,
         ValidateNodeRequest, ValidateNodeResponse,
         VectorSearchResult, VectorSeedQueryRequest, VectorSeedQueryResponse,
     },
 };
+use dashmap::DashMap;
 use polargraph_core::{id::NodeId, schema::{RetentionPolicy, StorageMode}, triple::Triple, value::Value};
 use polargraph_query::datalog::{
-    execute_query, execute_query_hybrid, execute_query_seeded, execute_recursive,
-    reachable_from, reachable_from_hops, Bindings, DerivedFacts, Query, QueryError,
+    execute_query, execute_query_hybrid, execute_query_seeded, execute_query_with_pending,
+    execute_recursive, reachable_from, reachable_from_hops, Bindings, DerivedFacts, Query,
+    QueryError,
 };
 use polargraph_query::explain::explain_query;
-use polargraph_storage::{BackupManager, CompactionManager, EdgeTypeRegistry, MigrationRunner, NodeTypeRegistry, StorageError, TripleStore, WalStreamer, MIGRATIONS};
+use polargraph_storage::{BackupManager, CompactionManager, EdgeTypeRegistry, MigrationRunner, NodeTypeRegistry, StorageError, Transaction, TripleStore, WalStreamer, MIGRATIONS};
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -55,10 +63,21 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, warn};
+
+// ── Open-transaction state ────────────────────────────────────────────────────
+
+/// Server-side state for one open wire transaction.
+struct OpenTransaction {
+    tx: Transaction,
+    last_used: Instant,
+}
+
+type TxMap = DashMap<String, Arc<AsyncMutex<OpenTransaction>>>;
 
 // ── Replica state ─────────────────────────────────────────────────────────────
 
@@ -122,6 +141,12 @@ pub struct PolarGraphServer {
     slow_query_ms: u64,
     /// Default HNSW exploration factor for all vector search RPCs.
     default_vector_ef: u32,
+    /// Server start time, used to compute uptime in ShowStats.
+    start_time: Instant,
+    /// Live wire transactions. Shared across all clones via Arc.
+    tx_map: Arc<TxMap>,
+    /// Milliseconds of idle time after which an open transaction is rolled back. 0 = disabled.
+    tx_idle_timeout_ms: u64,
 }
 
 impl PolarGraphServer {
@@ -149,7 +174,20 @@ impl PolarGraphServer {
         let backup_manager = backup_dir
             .map(|dir| BackupManager::open(dir, &store).map(Arc::new))
             .transpose()?;
-        Ok(Self { store, registry, edge_registry, type_cache, backup_manager, replica_state: None, query_timeout_ms: 30_000, slow_query_ms: 1_000, default_vector_ef: 50 })
+        Ok(Self {
+            store,
+            registry,
+            edge_registry,
+            type_cache,
+            backup_manager,
+            replica_state: None,
+            query_timeout_ms: 30_000,
+            slow_query_ms: 1_000,
+            default_vector_ef: 50,
+            start_time: Instant::now(),
+            tx_map: Arc::new(DashMap::new()),
+            tx_idle_timeout_ms: 300_000,
+        })
     }
 
     /// Set the maximum query execution time in milliseconds. 0 disables the timeout.
@@ -170,6 +208,12 @@ impl PolarGraphServer {
     /// Per-request `ef` fields override this value when non-zero.
     pub fn with_default_vector_ef(mut self, ef: u32) -> Self {
         self.default_vector_ef = ef;
+        self
+    }
+
+    /// Set the idle TTL for open transactions in milliseconds. 0 disables idle expiry.
+    pub fn with_tx_idle_timeout_ms(mut self, ms: u64) -> Self {
+        self.tx_idle_timeout_ms = ms;
         self
     }
 
@@ -215,8 +259,69 @@ impl PolarGraphServer {
             query_timeout_ms: 30_000,
             slow_query_ms: 1_000,
             default_vector_ef: 50,
+            start_time: Instant::now(),
+            tx_map: Arc::new(DashMap::new()),
+            tx_idle_timeout_ms: 300_000,
         };
         Ok((server, replica_state))
+    }
+
+    /// Spawn a background task that periodically evicts idle open transactions.
+    ///
+    /// Any transaction whose `last_used` is older than `idle_timeout_ms` is
+    /// removed from the map (effectively rolling it back). Stops when `token`
+    /// is cancelled.
+    pub fn spawn_tx_ttl_task(&self, token: CancellationToken, idle_timeout_ms: u64) {
+        if idle_timeout_ms == 0 {
+            return;
+        }
+        let tx_map = Arc::clone(&self.tx_map);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let threshold = Duration::from_millis(idle_timeout_ms);
+                        let now = Instant::now();
+                        let expired: Vec<String> = tx_map
+                            .iter()
+                            .filter_map(|entry| {
+                                // Try a non-blocking lock; skip if the tx is being used.
+                                if let Ok(guard) = entry.value().try_lock() {
+                                    if now.duration_since(guard.last_used) > threshold {
+                                        return Some(entry.key().clone());
+                                    }
+                                }
+                                None
+                            })
+                            .collect();
+                        for tx_id in &expired {
+                            tx_map.remove(tx_id);
+                        }
+                        if !expired.is_empty() {
+                            warn!(
+                                count = expired.len(),
+                                idle_timeout_ms,
+                                "idle transactions expired and rolled back"
+                            );
+                            metrics::gauge!("polargraph_open_transactions")
+                                .set(tx_map.len() as f64);
+                        }
+                    }
+                    _ = token.cancelled() => {
+                        let remaining = tx_map.len();
+                        if remaining > 0 {
+                            warn!(
+                                count = remaining,
+                                "rolling back open transactions on shutdown"
+                            );
+                        }
+                        tx_map.clear();
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     /// Expose the underlying store. Used in integration tests to plant
@@ -319,7 +424,22 @@ impl PolarGraphService for PolarGraphServer {
 
         debug!("insert: {} triple(s) ({} relation(s))", all_triples.len(), edge_ids.len());
 
-        // Begin transaction, insert all, commit.
+        // If a tx_id is provided, buffer into the open transaction without committing.
+        if !req.tx_id.is_empty() {
+            let entry = self
+                .tx_map
+                .get(&req.tx_id)
+                .ok_or_else(|| Status::not_found(format!("unknown or expired transaction: {}", req.tx_id)))?;
+            let mut guard = entry.lock().await;
+            for triple in &all_triples {
+                guard.tx.insert(triple.clone());
+            }
+            guard.last_used = Instant::now();
+            debug!(tx_id = %req.tx_id, "buffered {} triple(s) into open transaction", all_triples.len());
+            return Ok(Response::new(InsertResponse { commit_ts: 0, edge_ids }));
+        }
+
+        // Auto-commit path: begin a new transaction, insert all, commit.
         let mut tx = self.store.begin();
         for triple in &all_triples {
             tx.insert(triple.clone());
@@ -385,7 +505,24 @@ impl PolarGraphService for PolarGraphServer {
             .collect::<Result<_, _>>()?;
 
         let t0 = Instant::now();
-        let results = if rules.is_empty() {
+
+        // When tx_id is set, use the transaction's snapshot (read_ts) and overlay
+        // pending write-buffer triples for write-your-own-reads.
+        let results = if !req.tx_id.is_empty() {
+            let entry = self
+                .tx_map
+                .get(&req.tx_id)
+                .ok_or_else(|| Status::not_found(format!("unknown or expired transaction: {}", req.tx_id)))?;
+            let mut guard = entry.lock().await;
+            guard.last_used = Instant::now();
+            let tx_snapshot = self.store.snapshot(guard.tx.read_ts);
+            // Collect pending triples while we hold the lock.
+            let pending: Vec<Triple> = guard.tx.pending_triples().to_vec();
+            drop(guard);
+            drop(entry);
+            execute_query_with_pending(&query, &tx_snapshot, &pending, self.make_deadline(), Some(&self.edge_registry))
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+        } else if rules.is_empty() {
             // Fast path: pure conjunctive query against base facts only.
             execute_query(&query, &snapshot, self.make_deadline(), Some(&self.edge_registry))
                 .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
@@ -1238,12 +1375,24 @@ impl PolarGraphService for PolarGraphServer {
         // Compile the AST into the Datalog IR.
         let compiled = polargraph_query::cypher::compile(parsed);
 
-        // Resolve snapshot (same logic as the Query RPC).
-        let tx_ts = if req.as_of_tx_time != 0 { req.as_of_tx_time } else { 0 };
-        let mut snapshot = if tx_ts == 0 {
-            self.store.snapshot(self.store.begin().read_ts)
+        // Resolve snapshot. If tx_id is set, read from the transaction's snapshot.
+        let mut snapshot = if !req.tx_id.is_empty() {
+            let open_arc = {
+                let entry = self.tx_map.get(&req.tx_id).ok_or_else(|| {
+                    Status::not_found(format!("transaction '{}' not found or expired", req.tx_id))
+                })?;
+                Arc::clone(entry.value())
+            };
+            let mut guard = open_arc.lock().await;
+            guard.last_used = Instant::now();
+            self.store.snapshot(guard.tx.read_ts)
         } else {
-            self.store.snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+            let tx_ts = if req.as_of_tx_time != 0 { req.as_of_tx_time } else { 0 };
+            if tx_ts == 0 {
+                self.store.snapshot(self.store.begin().read_ts)
+            } else {
+                self.store.snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+            }
         };
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
@@ -1307,6 +1456,11 @@ impl PolarGraphService for PolarGraphServer {
         // Apply value filters (type constraints and WHERE clause checks).
         let filtered =
             polargraph_query::cypher::apply_value_filters(raw_results, &compiled.value_filters, &snapshot)
+                .map_err(storage_err_to_status)?;
+
+        // Apply text filters (CONTAINS / STARTS WITH / =~).
+        let filtered =
+            polargraph_query::cypher::apply_text_filters(filtered, &compiled.text_filters, &snapshot)
                 .map_err(storage_err_to_status)?;
 
         // Apply aggregations, ORDER BY, SKIP, and LIMIT.
@@ -1374,41 +1528,72 @@ impl PolarGraphService for PolarGraphServer {
             }
         };
 
-        let mut tx = self.store.begin();
-        let snapshot = self.store.snapshot(tx.read_ts);
-
-        let result = if let Some(ref mq) = compiled.match_query {
-            // MATCH + write: execute the match, then run the write ops for each row.
-            let raw = execute_query(&mq.query, &snapshot, None, None)
-                .map_err(|e| Status::internal(format!("match query error: {e}")))?;
-            let rows = polargraph_query::cypher::apply_value_filters(raw, &mq.value_filters, &snapshot)
-                .map_err(storage_err_to_status)?;
-
-            let mut all_ids: Vec<NodeId> = Vec::new();
-            let mut all_written: u64 = 0;
-            let mut all_deleted: u64 = 0;
-            for row in rows {
-                let mut row_bindings = row;
-                let r = polargraph_query::cypher::execute_write_ops(
-                    &compiled.writes, &mut tx, &snapshot, &mut row_bindings,
+        // Helper closure to run the write ops given a mutable Transaction reference.
+        // Returns the WriteResult without committing.
+        let execute_writes = |tx: &mut Transaction| -> Result<polargraph_query::cypher::WriteResult, Status> {
+            let snapshot = self.store.snapshot(tx.read_ts);
+            if let Some(ref mq) = compiled.match_query {
+                let raw = execute_query(&mq.query, &snapshot, None, None)
+                    .map_err(|e| Status::internal(format!("match query error: {e}")))?;
+                let rows = polargraph_query::cypher::apply_value_filters(raw, &mq.value_filters, &snapshot)
+                    .map_err(storage_err_to_status)?;
+                let rows = polargraph_query::cypher::apply_text_filters(rows, &mq.text_filters, &snapshot)
+                    .map_err(storage_err_to_status)?;
+                let mut all_ids: Vec<NodeId> = Vec::new();
+                let mut all_written: u64 = 0;
+                let mut all_deleted: u64 = 0;
+                for row in rows {
+                    let mut row_bindings = row;
+                    let r = polargraph_query::cypher::execute_write_ops(
+                        &compiled.writes, tx, &snapshot, &mut row_bindings,
+                    )
+                    .map_err(&map_write_err)?;
+                    all_ids.extend(r.created_ids);
+                    all_written += r.triples_written;
+                    all_deleted += r.triples_deleted;
+                }
+                Ok(polargraph_query::cypher::WriteResult {
+                    created_ids: all_ids,
+                    triples_written: all_written,
+                    triples_deleted: all_deleted,
+                })
+            } else {
+                let mut bindings = HashMap::new();
+                polargraph_query::cypher::execute_write_ops(
+                    &compiled.writes, tx, &snapshot, &mut bindings,
                 )
-                .map_err(&map_write_err)?;
-                all_ids.extend(r.created_ids);
-                all_written += r.triples_written;
-                all_deleted += r.triples_deleted;
+                .map_err(map_write_err)
             }
-            polargraph_query::cypher::WriteResult {
-                created_ids: all_ids,
-                triples_written: all_written,
-                triples_deleted: all_deleted,
-            }
-        } else {
-            let mut bindings = HashMap::new();
-            polargraph_query::cypher::execute_write_ops(
-                &compiled.writes, &mut tx, &snapshot, &mut bindings,
-            )
-            .map_err(map_write_err)?
         };
+
+        // If tx_id is set, buffer writes into the open transaction without committing.
+        if !req.tx_id.is_empty() {
+            // Clone the Arc before awaiting to avoid holding a DashMap shard lock.
+            let open_arc = {
+                let entry = self
+                    .tx_map
+                    .get(&req.tx_id)
+                    .ok_or_else(|| Status::not_found(format!("unknown or expired transaction: {}", req.tx_id)))?;
+                Arc::clone(entry.value())
+            };
+            let mut guard = open_arc.lock().await;
+            let result = execute_writes(&mut guard.tx)?;
+            guard.last_used = Instant::now();
+            debug!(
+                tx_id = %req.tx_id,
+                "cypher_write buffered: created={} written={} deleted={}",
+                result.created_ids.len(), result.triples_written, result.triples_deleted
+            );
+            return Ok(Response::new(CypherWriteResponse {
+                created_node_ids: result.created_ids.iter().map(|id| id.as_bytes().to_vec()).collect(),
+                triples_written: result.triples_written,
+                triples_deleted: result.triples_deleted,
+            }));
+        }
+
+        // Auto-commit path.
+        let mut tx = self.store.begin();
+        let result = execute_writes(&mut tx)?;
 
         let commit_ts = tx.commit().map_err(storage_err_to_status)?;
         debug!(
@@ -1623,6 +1808,10 @@ impl PolarGraphService for PolarGraphServer {
             polargraph_query::cypher::apply_value_filters(raw_results, &compiled.value_filters, &snapshot)
                 .map_err(storage_err_to_status)?;
 
+        let filtered =
+            polargraph_query::cypher::apply_text_filters(filtered, &compiled.text_filters, &snapshot)
+                .map_err(storage_err_to_status)?;
+
         let limited: Vec<_> = match compiled.limit {
             Some(n) => filtered.into_iter().take(n).collect(),
             None => filtered,
@@ -1645,6 +1834,131 @@ impl PolarGraphService for PolarGraphServer {
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn show_indexes(
+        &self,
+        _req: Request<ShowIndexesRequest>,
+    ) -> Result<Response<ShowIndexesResponse>, Status> {
+        let column_families: Vec<ColumnFamilyInfo> = polargraph_storage::cf::ALL
+            .iter()
+            .map(|&name| ColumnFamilyInfo {
+                name: name.to_owned(),
+                approx_key_count: self.store.cf_approx_key_count(name),
+                approx_size_bytes: self.store.cf_approx_size_bytes(name),
+            })
+            .collect();
+
+        let vector_spaces: Vec<VectorSpaceInfo> = self
+            .store
+            .hnsw_spaces_info()
+            .into_iter()
+            .map(|(name, node_count, is_mmap)| {
+                let dimensions = self
+                    .registry
+                    .get_space_def(&name)
+                    .map(|vs| vs.dimensions)
+                    .unwrap_or(0);
+                VectorSpaceInfo {
+                    name,
+                    dimensions,
+                    node_count: node_count as u64,
+                    storage_mode: if is_mmap { "mmap".to_owned() } else { "memory".to_owned() },
+                }
+            })
+            .collect();
+
+        let predicate_count = self.store.predicate_count();
+
+        Ok(Response::new(ShowIndexesResponse { column_families, vector_spaces, predicate_count }))
+    }
+
+    async fn show_stats(
+        &self,
+        _req: Request<ShowStatsRequest>,
+    ) -> Result<Response<ShowStatsResponse>, Status> {
+        let mode = if self.store.is_replica() { "replica" } else { "primary" };
+        Ok(Response::new(ShowStatsResponse {
+            live_sst_files: self.store.db_live_sst_files(),
+            total_sst_size_bytes: self.store.db_total_sst_size_bytes(),
+            memtable_size_bytes: self.store.db_memtable_size_bytes(),
+            mvcc_oracle_ts: self.store.oracle_ts() as u64,
+            predicate_intern_count: self.store.predicate_count(),
+            open_transaction_count: self.tx_map.len() as u32,
+            mode: mode.to_owned(),
+        }))
+    }
+
+    // ── Wire transactions ─────────────────────────────────────────────────────
+
+    /// Open a new server-side MVCC transaction and return its opaque ID.
+    async fn begin_transaction(
+        &self,
+        _request: Request<BeginTransactionRequest>,
+    ) -> Result<Response<BeginTransactionResponse>, Status> {
+        self.check_not_replica()?;
+
+        let tx = self.store.begin();
+        let tx_id = uuid::Uuid::now_v7().to_string();
+
+        let open = Arc::new(AsyncMutex::new(OpenTransaction {
+            tx,
+            last_used: Instant::now(),
+        }));
+        self.tx_map.insert(tx_id.clone(), open);
+
+        metrics::gauge!("polargraph_open_transactions").set(self.tx_map.len() as f64);
+        debug!(tx_id, "transaction opened");
+
+        Ok(Response::new(BeginTransactionResponse { tx_id }))
+    }
+
+    /// Commit an open transaction.
+    async fn commit_transaction(
+        &self,
+        request: Request<CommitTransactionRequest>,
+    ) -> Result<Response<CommitTransactionResponse>, Status> {
+        self.check_not_replica()?;
+        let tx_id = request.into_inner().tx_id;
+
+        let (_key, open) = self
+            .tx_map
+            .remove(&tx_id)
+            .ok_or_else(|| Status::not_found(format!("unknown or expired transaction: {tx_id}")))?;
+
+        // Unwrap the Arc — succeeds because we removed it from the map and no
+        // new reference can be obtained.
+        let inner = Arc::try_unwrap(open).map_err(|_| {
+            Status::internal("transaction is still in use by a concurrent RPC")
+        })?;
+        let open_tx = inner.into_inner();
+        let triples_written = open_tx.tx.pending_triples().len() as u64;
+
+        debug!(tx_id, triples = triples_written, "committing transaction");
+        open_tx.tx.commit().map_err(storage_err_to_status)?;
+
+        metrics::gauge!("polargraph_open_transactions").set(self.tx_map.len() as f64);
+        info!(tx_id, triples_written, "transaction committed");
+
+        Ok(Response::new(CommitTransactionResponse { triples_written }))
+    }
+
+    /// Roll back an open transaction, discarding all buffered writes.
+    async fn rollback_transaction(
+        &self,
+        request: Request<RollbackTransactionRequest>,
+    ) -> Result<Response<RollbackTransactionResponse>, Status> {
+        self.check_not_replica()?;
+        let tx_id = request.into_inner().tx_id;
+
+        self.tx_map
+            .remove(&tx_id)
+            .ok_or_else(|| Status::not_found(format!("unknown or expired transaction: {tx_id}")))?;
+
+        metrics::gauge!("polargraph_open_transactions").set(self.tx_map.len() as f64);
+        debug!(tx_id, "transaction rolled back");
+
+        Ok(Response::new(RollbackTransactionResponse {}))
     }
 }
 

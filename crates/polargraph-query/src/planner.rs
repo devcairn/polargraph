@@ -71,6 +71,22 @@ impl Default for Pattern {
     }
 }
 
+// ── SchemaHints ───────────────────────────────────────────────────────────────
+
+/// Domain/range type constraints derived from the `EdgeTypeRegistry` for a
+/// pattern with a bound predicate.
+///
+/// When a predicate has a registered schema with `domain` or `range` set, the
+/// evaluator can short-circuit the hexastore scan if the bound subject/object
+/// node does not carry the expected `__type` property.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaHints {
+    /// Expected `__type` of the subject (domain constraint). `None` = unconstrained.
+    pub domain: Option<String>,
+    /// Expected `__type` of the object (range constraint). `None` = unconstrained.
+    pub range: Option<String>,
+}
+
 // ── IndexChoice ───────────────────────────────────────────────────────────────
 
 /// Which storage scan the evaluator should perform.

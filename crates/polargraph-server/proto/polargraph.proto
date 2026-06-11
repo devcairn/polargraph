@@ -107,6 +107,9 @@ message DatalogRule {
 
 message InsertRequest {
     repeated Triple triples = 1;
+    /// Optional open-transaction ID. When set, triples are buffered into the
+    /// named transaction rather than auto-committed.
+    string tx_id = 2;
 }
 
 message InsertResponse {
@@ -134,6 +137,9 @@ message QueryRequest {
     /// fixed point (deriving IDB facts) then evaluates `patterns` against the
     /// combined base + derived fact set.
     repeated DatalogRule rules           = 5;
+    /// Optional open-transaction ID. When set, the query reads from the
+    /// transaction's snapshot (including its uncommitted write buffer).
+    string tx_id = 6;
 }
 
 /// One satisfying assignment of all variables in the query.
@@ -143,6 +149,21 @@ message Binding {
 
 message QueryResponse {
     repeated Binding bindings = 1;
+}
+
+/// One row in a streaming query response. Structurally identical to `Binding`;
+/// provided as a distinct message so streaming and non-streaming RPCs can evolve
+/// independently.
+message QueryResult {
+    map<string, NodeId> vars = 1;
+}
+
+/// A chunk of results delivered by a streaming query RPC.
+/// The final chunk always has `done = true`; earlier chunks have `done = false`.
+message QueryStreamChunk {
+    repeated QueryResult results    = 1;
+    uint64               chunk_index = 2;
+    bool                 done        = 3;
 }
 
 // ── Reachability ─────────────────────────────────────────────────────────────
@@ -530,6 +551,41 @@ message AppliedMigrationInfo {
     int64  applied_at_tx_time  = 3;
 }
 
+// ── Diagnostics ───────────────────────────────────────────────────────────────
+
+message ShowIndexesRequest {}
+
+message ColumnFamilyInfo {
+    string name              = 1;
+    uint64 approx_key_count  = 2;
+    uint64 approx_size_bytes = 3;
+}
+
+message VectorSpaceInfo {
+    string name         = 1;
+    uint32 dimensions   = 2;
+    uint64 node_count   = 3;
+    string storage_mode = 4;
+}
+
+message ShowIndexesResponse {
+    repeated ColumnFamilyInfo column_families = 1;
+    repeated VectorSpaceInfo  vector_spaces   = 2;
+    uint32                    predicate_count  = 3;
+}
+
+message ShowStatsRequest {}
+
+message ShowStatsResponse {
+    uint64 live_sst_files        = 1;
+    uint64 total_sst_size_bytes  = 2;
+    uint64 memtable_size_bytes   = 3;
+    uint64 mvcc_oracle_ts        = 4;
+    uint32 predicate_intern_count = 5;
+    uint32 open_transaction_count = 6;
+    string mode                  = 7;
+}
+
 // ── CypherQuery ───────────────────────────────────────────────────────────────
 
 /// Execute a query written in the supported Cypher subset.
@@ -537,12 +593,15 @@ message AppliedMigrationInfo {
 /// The Cypher string is parsed and compiled to the internal Datalog IR, then
 /// evaluated by the same engine as the `Query` RPC. Returns bindings for the
 /// variables named in the RETURN clause (filtered to those variable names).
+/// When the RETURN clause contains aggregate functions (count(*), collect(), etc.),
+/// aggregate values appear in the `values` map of each CypherBinding row.
 message CypherQueryRequest {
     /// Cypher query string, e.g.:
     ///   MATCH (a:Person)-[:knows]->(b:Person)
     ///   WHERE a.name = "Alice"
-    ///   RETURN a, b
-    ///   LIMIT 10
+    ///   RETURN a, count(*) AS n
+    ///   ORDER BY n DESC
+    ///   SKIP 0 LIMIT 10
     string cypher = 1;
     /// Valid-time point-in-time filter (unix microseconds). 0 = no filter.
     int64  as_of_valid_time = 2;
@@ -553,6 +612,50 @@ message CypherQueryRequest {
     repeated float vector   = 4;
     /// HNSW exploration factor for VECTOR_NEAR. 0 = use server default.
     uint32         ef       = 5;
+    /// Optional open-transaction ID. Reads from the transaction's snapshot.
+    string tx_id = 6;
+}
+
+/// One result row from a CypherQuery.
+///
+/// For plain RETURN (no aggregations) `nodes` carries all bound variables and
+/// `values` is empty.  When RETURN contains aggregate functions, `nodes` carries
+/// the group-key variables and `values` carries the computed aggregates
+/// (e.g. count(*) AS n → `values["n"] = {int_val: 5}`).
+message CypherBinding {
+    /// Graph-node variable bindings (RETURN a, b).
+    map<string, NodeId> nodes  = 1;
+    /// Scalar and aggregate variable bindings (count(*) AS n, collect(b) AS bs).
+    map<string, Value>  values = 2;
+}
+
+/// Response from CypherQuery.
+message CypherQueryResponse {
+    repeated CypherBinding rows = 1;
+}
+
+// ── CypherWrite ───────────────────────────────────────────────────────────────
+
+/// Execute a Cypher write statement (CREATE, MERGE, SET, DELETE).
+message CypherWriteRequest {
+    /// Cypher write string, e.g.:
+    ///   CREATE (a:Person {name: "Alice"})
+    ///   MERGE (c:Company {name: "Acme"})
+    ///   SET a.active = true
+    ///   DELETE a
+    string cypher = 1;
+    /// Optional open-transaction ID. When set, writes are buffered into the
+    /// named transaction rather than auto-committed.
+    string tx_id = 2;
+}
+
+message CypherWriteResponse {
+    /// UUIDs (16-byte NodeId) of nodes created by this statement (in order).
+    repeated bytes created_node_ids = 1;
+    /// Total number of property/relation triples inserted.
+    uint64 triples_written = 2;
+    /// Total number of triples logically deleted (vt_end closed).
+    uint64 triples_deleted = 3;
 }
 
 // ── ExplainQuery ──────────────────────────────────────────────────────────────
@@ -576,6 +679,31 @@ message PlanNode {
     /// Child nodes (e.g. body patterns of a RecursiveJoin).
     repeated PlanNode children = 4;
 }
+
+// ── Wire transactions ─────────────────────────────────────────────────────────
+
+message BeginTransactionRequest {}
+
+message BeginTransactionResponse {
+    /// Opaque transaction identifier. Pass this in subsequent Insert, Query,
+    /// CypherWrite, and CypherQuery RPCs to join the open transaction.
+    string tx_id = 1;
+}
+
+message CommitTransactionRequest {
+    string tx_id = 1;
+}
+
+message CommitTransactionResponse {
+    /// Total number of triples written (relation + property) in this transaction.
+    uint64 triples_written = 1;
+}
+
+message RollbackTransactionRequest {
+    string tx_id = 1;
+}
+
+message RollbackTransactionResponse {}
 
 // ── Service ───────────────────────────────────────────────────────────────────
 
@@ -685,6 +813,43 @@ service PolarGraphService {
     /// Parse and execute a Cypher query string. Supports a subset of openCypher:
     /// MATCH, WHERE (= only), RETURN, LIMIT; directed relationships; transitive
     /// closure with [:pred*] or [:pred*min..max].
-    /// Returns INVALID_ARGUMENT if the Cypher string cannot be parsed.
-    rpc CypherQuery(CypherQueryRequest) returns (QueryResponse);
+    /// Returns INVALID_ARGUMENT if the Cypher string cannot be parsed or contains
+    /// write clauses (CREATE/MERGE/SET/DELETE) — use CypherWrite for mutations.
+    rpc CypherQuery(CypherQueryRequest) returns (CypherQueryResponse);
+
+    /// Parse and execute a Cypher write statement (CREATE, MERGE, SET, DELETE).
+    /// Executes atomically in a single MVCC transaction.
+    /// Returns INVALID_ARGUMENT if the statement cannot be parsed or contains no
+    /// write clause. Returns FAILED_PRECONDITION on a read replica.
+    rpc CypherWrite(CypherWriteRequest) returns (CypherWriteResponse);
+
+    /// Like `Query` but streams results in chunks of up to 500 bindings each.
+    /// Use for large result sets that would otherwise exceed memory or message-size
+    /// limits. The final chunk has `done = true`.
+    rpc QueryStream(QueryRequest) returns (stream QueryStreamChunk);
+
+    /// Like `CypherQuery` but streams results in chunks. Respects the LIMIT clause
+    /// in the Cypher string. The final chunk has `done = true`.
+    rpc CypherQueryStream(CypherQueryRequest) returns (stream QueryStreamChunk);
+
+    /// Return per-column-family key counts and sizes, plus HNSW space info.
+    rpc ShowIndexes(ShowIndexesRequest) returns (ShowIndexesResponse);
+
+    /// Return server-wide storage and MVCC statistics.
+    rpc ShowStats(ShowStatsRequest) returns (ShowStatsResponse);
+
+    /// Open a new multi-RPC transaction. Returns an opaque tx_id.
+    /// Pass tx_id to Insert, Query, CypherWrite, or CypherQuery to join the
+    /// transaction. Returns FAILED_PRECONDITION on a read replica.
+    rpc BeginTransaction(BeginTransactionRequest) returns (BeginTransactionResponse);
+
+    /// Commit an open transaction. Returns ABORTED on write-write conflict,
+    /// NOT_FOUND if tx_id is unknown or has expired.
+    /// Returns FAILED_PRECONDITION on a read replica.
+    rpc CommitTransaction(CommitTransactionRequest) returns (CommitTransactionResponse);
+
+    /// Roll back an open transaction, discarding all buffered writes.
+    /// Returns NOT_FOUND if tx_id is unknown or has expired.
+    /// Returns FAILED_PRECONDITION on a read replica.
+    rpc RollbackTransaction(RollbackTransactionRequest) returns (RollbackTransactionResponse);
 }

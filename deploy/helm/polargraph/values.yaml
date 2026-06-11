@@ -1,0 +1,101 @@
+# Default values for polargraph.
+
+image:
+  repository: ghcr.io/OWNER/polargraph
+  tag: ""  # defaults to Chart.appVersion
+  pullPolicy: Always
+
+# Number of replicas. Scaling above 1 requires WAL replication (--replica-of)
+# or a ReadWriteMany PVC — see deploy/kubernetes/README.md.
+replicaCount: 1
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespace the chart deploys into. Set create: false to use a pre-existing namespace.
+namespace:
+  create: true
+  name: polargraph
+
+service:
+  grpc:
+    type: ClusterIP
+    port: 50051
+  ui:
+    type: ClusterIP
+    port: 80
+  metrics:
+    type: ClusterIP
+    port: 9090
+
+persistence:
+  enabled: true
+  storageClass: standard  # e.g. gp3 (AWS), premium-rwo (GCP), managed-premium (Azure)
+  size: 20Gi
+  accessMode: ReadWriteOnce
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+# Application configuration (maps to env vars / ConfigMap)
+config:
+  logFormat: json    # json | pretty
+  logLevel: info
+  metricsPort: "9090"
+  grpcPort: "50051"
+  uiPort: "8080"
+
+# API key for gRPC auth. Set to a non-empty string in production.
+# The value is stored in a Kubernetes Secret.
+auth:
+  apiKey: "changeme"
+  # To supply the key from an existing secret instead, set existingSecret:
+  # existingSecret: my-secret
+  # existingSecretKey: api-key
+
+# Liveness probe (gRPC health check on the gRPC port)
+livenessProbe:
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  failureThreshold: 3
+  timeoutSeconds: 5
+
+# Readiness probe (HTTP /health on the UI port)
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+  timeoutSeconds: 3
+
+# Startup probe — useful if the DB has a large dataset and takes a while to open
+startupProbe:
+  enabled: false
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  failureThreshold: 30   # allows up to 5 min startup
+  timeoutSeconds: 5
+
+hpa:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+terminationGracePeriodSeconds: 30
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra environment variables injected directly into the container
+extraEnv: []
+# - name: POLARGRAPH_BACKUP_DIR
+#   value: /backups

@@ -43,13 +43,13 @@
 //!   triples match subject variables but their scalar value is not bindable.
 //! - No negation, no aggregation.
 
-use crate::{eval::evaluate, planner::Pattern};
+use crate::{eval::{evaluate, evaluate_with_overlay, evaluate_with_registry}, planner::Pattern};
 use polargraph_core::{
     id::{EdgeId, NodeId},
     temporal::{BiTemporalRange, Timestamp},
     triple::{Predicate, Triple},
 };
-use polargraph_storage::{Snapshot, StorageError};
+use polargraph_storage::{EdgeTypeRegistry, Snapshot, StorageError};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -233,11 +233,17 @@ fn bind_term(term: &Term, value: NodeId, bindings: &Bindings) -> Option<Bindings
 /// evaluated in order, joining against every element; only solutions that
 /// satisfy all patterns survive. An empty `initial` returns immediately with
 /// an empty result. An empty `query.patterns` returns `initial` unchanged.
+///
+/// When `registry` is `Some`, each pattern evaluation consults the
+/// `EdgeTypeRegistry` and short-circuits when the bound subject or object does
+/// not satisfy the predicate's domain/range constraint. Pass `None` to disable
+/// schema-aware pruning and preserve the existing behaviour.
 pub fn execute_query_seeded(
     query: &Query,
     snapshot: &Snapshot,
     initial: Vec<Bindings>,
     deadline: Option<Instant>,
+    registry: Option<&EdgeTypeRegistry>,
 ) -> Result<Vec<Bindings>, QueryError> {
     if initial.is_empty() {
         return Ok(vec![]);
@@ -254,7 +260,7 @@ pub fn execute_query_seeded(
 
         for bindings in solutions {
             let pattern = substitute(vp, &bindings);
-            let triples = evaluate(&pattern, snapshot)?;
+            let triples = evaluate_with_registry(&pattern, snapshot, registry)?;
 
             for triple in triples {
                 if let Some(extended) = extend_bindings(&triple, vp, &bindings) {
@@ -278,8 +284,59 @@ pub fn execute_query_seeded(
 /// Returns all binding sets that satisfy every pattern in the query.
 /// An empty query returns a single empty binding (vacuously satisfied).
 /// A query with unsatisfiable patterns returns an empty vec.
-pub fn execute_query(query: &Query, snapshot: &Snapshot, deadline: Option<Instant>) -> Result<Vec<Bindings>, QueryError> {
-    execute_query_seeded(query, snapshot, vec![HashMap::new()], deadline)
+///
+/// Pass `registry: Some(reg)` to enable schema-aware pruning (see
+/// [`execute_query_seeded`]). Pass `None` to preserve the existing behaviour.
+pub fn execute_query(
+    query: &Query,
+    snapshot: &Snapshot,
+    deadline: Option<Instant>,
+    registry: Option<&EdgeTypeRegistry>,
+) -> Result<Vec<Bindings>, QueryError> {
+    execute_query_seeded(query, snapshot, vec![HashMap::new()], deadline, registry)
+}
+
+/// Like [`execute_query`] but overlays `pending` (uncommitted write-buffer
+/// triples from an open transaction) on top of every storage scan.
+///
+/// This implements write-your-own-reads: a query that shares a `tx_id` with
+/// prior `Insert` calls will see those uncommitted triples in its results
+/// alongside the committed storage state at the transaction's `read_ts`.
+pub fn execute_query_with_pending(
+    query: &Query,
+    snapshot: &Snapshot,
+    pending: &[Triple],
+    deadline: Option<Instant>,
+    registry: Option<&EdgeTypeRegistry>,
+) -> Result<Vec<Bindings>, QueryError> {
+    let mut solutions: Vec<Bindings> = vec![HashMap::new()];
+
+    for vp in &query.patterns {
+        if deadline.map(|d| Instant::now() > d).unwrap_or(false) {
+            return Err(QueryError::Timeout);
+        }
+
+        let mut next = Vec::new();
+
+        for bindings in solutions {
+            let pattern = substitute(vp, &bindings);
+            let triples = evaluate_with_overlay(&pattern, snapshot, pending, registry)?;
+
+            for triple in triples {
+                if let Some(extended) = extend_bindings(&triple, vp, &bindings) {
+                    next.push(extended);
+                }
+            }
+        }
+
+        solutions = next;
+
+        if solutions.is_empty() {
+            return Ok(vec![]);
+        }
+    }
+
+    Ok(solutions)
 }
 
 // ── Recursive Datalog ─────────────────────────────────────────────────────────
@@ -526,7 +583,7 @@ pub fn reachable_from(
 
 /// Run a conjunctive query where patterns whose predicate is a key in `derived`
 /// are evaluated against the in-memory derived set rather than storage.
-fn execute_query_hybrid(
+pub fn execute_query_hybrid(
     query: &Query,
     snapshot: &Snapshot,
     derived: &DerivedFacts,
@@ -671,7 +728,7 @@ mod tests {
             VarPattern::new().subject(bound(alice)).predicate("knows").object(var("who"))
         );
 
-        let results = execute_query(&q, &snap, None).unwrap();
+        let results = execute_query(&q, &snap, None, None).unwrap();
         assert_eq!(results.len(), 2);
         let who = collect_var(&results, "who");
         assert!(who.contains(&bob));
@@ -690,7 +747,7 @@ mod tests {
             VarPattern::new().subject(bound(nobody)).predicate("knows").object(var("x"))
         );
 
-        assert!(execute_query(&q, &snap, None).unwrap().is_empty());
+        assert!(execute_query(&q, &snap, None, None).unwrap().is_empty());
     }
 
     // ── two-pattern join ──────────────────────────────────────────────────────
@@ -719,7 +776,7 @@ mod tests {
             .pattern(VarPattern::new().subject(bound(alice)).predicate("reports-to").object(var("mgr")))
             .pattern(VarPattern::new().subject(var("colleague")).predicate("reports-to").object(var("mgr")));
 
-        let results = execute_query(&q, &snap, None).unwrap();
+        let results = execute_query(&q, &snap, None, None).unwrap();
 
         // alice, bob, carol all report to mgr_a → 3 results (including alice herself)
         assert_eq!(results.len(), 3, "expected alice, bob, carol as colleagues");
@@ -747,7 +804,7 @@ mod tests {
             .pattern(VarPattern::new().subject(bound(alice)).predicate("reports-to").object(var("m")))
             .pattern(VarPattern::new().subject(var("c")).predicate("reports-to").object(var("m")));
 
-        let results = execute_query(&q, &snap, None).unwrap();
+        let results = execute_query(&q, &snap, None, None).unwrap();
         // Every result must have ?m = mgr.
         for b in &results {
             assert_eq!(b["m"], mgr, "?m must always be the same manager");
@@ -777,7 +834,7 @@ mod tests {
             .pattern(VarPattern::new().subject(bound(alice)).predicate("knows").object(var("b")))
             .pattern(VarPattern::new().subject(var("b")).predicate("knows").object(var("c")));
 
-        let results = execute_query(&q, &snap, None).unwrap();
+        let results = execute_query(&q, &snap, None, None).unwrap();
 
         // (alice→bob→dave) and (alice→carol→dave) → 2 paths, both end at dave
         assert_eq!(results.len(), 2);
@@ -811,7 +868,7 @@ mod tests {
             .pattern(VarPattern::new().subject(var("proj")).predicate("uses-tech").object(var("tech")))
             .pattern(VarPattern::new().subject(var("tech")).predicate("vendor").object(var("vendor")));
 
-        let results = execute_query(&q, &snap, None).unwrap();
+        let results = execute_query(&q, &snap, None, None).unwrap();
         assert_eq!(results.len(), 2);
 
         let vendors = collect_var(&results, "vendor");
@@ -837,7 +894,7 @@ mod tests {
             VarPattern::new().subject(var("x")).predicate("knows").object(var("x"))
         );
 
-        let results = execute_query(&q, &snap, None).unwrap();
+        let results = execute_query(&q, &snap, None, None).unwrap();
         assert_eq!(results.len(), 1, "only the self-loop satisfies x == x");
         assert_eq!(results[0]["x"], alice);
     }
@@ -863,7 +920,7 @@ mod tests {
             .pattern(VarPattern::new().subject(var("x")).predicate("knows").object(var("x")));
 
         // carol has no self-loop so its binding is eliminated; only ?x = bob survives.
-        let results = execute_query(&q, &snap, None).unwrap();
+        let results = execute_query(&q, &snap, None, None).unwrap();
         assert!(results.iter().all(|b| b.get("x") == Some(&bob)));
     }
 
@@ -884,7 +941,7 @@ mod tests {
             VarPattern::new().subject(var("who")).predicate("name").object(Term::Any)
         );
 
-        let results = execute_query(&q, &snap, None).unwrap();
+        let results = execute_query(&q, &snap, None, None).unwrap();
         assert_eq!(results.len(), 2);
         let who = collect_var(&results, "who");
         assert!(who.contains(&alice));
@@ -908,7 +965,7 @@ mod tests {
         );
 
         // "name" is a property predicate — object is a Value, not a NodeId.
-        let results = execute_query(&q, &snap, None).unwrap();
+        let results = execute_query(&q, &snap, None, None).unwrap();
         assert!(results.is_empty(), "object var cannot bind to scalar property value");
     }
 
@@ -919,7 +976,7 @@ mod tests {
         let (store, _dir) = open();
         let snap = commit(&store, vec![]);
         let q = Query::new(); // no patterns
-        let results = execute_query(&q, &snap, None).unwrap();
+        let results = execute_query(&q, &snap, None, None).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].is_empty());
     }
@@ -939,7 +996,7 @@ mod tests {
             .pattern(VarPattern::new().subject(var("x")).predicate("owns-project").object(var("proj")));
 
         // bob has no "owns-project" edges → second pattern fails → no results.
-        let results = execute_query(&q, &snap, None).unwrap();
+        let results = execute_query(&q, &snap, None, None).unwrap();
         assert!(results.is_empty());
     }
 
@@ -1240,7 +1297,7 @@ mod tests {
             VarPattern::new().subject(Term::Bound(a)).predicate("knows").object(Term::var("x"))
         );
 
-        let result = execute_query(&q, &snap, expired);
+        let result = execute_query(&q, &snap, expired, None);
         assert!(matches!(result, Err(QueryError::Timeout)), "expected Timeout, got {result:?}");
     }
 
@@ -1255,7 +1312,7 @@ mod tests {
             VarPattern::new().subject(Term::Bound(a)).predicate("knows").object(Term::var("x"))
         );
 
-        let result = execute_query(&q, &snap, None);
+        let result = execute_query(&q, &snap, None, None);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 1);
     }

@@ -166,6 +166,14 @@ impl Transaction {
         self.write_buffer.push(triple);
     }
 
+    /// Returns a view of triples buffered but not yet committed.
+    ///
+    /// Used by the query layer for write-your-own-reads within an open
+    /// transaction: overlay these over storage scans at `read_ts`.
+    pub fn pending_triples(&self) -> &[Triple] {
+        &self.write_buffer
+    }
+
     /// Snapshot reads — see state as of `read_ts`. ─────────────────────────
     pub fn scan_by_subject(&self, subject: &NodeId) -> Result<Vec<Triple>, StorageError> {
         self.store.scan_by_subject_at(subject, self.read_ts, None)
@@ -239,14 +247,19 @@ impl Transaction {
 
         for triple in &self.write_buffer {
             let temporal_stamped = stamp_temporal(triple.temporal(), commit_ts);
+            let pred_id = self.store.intern_predicate(triple.predicate().0.as_str())?;
             self.store.batch_triple(
                 &mut batch,
                 triple.subject(),
-                self.store.intern_predicate(triple.predicate().0.as_str())?,
+                pred_id,
                 object_of(triple),
                 commit_ts,
                 &encode_value(triple, &temporal_stamped)?,
             )?;
+            // Trigram index: write TRI CF entries for text property values.
+            if let Triple::Property { value: polargraph_core::value::Value::Text(text), .. } = triple {
+                self.store.batch_text_trigrams(&mut batch, &triple.subject(), pred_id, text)?;
+            }
         }
 
         // Persist oracle counter so restarts don't reuse timestamps.
@@ -371,6 +384,11 @@ impl Snapshot {
 
     pub fn scan_all(&self) -> Result<Vec<Triple>, StorageError> {
         self.store.scan_all_at(self.ts, self.vt_as_of)
+    }
+
+    /// Return `NodeId`s confirmed to have a live text value for `predicate` containing `query`.
+    pub fn text_search(&self, predicate: &str, query: &str) -> Result<Vec<polargraph_core::id::NodeId>, StorageError> {
+        self.store.text_search(predicate, query, self.ts, self.vt_as_of)
     }
 }
 

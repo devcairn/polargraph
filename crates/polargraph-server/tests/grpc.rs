@@ -13,7 +13,8 @@ use polargraph_server::{
         value::Kind as ValueKind,
         search_vector_filtered_request::Filter,
         vector_seed_query_request::Filter as SeedFilter,
-        BatchInsertVectorsRequest, CreateBackupRequest, CypherQueryRequest, CypherWriteRequest, EdgeTypeDef, FieldDef,
+        BatchInsertVectorsRequest, BeginTransactionRequest, CommitTransactionRequest, RollbackTransactionRequest,
+        CreateBackupRequest, CypherQueryRequest, CypherWriteRequest, EdgeTypeDef, FieldDef,
         GetEdgeTypeRequest, GetNodeTypeRequest, InsertRequest, InsertVectorRequest,
         ListBackupsRequest, ListEdgeTypesRequest, ListNodeTypesRequest,
         ListPredicatesBetweenRequest, MigrateRequest, MigrationStatusRequest, NodeId,
@@ -99,7 +100,7 @@ async fn insert_single_relation_returns_positive_commit_ts() {
     let (_, bob)   = new_node();
 
     let resp = svc
-        .insert(Request::new(InsertRequest { triples: vec![rel(alice, "knows", bob)] }))
+        .insert(Request::new(InsertRequest { triples: vec![rel(alice, "knows", bob)], ..Default::default() }))
         .await
         .unwrap()
         .into_inner();
@@ -120,7 +121,7 @@ async fn insert_batch_all_triples_committed() {
                 rel(alice.clone(), "knows", bob.clone()),
                 rel(alice.clone(), "knows", carol.clone()),
                 text_prop(alice.clone(), "name", "Alice"),
-            ],
+            ], ..Default::default()
         }))
         .await
         .unwrap()
@@ -145,7 +146,7 @@ async fn insert_batch_all_triples_committed() {
 async fn insert_empty_returns_invalid_argument() {
     let (svc, _dir) = open();
     let err = svc
-        .insert(Request::new(InsertRequest { triples: vec![] }))
+        .insert(Request::new(InsertRequest { triples: vec![], ..Default::default() }))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -164,7 +165,7 @@ async fn insert_bad_node_id_length_returns_invalid_argument() {
         })),
     };
     let err = svc
-        .insert(Request::new(InsertRequest { triples: vec![bad] }))
+        .insert(Request::new(InsertRequest { triples: vec![bad], ..Default::default() }))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -177,7 +178,7 @@ async fn insert_empty_predicate_returns_invalid_argument() {
     let (_, b) = new_node();
     let bad = rel(a, "", b); // empty predicate
     let err = svc
-        .insert(Request::new(InsertRequest { triples: vec![bad] }))
+        .insert(Request::new(InsertRequest { triples: vec![bad], ..Default::default() }))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -207,7 +208,7 @@ async fn query_with_object_variable_binds_objects() {
             triples: vec![
                 rel(alice.clone(), "knows", bob),
                 rel(alice.clone(), "knows", carol),
-            ],
+            ], ..Default::default()
         }))
         .await.unwrap().into_inner().commit_ts;
 
@@ -235,10 +236,10 @@ async fn query_snapshot_at_old_ts_excludes_later_writes() {
     let (_, carol) = new_node();
 
     let ts1 = svc
-        .insert(Request::new(InsertRequest { triples: vec![rel(alice.clone(), "knows", bob)] }))
+        .insert(Request::new(InsertRequest { triples: vec![rel(alice.clone(), "knows", bob)], ..Default::default() }))
         .await.unwrap().into_inner().commit_ts;
 
-    svc.insert(Request::new(InsertRequest { triples: vec![rel(alice.clone(), "knows", carol)] }))
+    svc.insert(Request::new(InsertRequest { triples: vec![rel(alice.clone(), "knows", carol)], ..Default::default() }))
         .await.unwrap();
 
     // Snapshot at ts1 should only see the first insert.
@@ -259,7 +260,7 @@ async fn query_at_ts_zero_sees_latest() {
     let (_, alice) = new_node();
     let (_, bob)   = new_node();
 
-    svc.insert(Request::new(InsertRequest { triples: vec![rel(alice.clone(), "knows", bob)] }))
+    svc.insert(Request::new(InsertRequest { triples: vec![rel(alice.clone(), "knows", bob)], ..Default::default() }))
         .await.unwrap();
 
     // ts=0 means "latest"
@@ -286,7 +287,7 @@ async fn two_pattern_join_via_service() {
             triples: vec![
                 rel(alice.clone(), "reports-to", mgr.clone()),
                 rel(bob.clone(),   "reports-to", mgr.clone()),
-            ],
+            ], ..Default::default()
         }))
         .await.unwrap().into_inner().commit_ts;
 
@@ -481,11 +482,11 @@ async fn commit_ts_increments_across_inserts() {
     let (_, c) = new_node();
 
     let ts1 = svc
-        .insert(Request::new(InsertRequest { triples: vec![rel(a.clone(), "k", b)] }))
+        .insert(Request::new(InsertRequest { triples: vec![rel(a.clone(), "k", b)], ..Default::default() }))
         .await.unwrap().into_inner().commit_ts;
 
     let ts2 = svc
-        .insert(Request::new(InsertRequest { triples: vec![rel(a, "k", c)] }))
+        .insert(Request::new(InsertRequest { triples: vec![rel(a, "k", c)], ..Default::default() }))
         .await.unwrap().into_inner().commit_ts;
 
     assert!(ts2 > ts1, "commit timestamps must be monotonically increasing");
@@ -508,7 +509,7 @@ async fn reachable_linear_chain() {
             rel(nodes[0].1.clone(), "follows", nodes[1].1.clone()),
             rel(nodes[1].1.clone(), "follows", nodes[2].1.clone()),
             rel(nodes[2].1.clone(), "follows", nodes[3].1.clone()),
-        ],
+        ], ..Default::default()
     }))
     .await
     .unwrap();
@@ -546,7 +547,7 @@ async fn reachable_diamond_graph() {
             rel(nodes[0].1.clone(), "edge", nodes[2].1.clone()), // A→C
             rel(nodes[1].1.clone(), "edge", nodes[3].1.clone()), // B→D
             rel(nodes[2].1.clone(), "edge", nodes[3].1.clone()), // C→D
-        ],
+        ], ..Default::default()
     }))
     .await
     .unwrap();
@@ -581,7 +582,7 @@ async fn reachable_cycle_terminates() {
             rel(nodes[0].1.clone(), "link", nodes[1].1.clone()),
             rel(nodes[1].1.clone(), "link", nodes[2].1.clone()),
             rel(nodes[2].1.clone(), "link", nodes[0].1.clone()),
-        ],
+        ], ..Default::default()
     }))
     .await
     .unwrap();
@@ -615,7 +616,7 @@ async fn reachable_max_hops_limits_depth() {
         triples: vec![
             rel(nodes[0].1.clone(), "hop", nodes[1].1.clone()), // A→B (1 hop)
             rel(nodes[1].1.clone(), "hop", nodes[2].1.clone()), // B→C (2 hops)
-        ],
+        ], ..Default::default()
     }))
     .await
     .unwrap();
@@ -1430,7 +1431,7 @@ async fn search_vector_filtered_by_node_type_returns_only_matching_nodes() {
         (proto_c.clone(), "Other"),
     ] {
         svc.insert(Request::new(InsertRequest {
-            triples: vec![text_prop(id, "__type", type_name)],
+            triples: vec![text_prop(id, "__type", type_name)], ..Default::default()
         }))
         .await
         .unwrap();
@@ -1498,7 +1499,7 @@ async fn vector_seed_query_binds_seeds_to_graph_patterns() {
         triples: vec![
             rel(proto_a.clone(), "follows", proto_b.clone()),
             rel(proto_a.clone(), "follows", proto_c.clone()),
-        ],
+        ], ..Default::default()
     }))
     .await
     .unwrap();
@@ -1519,7 +1520,7 @@ async fn vector_seed_query_binds_seeds_to_graph_patterns() {
             patterns: vec![pattern(var("n"), "follows", var("friend"))],
             snapshot_ts: 0,
             filter: None,
-            ef: 0,
+            ef: 0, ..Default::default()
         }))
         .await
         .unwrap()
@@ -1550,7 +1551,7 @@ async fn vector_seed_query_with_node_type_filter() {
 
     // Mark proto_typed as "TypedNode".
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop(proto_typed.clone(), "__type", "TypedNode")],
+        triples: vec![text_prop(proto_typed.clone(), "__type", "TypedNode")], ..Default::default()
     }))
     .await
     .unwrap();
@@ -1568,7 +1569,7 @@ async fn vector_seed_query_with_node_type_filter() {
             patterns: vec![],
             snapshot_ts: 0,
             filter: Some(SeedFilter::NodeTypeFilter(NodeTypeFilter {
-                type_name: "TypedNode".into(),
+                type_name: "TypedNode".into(), ..Default::default()
             })),
             ef: 0,
         }))
@@ -1599,7 +1600,7 @@ async fn vector_seed_query_empty_patterns_returns_seed_bindings() {
             patterns: vec![],
             snapshot_ts: 0,
             filter: None,
-            ef: 0,
+            ef: 0, ..Default::default()
         }))
         .await
         .unwrap()
@@ -1638,7 +1639,7 @@ async fn vector_seed_query_seeds_with_no_edges_return_no_rows() {
             patterns: vec![pattern(var("n"), "knows", var("friend"))],
             snapshot_ts: 0,
             filter: None,
-            ef: 0,
+            ef: 0, ..Default::default()
         }))
         .await
         .unwrap()
@@ -1825,7 +1826,7 @@ async fn run_retention_deletes_old_triples() {
 
     // Insert a triple via the normal path (recent tt).
     let insert_req = InsertRequest {
-        triples: vec![text_prop(proto_s.clone(), "label", "hello")],
+        triples: vec![text_prop(proto_s.clone(), "label", "hello")], ..Default::default()
     };
     svc.insert(Request::new(insert_req)).await.unwrap();
 
@@ -1864,7 +1865,7 @@ async fn run_retention_recent_triple_survives() {
     let (_, proto_s) = new_node();
 
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop(proto_s, "label", "current")],
+        triples: vec![text_prop(proto_s, "label", "current")], ..Default::default()
     }))
     .await
     .unwrap();
@@ -1951,7 +1952,7 @@ async fn as_of_valid_time_zero_sees_latest() {
     let (_, bob) = new_node();
 
     svc.insert(Request::new(InsertRequest {
-        triples: vec![rel_with_vt(alice.clone(), "knows", bob.clone(), 1000, 0)],
+        triples: vec![rel_with_vt(alice.clone(), "knows", bob.clone(), 1000, 0)], ..Default::default()
     }))
     .await
     .unwrap();
@@ -1962,7 +1963,7 @@ async fn as_of_valid_time_zero_sees_latest() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: 0,
-        rules: vec![],
+        rules: vec![], ..Default::default()
     }))
         .await
         .unwrap()
@@ -1980,7 +1981,7 @@ async fn as_of_valid_time_filters_expired_triples() {
 
     // Triple valid in [1000, 2000).
     svc.insert(Request::new(InsertRequest {
-        triples: vec![rel_with_vt(alice.clone(), "knows", bob.clone(), 1000, 2000)],
+        triples: vec![rel_with_vt(alice.clone(), "knows", bob.clone(), 1000, 2000)], ..Default::default()
     }))
     .await
     .unwrap();
@@ -1992,7 +1993,7 @@ async fn as_of_valid_time_filters_expired_triples() {
             snapshot_ts: 0,
             as_of_valid_time: 1500,
             as_of_tx_time: 0,
-        rules: vec![],
+        rules: vec![], ..Default::default()
     }))
         .await
         .unwrap()
@@ -2005,7 +2006,7 @@ async fn as_of_valid_time_filters_expired_triples() {
             snapshot_ts: 0,
             as_of_valid_time: 2500,
             as_of_tx_time: 0,
-        rules: vec![],
+        rules: vec![], ..Default::default()
     }))
         .await
         .unwrap()
@@ -2024,14 +2025,14 @@ async fn as_of_valid_time_returns_correct_version() {
 
     // Version 1: vt=[1000, 2000)
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop_with_vt(alice.clone(), "status", "active", 1000, 2000)],
+        triples: vec![text_prop_with_vt(alice.clone(), "status", "active", 1000, 2000)], ..Default::default()
     }))
     .await
     .unwrap();
 
     // Version 2: vt=[2000, ∞)  (vt_end=0 → END_OF_TIME)
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop_with_vt(alice.clone(), "status", "retired", 2000, 0)],
+        triples: vec![text_prop_with_vt(alice.clone(), "status", "retired", 2000, 0)], ..Default::default()
     }))
     .await
     .unwrap();
@@ -2043,7 +2044,7 @@ async fn as_of_valid_time_returns_correct_version() {
             snapshot_ts: 0,
             as_of_valid_time: 1500,
             as_of_tx_time: 0,
-        rules: vec![],
+        rules: vec![], ..Default::default()
     }))
         .await
         .unwrap()
@@ -2056,7 +2057,7 @@ async fn as_of_valid_time_returns_correct_version() {
             snapshot_ts: 0,
             as_of_valid_time: 2500,
             as_of_tx_time: 0,
-        rules: vec![],
+        rules: vec![], ..Default::default()
     }))
         .await
         .unwrap()
@@ -2069,7 +2070,7 @@ async fn as_of_valid_time_returns_correct_version() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: 0,
-        rules: vec![],
+        rules: vec![], ..Default::default()
     }))
         .await
         .unwrap()
@@ -2094,7 +2095,7 @@ async fn as_of_tx_time_before_insert_sees_nothing() {
         .as_micros() as i64;
 
     svc.insert(Request::new(InsertRequest {
-        triples: vec![rel(alice.clone(), "knows", bob)],
+        triples: vec![rel(alice.clone(), "knows", bob)], ..Default::default()
     }))
     .await
     .unwrap();
@@ -2105,7 +2106,7 @@ async fn as_of_tx_time_before_insert_sees_nothing() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: t_before,
-        rules: vec![],
+        rules: vec![], ..Default::default()
     }))
         .await
         .unwrap()
@@ -2123,7 +2124,7 @@ async fn as_of_tx_time_at_commit_sees_triple() {
 
     let commit_ts = svc
         .insert(Request::new(InsertRequest {
-            triples: vec![rel(alice.clone(), "knows", bob)],
+            triples: vec![rel(alice.clone(), "knows", bob)], ..Default::default()
         }))
         .await
         .unwrap()
@@ -2136,7 +2137,7 @@ async fn as_of_tx_time_at_commit_sees_triple() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: commit_ts,
-        rules: vec![],
+        rules: vec![], ..Default::default()
     }))
         .await
         .unwrap()
@@ -2155,7 +2156,7 @@ async fn as_of_tx_and_vt_combined_filter() {
     // Triple valid in [1000, 3000), committed now.
     let commit_ts = svc
         .insert(Request::new(InsertRequest {
-            triples: vec![rel_with_vt(alice.clone(), "knows", bob, 1000, 3000)],
+            triples: vec![rel_with_vt(alice.clone(), "knows", bob, 1000, 3000)], ..Default::default()
         }))
         .await
         .unwrap()
@@ -2169,7 +2170,7 @@ async fn as_of_tx_and_vt_combined_filter() {
             snapshot_ts: 0,
             as_of_valid_time: 2000,
             as_of_tx_time: commit_ts,
-        rules: vec![],
+        rules: vec![], ..Default::default()
     }))
         .await
         .unwrap()
@@ -2182,7 +2183,7 @@ async fn as_of_tx_and_vt_combined_filter() {
             snapshot_ts: 0,
             as_of_valid_time: 4000,
             as_of_tx_time: commit_ts,
-        rules: vec![],
+        rules: vec![], ..Default::default()
     }))
         .await
         .unwrap()
@@ -2258,7 +2259,7 @@ async fn replica_streams_triples_from_primary() {
     let primary = PolarGraphServer::new(primary_store.clone()).unwrap();
     primary
         .insert(Request::new(InsertRequest {
-            triples: vec![rel(alice.clone(), "knows", bob.clone())],
+            triples: vec![rel(alice.clone(), "knows", bob.clone())], ..Default::default()
         }))
         .await
         .unwrap();
@@ -2272,12 +2273,13 @@ async fn replica_streams_triples_from_primary() {
             patterns: vec![VarPattern {
                 subject: Some(bound(&alice)),
                 predicate: "knows".into(),
-                object: Some(var("x")),
+                object: Some(var("x")), ..Default::default()
             }],
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: 0,
-        rules: vec![],
+            rules: vec![],
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -2300,7 +2302,7 @@ async fn replica_write_rpcs_return_failed_precondition() {
 
     let err = replica
         .insert(Request::new(InsertRequest {
-            triples: vec![rel(node.clone(), "x", node2.clone())],
+            triples: vec![rel(node.clone(), "x", node2.clone())], ..Default::default()
         }))
         .await
         .unwrap_err();
@@ -2424,7 +2426,7 @@ async fn replica_receives_triples_inserted_after_connect() {
     let primary = PolarGraphServer::new(primary_store).unwrap();
     primary
         .insert(Request::new(InsertRequest {
-            triples: vec![rel(alice.clone(), "follows", bob.clone())],
+            triples: vec![rel(alice.clone(), "follows", bob.clone())], ..Default::default()
         }))
         .await
         .unwrap();
@@ -2437,12 +2439,13 @@ async fn replica_receives_triples_inserted_after_connect() {
             patterns: vec![VarPattern {
                 subject: Some(bound(&alice)),
                 predicate: "follows".into(),
-                object: Some(var("y")),
+                object: Some(var("y")), ..Default::default()
             }],
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: 0,
-        rules: vec![],
+            rules: vec![],
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -2513,7 +2516,7 @@ async fn auth_request_without_key_returns_unauthenticated() {
 
     let err = client
         .insert(Request::new(InsertRequest {
-            triples: vec![rel(node_a, "knows", node_b)],
+            triples: vec![rel(node_a, "knows", node_b)], ..Default::default()
         }))
         .await
         .unwrap_err();
@@ -2533,7 +2536,7 @@ async fn auth_request_with_correct_key_succeeds() {
 
     let resp = client
         .insert(bearer(InsertRequest {
-            triples: vec![rel(node_a, "knows", node_b)],
+            triples: vec![rel(node_a, "knows", node_b)], ..Default::default()
         }, "valid-key"))
         .await
         .unwrap()
@@ -2554,7 +2557,7 @@ async fn auth_request_with_wrong_key_returns_unauthenticated() {
 
     let err = client
         .insert(bearer(InsertRequest {
-            triples: vec![rel(node_a, "knows", node_b)],
+            triples: vec![rel(node_a, "knows", node_b)], ..Default::default()
         }, "wrong-key"))
         .await
         .unwrap_err();
@@ -2589,7 +2592,7 @@ async fn auth_disabled_all_requests_pass() {
 
     let resp = svc
         .insert(Request::new(InsertRequest {
-            triples: vec![rel(node_a, "knows", node_b)],
+            triples: vec![rel(node_a, "knows", node_b)], ..Default::default()
         }))
         .await
         .unwrap()
@@ -2611,7 +2614,7 @@ async fn auth_multiple_keys_any_accepted() {
     let (_, a1) = new_node();
     let (_, a2) = new_node();
     client
-        .insert(bearer(InsertRequest { triples: vec![rel(a1, "x", a2)] }, "key-a"))
+        .insert(bearer(InsertRequest { triples: vec![rel(a1, "x", a2)], ..Default::default() }, "key-a"))
         .await
         .unwrap();
 
@@ -2619,7 +2622,7 @@ async fn auth_multiple_keys_any_accepted() {
     let (_, b1) = new_node();
     let (_, b2) = new_node();
     client
-        .insert(bearer(InsertRequest { triples: vec![rel(b1, "x", b2)] }, "key-b"))
+        .insert(bearer(InsertRequest { triples: vec![rel(b1, "x", b2)], ..Default::default() }, "key-b"))
         .await
         .unwrap();
 
@@ -2627,7 +2630,7 @@ async fn auth_multiple_keys_any_accepted() {
     let (_, c1) = new_node();
     let (_, c2) = new_node();
     let err = client
-        .insert(bearer(InsertRequest { triples: vec![rel(c1, "x", c2)] }, "key-c"))
+        .insert(bearer(InsertRequest { triples: vec![rel(c1, "x", c2)], ..Default::default() }, "key-c"))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
@@ -2895,7 +2898,7 @@ async fn query_timeout_fires_on_large_recursive_query() {
         .windows(2)
         .map(|w| rel(w[0].1.clone(), "next", w[1].1.clone()))
         .collect();
-    svc.insert(Request::new(InsertRequest { triples })).await.unwrap();
+    svc.insert(Request::new(InsertRequest { triples, ..Default::default() })).await.unwrap();
 
     let err = svc
         .reachable(Request::new(ReachableRequest {
@@ -2928,7 +2931,7 @@ async fn query_completes_within_generous_timeout() {
             rel(a.clone(), "edge", b.clone()),
             rel(b.clone(), "edge", c.clone()),
             rel(c.clone(), "edge", a.clone()),
-        ],
+        ], ..Default::default()
     }))
     .await
     .unwrap();
@@ -2961,7 +2964,7 @@ async fn query_timeout_zero_disables_timeout() {
             rel(a.clone(), "edge", b.clone()),
             rel(b.clone(), "edge", c.clone()),
             rel(c.clone(), "edge", a.clone()),
-        ],
+        ], ..Default::default()
     }))
     .await
     .unwrap();
@@ -3148,7 +3151,7 @@ async fn rate_limit_single_client_throttled_after_quota() {
     for _ in 0..3 {
         let result = client
             .insert(req_from_ip(
-                InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())] },
+                InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())], ..Default::default() },
                 "10.1.1.1",
             ))
             .await;
@@ -3158,7 +3161,7 @@ async fn rate_limit_single_client_throttled_after_quota() {
     // The 4th request should be rejected.
     let err = client
         .insert(req_from_ip(
-            InsertRequest { triples: vec![rel(na, "knows", nb)] },
+            InsertRequest { triples: vec![rel(na, "knows", nb)], ..Default::default() },
             "10.1.1.1",
         ))
         .await
@@ -3192,7 +3195,7 @@ async fn rate_limit_two_clients_have_independent_buckets() {
     for _ in 0..2 {
         let result = client
             .insert(req_from_ip(
-                InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())] },
+                InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())], ..Default::default() },
                 "10.2.2.1",
             ))
             .await;
@@ -3200,7 +3203,7 @@ async fn rate_limit_two_clients_have_independent_buckets() {
     }
     let err = client
         .insert(req_from_ip(
-            InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())] },
+            InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())], ..Default::default() },
             "10.2.2.1",
         ))
         .await
@@ -3211,7 +3214,7 @@ async fn rate_limit_two_clients_have_independent_buckets() {
     for _ in 0..2 {
         let result = client
             .insert(req_from_ip(
-                InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())] },
+                InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())], ..Default::default() },
                 "10.2.2.2",
             ))
             .await;
@@ -3320,7 +3323,7 @@ async fn cypher_query_simple() {
             text_prop(carol.clone(), "__type", "Robot"),
             rel(alice.clone(), "knows", bob.clone()),
             rel(alice.clone(), "knows", carol.clone()),
-        ],
+        ], ..Default::default()
     }))
     .await
     .unwrap();
@@ -3334,7 +3337,7 @@ async fn cypher_query_simple() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![],
-            ef: 0,
+            ef: 0, ..Default::default()
         }))
         .await
         .unwrap()
@@ -3368,7 +3371,7 @@ async fn cypher_query_recursive() {
             rel(a.clone(), "follows", b.clone()),
             rel(b.clone(), "follows", c.clone()),
             rel(c.clone(), "follows", d.clone()),
-        ],
+        ], ..Default::default()
     }))
     .await
     .unwrap();
@@ -3380,7 +3383,7 @@ async fn cypher_query_recursive() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![],
-            ef: 0,
+            ef: 0, ..Default::default()
         }))
         .await
         .unwrap()
@@ -3461,7 +3464,7 @@ async fn cypher_vector_near_query() {
             rel(nodes[0].1.clone(), "cites", nodes[1].1.clone()),
             rel(nodes[1].1.clone(), "cites", nodes[2].1.clone()),
             rel(nodes[3].1.clone(), "cites", nodes[4].1.clone()),
-        ],
+        ], ..Default::default()
     }))
     .await
     .unwrap();
@@ -3479,7 +3482,7 @@ async fn cypher_vector_near_query() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![1.0, 0.0, 0.0],
-            ef: 0,
+            ef: 0, ..Default::default()
         }))
         .await
         .unwrap()
@@ -3520,7 +3523,7 @@ async fn query_stream_returns_all_results_in_order() {
     for i in 0..12 {
         triples.push(rel(nodes[i].1.clone(), "likes", nodes[i + 1].1.clone()));
     }
-    svc.insert(Request::new(InsertRequest { triples })).await.unwrap();
+    svc.insert(Request::new(InsertRequest { triples, ..Default::default() })).await.unwrap();
 
     // Stream all :likes edges.
     let mut stream = svc
@@ -3580,7 +3583,7 @@ async fn cypher_query_stream_respects_limit() {
     for i in 0..10 {
         triples.push(rel(nodes[i].1.clone(), "follows", nodes[i + 1].1.clone()));
     }
-    svc.insert(Request::new(InsertRequest { triples })).await.unwrap();
+    svc.insert(Request::new(InsertRequest { triples, ..Default::default() })).await.unwrap();
 
     // Query with LIMIT 3 — should receive exactly 3 results.
     let mut stream = svc
@@ -3621,7 +3624,7 @@ async fn query_stream_chunk_boundary_math() {
     // We want 1001 rows to cross the 500-boundary twice.
     let nodes: Vec<(polargraph_core::id::NodeId, NodeId)> = (0..1001).map(|_| new_node()).collect();
     let triples: Vec<_> = nodes.iter().map(|(_, n)| rel(n.clone(), "self", n.clone())).collect();
-    svc.insert(Request::new(InsertRequest { triples })).await.unwrap();
+    svc.insert(Request::new(InsertRequest { triples, ..Default::default() })).await.unwrap();
 
     let mut stream = svc
         .query_stream(Request::new(QueryRequest {
@@ -3663,6 +3666,7 @@ async fn cypher_write_create_node_then_query() {
     let write_resp = svc
         .cypher_write(Request::new(CypherWriteRequest {
             cypher: r#"CREATE (a:Person {name: "Alice", active: true})"#.to_string(),
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -3679,7 +3683,7 @@ async fn cypher_write_create_node_then_query() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![],
-            ef: 0,
+            ef: 0, ..Default::default()
         }))
         .await
         .unwrap()
@@ -3698,6 +3702,7 @@ async fn cypher_write_merge_is_idempotent() {
 
     let do_merge = || CypherWriteRequest {
         cypher: r#"MERGE (c:Company {name: "Acme"})"#.to_string(),
+        ..Default::default()
     };
 
     let r1 = svc
@@ -3721,11 +3726,233 @@ async fn cypher_write_merge_is_idempotent() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![],
-            ef: 0,
+            ef: 0, ..Default::default()
         }))
         .await
         .unwrap()
         .into_inner();
 
     assert_eq!(query_resp.rows.len(), 1, "expected exactly one Company node after two MERGEs");
+}
+
+// ── Diagnostics RPCs ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn show_indexes_returns_all_cfs() {
+    use polargraph_server::proto::{ShowIndexesRequest, ShowIndexesResponse};
+
+    let (svc, _dir) = open();
+    let resp: ShowIndexesResponse = svc
+        .show_indexes(Request::new(ShowIndexesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let cf_names: Vec<&str> = resp.column_families.iter().map(|cf| cf.name.as_str()).collect();
+    for expected in &["spo", "sop", "pso", "pos", "osp", "ops", "meta", "hnsw", "tri"] {
+        assert!(
+            cf_names.contains(expected),
+            "expected CF '{}' in ShowIndexes response, got: {:?}",
+            expected,
+            cf_names
+        );
+    }
+}
+
+#[tokio::test]
+async fn show_stats_returns_primary_mode() {
+    use polargraph_server::proto::{ShowStatsRequest, ShowStatsResponse};
+
+    let (svc, _dir) = open();
+    let resp: ShowStatsResponse = svc
+        .show_stats(Request::new(ShowStatsRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.mode, "primary", "ShowStats mode should be 'primary' for a non-replica store");
+}
+
+#[tokio::test]
+async fn show_indexes_reflects_registered_vector_space() {
+    use polargraph_server::proto::{ShowIndexesRequest, ShowIndexesResponse, InsertVectorRequest};
+
+    let (svc, _dir) = open();
+
+    // Register a node type with a named vector space.
+    svc.register_node_type(Request::new(RegisterNodeTypeRequest {
+        definition: Some(NodeTypeDef {
+            type_name: "Doc".into(),
+            fields: vec![],
+            vector_space: Some(VectorSpaceDef {
+                space_name: "doc_embeddings".into(),
+                dimensions: 3,
+                embedding_model: String::new(),
+                storage_mode: String::new(),
+            }),
+        }),
+    }))
+    .await
+    .unwrap();
+
+    // Insert a vector into that space so the HNSW index is materialised.
+    let (_, node_id) = new_node();
+    svc.insert_vector(Request::new(InsertVectorRequest {
+        node_id: Some(node_id),
+        vector: vec![1.0, 0.0, 0.0],
+        space: "doc_embeddings".into(),
+    }))
+    .await
+    .unwrap();
+
+    let resp: ShowIndexesResponse = svc
+        .show_indexes(Request::new(ShowIndexesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let space_names: Vec<&str> = resp.vector_spaces.iter().map(|vs| vs.name.as_str()).collect();
+    assert!(
+        space_names.contains(&"doc_embeddings"),
+        "expected 'doc_embeddings' in ShowIndexes vector_spaces, got: {:?}",
+        space_names
+    );
+    let space = resp.vector_spaces.iter().find(|vs| vs.name == "doc_embeddings").unwrap();
+    assert_eq!(space.node_count, 1, "vector space should have one entry");
+    assert_eq!(space.dimensions, 3);
+}
+
+// ── Full-text / trigram Cypher WHERE tests ────────────────────────────────────
+
+#[tokio::test]
+async fn cypher_where_contains_finds_match() {
+    let (svc, _dir) = open();
+    let (_alice_core, alice) = new_node();
+    let (_bob_core,   bob)   = new_node();
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            text_prop(alice.clone(), "name", "Alice Smith"),
+            text_prop(bob.clone(),   "name", "Robert Jones"),
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (n) WHERE n.name CONTAINS \"Smith\" RETURN n".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.rows.len(), 1, "only Alice Smith matches");
+    let bound = resp.rows[0].nodes.get("n").unwrap();
+    let bound_id = polargraph_core::id::NodeId(
+        uuid::Uuid::from_bytes(bound.bytes[..16].try_into().unwrap()),
+    );
+    let alice_id = polargraph_core::id::NodeId(
+        uuid::Uuid::from_bytes(alice.bytes[..16].try_into().unwrap()),
+    );
+    assert_eq!(bound_id, alice_id);
+}
+
+#[tokio::test]
+async fn cypher_where_starts_with_finds_match() {
+    let (svc, _dir) = open();
+    let (_alice_core, alice) = new_node();
+    let (_bob_core,   bob)   = new_node();
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            text_prop(alice.clone(), "name", "Alexandra Doe"),
+            text_prop(bob.clone(),   "name", "Robert Smith"),
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (n) WHERE n.name STARTS WITH \"Alex\" RETURN n".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.rows.len(), 1, "only Alexandra matches");
+    let bound = resp.rows[0].nodes.get("n").unwrap();
+    let bound_id = polargraph_core::id::NodeId(
+        uuid::Uuid::from_bytes(bound.bytes[..16].try_into().unwrap()),
+    );
+    let alice_id = polargraph_core::id::NodeId(
+        uuid::Uuid::from_bytes(alice.bytes[..16].try_into().unwrap()),
+    );
+    assert_eq!(bound_id, alice_id);
+}
+
+#[tokio::test]
+async fn cypher_where_contains_no_match_returns_empty() {
+    let (svc, _dir) = open();
+    let (_n_core, n) = new_node();
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(n.clone(), "name", "Alice")],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (n) WHERE n.name CONTAINS \"zzz\" RETURN n".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp.rows.is_empty(), "no node should match");
+}
+
+#[tokio::test]
+async fn cypher_where_regex_finds_match() {
+    let (svc, _dir) = open();
+    let (_alice_core, alice) = new_node();
+    let (_bob_core,   bob)   = new_node();
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            text_prop(alice.clone(), "email", "alice@example.com"),
+            text_prop(bob.clone(),   "email", "bob_at_domain_dot_org"),
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    // Regex: match emails ending in .com
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (n) WHERE n.email =~ \".*\\.com$\" RETURN n".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.rows.len(), 1, "only alice@example.com matches .*\\.com$");
+    let bound = resp.rows[0].nodes.get("n").unwrap();
+    let bound_id = polargraph_core::id::NodeId(
+        uuid::Uuid::from_bytes(bound.bytes[..16].try_into().unwrap()),
+    );
+    let alice_id = polargraph_core::id::NodeId(
+        uuid::Uuid::from_bytes(alice.bytes[..16].try_into().unwrap()),
+    );
+    assert_eq!(bound_id, alice_id);
 }

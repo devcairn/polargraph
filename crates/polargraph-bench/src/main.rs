@@ -207,7 +207,7 @@ async fn run_write(mut client: PolarGraphServiceClient<Channel>, args: &Args) ->
             .collect();
         let t0 = Instant::now();
         client
-            .insert(InsertRequest { triples })
+            .insert(InsertRequest { triples, ..Default::default() })
             .await
             .context("insert properties")?;
         prop_hist.record(t0.elapsed());
@@ -231,7 +231,7 @@ async fn run_write(mut client: PolarGraphServiceClient<Channel>, args: &Args) ->
         }
         let t0 = Instant::now();
         client
-            .insert(InsertRequest { triples })
+            .insert(InsertRequest { triples, ..Default::default() })
             .await
             .context("insert relations")?;
         edge_hist.record(t0.elapsed());
@@ -271,7 +271,7 @@ async fn run_read(mut client: PolarGraphServiceClient<Channel>, args: &Args) -> 
             .map(|id| text_prop(id.clone(), "name", "bench"))
             .collect();
         client
-            .insert(InsertRequest { triples })
+            .insert(InsertRequest { triples, ..Default::default() })
             .await
             .context("pre-populate")?;
     }
@@ -328,7 +328,7 @@ async fn run_mixed(client: PolarGraphServiceClient<Channel>, args: &Args) -> Res
                 .iter()
                 .map(|id| text_prop(id.clone(), "name", "bench"))
                 .collect();
-            cl.insert(InsertRequest { triples })
+            cl.insert(InsertRequest { triples, ..Default::default() })
                 .await
                 .context("pre-populate")?;
         }
@@ -378,6 +378,7 @@ async fn run_mixed(client: PolarGraphServiceClient<Channel>, args: &Args) -> Res
                 let _ = cl
                     .insert(InsertRequest {
                         triples: vec![text_prop(id, "name", "new")],
+                        ..Default::default()
                     })
                     .await;
                 wh.lock().await.record(t0.elapsed());
@@ -520,7 +521,7 @@ async fn run_filtered_search(mut client: PolarGraphServiceClient<Channel>, args:
             node_ids.push(id);
         }
         client
-            .insert(InsertRequest { triples })
+            .insert(InsertRequest { triples, ..Default::default() })
             .await
             .context("insert nodes")?;
 
@@ -576,6 +577,7 @@ async fn run_filtered_search(mut client: PolarGraphServiceClient<Channel>, args:
                 space: SPACE.into(),
                 query: query.clone(),
                 k: K as u32,
+                ef: 0,
                 filter: Some(SvfFilter::NodeTypeFilter(NodeTypeFilter {
                     type_name: TYPE_NAME.into(),
                 })),
@@ -734,7 +736,7 @@ async fn run_vector_near_graph() -> Result<()> {
                 // Graph join
                 let t_graph = Instant::now();
                 let _results =
-                    execute_query_seeded(&query, &snapshot, seed_bindings, None)
+                    execute_query_seeded(&query, &snapshot, seed_bindings, None, None)
                         .context("execute_query_seeded")?;
                 graph_hist.record(t_graph.elapsed());
 

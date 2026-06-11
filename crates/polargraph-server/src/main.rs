@@ -230,6 +230,14 @@ struct Cli {
     )]
     rate_limit_rps: Option<u32>,
 
+    /// Idle timeout in milliseconds for open wire transactions (0 = disabled). Default: 300000.
+    #[arg(
+        long = "tx-idle-timeout-ms",
+        env = "POLARGRAPH_TX_IDLE_TIMEOUT_MS",
+        value_name = "MS"
+    )]
+    tx_idle_timeout_ms: Option<u64>,
+
     /// Default HNSW exploration factor for vector searches (higher = better recall, slower).
     /// Per-request `ef` fields override this value when non-zero. Default: 50.
     #[arg(
@@ -343,6 +351,7 @@ async fn main() -> Result<()> {
     let replica_tls_ca = resolve_path_opt(cli.replica_tls_ca, cfg.replication.tls_ca);
     let rate_limit_rps = resolve(cli.rate_limit_rps, cfg.rate_limit.max_rps, 0u32);
     let default_vector_ef = resolve(cli.default_vector_ef, cfg.query.default_vector_ef, 50u32);
+    let tx_idle_timeout_ms = resolve(cli.tx_idle_timeout_ms, None::<u64>, 300_000u64);
 
     // ── Tracing ───────────────────────────────────────────────────────────────
     let filter = EnvFilter::try_new(&log_level)
@@ -594,7 +603,8 @@ async fn main() -> Result<()> {
         let server = server
             .with_query_timeout_ms(query_timeout_ms)
             .with_slow_query_ms(slow_query_ms)
-            .with_default_vector_ef(default_vector_ef);
+            .with_default_vector_ef(default_vector_ef)
+            .with_tx_idle_timeout_ms(tx_idle_timeout_ms);
 
         (server, Some(rs))
     } else {
@@ -602,9 +612,13 @@ async fn main() -> Result<()> {
             .context("failed to initialise PolarGraphServer")?
             .with_query_timeout_ms(query_timeout_ms)
             .with_slow_query_ms(slow_query_ms)
-            .with_default_vector_ef(default_vector_ef);
+            .with_default_vector_ef(default_vector_ef)
+            .with_tx_idle_timeout_ms(tx_idle_timeout_ms);
         (server, None)
     };
+
+    // ── Wire transaction TTL task ─────────────────────────────────────────────
+    pg_server.spawn_tx_ttl_task(token.clone(), tx_idle_timeout_ms);
 
     // ── Management UI HTTP server ─────────────────────────────────────────────
     let ui_join: Option<tokio::task::JoinHandle<()>> = if !no_ui {

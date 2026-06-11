@@ -506,3 +506,104 @@ fn relation_subject_field_is_correct_after_scan() {
     let by_obj = store.scan_by_object(&bob).unwrap();
     assert_eq!(by_obj[0].subject(), alice);
 }
+
+// ── Full-text / trigram search ────────────────────────────────────────────────
+
+#[test]
+fn trigram_insert_and_search() {
+    let (store, _dir) = open_store();
+    let alice = NodeId::new();
+    store.insert(&property(alice, "name", Value::Text("Alice Smith".to_string()))).unwrap();
+
+    let ts = Timestamp(store.oracle_ts());
+    let hits = store.text_search("name", "Smith", ts, None).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0], alice);
+}
+
+#[test]
+fn trigram_no_match_returns_empty() {
+    let (store, _dir) = open_store();
+    let node = NodeId::new();
+    store.insert(&property(node, "name", Value::Text("Alice".to_string()))).unwrap();
+
+    let ts = Timestamp(store.oracle_ts());
+    let hits = store.text_search("name", "Bob", ts, None).unwrap();
+    assert!(hits.is_empty());
+}
+
+#[test]
+fn trigram_multi_intersection() {
+    let (store, _dir) = open_store();
+    let alice = NodeId::new();
+    let bob = NodeId::new();
+    store.insert(&property(alice, "bio", Value::Text("database engineer".to_string()))).unwrap();
+    store.insert(&property(bob, "bio", Value::Text("software developer".to_string()))).unwrap();
+
+    let ts = Timestamp(store.oracle_ts());
+    // "engineer" contains trigrams unique to alice's value
+    let hits = store.text_search("bio", "engineer", ts, None).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0], alice);
+}
+
+#[test]
+fn trigram_stale_entries_eliminated_by_snapshot_confirmation() {
+    // Insert a text value, then overwrite it. The old trigrams stay in TRI CF
+    // (no deletion), but text_search must not return the node when the query
+    // no longer matches the live value.
+    let (store, _dir) = open_store();
+    let node = NodeId::new();
+    store.insert(&property(node, "name", Value::Text("Alice".to_string()))).unwrap();
+    // Overwrite with a completely different value
+    store.insert(&property(node, "name", Value::Text("Charlie".to_string()))).unwrap();
+
+    let ts = Timestamp(store.oracle_ts());
+    // "Alice" is stale — snapshot confirmation must filter it out
+    let hits_alice = store.text_search("name", "Ali", ts, None).unwrap();
+    assert!(hits_alice.is_empty(), "stale entry should be filtered");
+
+    // "Charlie" is live
+    let hits_charlie = store.text_search("name", "Char", ts, None).unwrap();
+    assert_eq!(hits_charlie.len(), 1);
+    assert_eq!(hits_charlie[0], node);
+}
+
+#[test]
+fn trigram_short_string_and_empty_string() {
+    let (store, _dir) = open_store();
+    let a = NodeId::new();
+    let b = NodeId::new();
+    // Two-character value — padded trigram
+    store.insert(&property(a, "tag", Value::Text("ab".to_string()))).unwrap();
+    // Empty string — no trigrams written, so no hits
+    store.insert(&property(b, "tag", Value::Text("".to_string()))).unwrap();
+
+    let ts = Timestamp(store.oracle_ts());
+    // Searching for "ab" finds the two-char node
+    let hits = store.text_search("tag", "ab", ts, None).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0], a);
+
+    // Empty query produces no results (extract_trigrams returns empty vec)
+    let empty_hits = store.text_search("tag", "", ts, None).unwrap();
+    assert!(empty_hits.is_empty());
+}
+
+#[test]
+fn trigram_predicate_isolation() {
+    // Trigrams are scoped by predicate — a match on one predicate must not
+    // surface results from another predicate.
+    let (store, _dir) = open_store();
+    let node = NodeId::new();
+    store.insert(&property(node, "name", Value::Text("Alice".to_string()))).unwrap();
+
+    let ts = Timestamp(store.oracle_ts());
+    // Correct predicate finds the node
+    let hits = store.text_search("name", "Ali", ts, None).unwrap();
+    assert_eq!(hits.len(), 1);
+
+    // Wrong predicate returns nothing, even though the text would match
+    let miss = store.text_search("bio", "Ali", ts, None).unwrap();
+    assert!(miss.is_empty());
+}

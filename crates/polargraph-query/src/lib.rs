@@ -16,6 +16,7 @@
 //! }
 //! ```
 
+pub mod aggregation;
 pub mod cypher;
 pub mod datalog;
 pub mod eval;
@@ -24,10 +25,11 @@ pub mod planner;
 pub mod projection;
 
 pub use datalog::{
-    execute_query, execute_query_seeded, execute_recursive, reachable_from, reachable_from_hops,
-    Bindings, DerivedFacts, Query, QueryError, Rule, Term, VarPattern,
+    execute_query, execute_query_hybrid, execute_query_seeded, execute_query_with_pending,
+    execute_recursive, reachable_from, reachable_from_hops, Bindings, DerivedFacts, Query,
+    QueryError, Rule, Term, VarPattern,
 };
-pub use eval::evaluate;
+pub use eval::{evaluate, evaluate_with_registry};
 pub use explain::{explain_query, ExplainPlan, ExplainStep};
-pub use planner::{choose_index, IndexChoice, Pattern};
+pub use planner::{choose_index, IndexChoice, Pattern, SchemaHints};
 pub use projection::{apply_view, ProjectedTriple};

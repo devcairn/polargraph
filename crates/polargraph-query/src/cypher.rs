@@ -117,8 +117,15 @@ struct CypherPath {
 
 #[derive(Debug)]
 pub enum WhereClause {
-    PropertyEq { var: String, prop: String, value: CypherValue },
+    PropertyEq  { var: String, prop: String, value: CypherValue },
     VectorNear  { var: String, space: String, k: u32, ef: Option<u32> },
+    /// `WHERE a.prop CONTAINS "needle"` — case-sensitive substring match.
+    Contains    { var: String, prop: String, value: String },
+    /// `WHERE a.prop STARTS WITH "prefix"` — case-sensitive prefix match.
+    StartsWith  { var: String, prop: String, value: String },
+    /// `WHERE a.prop =~ "^pattern.*"` — full regex match.
+    /// Falls back to a full predicate scan; no trigram pre-filter.
+    Regex       { var: String, prop: String, pattern: String },
 }
 
 /// A single item in a RETURN clause.
@@ -511,11 +518,30 @@ pub struct VectorNearClause {
     pub ef: Option<u32>,
 }
 
+/// The match kind for a full-text / substring filter.
+pub enum TextFilterKind {
+    /// `CONTAINS "needle"` — `str.contains()` check.
+    Contains(String),
+    /// `STARTS WITH "prefix"` — `str.starts_with()` check.
+    StartsWith(String),
+    /// `=~ "pattern"` — `regex::Regex` match. Falls back to full predicate scan.
+    Regex(String),
+}
+
+/// A text predicate applied post-execution via snapshot scan.
+pub struct TextFilter {
+    pub var: String,
+    pub predicate: String,
+    pub kind: TextFilterKind,
+}
+
 /// The result of compiling a `CypherQuery` to the Datalog IR.
 pub struct CompiledQuery {
     pub query: Query,
     pub rules: Vec<Rule>,
     pub value_filters: Vec<ValueFilter>,
+    /// Text filters from `CONTAINS`, `STARTS WITH`, and `=~` WHERE clauses.
+    pub text_filters: Vec<TextFilter>,
     /// Non-aggregated variable names in RETURN (group-by keys when aggregating).
     pub return_vars: Vec<String>,
     pub limit: Option<usize>,
@@ -551,6 +577,7 @@ enum Token {
     Arrow,      // ->
     LeftArrow,  // <-
     Dash,       // -
+    Tilde,      // ~  (used in =~ regex operator)
     Ident(String),
     Str(String),
     Int(i64),
@@ -658,6 +685,7 @@ impl<'a> Lexer<'a> {
                 Some(b':') => tokens.push((pos, Token::Colon)),
                 Some(b',') => tokens.push((pos, Token::Comma)),
                 Some(b'=') => tokens.push((pos, Token::Eq)),
+                Some(b'~') => tokens.push((pos, Token::Tilde)),
                 Some(b'*') => tokens.push((pos, Token::Star)),
                 Some(b'-') => {
                     if self.peek() == Some(b'>') {
@@ -1097,12 +1125,48 @@ impl Parser {
             self.expect(&Token::RParen)?;
             Ok(WhereClause::VectorNear { var, space, k: k_val as u32, ef: ef_val })
         } else {
-            // Regular property filter: var.prop = value
+            // var.prop <op> value
             self.expect(&Token::Dot)?;
             let prop = self.expect_ident()?;
-            self.expect(&Token::Eq)?;
-            let value = self.parse_literal()?;
-            Ok(WhereClause::PropertyEq { var: first, prop, value })
+
+            if self.peek_keyword("CONTAINS") {
+                self.advance(); // consume CONTAINS
+                let pos = self.current_pos();
+                let val = match self.peek().cloned() {
+                    Some(Token::Str(s)) => { self.advance(); s }
+                    other => return Err(CypherError::at(pos, format!("CONTAINS expects a string, got {:?}", other))),
+                };
+                Ok(WhereClause::Contains { var: first, prop, value: val })
+            } else if self.peek_keyword("STARTS") {
+                self.advance(); // consume STARTS
+                let pos = self.current_pos();
+                if !self.peek_keyword("WITH") {
+                    return Err(CypherError::at(pos, "expected WITH after STARTS"));
+                }
+                self.advance(); // consume WITH
+                let pos = self.current_pos();
+                let val = match self.peek().cloned() {
+                    Some(Token::Str(s)) => { self.advance(); s }
+                    other => return Err(CypherError::at(pos, format!("STARTS WITH expects a string, got {:?}", other))),
+                };
+                Ok(WhereClause::StartsWith { var: first, prop, value: val })
+            } else if self.peek() == Some(&Token::Eq) {
+                self.advance(); // consume =
+                if self.peek() == Some(&Token::Tilde) {
+                    self.advance(); // consume ~
+                    let pos = self.current_pos();
+                    let pattern = match self.peek().cloned() {
+                        Some(Token::Str(s)) => { self.advance(); s }
+                        other => return Err(CypherError::at(pos, format!("=~ expects a regex string, got {:?}", other))),
+                    };
+                    Ok(WhereClause::Regex { var: first, prop, pattern })
+                } else {
+                    let value = self.parse_literal()?;
+                    Ok(WhereClause::PropertyEq { var: first, prop, value })
+                }
+            } else {
+                Err(CypherError::at(self.current_pos(), "expected =, =~, CONTAINS, or STARTS WITH after property name"))
+            }
         }
     }
 
@@ -1185,6 +1249,7 @@ fn is_clause_keyword(s: &str) -> bool {
         | "CREATE" | "MERGE" | "SET" | "DELETE"
         | "WITH" | "ORDER" | "BY" | "SKIP" | "ASC" | "DESC"
         | "AS" | "COUNT" | "COLLECT"
+        | "CONTAINS" | "STARTS"
     )
 }
 
@@ -1422,34 +1487,41 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
         );
     }
 
-    // WHERE clauses: property filters become value filters; VECTOR_NEAR is
-    // extracted into `vector_near` for the caller to route through ANN search.
+    // WHERE clauses: property filters → value_filters; text filters → text_filters;
+    // VECTOR_NEAR → vector_near.
     let mut vector_near: Option<VectorNearClause> = None;
-    for wc in cypher.where_clauses {
+    let mut text_filters: Vec<TextFilter> = Vec::new();
+
+    let add_where = |wc: WhereClause, vf: &mut Vec<ValueFilter>, tf: &mut Vec<TextFilter>, vn: &mut Option<VectorNearClause>| {
         match wc {
             WhereClause::PropertyEq { var, prop, value } => {
-                value_filters.push(ValueFilter { var, predicate: prop, value: value.to_core_value() });
+                vf.push(ValueFilter { var, predicate: prop, value: value.to_core_value() });
             }
             WhereClause::VectorNear { var, space, k, ef } => {
-                vector_near = Some(VectorNearClause { seed_variable: var, space, k, ef });
+                if vn.is_none() {
+                    *vn = Some(VectorNearClause { seed_variable: var, space, k, ef });
+                }
+            }
+            WhereClause::Contains { var, prop, value } => {
+                tf.push(TextFilter { var, predicate: prop, kind: TextFilterKind::Contains(value) });
+            }
+            WhereClause::StartsWith { var, prop, value } => {
+                tf.push(TextFilter { var, predicate: prop, kind: TextFilterKind::StartsWith(value) });
+            }
+            WhereClause::Regex { var, prop, pattern } => {
+                tf.push(TextFilter { var, predicate: prop, kind: TextFilterKind::Regex(pattern) });
             }
         }
+    };
+
+    for wc in cypher.where_clauses {
+        add_where(wc, &mut value_filters, &mut text_filters, &mut vector_near);
     }
 
-    // WITH clause: append its filters to the existing value_filters.
+    // WITH clause: append its filters.
     if let Some(with) = cypher.with_clause {
         for wc in with.filters {
-            match wc {
-                WhereClause::PropertyEq { var, prop, value } => {
-                    value_filters.push(ValueFilter { var, predicate: prop, value: value.to_core_value() });
-                }
-                WhereClause::VectorNear { var, space, k, ef } => {
-                    // VECTOR_NEAR in WITH is unusual; treat it like WHERE for now.
-                    if vector_near.is_none() {
-                        vector_near = Some(VectorNearClause { seed_variable: var, space, k, ef });
-                    }
-                }
-            }
+            add_where(wc, &mut value_filters, &mut text_filters, &mut vector_near);
         }
     }
 
@@ -1468,6 +1540,7 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
         query: Query { patterns },
         rules,
         value_filters,
+        text_filters,
         return_vars,
         limit: cypher.limit,
         vector_near,
@@ -1685,6 +1758,55 @@ pub fn apply_value_filters(
 
             let matched = triples.iter().any(|t| match t {
                 Triple::Property { value, .. } => value == &filter.value,
+                _ => false,
+            });
+
+            if !matched {
+                continue 'binding;
+            }
+        }
+        out.push(binding);
+    }
+
+    Ok(out)
+}
+
+/// Apply text filters (`CONTAINS`, `STARTS WITH`, `=~`) to a set of bindings.
+///
+/// For each binding:
+/// 1. Look up the `NodeId` bound to `filter.var`.
+/// 2. Scan the snapshot for property triples `(node, filter.predicate, *)`.
+/// 3. Keep the binding only if at least one text value satisfies the filter predicate.
+///
+/// `=~` patterns are compiled on each call; callers with many bindings may
+/// want to pre-compile and cache the regex separately.
+pub fn apply_text_filters(
+    bindings: Vec<Bindings>,
+    filters: &[TextFilter],
+    snapshot: &Snapshot,
+) -> Result<Vec<Bindings>, StorageError> {
+    if filters.is_empty() {
+        return Ok(bindings);
+    }
+
+    let mut out = Vec::with_capacity(bindings.len());
+
+    'binding: for binding in bindings {
+        for filter in filters {
+            let node_id = match binding.get(&filter.var) {
+                Some(&id) => id,
+                None => continue 'binding,
+            };
+
+            let triples = snapshot.scan_by_subject_predicate(&node_id, &filter.predicate)?;
+            let matched = triples.iter().any(|t| match t {
+                Triple::Property { value: Value::Text(text), .. } => match &filter.kind {
+                    TextFilterKind::Contains(needle) => text.contains(needle.as_str()),
+                    TextFilterKind::StartsWith(prefix) => text.starts_with(prefix.as_str()),
+                    TextFilterKind::Regex(pattern) => regex::Regex::new(pattern)
+                        .map(|re| re.is_match(text))
+                        .unwrap_or(false),
+                },
                 _ => false,
             });
 

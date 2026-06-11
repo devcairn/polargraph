@@ -138,6 +138,53 @@ pub fn encode_osp(o: &NodeId, s: &NodeId, p: PredId, tt: Timestamp) -> [u8; 44] 
     k
 }
 
+// ── Trigram CF key encoding ───────────────────────────────────────────────────
+
+/// Extract all 3-gram byte sequences from `text` (UTF-8 byte-level sliding window).
+///
+/// For text shorter than 3 bytes, the single gram is zero-padded to 3 bytes.
+/// Returns a deduplicated set. An empty string returns an empty vec.
+pub fn extract_trigrams(text: &str) -> Vec<[u8; 3]> {
+    let bytes = text.as_bytes();
+    let mut set = std::collections::HashSet::new();
+    if bytes.is_empty() {
+        return vec![];
+    }
+    if bytes.len() < 3 {
+        let mut gram = [0u8; 3];
+        gram[..bytes.len()].copy_from_slice(bytes);
+        set.insert(gram);
+    } else {
+        for window in bytes.windows(3) {
+            set.insert([window[0], window[1], window[2]]);
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// TRI key layout: `[trigram(3)][pred_id LE(4)][subject(16)]` = 23 bytes. Value is empty.
+pub fn encode_tri(trigram: [u8; 3], pred_id: PredId, subject: &NodeId) -> [u8; 23] {
+    let mut k = [0u8; 23];
+    k[0..3].copy_from_slice(&trigram);
+    k[3..7].copy_from_slice(&pred_id.to_le_bytes());
+    k[7..23].copy_from_slice(subject.as_bytes());
+    k
+}
+
+/// TRI prefix for scanning all subjects that have `(trigram, pred_id)`.
+pub fn tri_prefix_tp(trigram: [u8; 3], pred_id: PredId) -> [u8; 7] {
+    let mut k = [0u8; 7];
+    k[0..3].copy_from_slice(&trigram);
+    k[3..7].copy_from_slice(&pred_id.to_le_bytes());
+    k
+}
+
+/// Extract the subject `NodeId` from a 23-byte TRI key.
+pub fn decode_tri_subject(key: &[u8]) -> Result<NodeId, StorageError> {
+    check_len(key, 23, "TRI")?;
+    Ok(node_id_from(&key[7..23]))
+}
+
 // OPS: [object(16)][pred(4)][subject(16)][tt(8)]
 pub fn encode_ops(o: &NodeId, p: PredId, s: &NodeId, tt: Timestamp) -> [u8; 44] {
     let mut k = [0u8; 44];

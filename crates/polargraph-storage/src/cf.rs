@@ -14,4 +14,8 @@ pub const META: &str = "meta";
 /// HNSW vector index — one entry per node, plus a `__ep` entry-point record.
 pub const HNSW: &str = "hnsw";
 
-pub const ALL: &[&str] = &[SPO, SOP, PSO, POS, OSP, OPS, META, HNSW];
+/// Full-text / trigram inverted index.
+/// Key layout: [trigram(3)][pred_id LE(4)][subject(16)] = 23 bytes, value empty.
+pub const TRI: &str = "tri";
+
+pub const ALL: &[&str] = &[SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI];

@@ -1715,6 +1715,7 @@ version = "0.1.0"
 dependencies = [
  "polargraph-core",
  "polargraph-storage",
+ "regex",
  "serde",
  "tempfile",
  "thiserror",
@@ -1728,6 +1729,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "clap",
  "http 0.2.12",
  "hyper 0.14.32",
