@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "polargraph-client"
+version = "0.1.0"
+description = "Official Python client for the PolarGraph DB Engine"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["polargraph", "graph", "database", "grpc"]
+dependencies = [
+    "grpcio>=1.54",
+    "protobuf>=4.21",
+]
+
+[project.optional-dependencies]
+async = ["grpcio>=1.54"]
+dev = ["grpcio-tools>=1.54", "pytest>=7.0"]
+
+[project.urls]
+Repository = "https://github.com/polarops/polargraph"
+
+[tool.hatch.build.targets.wheel]
+packages = ["polargraph"]
