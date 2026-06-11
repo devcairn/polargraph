@@ -23,4 +23,7 @@ pub enum StorageError {
 
     #[error("{0}")]
     ReadOnly(String),
+
+    #[error("Validation error: {0}")]
+    Validation(String),
 }

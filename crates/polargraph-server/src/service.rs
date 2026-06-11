@@ -24,6 +24,8 @@ use crate::{
         ListEdgeTypesRequest, ListEdgeTypesResponse,
         ListNodeTypesRequest, ListNodeTypesResponse,
         ListPredicatesBetweenRequest, ListPredicatesBetweenResponse,
+        OntologyViolation,
+        ValidateOntologyRequest, ValidateOntologyResponse,
         MigrateRequest, MigrateResponse, MigrationStatusRequest, MigrationStatusResponse,
         PurgeOldBackupsRequest, PurgeOldBackupsResponse,
         QueryRequest, QueryResponse, QueryStreamChunk, ReachableRequest, ReachableResponse,
@@ -437,6 +439,15 @@ impl PolarGraphService for PolarGraphServer {
             guard.last_used = Instant::now();
             debug!(tx_id = %req.tx_id, "buffered {} triple(s) into open transaction", all_triples.len());
             return Ok(Response::new(InsertResponse { commit_ts: 0, edge_ids }));
+        }
+
+        // Cardinality pre-check: scan committed state before inserting.
+        for triple in &all_triples {
+            if let Triple::Relation { subject, predicate, object, .. } = triple {
+                self.edge_registry
+                    .validate_cardinality(predicate.0.as_str(), *subject, *object, &self.store)
+                    .map_err(|e| Status::failed_precondition(e.message))?;
+            }
         }
 
         // Auto-commit path: begin a new transaction, insert all, commit.
@@ -984,6 +995,126 @@ impl PolarGraphService for PolarGraphServer {
 
         let predicates = self.edge_registry.list_predicates_between(&req.domain_type, &req.range_type);
         Ok(Response::new(ListPredicatesBetweenResponse { predicates }))
+    }
+
+    /// Check the full ontology for consistency.
+    async fn validate_ontology(
+        &self,
+        _request: Request<ValidateOntologyRequest>,
+    ) -> Result<Response<ValidateOntologyResponse>, Status> {
+        let mut violations: Vec<OntologyViolation> = Vec::new();
+
+        let edge_types = self.edge_registry.list_edge_types();
+        let node_types = self.registry.list_types();
+
+        // 1. Cardinality violations: for each constrained predicate, scan the store.
+        for def in &edge_types {
+            use polargraph_core::schema::Cardinality;
+            if def.cardinality == Cardinality::Many {
+                continue;
+            }
+            let triples = match self.store.scan_by_predicate(&def.predicate) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            // Collect relation triples only.
+            let relations: Vec<_> = triples.iter().filter_map(|t| {
+                if let Triple::Relation { subject, object, .. } = t {
+                    Some((*subject, *object))
+                } else {
+                    None
+                }
+            }).collect();
+
+            // For OneToMany/OneToOne: each subject appears at most once.
+            if matches!(def.cardinality, Cardinality::OneToMany | Cardinality::OneToOne) {
+                let mut subjects: HashMap<NodeId, usize> = HashMap::new();
+                for (subj, _) in &relations {
+                    *subjects.entry(*subj).or_insert(0) += 1;
+                }
+                for (subj, count) in &subjects {
+                    if *count > 1 {
+                        violations.push(OntologyViolation {
+                            violation_type: "cardinality".into(),
+                            name: def.predicate.clone(),
+                            message: format!(
+                                "predicate '{}' (one_to_many): subject {:?} has {} objects",
+                                def.predicate, subj, count
+                            ),
+                        });
+                    }
+                }
+            }
+
+            // For ManyToOne/OneToOne: each object appears at most once.
+            if matches!(def.cardinality, Cardinality::ManyToOne | Cardinality::OneToOne) {
+                let mut objects: HashMap<NodeId, usize> = HashMap::new();
+                for (_, obj) in &relations {
+                    *objects.entry(*obj).or_insert(0) += 1;
+                }
+                for (obj, count) in &objects {
+                    if *count > 1 {
+                        violations.push(OntologyViolation {
+                            violation_type: "cardinality".into(),
+                            name: def.predicate.clone(),
+                            message: format!(
+                                "predicate '{}' (many_to_one): object {:?} has {} subjects",
+                                def.predicate, obj, count
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        // 2. Inverse-predicate pair check.
+        for def in &edge_types {
+            let Some(inv) = &def.inverse_of else { continue };
+            // Scan all (A, predicate, B) and check that (B, inv, A) exists.
+            let triples = match self.store.scan_by_predicate(&def.predicate) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            for triple in &triples {
+                let Triple::Relation { subject, object, .. } = triple else { continue };
+                // Check if (object, inv, subject) exists.
+                let inv_triples = self.store
+                    .scan_by_subject_predicate(object, inv)
+                    .unwrap_or_default();
+                let found = inv_triples.iter().any(|t| {
+                    matches!(t, Triple::Relation { object: o, .. } if *o == *subject)
+                });
+                if !found {
+                    violations.push(OntologyViolation {
+                        violation_type: "inverse".into(),
+                        name: def.predicate.clone(),
+                        message: format!(
+                            "predicate '{}' inverse '{}': no ({:?} → {} → {:?}) counterpart",
+                            def.predicate, inv, object, inv, subject
+                        ),
+                    });
+                }
+            }
+        }
+
+        // 3. Cycle detection in type hierarchy.
+        for def in &node_types {
+            for parent in &def.parent_types {
+                if self.registry.is_subtype_of(parent, &def.type_name) {
+                    violations.push(OntologyViolation {
+                        violation_type: "cycle".into(),
+                        name: def.type_name.clone(),
+                        message: format!(
+                            "type hierarchy cycle detected: '{}' inherits from '{}' which inherits from '{}'",
+                            def.type_name, parent, def.type_name
+                        ),
+                    });
+                }
+            }
+        }
+
+        let valid = violations.is_empty();
+        Ok(Response::new(ValidateOntologyResponse { valid, violations }))
     }
 
     /// ANN vector search seeded into a conjunctive Datalog graph query.
@@ -2029,5 +2160,6 @@ fn storage_err_to_status(err: StorageError) -> Status {
         StorageError::KeyDecode(_) => Status::internal(err.to_string()),
         StorageError::Io(_) => Status::internal(err.to_string()),
         StorageError::ReadOnly(_) => Status::failed_precondition(err.to_string()),
+        StorageError::Validation(_) => Status::failed_precondition(err.to_string()),
     }
 }

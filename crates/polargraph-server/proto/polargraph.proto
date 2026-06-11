@@ -306,6 +306,8 @@ message NodeTypeDef {
     repeated FieldDef fields       = 2;
     /// Optional vector space definition. Absent if the type has no vector space.
     VectorSpaceDef    vector_space = 3;
+    /// Parent type names. This type inherits all fields declared by each parent.
+    repeated string   parent_types = 4;
 }
 
 message RegisterNodeTypeRequest {
@@ -345,12 +347,19 @@ message ValidateNodeResponse {
 /// A named edge type schema.
 message EdgeTypeDef {
     /// The predicate string this schema governs (e.g. "works_at").
-    string            predicate = 1;
+    string            predicate   = 1;
     /// Expected node type for the subject. Empty string means unconstrained.
-    string            domain    = 2;
+    string            domain      = 2;
     /// Expected node type for the object. Empty string means unconstrained.
-    string            range     = 3;
-    repeated FieldDef fields    = 4;
+    string            range       = 3;
+    repeated FieldDef fields      = 4;
+    /// Cardinality constraint. One of: "many" (default), "one_to_many",
+    /// "many_to_one", "one_to_one". Empty string is treated as "many".
+    string            cardinality = 5;
+    /// Inverse predicate name. If set, every (A, predicate, B) triple must
+    /// have a corresponding (B, inverse_of, A) triple. Advisory — not
+    /// enforced in storage, checked on insert and via ValidateOntology.
+    string            inverse_of  = 6;
 }
 
 message RegisterEdgeTypeRequest {
@@ -387,6 +396,21 @@ message ValidateEdgeRequest {
 message ValidateEdgeResponse {
     bool            valid  = 1;
     repeated string errors = 2;
+}
+
+message ValidateOntologyRequest {}
+
+message OntologyViolation {
+    /// One of: "cardinality", "inverse", "cycle".
+    string violation_type = 1;
+    /// Predicate or type name involved in the violation.
+    string name           = 2;
+    string message        = 3;
+}
+
+message ValidateOntologyResponse {
+    bool                       valid      = 1;
+    repeated OntologyViolation violations = 2;
 }
 
 message ListPredicatesBetweenRequest {
@@ -754,6 +778,13 @@ service PolarGraphService {
     /// Return all registered predicate names whose domain and range match
     /// the supplied node type names. Unconstrained slots match any type.
     rpc ListPredicatesBetween(ListPredicatesBetweenRequest) returns (ListPredicatesBetweenResponse);
+
+    /// Check the full ontology for consistency:
+    /// - cardinality violations across all committed triples
+    /// - missing inverse-predicate counterparts
+    /// - cycles in the node type hierarchy (should not occur if RegisterNodeType
+    ///   enforcement is in place, but this double-checks the live data)
+    rpc ValidateOntology(ValidateOntologyRequest) returns (ValidateOntologyResponse);
 
     /// Vector search with a node-type or reachability filter.
     /// Runs HNSW with a large candidate pool then post-filters to the allowed set.

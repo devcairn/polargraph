@@ -23,7 +23,8 @@ use crate::{
     proto::{
         self, term::Kind as TermKind, triple::Kind as TripleKind, value::Kind as ValueKind,
         polar_graph_service_server::PolarGraphService,
-        InsertRequest, ListEdgeTypesRequest, ListNodeTypesRequest, PropertyTriple, QueryRequest,
+        CreateBackupRequest, InsertRequest, ListBackupsRequest, ListEdgeTypesRequest,
+        ListNodeTypesRequest, PropertyTriple, PurgeOldBackupsRequest, QueryRequest,
         RelationTriple, ReplicaStatusRequest, ShowIndexesRequest, ShowStatsRequest,
         Triple as ProtoTriple, Value as ProtoValue, VarPattern,
     },
@@ -59,6 +60,9 @@ pub fn build_ui_router(state: Arc<UiState>) -> Router {
         .route("/api/search", get(api_search))
         .route("/api/indexes", get(api_indexes))
         .route("/api/stats", get(api_stats))
+        .route("/api/backups", get(api_backups_list))
+        .route("/api/backups/create", post(api_backups_create))
+        .route("/api/backups/purge", post(api_backups_purge))
         .with_state(state)
 }
 
@@ -711,6 +715,114 @@ async fn api_stats(
                 "open_transaction_count": s.open_transaction_count,
                 "mode": s.mode,
             })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.message()})),
+        ).into_response(),
+    }
+}
+
+// ── /api/backups ──────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct BackupInfoJson {
+    id: u32,
+    timestamp: i64,
+    size_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct ListBackupsApiResponse {
+    backups: Vec<BackupInfoJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+async fn api_backups_list(
+    State(state): State<Arc<UiState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(err) = require_auth(&headers, &state.api_keys) {
+        return err;
+    }
+
+    match state.service.list_backups(Request::new(ListBackupsRequest {})).await {
+        Ok(r) => {
+            let backups = r.into_inner().backups.into_iter().map(|b| BackupInfoJson {
+                id: b.backup_id,
+                timestamp: b.timestamp,
+                size_bytes: b.size_bytes,
+            }).collect();
+            Json(ListBackupsApiResponse { backups, error: None }).into_response()
+        }
+        Err(e) if e.code() == tonic::Code::FailedPrecondition => {
+            Json(ListBackupsApiResponse {
+                backups: vec![],
+                error: Some("backup directory not configured".into()),
+            }).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.message()})),
+        ).into_response(),
+    }
+}
+
+async fn api_backups_create(
+    State(state): State<Arc<UiState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(err) = require_auth(&headers, &state.api_keys) {
+        return err;
+    }
+
+    match state.service.create_backup(Request::new(CreateBackupRequest {})).await {
+        Ok(r) => {
+            let inner = r.into_inner();
+            Json(serde_json::json!({"backup_id": inner.backup_id})).into_response()
+        }
+        Err(e) if e.code() == tonic::Code::FailedPrecondition => {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "backup directory not configured"})),
+            ).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.message()})),
+        ).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PurgeApiBody {
+    keep: u32,
+}
+
+async fn api_backups_purge(
+    State(state): State<Arc<UiState>>,
+    headers: HeaderMap,
+    Json(body): Json<PurgeApiBody>,
+) -> Response {
+    if let Some(err) = require_auth(&headers, &state.api_keys) {
+        return err;
+    }
+
+    match state
+        .service
+        .purge_old_backups(Request::new(PurgeOldBackupsRequest { keep_n: body.keep }))
+        .await
+    {
+        Ok(r) => {
+            let inner = r.into_inner();
+            Json(serde_json::json!({"purged": inner.deleted_count})).into_response()
+        }
+        Err(e) if e.code() == tonic::Code::FailedPrecondition => {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "backup directory not configured"})),
+            ).into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

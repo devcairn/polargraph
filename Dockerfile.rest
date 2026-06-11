@@ -1,0 +1,77 @@
+# Multi-stage build for polargraph-rest (HTTP/JSON REST gateway).
+#
+# Stage 1 (builder): compiles only polargraph-rest and its dependencies.
+#   No RocksDB toolchain needed — polargraph-rest has no storage dependency.
+# Stage 2 (runtime): slim image shipping only the binary.
+
+# ── Stage 1: Build ────────────────────────────────────────────────────────────
+FROM rust:1.78-bookworm AS builder
+
+WORKDIR /build
+
+# protobuf-compiler — tonic-build compiles polargraph.proto at build time.
+# No clang/cmake/libclang-dev needed: polargraph-rest has no RocksDB dep.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Workspace manifests ───────────────────────────────────────────────────────
+COPY Cargo.toml Cargo.lock ./
+
+# All member Cargo.toml files are needed for workspace dependency resolution.
+COPY crates/polargraph-core/Cargo.toml      crates/polargraph-core/Cargo.toml
+COPY crates/polargraph-storage/Cargo.toml   crates/polargraph-storage/Cargo.toml
+COPY crates/polargraph-query/Cargo.toml     crates/polargraph-query/Cargo.toml
+COPY crates/polargraph-server/Cargo.toml    crates/polargraph-server/Cargo.toml
+COPY crates/polargraph-bench/Cargo.toml     crates/polargraph-bench/Cargo.toml
+COPY crates/polargraph-import/Cargo.toml    crates/polargraph-import/Cargo.toml
+COPY crates/polargraph-rest/Cargo.toml      crates/polargraph-rest/Cargo.toml
+COPY crates/polargraph-rest/build.rs        crates/polargraph-rest/build.rs
+
+# polargraph-rest/build.rs references the server's proto file — copy it here
+# so the build script can compile the proto during dependency pre-build.
+COPY crates/polargraph-server/proto/        crates/polargraph-server/proto/
+
+# Stub every workspace member source so `cargo fetch` / dep compilation
+# succeeds without the real source files.
+RUN for crate in polargraph-core polargraph-storage polargraph-query; do \
+        mkdir -p crates/$crate/src && \
+        printf 'pub fn _stub() {}' > crates/$crate/src/lib.rs; \
+    done && \
+    mkdir -p crates/polargraph-server/src && \
+    printf 'pub fn _stub() {}' > crates/polargraph-server/src/lib.rs && \
+    printf 'fn main() {}'      > crates/polargraph-server/src/main.rs && \
+    for crate in polargraph-bench polargraph-import polargraph-rest; do \
+        mkdir -p crates/$crate/src && \
+        printf 'fn main() {}'  > crates/$crate/src/main.rs; \
+    done
+
+# Pre-compile dependencies (cached as long as Cargo.toml/lock don't change).
+RUN cargo build --release -p polargraph-rest 2>&1 || true
+RUN cargo fetch
+
+# ── Real build ────────────────────────────────────────────────────────────────
+COPY crates/ crates/
+
+RUN find crates -name "*.rs" | xargs touch
+
+RUN cargo build --release -p polargraph-rest
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        wget \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /build/target/release/polargraph-rest /app/polargraph-rest
+
+ENV POLARGRAPH_UPSTREAM=http://localhost:50051
+ENV POLARGRAPH_REST_LISTEN=0.0.0.0:8000
+
+EXPOSE 8000
+
+ENTRYPOINT ["/app/polargraph-rest"]

@@ -23,8 +23,8 @@ use polargraph_server::{
         RegisterEdgeTypeRequest, RegisterNodeTypeRequest, RelationTriple,
         ReplicaStatusRequest, RunRetentionRequest, StreamWalRequest,
         SearchVectorFilteredRequest, SearchVectorInSetRequest, SearchVectorRequest,
-        Term, Triple, ValidateEdgeRequest, ValidateNodeRequest, Value, VarPattern,
-        VectorItem, VectorSeedQueryRequest, VectorSpaceDef,
+        Term, Triple, ValidateEdgeRequest, ValidateNodeRequest, ValidateOntologyRequest,
+        Value, VarPattern, VectorItem, VectorSeedQueryRequest, VectorSpaceDef,
     },
     service::PolarGraphServer,
     wal_client,
@@ -697,6 +697,7 @@ fn person_type_def() -> NodeTypeDef {
             FieldDef { field_name: "age".into(),  kind: "int".into(),  required: false },
         ],
         vector_space: None,
+        parent_types: vec![],
     }
 }
 
@@ -749,6 +750,7 @@ async fn list_node_types_returns_all_registered() {
             type_name: "Project".into(),
             fields: vec![FieldDef { field_name: "title".into(), kind: "text".into(), required: true }],
             vector_space: None,
+            parent_types: vec![],
         }),
     }))
     .await
@@ -883,6 +885,8 @@ fn works_at_edge_def() -> EdgeTypeDef {
         fields: vec![
             FieldDef { field_name: "since".into(), kind: "int".into(), required: true },
         ],
+        cardinality: String::new(),
+        inverse_of: String::new(),
     }
 }
 
@@ -938,6 +942,8 @@ async fn list_edge_types_returns_all_registered() {
             domain: "".into(),
             range: "".into(),
             fields: vec![],
+            cardinality: String::new(),
+            inverse_of: String::new(),
         }),
     }))
     .await
@@ -1127,6 +1133,8 @@ async fn list_predicates_between_returns_correct_subset() {
             domain: "Person".into(),
             range: "Person".into(),
             fields: vec![],
+            cardinality: String::new(),
+            inverse_of: String::new(),
         }),
     }))
     .await
@@ -1213,6 +1221,7 @@ async fn register_node_type_with_vector_space_round_trips() {
     let def = NodeTypeDef {
         type_name: "Article".into(),
         fields: vec![],
+        parent_types: vec![],
         vector_space: Some(VectorSpaceDef {
             space_name: "article_space".into(),
             dimensions: 4,
@@ -1249,6 +1258,7 @@ async fn insert_vector_dimension_mismatch_rejected() {
         definition: Some(NodeTypeDef {
             type_name: "Thing".into(),
             fields: vec![],
+            parent_types: vec![],
             vector_space: Some(VectorSpaceDef {
                 space_name: "thing_space".into(),
                 dimensions: 3,
@@ -1319,6 +1329,7 @@ async fn batch_insert_vectors_rejects_dimension_mismatch() {
         definition: Some(NodeTypeDef {
             type_name: "Doc".into(),
             fields: vec![],
+            parent_types: vec![],
             vector_space: Some(VectorSpaceDef {
                 space_name: "doc_space".into(),
                 dimensions: 3,
@@ -1659,6 +1670,7 @@ async fn mmap_storage_mode_insert_and_search() {
         definition: Some(NodeTypeDef {
             type_name: "MmapDoc".into(),
             fields: vec![],
+            parent_types: vec![],
             vector_space: Some(VectorSpaceDef {
                 space_name: "mmap_space".into(),
                 dimensions: 3,
@@ -1715,6 +1727,7 @@ async fn mmap_storage_mode_round_trips_in_node_type() {
         definition: Some(NodeTypeDef {
             type_name: "MmapNode".into(),
             fields: vec![],
+            parent_types: vec![],
             vector_space: Some(VectorSpaceDef {
                 space_name: "mm_space".into(),
                 dimensions: 8,
@@ -2324,6 +2337,7 @@ async fn replica_write_rpcs_return_failed_precondition() {
                 type_name: "Foo".into(),
                 fields: vec![],
                 vector_space: None,
+                parent_types: vec![],
             }),
         }))
         .await
@@ -2337,6 +2351,8 @@ async fn replica_write_rpcs_return_failed_precondition() {
                 domain: String::new(),
                 range: String::new(),
                 fields: vec![],
+                cardinality: String::new(),
+                inverse_of: String::new(),
             }),
         }))
         .await
@@ -2749,6 +2765,89 @@ async fn ui_api_requires_auth_when_keys_configured() {
     // GET / (UI HTML) is always accessible without auth
     let res = client.get(format!("{base}/")).send().await.unwrap();
     assert_eq!(res.status(), 200);
+
+    let _ = shutdown.send(());
+}
+
+/// Start a UI HTTP server with a pre-built `PolarGraphServer` (e.g. one that has a backup dir).
+async fn start_ui_http_svc(
+    svc: PolarGraphServer,
+    api_keys: Vec<String>,
+) -> (String, tokio::sync::oneshot::Sender<()>) {
+    use polargraph_server::ui_api;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let state = Arc::new(ui_api::UiState {
+        service: svc,
+        api_keys: Arc::new(api_keys),
+        start_time: std::time::Instant::now(),
+        data_dir: "/tmp".into(),
+        grpc_addr: "127.0.0.1:50051".into(),
+        replica_state: None,
+    });
+    let app = ui_api::build_ui_router(state);
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let server = axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service());
+        tokio::select! {
+            _ = server => {}
+            _ = shutdown_rx => {}
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    (format!("http://{addr}"), shutdown_tx)
+}
+
+#[tokio::test]
+async fn ui_backups_list_unconfigured_returns_empty() {
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let (base, shutdown, _dir) = start_ui_http(store, vec![]).await;
+
+    let client = reqwest::Client::new();
+    let res = client.get(format!("{base}/api/backups")).send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    let json: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(json["backups"], serde_json::json!([]));
+    assert!(json.get("error").is_some(), "expected error field when backup dir not configured");
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn ui_backups_create_and_list() {
+    let (svc, _data, _backup) = open_with_backup();
+    let (base, shutdown) = start_ui_http_svc(svc, vec![]).await;
+
+    let client = reqwest::Client::new();
+
+    // Create a backup
+    let res = client
+        .post(format!("{base}/api/backups/create"))
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let json: serde_json::Value = res.json().await.unwrap();
+    assert!(json.get("backup_id").is_some(), "expected backup_id in create response");
+
+    // List backups — should contain the one we just made
+    let res = client.get(format!("{base}/api/backups")).send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    let json: serde_json::Value = res.json().await.unwrap();
+    assert!(json.get("error").is_none(), "should have no error when backup dir is configured");
+    let backups = json["backups"].as_array().expect("backups should be an array");
+    assert!(!backups.is_empty(), "expected at least one backup after create");
+    assert!(backups[0].get("id").is_some(), "backup entry missing id");
+    assert!(backups[0].get("timestamp").is_some(), "backup entry missing timestamp");
+    assert!(backups[0].get("size_bytes").is_some(), "backup entry missing size_bytes");
 
     let _ = shutdown.send(());
 }
@@ -3435,6 +3534,7 @@ async fn cypher_vector_near_query() {
         definition: Some(NodeTypeDef {
             type_name: "Document".into(),
             fields: vec![],
+            parent_types: vec![],
             vector_space: Some(VectorSpaceDef {
                 space_name: "docs".into(),
                 dimensions: 3,
@@ -3965,6 +4065,7 @@ async fn show_indexes_reflects_registered_vector_space() {
         definition: Some(NodeTypeDef {
             type_name: "Doc".into(),
             fields: vec![],
+            parent_types: vec![],
             vector_space: Some(VectorSpaceDef {
                 space_name: "doc_embeddings".into(),
                 dimensions: 3,
@@ -4145,4 +4246,203 @@ async fn cypher_where_regex_finds_match() {
         uuid::Uuid::from_bytes(alice.bytes[..16].try_into().unwrap()),
     );
     assert_eq!(bound_id, alice_id);
+}
+
+// ── Schema & ontology layer tests ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_grpc_edge_cardinality_enforced() {
+    let (svc, _dir) = open();
+
+    // Register an edge type with one_to_many cardinality.
+    svc.register_edge_type(Request::new(RegisterEdgeTypeRequest {
+        definition: Some(EdgeTypeDef {
+            predicate: "assigned_to".into(),
+            domain: String::new(),
+            range: String::new(),
+            fields: vec![],
+            cardinality: "one_to_many".into(),
+            inverse_of: String::new(),
+        }),
+    }))
+    .await
+    .unwrap();
+
+    let (_, task) = new_node();
+    let (_, owner1) = new_node();
+    let (_, owner2) = new_node();
+
+    // First insert should succeed.
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(task.clone(), "assigned_to", owner1.clone())],
+        ..Default::default()
+    }))
+    .await
+    .expect("first insert should succeed");
+
+    // Second insert with the same subject and a different object → cardinality violation.
+    let err = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(task.clone(), "assigned_to", owner2.clone())],
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.code(),
+        tonic::Code::FailedPrecondition,
+        "expected FAILED_PRECONDITION for cardinality violation, got: {}",
+        err.message()
+    );
+    assert!(err.message().contains("one object per subject"), "got: {}", err.message());
+}
+
+#[tokio::test]
+async fn test_grpc_subtype_inheritance() {
+    let (svc, _dir) = open();
+
+    // Register a parent type with a required field.
+    svc.register_node_type(Request::new(RegisterNodeTypeRequest {
+        definition: Some(NodeTypeDef {
+            type_name: "Entity".into(),
+            fields: vec![
+                FieldDef { field_name: "id_code".into(), kind: "text".into(), required: true },
+            ],
+            vector_space: None,
+            parent_types: vec![],
+        }),
+    }))
+    .await
+    .unwrap();
+
+    // Register a child type that inherits from Entity.
+    svc.register_node_type(Request::new(RegisterNodeTypeRequest {
+        definition: Some(NodeTypeDef {
+            type_name: "Person".into(),
+            fields: vec![
+                FieldDef { field_name: "name".into(), kind: "text".into(), required: true },
+            ],
+            vector_space: None,
+            parent_types: vec!["Entity".into()],
+        }),
+    }))
+    .await
+    .unwrap();
+
+    // Validate without inherited required field "id_code" → should fail.
+    let resp = svc
+        .validate_node(Request::new(ValidateNodeRequest {
+            type_name: "Person".into(),
+            properties: std::collections::HashMap::from([
+                ("name".to_string(), Value { kind: Some(ValueKind::TextVal("Alice".into())) }),
+                // "id_code" from Entity is missing
+            ]),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(!resp.valid, "validation should fail when inherited required field is missing");
+    assert!(
+        resp.errors.iter().any(|e| e.contains("id_code")),
+        "error should mention missing inherited field 'id_code': {:?}",
+        resp.errors
+    );
+
+    // Validate with all fields → should pass.
+    let resp2 = svc
+        .validate_node(Request::new(ValidateNodeRequest {
+            type_name: "Person".into(),
+            properties: std::collections::HashMap::from([
+                ("name".to_string(), Value { kind: Some(ValueKind::TextVal("Alice".into())) }),
+                ("id_code".to_string(), Value { kind: Some(ValueKind::TextVal("E001".into())) }),
+            ]),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp2.valid, "validation should pass when all inherited fields are present");
+}
+
+#[tokio::test]
+async fn test_grpc_validate_ontology() {
+    let (svc, _dir) = open();
+
+    // Register a predicate with an inverse.
+    svc.register_edge_type(Request::new(RegisterEdgeTypeRequest {
+        definition: Some(EdgeTypeDef {
+            predicate: "parent_of".into(),
+            domain: String::new(),
+            range: String::new(),
+            fields: vec![],
+            cardinality: String::new(),
+            inverse_of: "child_of".into(),
+        }),
+    }))
+    .await
+    .unwrap();
+
+    svc.register_edge_type(Request::new(RegisterEdgeTypeRequest {
+        definition: Some(EdgeTypeDef {
+            predicate: "child_of".into(),
+            domain: String::new(),
+            range: String::new(),
+            fields: vec![],
+            cardinality: String::new(),
+            inverse_of: String::new(),
+        }),
+    }))
+    .await
+    .unwrap();
+
+    let (_, alice) = new_node();
+    let (_, bob) = new_node();
+
+    // Insert parent_of AND its inverse child_of → ontology should be clean.
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            rel(alice.clone(), "parent_of", bob.clone()),
+            rel(bob.clone(), "child_of", alice.clone()),
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .validate_ontology(Request::new(ValidateOntologyRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(
+        resp.valid,
+        "ontology should be valid when inverse pairs are consistent; violations: {:?}",
+        resp.violations
+    );
+
+    // Insert a parent_of WITHOUT the inverse → validate_ontology should report a violation.
+    let (_, carol) = new_node();
+    let (_, dave) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(carol.clone(), "parent_of", dave.clone())],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp2 = svc
+        .validate_ontology(Request::new(ValidateOntologyRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(!resp2.valid, "ontology should report violation when inverse is missing");
+    assert!(
+        resp2.violations.iter().any(|v| v.violation_type == "inverse"),
+        "expected 'inverse' violation type; got: {:?}",
+        resp2.violations
+    );
 }

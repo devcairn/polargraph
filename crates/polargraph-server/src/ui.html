@@ -150,6 +150,7 @@ pre.codeblock{background:#161b22;border:1px solid #21262d;border-radius:6px;padd
       <div class="nav-item" id="nav-insert" onclick="showTab('insert')">Insert Triple</div>
       <div class="nav-item" id="nav-search" onclick="showTab('search')">Search</div>
       <div class="nav-item" id="nav-status" onclick="showTab('status')">Status</div>
+      <div class="nav-item" id="nav-backups" onclick="showTab('backups')">Backups</div>
     </div>
     <div class="nav-section">
       <div class="nav-section-title">Node Types <span id="nt-count" class="badge"></span></div>
@@ -171,6 +172,7 @@ pre.codeblock{background:#161b22;border:1px solid #21262d;border-radius:6px;padd
     <button class="tab-btn" id="tabBtn-insert" onclick="showTab('insert')">Insert</button>
     <button class="tab-btn" id="tabBtn-search" onclick="showTab('search')">Search</button>
     <button class="tab-btn" id="tabBtn-status" onclick="showTab('status')">Status</button>
+    <button class="tab-btn" id="tabBtn-backups" onclick="showTab('backups')">Backups</button>
   </div>
 
   <div id="content">
@@ -264,6 +266,37 @@ pre.codeblock{background:#161b22;border:1px solid #21262d;border-radius:6px;padd
         <button class="btn" onclick="runSearch()">Search</button>
       </div>
       <div id="s-results"></div>
+    </div>
+
+    <!-- Backups panel -->
+    <div id="panel-backups" class="panel">
+      <div class="panel-title">Backups</div>
+      <div id="backups-unconfigured" style="display:none" class="empty-state">
+        Backup directory not configured. Start polargraphd with <code>--backup-dir</code> to enable backups.
+      </div>
+      <div id="backups-configured">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">
+          <button class="btn" onclick="createBackup()">Create Backup</button>
+          <span id="backup-create-msg" style="font-size:13px;color:#3fb950;display:none"></span>
+          <span id="backup-create-err" style="font-size:13px;color:#f85149;display:none"></span>
+        </div>
+        <div id="backups-table-wrap"><div class="empty-state">Loading…</div></div>
+        <hr class="divider">
+        <div class="panel-title" style="font-size:14px">Purge Old Backups</div>
+        <div class="input-row" style="margin-bottom:14px;max-width:380px">
+          <div class="form-group">
+            <label>Keep N most recent</label>
+            <input type="number" id="purge-keep" value="3" min="1" style="max-width:120px">
+          </div>
+          <button class="btn btn-danger" onclick="purgeBackups()">Purge</button>
+        </div>
+        <div id="purge-msg" style="font-size:13px;display:none"></div>
+        <hr class="divider">
+        <div style="font-size:12px;color:#6e7681">
+          ⚠ Restore is an offline operation — stop the server, run <code>polargraphd</code> with
+          <code>--restore-from-backup &lt;id&gt;</code>, then restart normally.
+        </div>
+      </div>
     </div>
 
     <!-- Status panel -->
@@ -406,6 +439,7 @@ function showTab(name) {
   if (btn) btn.classList.add('active');
   if (name === 'status') loadStatus();
   if (name === 'schema') renderSchemaDiagram();
+  if (name === 'backups') loadBackups();
 }
 
 // ── Sidebar population ────────────────────────────────────────────────────────
@@ -817,6 +851,104 @@ function formatUptime(secs) {
   const h = Math.floor(secs/3600);
   const m = Math.floor((secs%3600)/60);
   return h + 'h ' + m + 'm';
+}
+
+// ── Backups ───────────────────────────────────────────────────────────────────
+async function loadBackups() {
+  const tableWrap = document.getElementById('backups-table-wrap');
+  const unconfigured = document.getElementById('backups-unconfigured');
+  const configured = document.getElementById('backups-configured');
+  tableWrap.innerHTML = '<div class="empty-state">Loading…</div>';
+
+  try {
+    const res = await apiFetch('/api/backups');
+    const data = await res.json();
+
+    if (data.error) {
+      unconfigured.style.display = 'block';
+      configured.style.display = 'none';
+      return;
+    }
+
+    unconfigured.style.display = 'none';
+    configured.style.display = 'block';
+
+    const backups = data.backups || [];
+    if (backups.length === 0) {
+      tableWrap.innerHTML = '<div class="empty-state">No backups yet. Click "Create Backup" to make one.</div>';
+      return;
+    }
+
+    let html = `<div class="table-wrap"><table>
+      <tr><th>ID</th><th>Created</th><th>Size</th></tr>`;
+    backups.forEach(b => {
+      const ts = b.timestamp ? new Date(b.timestamp * 1000).toLocaleString() : '—';
+      html += `<tr>
+        <td>${b.id}</td>
+        <td>${esc(ts)}</td>
+        <td>${fmtBytes(b.size_bytes)}</td>
+      </tr>`;
+    });
+    html += `</table></div>`;
+    tableWrap.innerHTML = html;
+  } catch(e) {
+    if (e.message !== 'unauthorized') tableWrap.innerHTML = `<div class="empty-state">Failed to load backups.</div>`;
+  }
+}
+
+async function createBackup() {
+  const msgEl = document.getElementById('backup-create-msg');
+  const errEl = document.getElementById('backup-create-err');
+  msgEl.style.display = 'none';
+  errEl.style.display = 'none';
+
+  try {
+    const res = await apiFetch('/api/backups/create', { method: 'POST' });
+    const data = await res.json();
+    if (data.error) {
+      errEl.textContent = data.error;
+      errEl.style.display = 'inline';
+      return;
+    }
+    msgEl.textContent = `✓ Backup #${data.backup_id} created`;
+    msgEl.style.display = 'inline';
+    loadBackups();
+  } catch(e) {
+    if (e.message !== 'unauthorized') {
+      errEl.textContent = e.message;
+      errEl.style.display = 'inline';
+    }
+  }
+}
+
+async function purgeBackups() {
+  const keep = parseInt(document.getElementById('purge-keep').value) || 3;
+  const msgEl = document.getElementById('purge-msg');
+  msgEl.style.display = 'none';
+
+  try {
+    const res = await apiFetch('/api/backups/purge', {
+      method: 'POST',
+      body: JSON.stringify({ keep }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      msgEl.textContent = data.error;
+      msgEl.style.color = '#f85149';
+      msgEl.style.display = 'block';
+      return;
+    }
+    msgEl.textContent = `✓ Purged ${data.purged} backup${data.purged === 1 ? '' : 's'}`;
+    msgEl.style.color = '#3fb950';
+    msgEl.style.display = 'block';
+    loadBackups();
+  } catch(e) {
+    if (e.message !== 'unauthorized') {
+      msgEl.textContent = e.message;
+      msgEl.style.color = '#f85149';
+      msgEl.style.display = 'block';
+    }
+  }
 }
 
 // ── Utils ─────────────────────────────────────────────────────────────────────

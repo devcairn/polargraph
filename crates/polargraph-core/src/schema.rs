@@ -125,6 +125,21 @@ impl VectorSpaceDef {
     }
 }
 
+/// Cardinality constraint on a relation predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Cardinality {
+    /// No constraint. Default.
+    #[default]
+    Many,
+    /// At most one object per subject (functional).
+    OneToMany,
+    /// At most one subject per object (inverse-functional).
+    ManyToOne,
+    /// At most one object per subject AND at most one subject per object.
+    OneToOne,
+}
+
 /// A named node type schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeTypeDef {
@@ -132,15 +147,24 @@ pub struct NodeTypeDef {
     pub fields: Vec<FieldDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_space: Option<VectorSpaceDef>,
+    /// Parent type names. This type inherits all fields declared by each parent.
+    /// Cycles are rejected at registration time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parent_types: Vec<String>,
 }
 
 impl NodeTypeDef {
     pub fn new(type_name: impl Into<String>, fields: Vec<FieldDef>) -> Self {
-        Self { type_name: type_name.into(), fields, vector_space: None }
+        Self { type_name: type_name.into(), fields, vector_space: None, parent_types: vec![] }
     }
 
     pub fn with_vector_space(mut self, space: VectorSpaceDef) -> Self {
         self.vector_space = Some(space);
+        self
+    }
+
+    pub fn with_parent_types(mut self, parents: Vec<impl Into<String>>) -> Self {
+        self.parent_types = parents.into_iter().map(Into::into).collect();
         self
     }
 }
@@ -166,6 +190,13 @@ pub struct EdgeTypeDef {
     pub range: Option<String>,
     /// Expected property predicates on this edge.
     pub fields: Vec<FieldDef>,
+    /// Cardinality constraint on the outgoing direction (subject → object).
+    #[serde(default)]
+    pub cardinality: Cardinality,
+    /// If `Some(pred)`, every triple `(A, predicate, B)` must have a
+    /// corresponding `(B, pred, A)`. Validated on insert, not enforced in storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inverse_of: Option<String>,
 }
 
 impl EdgeTypeDef {
@@ -180,7 +211,19 @@ impl EdgeTypeDef {
             domain: domain.map(Into::into),
             range: range.map(Into::into),
             fields,
+            cardinality: Cardinality::Many,
+            inverse_of: None,
         }
+    }
+
+    pub fn with_cardinality(mut self, cardinality: Cardinality) -> Self {
+        self.cardinality = cardinality;
+        self
+    }
+
+    pub fn with_inverse_of(mut self, inverse: impl Into<String>) -> Self {
+        self.inverse_of = Some(inverse.into());
+        self
     }
 }
 

@@ -13,7 +13,7 @@ use crate::proto::{
 };
 use polargraph_core::{
     id::{EdgeId, NodeId},
-    schema::{EdgeTypeDef, FieldDef, FieldKind, NodeTypeDef, StorageMode, VectorSpaceDef},
+    schema::{Cardinality, EdgeTypeDef, FieldDef, FieldKind, NodeTypeDef, StorageMode, VectorSpaceDef},
     temporal::{BiTemporalRange, Timestamp},
     triple::{Predicate, Triple},
     value::Value,
@@ -338,6 +338,9 @@ pub fn node_type_def_from_proto(proto: &proto::NodeTypeDef) -> Result<NodeTypeDe
     if let Some(vs) = vector_space {
         def = def.with_vector_space(vs);
     }
+    if !proto.parent_types.is_empty() {
+        def.parent_types = proto.parent_types.clone();
+    }
     Ok(def)
 }
 
@@ -354,10 +357,32 @@ pub fn node_type_def_to_proto(def: &NodeTypeDef) -> proto::NodeTypeDef {
             })
             .collect(),
         vector_space: def.vector_space.as_ref().map(vector_space_def_to_proto),
+        parent_types: def.parent_types.clone(),
     }
 }
 
 // ── Edge type schema ──────────────────────────────────────────────────────────
+
+pub fn cardinality_from_str(s: &str) -> Result<Cardinality, Status> {
+    match s {
+        "" | "many" => Ok(Cardinality::Many),
+        "one_to_many" => Ok(Cardinality::OneToMany),
+        "many_to_one" => Ok(Cardinality::ManyToOne),
+        "one_to_one" => Ok(Cardinality::OneToOne),
+        other => Err(Status::invalid_argument(format!(
+            "unknown cardinality '{other}'; expected one of: many, one_to_many, many_to_one, one_to_one"
+        ))),
+    }
+}
+
+pub fn cardinality_to_str(c: Cardinality) -> &'static str {
+    match c {
+        Cardinality::Many => "many",
+        Cardinality::OneToMany => "one_to_many",
+        Cardinality::ManyToOne => "many_to_one",
+        Cardinality::OneToOne => "one_to_one",
+    }
+}
 
 pub fn edge_type_def_from_proto(proto: &proto::EdgeTypeDef) -> Result<EdgeTypeDef, Status> {
     if proto.predicate.is_empty() {
@@ -379,19 +404,26 @@ pub fn edge_type_def_from_proto(proto: &proto::EdgeTypeDef) -> Result<EdgeTypeDe
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let cardinality = cardinality_from_str(&proto.cardinality)?;
+    let inverse_of = if proto.inverse_of.is_empty() { None } else { Some(proto.inverse_of.clone()) };
+
     Ok(EdgeTypeDef {
         predicate: proto.predicate.clone(),
         domain: if proto.domain.is_empty() { None } else { Some(proto.domain.clone()) },
         range:  if proto.range.is_empty()  { None } else { Some(proto.range.clone())  },
         fields,
+        cardinality,
+        inverse_of,
     })
 }
 
 pub fn edge_type_def_to_proto(def: &EdgeTypeDef) -> proto::EdgeTypeDef {
     proto::EdgeTypeDef {
-        predicate: def.predicate.clone(),
-        domain: def.domain.clone().unwrap_or_default(),
-        range:  def.range.clone().unwrap_or_default(),
+        predicate:   def.predicate.clone(),
+        domain:      def.domain.clone().unwrap_or_default(),
+        range:       def.range.clone().unwrap_or_default(),
+        cardinality: cardinality_to_str(def.cardinality).to_string(),
+        inverse_of:  def.inverse_of.clone().unwrap_or_default(),
         fields: def
             .fields
             .iter()

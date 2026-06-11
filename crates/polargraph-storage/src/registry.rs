@@ -22,7 +22,7 @@
 use crate::{error::StorageError, store::TripleStore};
 use polargraph_core::{
     id::NodeId,
-    schema::{EdgeTypeDef, FieldDef, NodeTypeDef, VectorSpaceDef},
+    schema::{Cardinality, EdgeTypeDef, FieldDef, NodeTypeDef, VectorSpaceDef},
     temporal::{BiTemporalRange, Timestamp},
     triple::{Predicate, Triple},
     value::Value,
@@ -77,6 +77,8 @@ struct NodeSchemaJson {
     fields: Vec<FieldDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     vector_space: Option<VectorSpaceDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    parent_types: Vec<String>,
 }
 
 // ── Edge schema wire format ────────────────────────────────────────────────────
@@ -87,6 +89,10 @@ struct EdgeSchemaJson {
     domain: Option<String>,
     range:  Option<String>,
     fields: Vec<FieldDef>,
+    #[serde(default)]
+    cardinality: Cardinality,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inverse_of: Option<String>,
 }
 
 // ── Validation error ──────────────────────────────────────────────────────────
@@ -143,9 +149,19 @@ impl NodeTypeRegistry {
     /// Register (or overwrite) a node type schema.
     ///
     /// The schema is persisted to the triple store immediately, so it survives
-    /// process restarts.
+    /// process restarts. Returns `Err` if `def.parent_types` contains a cycle.
     pub fn register_type(&self, def: NodeTypeDef) -> Result<(), StorageError> {
-        let wire = NodeSchemaJson { fields: def.fields.clone(), vector_space: def.vector_space.clone() };
+        // Cycle detection: walk the declared parent chain before writing.
+        {
+            let cache = self.cache.read().unwrap();
+            Self::check_no_cycle(&def.type_name, &def.parent_types, &cache)?;
+        }
+
+        let wire = NodeSchemaJson {
+            fields: def.fields.clone(),
+            vector_space: def.vector_space.clone(),
+            parent_types: def.parent_types.clone(),
+        };
         let json = serde_json::to_string(&wire)?;
         let triple = Triple::Property {
             subject: SCHEMA_REGISTRY_NODE,
@@ -182,7 +198,31 @@ impl NodeTypeRegistry {
             })
     }
 
-    /// Validate a property map against a registered schema.
+    /// Return all fields available on `type_name`, including inherited fields.
+    ///
+    /// Resolution order: own fields first, then depth-first parent fields.
+    /// If the same field name appears more than once, the first occurrence wins
+    /// (own fields shadow parent fields; earlier parents shadow later ones).
+    /// Returns an empty vec if the type is not registered.
+    pub fn resolved_fields(&self, type_name: &str) -> Vec<FieldDef> {
+        let cache = self.cache.read().unwrap();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        Self::collect_fields(type_name, &cache, &mut seen, &mut result);
+        result
+    }
+
+    /// Returns `true` if `type_name` is `ancestor` or inherits from it (transitively).
+    pub fn is_subtype_of(&self, type_name: &str, ancestor: &str) -> bool {
+        if type_name == ancestor {
+            return true;
+        }
+        let cache = self.cache.read().unwrap();
+        let mut visited = std::collections::HashSet::new();
+        Self::walk_ancestors(type_name, ancestor, &cache, &mut visited)
+    }
+
+    /// Validate a property map against a registered schema (including inherited fields).
     ///
     /// Returns `Ok(())` if all required fields are present and every supplied
     /// value matches the declared kind.  Returns `Err(errors)` otherwise.
@@ -196,17 +236,17 @@ impl NodeTypeRegistry {
         type_name: &str,
         props: &HashMap<String, Value>,
     ) -> Result<(), Vec<ValidationError>> {
-        let def = match self.get_type(type_name) {
-            Some(d) => d,
-            None => return Err(vec![ValidationError {
+        if self.get_type(type_name).is_none() {
+            return Err(vec![ValidationError {
                 field: String::new(),
                 message: format!("unknown type '{type_name}'"),
-            }]),
-        };
+            }]);
+        }
 
+        let fields = self.resolved_fields(type_name);
         let mut errors = Vec::new();
 
-        for field in &def.fields {
+        for field in &fields {
             match props.get(&field.name) {
                 None if field.required => {
                     errors.push(ValidationError::missing(&field.name));
@@ -241,9 +281,15 @@ impl NodeTypeRegistry {
                             type_name: type_name.to_string(),
                             fields: wire.fields,
                             vector_space: wire.vector_space,
+                            parent_types: wire.parent_types,
                         }
                     } else if let Ok(fields) = serde_json::from_str::<Vec<FieldDef>>(&json) {
-                        NodeTypeDef { type_name: type_name.to_string(), fields, vector_space: None }
+                        NodeTypeDef {
+                            type_name: type_name.to_string(),
+                            fields,
+                            vector_space: None,
+                            parent_types: vec![],
+                        }
                     } else {
                         tracing::warn!(type_name, "skipping malformed schema");
                         continue;
@@ -253,6 +299,83 @@ impl NodeTypeRegistry {
             }
         }
         Ok(cache)
+    }
+
+    /// Depth-first collection of all fields reachable from `type_name` via the
+    /// parent_types graph. Own fields come first; first occurrence by name wins.
+    fn collect_fields(
+        type_name: &str,
+        cache: &HashMap<String, NodeTypeDef>,
+        seen_names: &mut std::collections::HashSet<String>,
+        out: &mut Vec<FieldDef>,
+    ) {
+        let Some(def) = cache.get(type_name) else { return };
+        for field in &def.fields {
+            if seen_names.insert(field.name.clone()) {
+                out.push(field.clone());
+            }
+        }
+        for parent in &def.parent_types {
+            Self::collect_fields(parent, cache, seen_names, out);
+        }
+    }
+
+    /// Transitive ancestor walk. Returns `true` if `ancestor` is reachable.
+    fn walk_ancestors(
+        current: &str,
+        ancestor: &str,
+        cache: &HashMap<String, NodeTypeDef>,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        let Some(def) = cache.get(current) else { return false };
+        for parent in &def.parent_types {
+            if parent == ancestor {
+                return true;
+            }
+            if visited.insert(parent.clone()) && Self::walk_ancestors(parent, ancestor, cache, visited) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Walk the parent chain for `type_name` and return an error if a cycle is detected.
+    fn check_no_cycle(
+        type_name: &str,
+        parents: &[String],
+        cache: &HashMap<String, NodeTypeDef>,
+    ) -> Result<(), StorageError> {
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(type_name.to_string());
+        for parent in parents {
+            if !Self::dfs_cycle_check(parent, &visited, cache) {
+                return Err(StorageError::Validation(format!(
+                    "cycle detected in type hierarchy: '{type_name}' → '{parent}'"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns `false` if a cycle is found (i.e., `current` is already in `ancestors`).
+    fn dfs_cycle_check(
+        current: &str,
+        ancestors: &std::collections::HashSet<String>,
+        cache: &HashMap<String, NodeTypeDef>,
+    ) -> bool {
+        if ancestors.contains(current) {
+            return false; // cycle
+        }
+        let mut next_ancestors = ancestors.clone();
+        next_ancestors.insert(current.to_string());
+        if let Some(def) = cache.get(current) {
+            for parent in &def.parent_types {
+                if !Self::dfs_cycle_check(parent, &next_ancestors, cache) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 
@@ -284,9 +407,11 @@ impl EdgeTypeRegistry {
     /// Register (or overwrite) an edge type schema.
     pub fn register_edge_type(&self, def: EdgeTypeDef) -> Result<(), StorageError> {
         let wire = EdgeSchemaJson {
-            domain: def.domain.clone(),
-            range:  def.range.clone(),
-            fields: def.fields.clone(),
+            domain:      def.domain.clone(),
+            range:       def.range.clone(),
+            fields:      def.fields.clone(),
+            cardinality: def.cardinality,
+            inverse_of:  def.inverse_of.clone(),
         };
         let json = serde_json::to_string(&wire)?;
         let triple = Triple::Property {
@@ -411,6 +536,84 @@ impl EdgeTypeRegistry {
         if errors.is_empty() { Ok(()) } else { Err(errors) }
     }
 
+    /// Check whether inserting `(subject, predicate, object)` would violate the
+    /// registered cardinality constraint for `predicate`.
+    ///
+    /// - `OneToMany` / `OneToOne`: rejects if `subject` already has any object
+    ///   for this predicate in the committed store.
+    /// - `ManyToOne` / `OneToOne`: rejects if `object` already has any subject
+    ///   for this predicate in the committed store.
+    /// - `Many`: always returns `Ok(())`.
+    pub fn validate_cardinality(
+        &self,
+        predicate: &str,
+        subject: NodeId,
+        object: NodeId,
+        store: &TripleStore,
+    ) -> Result<(), ValidationError> {
+        let def = match self.get_edge_type(predicate) {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
+        match def.cardinality {
+            Cardinality::Many => {}
+
+            Cardinality::OneToMany | Cardinality::OneToOne => {
+                let existing = store
+                    .scan_by_subject_predicate(&subject, predicate)
+                    .unwrap_or_default();
+                let has_relation = existing.iter().any(|t| matches!(t, Triple::Relation { .. }));
+                if has_relation {
+                    return Err(ValidationError {
+                        field: "subject".into(),
+                        message: format!(
+                            "cardinality violation: predicate '{predicate}' allows at most one object per subject"
+                        ),
+                    });
+                }
+            }
+
+            Cardinality::ManyToOne => {
+                let existing = store
+                    .scan_by_predicate_object(predicate, &object)
+                    .unwrap_or_default();
+                let has_relation = existing.iter().any(|t| matches!(t, Triple::Relation { .. }));
+                if has_relation {
+                    return Err(ValidationError {
+                        field: "object".into(),
+                        message: format!(
+                            "cardinality violation: predicate '{predicate}' allows at most one subject per object"
+                        ),
+                    });
+                }
+            }
+        }
+
+        // OneToOne: already checked subject side above; now check object side.
+        if def.cardinality == Cardinality::OneToOne {
+            let existing = store
+                .scan_by_predicate_object(predicate, &object)
+                .unwrap_or_default();
+            let has_relation = existing.iter().any(|t| matches!(t, Triple::Relation { .. }));
+            if has_relation {
+                return Err(ValidationError {
+                    field: "object".into(),
+                    message: format!(
+                        "cardinality violation: predicate '{predicate}' allows at most one subject per object"
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Return the declared inverse predicate name for `predicate`, if any.
+    pub fn inverse_predicate(&self, predicate: &str) -> Option<String> {
+        self.cache.read().unwrap().get(predicate)?.inverse_of.clone()
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     fn load_from_store(store: &TripleStore) -> Result<HashMap<String, EdgeTypeDef>, StorageError> {
@@ -430,6 +633,8 @@ impl EdgeTypeRegistry {
                                     domain: wire.domain,
                                     range: wire.range,
                                     fields: wire.fields,
+                                    cardinality: wire.cardinality,
+                                    inverse_of: wire.inverse_of,
                                 },
                             );
                         }

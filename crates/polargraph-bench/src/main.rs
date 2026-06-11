@@ -492,6 +492,7 @@ async fn run_filtered_search(mut client: PolarGraphServiceClient<Channel>, args:
             definition: Some(ProtoNodeTypeDef {
                 type_name: TYPE_NAME.into(),
                 fields: vec![],
+                parent_types: vec![],
                 vector_space: Some(ProtoVectorSpaceDef {
                     space_name: SPACE.into(),
                     dimensions: dims as u32,
