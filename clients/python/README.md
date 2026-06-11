@@ -84,6 +84,41 @@ for row in client.stream_query([{"s": "?a", "p": "knows", "o": "?b"}]):
     print(row)
 ```
 
+## Wire transactions
+
+```python
+with PolarGraphClient("localhost", 50051, api_key="secret") as client:
+    tx_id = client.begin_tx()
+    try:
+        client.insert_node(node_id, "Event", name="Deploy", tx_id=tx_id)
+        client.insert_edge(alice_id, "triggered", node_id, tx_id=tx_id)
+        result = client.commit_tx(tx_id)
+        print(f"Committed {result['triples_written']} triples at ts={result['commit_ts']}")
+    except Exception:
+        client.rollback_tx(tx_id)
+        raise
+```
+
+Transactions expire after 5 minutes of inactivity. Handle `NOT_FOUND` errors on commit and retry if needed.
+
+## Available methods
+
+| Method | Description |
+|--------|-------------|
+| `insert_node(node_id, type_name, **props)` | Insert a node with `__type` and properties |
+| `insert_edge(subject, predicate, object, **props)` | Insert a relation triple |
+| `query(patterns, rules=None, limit=None, as_of_tx_time=None, as_of_valid_time=None, tx_id=None)` | Conjunctive pattern query |
+| `cypher(query, vector=None, ef=None, limit=None, tx_id=None)` | Cypher read query |
+| `cypher_write(query, tx_id=None)` | Cypher write (CREATE/MERGE/SET/DELETE) |
+| `insert_vector(node_id, vector, space="default")` | Insert embedding into a named HNSW space |
+| `search_vector(space, vector, k, ef=None)` | k-NN search |
+| `stream_query(patterns, **kwargs)` | Iterator over streamed bindings |
+| `begin_tx()` | Open a wire transaction; returns `tx_id` string |
+| `commit_tx(tx_id)` | Commit; returns `{"commit_ts": N, "triples_written": N}` |
+| `rollback_tx(tx_id)` | Discard a transaction |
+| `show_indexes()` | Column-family statistics |
+| `show_stats()` | Server internals snapshot |
+
 ## Regenerating proto stubs
 
 Maintainers only — consumers do not need this:

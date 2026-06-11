@@ -458,24 +458,275 @@ object slot for property triples.
 
 ---
 
-## `polargraph-query` (stubs)
+## `polargraph-query`
 
-Modules `planner` and `projection` exist but contain no public API yet.
-This crate will expose:
-
-- A query type (conjunctive Datalog-style pattern)
-- A `plan(query) -> ExecutionPlan` function
-- A `project(triples, view) -> ProjectedGraph` function
+Pattern-based query evaluation, Cypher frontend, aggregations, and view
+projection.
 
 ---
 
-## `polargraph-server`
+### `compile_cypher` (`polargraph_query::cypher`)
 
-Binary crate (`polargraphd`). No public library API. Entry point:
-
-```
-RUST_LOG=info cargo run -p polargraph-server
+```rust
+pub fn compile_cypher(cypher: &str) -> Result<CypherQuery, CypherError>
 ```
 
-Currently starts the tracing subscriber and exits. Config loading, store
-opening, and gRPC binding are not yet implemented.
+Parses a Cypher string and returns a `CypherQuery` containing:
+
+- `patterns: Vec<VarPattern>` — compiled MATCH body
+- `rules: Vec<Rule>` — recursive rules (from transitive closure syntax)
+- `aggregation: Option<AggregationPlan>` — ORDER BY / COUNT / COLLECT
+- `write_ops: Option<Vec<WriteOp>>` — present for write statements
+
+Returns `CypherError::Parse` on invalid syntax and `CypherError::Unsupported`
+for Cypher features not yet implemented.
+
+---
+
+### `execute_write_ops` (`polargraph_query::cypher`)
+
+```rust
+pub fn execute_write_ops(
+    ops: &[WriteOp],
+    txn: &mut Transaction,
+    store: &TripleStore,
+) -> Result<WriteResult, QueryError>
+```
+
+Executes a compiled list of write operations inside a caller-supplied
+transaction. Returns `WriteResult { created_node_ids, triples_written }`.
+
+---
+
+### `apply_aggregations` (`polargraph_query::aggregation`)
+
+```rust
+pub fn apply_aggregations(
+    plan: &AggregationPlan,
+    bindings: Vec<Bindings>,
+) -> Vec<Bindings>
+```
+
+Groups, aggregates, sorts, and applies skip/limit to a flat binding list.
+Called by the service handler after `execute_query` or `execute_recursive`.
+
+---
+
+### `evaluate_with_registry` (`polargraph_query::eval`)
+
+```rust
+pub fn evaluate_with_registry(
+    pattern: &VarPattern,
+    snapshot: &Snapshot,
+    registry: &EdgeTypeRegistry,
+    bound: &Bindings,
+) -> Result<Vec<Bindings>, QueryError>
+```
+
+Schema-aware variant of `evaluate`. Consults `registry` for the pattern
+predicate's domain/range types and applies a type pre-filter before the
+hexastore scan.
+
+---
+
+## `polargraph-server` — gRPC RPCs
+
+Service: `polargraph.v1.PolarGraphService`
+
+Proto source: `crates/polargraph-server/proto/polargraph.proto`
+
+---
+
+### `CypherQuery`
+
+```
+rpc CypherQuery(CypherQueryRequest) returns (CypherQueryResponse)
+```
+
+Parses and executes a Cypher read query. The Cypher string is compiled
+to Datalog IR and evaluated by the standard query pipeline.
+
+**Request fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cypher` | `string` | Cypher query string |
+| `vector` | `repeated float` | Required when `VECTOR_NEAR` is used |
+| `ef` | `uint32` | HNSW exploration factor override (0 = server default) |
+| `limit` | `uint32` | Result limit (overrides `LIMIT N` in the query string) |
+| `tx_id` | `string` | Optional wire transaction ID for consistent reads |
+
+**Response fields:** `repeated CypherRow rows` where each row contains a
+`map<string, Value> columns` matching the `RETURN` clause variables.
+
+---
+
+### `CypherQueryStream`
+
+```
+rpc CypherQueryStream(CypherQueryRequest) returns (stream CypherStreamChunk)
+```
+
+Server-streaming variant of `CypherQuery`. Delivers rows in chunks of
+`STREAM_CHUNK_SIZE = 500`. Accepts the same request fields as `CypherQuery`.
+
+---
+
+### `CypherWrite`
+
+```
+rpc CypherWrite(CypherWriteRequest) returns (CypherWriteResponse)
+```
+
+Executes a Cypher write statement (CREATE, MERGE, SET, DELETE).
+
+**Request fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cypher` | `string` | Write Cypher statement |
+| `tx_id` | `string` | Optional wire transaction ID; writes buffered until commit |
+
+**Response fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `created_node_ids` | `repeated bytes` | UUIDs of newly created nodes |
+| `triples_written` | `uint32` | Total triples committed (0 if using a wire transaction) |
+| `commit_ts` | `int64` | Commit timestamp (0 if using a wire transaction) |
+
+---
+
+### `QueryStream`
+
+```
+rpc QueryStream(QueryRequest) returns (stream QueryStreamChunk)
+```
+
+Server-streaming variant of `Query`. Accepts the same `QueryRequest` message
+(patterns, rules, time-travel fields, `tx_id`). Each `QueryStreamChunk`
+carries up to 500 `Bindings`.
+
+---
+
+### `BeginTransaction`
+
+```
+rpc BeginTransaction(BeginTransactionRequest) returns (BeginTransactionResponse)
+```
+
+Opens a new wire transaction. Returns `tx_id` — a UUID v4 string that must
+be supplied on subsequent `Insert`, `CypherWrite`, and `Query` calls to
+associate them with this transaction.
+
+---
+
+### `CommitTransaction`
+
+```
+rpc CommitTransaction(CommitTransactionRequest) returns (CommitTransactionResponse)
+```
+
+Commits the transaction identified by `tx_id`. Returns `commit_ts`.
+Returns `ABORTED` on write-write conflict; `NOT_FOUND` if the transaction
+has expired or does not exist.
+
+---
+
+### `RollbackTransaction`
+
+```
+rpc RollbackTransaction(RollbackTransactionRequest) returns (RollbackTransactionResponse)
+```
+
+Discards the transaction identified by `tx_id`. No-op if the transaction has
+already expired. Returns `NOT_FOUND` only if the `tx_id` was never valid.
+
+---
+
+### `ShowIndexes`
+
+```
+rpc ShowIndexes(ShowIndexesRequest) returns (ShowIndexesResponse)
+```
+
+Returns per-column-family statistics without scanning data.
+
+**Response `IndexInfo` fields:**
+
+| Field | Description |
+|-------|-------------|
+| `cf_name` | Column family name |
+| `estimated_key_count` | From RocksDB `estimate-num-keys` property |
+| `estimated_size_bytes` | From RocksDB `live-sst-files-size` property |
+| `hnsw_info` | Present only for the `hnsw` CF; includes space name, node count, dimensions, storage mode |
+
+---
+
+### `ShowStats`
+
+```
+rpc ShowStats(ShowStatsRequest) returns (ShowStatsResponse)
+```
+
+Returns server internals snapshot.
+
+**Response fields:**
+
+| Field | Description |
+|-------|-------------|
+| `rocksdb_stats` | Map of selected RocksDB property name → value strings |
+| `oracle_ts` | Current MVCC oracle timestamp (µs since Unix epoch) |
+| `open_transaction_count` | Number of active wire transactions |
+| `triple_count` | Approximate triple count from `estimate-num-keys` on SPO CF |
+
+---
+
+## REST gateway — updated endpoints
+
+The following endpoints are available in addition to those documented in
+`docs/architecture.md`.
+
+| Method | Path | gRPC equivalent |
+|--------|------|-----------------|
+| `POST` | `/cypher` | `CypherQuery` |
+| `POST` | `/cypher/write` | `CypherWrite` |
+| `POST` | `/query/stream` | `QueryStream` (NDJSON) |
+| `POST` | `/cypher/stream` | `CypherQueryStream` (NDJSON) |
+| `GET` | `/indexes` | `ShowIndexes` |
+| `GET` | `/stats` | `ShowStats` |
+| `POST` | `/tx/begin` | `BeginTransaction` |
+| `POST` | `/tx/commit` | `CommitTransaction` |
+| `POST` | `/tx/rollback` | `RollbackTransaction` |
+
+### `POST /cypher`
+
+Request body mirrors `CypherQueryRequest`. Returns `{"rows": [{...}, ...]}`.
+
+### `POST /cypher/write`
+
+Request body: `{"cypher": "...", "tx_id": "..."}`. Returns
+`{"created_node_ids": [...], "triples_written": N, "commit_ts": N}`.
+
+### `POST /query/stream` and `POST /cypher/stream`
+
+Identical request bodies to `/query` and `/cypher` respectively.
+Response: `Content-Type: application/x-ndjson`; one JSON object per line,
+each representing one row/binding. Connection closes after the last row.
+
+### `GET /indexes` and `GET /stats`
+
+No request body. Return JSON objects matching the gRPC response shapes.
+
+### `POST /tx/begin`
+
+No request body. Returns `{"tx_id": "<uuid>"}`.
+
+### `POST /tx/commit`
+
+Request body: `{"tx_id": "<uuid>"}`. Returns
+`{"commit_ts": N, "triples_written": N}`.
+
+### `POST /tx/rollback`
+
+Request body: `{"tx_id": "<uuid>"}`. Returns `{}`.

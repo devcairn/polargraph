@@ -29,6 +29,12 @@ polargraph/
 ├── docs/
 │   ├── architecture.md         # design narrative
 │   └── api-reference.md        # public API surface
+├── clients/
+│   ├── python/                 # Python SDK (sync + async, grpc)
+│   ├── go/                     # Go SDK (functional options, full RPC surface)
+│   └── js/                     # TypeScript/JavaScript SDK (@polargraph/client)
+├── deploy/
+│   └── helm/polargraph/        # Helm chart (8 resources: Namespace, ConfigMap, Secret, PVC, Deployment, Services×3, HPA)
 └── crates/
     ├── polargraph-core/        # primitive types, no I/O
     ├── polargraph-storage/     # RocksDB triple store + MVCC
@@ -132,9 +138,11 @@ Pattern-based query evaluation and view projection.
 | Module | Contents |
 |--------|----------|
 | `planner` | `Pattern`, `IndexChoice`, `choose_index` — picks cheapest CF for a bind pattern |
-| `eval` | `evaluate(pattern, snapshot)` — drives the storage scan the planner chose |
+| `eval` | `evaluate(pattern, snapshot)` — drives the storage scan the planner chose; `evaluate_with_registry()` prunes patterns using `EdgeTypeRegistry` domain/range hints |
 | `projection` | `ProjectedTriple`, `apply_view` — filters and label-remaps triples for a View |
 | `datalog` | `Query`, `VarPattern`, `Term`, `Bindings`, `execute_query` — conjunctive query evaluator; `Rule`, `DerivedFacts`, `execute_recursive`, `reachable_from` — recursive / transitive-closure queries |
+| `cypher` | `CypherQuery`, `CypherCompiler`, `compile_cypher()` — Cypher→Datalog compiler; MATCH/WHERE/RETURN pipeline; property equality, comparison, text predicates (CONTAINS, STARTS WITH, =~); `VECTOR_NEAR` function |
+| `aggregation` | `AggregationPlan`, `apply_aggregations()` — COUNT(*), COUNT(var), COLLECT(); ORDER BY (multi-key, ASC/DESC); SKIP N; WITH clause pipeline |
 
 ### `polargraph-server`
 
@@ -344,6 +352,23 @@ sort order and is cluster-safe without a central sequence generator.
 - [x] REST gateway Datalog rules — `/query` and `/explain` now accept a `rules` array; each rule has `head_predicate`, `head_subject_var`, `head_object_var`, `body` (pattern strings); forwarded to gRPC `QueryRequest.rules`; server runs `execute_recursive` to fixpoint then `execute_query_hybrid` against combined base + derived facts; `DatalogRule` proto message added to `polargraph.proto`; `rule_from_proto` in `convert.rs`; `execute_query_hybrid` made `pub` in `polargraph-query::datalog`
 - [x] Edge property storage — `RelationTriple` proto gains `repeated EdgeProperty properties`; `InsertResponse` gains `repeated bytes edge_ids`; `triples_from_proto` in `convert.rs` expands a relation with properties into the relation triple + one `Triple::Property` per property (subject = `NodeId(edge_id.0)`); insert handler collects and returns edge UUIDs; REST `/insert` accepts `properties` array and surfaces `edge_id` in response; `EdgeProperty` proto message added; `schema.rs` doc updated
 - [x] Schema migrations — `MigrationRunner` + `Migration` + `AppliedMigration` + `MigrationStats` in `polargraph-storage::migrations`; version stored in META CF under `__migrations__/version` (little-endian u32); applied records under `__migrations__/applied/<version>` as JSON; `MIGRATIONS` static list with 2 built-in versions (v1: baseline marker, v2: normalize node type schema records); auto-migration at server startup before gRPC accepts connections, skipped in replica mode; `MigrateSchema(MigrateRequest)` RPC (dry_run support, replica guard), `MigrationStatus` RPC; `rollback(to_version)` for reversals; 3 storage unit tests + 4 gRPC integration tests; "Schema migrations" section in `docs/architecture.md`
+- [x] Cypher query layer — `CypherQuery` gRPC RPC; `polargraph-query::cypher` module; full Cypher→Datalog compiler (`compile_cypher()`); MATCH/WHERE/RETURN pipeline; property equality, comparison, and text predicates (CONTAINS, STARTS WITH, =~); `VECTOR_NEAR(var, "space", k)` function seeds queries from ANN results; `CypherQueryRequest/Response` proto messages; REST `POST /cypher`; "Cypher query layer" section in `docs/architecture.md`
+- [x] Cypher aggregations — `polargraph-query::aggregation` module; `AggregationPlan` + `apply_aggregations()`; COUNT(*), COUNT(var), COLLECT(); ORDER BY with multi-key, ASC/DESC; SKIP N; WITH clause pipeline for multi-step Cypher; integrated into Cypher compiler output
+- [x] Cypher write operations — `CypherWrite` gRPC RPC; `WriteOp` enum, `CompiledWrite`, `parse_write()`, `execute_write_ops()` in `polargraph-query::cypher`; supports CREATE node/relation, MERGE, SET property, DELETE; `CypherWriteRequest/Response` proto messages; REST `POST /cypher/write`; returns created node IDs and triple counts
+- [x] Full-text trigram search — `TRI` column family (key: `[trigram:3][pred_id:4][subject_id:16]`); `extract_trigrams()`, `insert_trigrams()`, `text_search()` on `TripleStore`; integrated with Cypher WHERE CONTAINS / STARTS WITH / =~ so text predicates hit the `TRI` CF instead of doing full scans
+- [x] Schema-aware query optimization — `evaluate_with_registry()` in `polargraph-query::eval`; accepts `&EdgeTypeRegistry`; uses domain/range type hints to prune impossible join branches before evaluation; `SchemaHints` struct wraps registry lookups; no change to the triple wire format
+- [x] Wire transactions — `BeginTransaction` / `CommitTransaction` / `RollbackTransaction` gRPC RPCs; optional `tx_id: string` field on `InsertRequest`, `QueryRequest`, `CypherWriteRequest`; `open_txns: Arc<DashMap<String, Arc<Mutex<Transaction>>>>` in `PolarGraphServer`; UUID v4 token assigned at `BeginTransaction`; idle-TTL cleanup task evicts transactions open for >5 min; REST `POST /tx/begin`, `POST /tx/commit`, `POST /tx/rollback`
+- [x] Server-streaming queries — `QueryStream` and `CypherQueryStream` server-streaming gRPC RPCs; results streamed in chunks of `STREAM_CHUNK_SIZE = 500` bindings; REST `POST /query/stream` and `POST /cypher/stream` return NDJSON (newline-delimited JSON); useful for large result sets without holding a full in-memory buffer
+- [x] Diagnostics RPCs — `ShowIndexes` RPC returns per-CF key count + estimated size + HNSW space metadata; `ShowStats` RPC returns selected RocksDB properties, current oracle timestamp, and open transaction count; REST `GET /indexes` and `GET /stats`
+- [x] Scheduled retention — `retention_scheduler.rs` in `polargraph-server`; `run_retention_scheduler()` tokio task fires on configurable `interval_secs`; enabled via `[storage.retention_schedule]` TOML section or `--retention-schedule` / `POLARGRAPH_RETENTION_SCHEDULE`; adds `polargraph_retention_runs_total`, `polargraph_retention_deleted_total`, `polargraph_retention_last_run_ts` Prometheus counters
+- [x] Query history + schema diagram in UI — 50-entry ring buffer in management SPA stores recent queries in `localStorage`; Query tab shows history dropdown to re-run past queries; Schema tab renders a Mermaid.js ER diagram from live node/edge type data
+- [x] Python SDK — `clients/python/` package (`polargraph-client`); `PolarGraphClient` (sync) and `AsyncPolarGraphClient` (grpc.aio); full RPC surface including Cypher, wire transactions, streaming, vector operations; `pyproject.toml`; `clients/python/README.md`
+- [x] Go SDK — `clients/go/` module (`github.com/polarops/polargraph-go`); `Client` struct with functional options `WithAPIKey`, `WithTLSCA`; full method surface; 5 unit tests; `clients/go/README.md`
+- [x] JavaScript/TypeScript SDK — `clients/js/` package (`@polargraph/client`); `@grpc/grpc-js` transport; full TypeScript types; `tsup` build; streaming, wire transactions, Cypher; `clients/js/README.md`
+- [x] Helm chart — `deploy/helm/polargraph/` with 8 Kubernetes resources: Namespace, ConfigMap, Secret, PVC, Deployment, Services×3 (gRPC, UI, metrics), HPA; values file for image tag, replica count, resource limits, storage size
+- [x] Simplified CI/CD — single `.github/workflows/ci.yml`; jobs: `test` (cargo test), `lint` (clippy + fmt), `release` (binary artifact upload on `main`/tags), `docker-build` (build-only smoke test, no push)
+- [x] ef tuning — `default_vector_ef: u32` field on `PolarGraphServer`; `--default-vector-ef N` CLI flag + `POLARGRAPH_DEFAULT_VECTOR_EF` env var; `[query] default_vector_ef` TOML key; three-level resolution hierarchy: Cypher inline `ef=N` > per-request `ef` field > server default (built-in: 50); `with_default_vector_ef()` builder method
+- [x] VectorSpaceDef in core schema — `VectorSpaceDef` with `space_name`, `dimensions`, `embedding_model`, `storage_mode` string fields in `polargraph-core::schema`; associated with `NodeTypeDef`; `storage_mode` round-trips through proto `VectorSpaceDefProto` and `convert.rs`
 
 ---
 

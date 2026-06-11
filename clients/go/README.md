@@ -88,6 +88,48 @@ client, err := polargraph.New("myserver:50051",
 | `"<uuid>"` | Bound node ID |
 | `":predname"` | Predicate (leading colon stripped automatically) |
 
+## Wire transactions
+
+```go
+txID, err := client.BeginTransaction(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+
+_, err = client.InsertNode(ctx, nodeID, "Event",
+    map[string]interface{}{"name": "Deploy"},
+    polargraph.WithTxID(txID),
+)
+if err != nil {
+    client.RollbackTransaction(ctx, txID)
+    log.Fatal(err)
+}
+
+result, err := client.CommitTransaction(ctx, txID)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("committed %d triples at ts=%d\n", result.TriplesWritten, result.CommitTs)
+```
+
+## Available methods
+
+| Method | Description |
+|--------|-------------|
+| `InsertNode(ctx, nodeID, typeName, props, opts...)` | Insert a node with `__type` and property triples |
+| `InsertEdge(ctx, subject, predicate, object, props, opts...)` | Insert a relation triple |
+| `Query(ctx, QueryRequest) ([]Bindings, error)` | Conjunctive pattern query |
+| `Cypher(ctx, query, opts...) ([]CypherRow, error)` | Cypher read query |
+| `CypherWrite(ctx, query, opts...) (WriteResult, error)` | Cypher write (CREATE/MERGE/SET/DELETE) |
+| `InsertVector(ctx, nodeID, space, vector, opts...)` | Insert embedding into named HNSW space |
+| `SearchVector(ctx, space, vector, k, opts...) ([]SearchResult, error)` | k-NN search |
+| `BeginTransaction(ctx) (string, error)` | Open a wire transaction; returns `txID` |
+| `CommitTransaction(ctx, txID) (CommitResult, error)` | Commit; returns commit timestamp and triples written |
+| `RollbackTransaction(ctx, txID) error` | Discard a transaction |
+| `ShowIndexes(ctx) (IndexStats, error)` | Column-family statistics |
+| `ShowStats(ctx) (ServerStats, error)` | Server internals snapshot |
+| `Close()` | Close the gRPC channel |
+
 ## Datalog rules
 
 ```go

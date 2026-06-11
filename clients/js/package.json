@@ -1,0 +1,43 @@
+{
+  "name": "@polargraph/client",
+  "version": "0.1.0",
+  "description": "JavaScript/TypeScript client SDK for the PolarGraph DB Engine gRPC API",
+  "license": "MIT",
+  "main": "dist/cjs/index.js",
+  "module": "dist/esm/index.js",
+  "types": "dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/cjs/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
+    "typecheck": "tsc --noEmit",
+    "proto:gen": "scripts/regen_proto.sh",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "polargraph",
+    "graph-database",
+    "grpc",
+    "typescript"
+  ],
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.0.0",
+    "@grpc/grpc-js": "^1.10.0",
+    "@grpc/proto-loader": "^0.7.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ts-proto": "^2.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0"
+  }
+}

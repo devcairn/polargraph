@@ -428,7 +428,148 @@ curl -s -X POST http://localhost:8000/cypher \
   }'
 ```
 
-Supported Cypher: `MATCH`, `WHERE` (equality filters only), `RETURN`, `LIMIT`, directed relationships `(a)-[:pred]->(b)`, transitive closure `[:pred*]`. Unsupported features return `INVALID_ARGUMENT`.
+**Aggregations, ORDER BY, and WITH:**
+
+```bash
+curl -s -X POST http://localhost:8000/cypher \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d '{
+    "cypher": "MATCH (a:Person)-[:knows]->(b:Person) RETURN a.name, COUNT(*) AS cnt ORDER BY cnt DESC LIMIT 5"
+  }'
+```
+
+Supported aggregation functions: `COUNT(*)`, `COUNT(var)`, `COLLECT(var)`. `ORDER BY` accepts multiple keys with `ASC`/`DESC`. `SKIP N` offsets into a result set. `WITH` pipelines intermediate projections.
+
+**Full-text search in WHERE:**
+
+Cypher `WHERE` clauses that use `CONTAINS`, `STARTS WITH`, or `=~` (regex) against string properties are automatically routed to the trigram index (`TRI` CF) for sub-millisecond lookups:
+
+```bash
+curl -s -X POST http://localhost:8000/cypher \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d '{
+    "cypher": "MATCH (a:Person) WHERE a.name CONTAINS \"Ali\" RETURN a"
+  }'
+```
+
+`STARTS WITH` and `=~` are handled identically via trigram extraction. Falls back to a full scan if the predicate has no trigram index entries yet.
+
+Supported Cypher: `MATCH`, `WHERE` (equality, comparison, text predicates), `RETURN`, `LIMIT`, `ORDER BY`, `SKIP`, `WITH`, `COUNT`, `COLLECT`, directed relationships `(a)-[:pred]->(b)`, transitive closure `[:pred*]`. Unsupported features return `INVALID_ARGUMENT`.
+
+### Cypher write operations
+
+`POST /cypher/write` (or the `CypherWrite` gRPC RPC) executes CREATE, MERGE, SET, and DELETE statements.
+
+```bash
+# Create a node
+curl -s -X POST http://localhost:8000/cypher/write \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d '{"cypher": "CREATE (c:Company {name: \"Acme\", founded: 2010})"}'
+# Response: {"created_node_ids": ["019012ab-..."], "triples_written": 3}
+
+# MERGE (create if not exists)
+curl -s -X POST http://localhost:8000/cypher/write \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d '{
+    "cypher": "MATCH (a:Person {name: \"Alice\"}) MERGE (a)-[:works_at]->(c:Company {name: \"Acme\"})"
+  }'
+
+# SET property
+curl -s -X POST http://localhost:8000/cypher/write \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d '{"cypher": "MATCH (a:Person {name: \"Alice\"}) SET a.age = 31"}'
+
+# DELETE
+curl -s -X POST http://localhost:8000/cypher/write \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d '{"cypher": "MATCH (a:Person {name: \"Temp\"}) DELETE a"}'
+```
+
+Cypher writes can be included in a wire transaction by supplying `tx_id` (see below).
+
+### Wire transactions
+
+Batch multiple insert and write operations into a single atomic transaction. The server holds the transaction open until `CommitTransaction` or `RollbackTransaction` is called.
+
+```bash
+# 1. Open a transaction — returns a tx_id token
+TX=$(curl -s -X POST http://localhost:8000/tx/begin \
+  -H 'Authorization: Bearer my-key' | jq -r .tx_id)
+
+# 2. Write inside the transaction
+curl -s -X POST http://localhost:8000/cypher/write \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d "{\"cypher\": \"CREATE (n:Event {name: \\\"Deploy\\\"})\", \"tx_id\": \"$TX\"}"
+
+curl -s -X POST http://localhost:8000/insert \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d "{\"subject\": \"$NODE1\", \"predicate\": \"triggered\", \"object\": \"$NODE2\", \"tx_id\": \"$TX\"}"
+
+# 3. Commit
+curl -s -X POST http://localhost:8000/tx/commit \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d "{\"tx_id\": \"$TX\"}"
+# Response: {"commit_ts": 1718000000000001, "triples_written": 4}
+
+# Or rollback
+curl -s -X POST http://localhost:8000/tx/rollback \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d "{\"tx_id\": \"$TX\"}"
+```
+
+Transactions are automatically evicted after 5 minutes of inactivity. `Query` calls that supply `tx_id` read at the transaction's `read_ts`, providing a consistent snapshot across multiple reads.
+
+### Streaming queries
+
+For large result sets, stream bindings one chunk at a time instead of waiting for the full response:
+
+```bash
+# NDJSON stream — one JSON object per line
+curl -s -X POST http://localhost:8000/query/stream \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d '{"patterns": ["?s :name ?n"]}' \
+  | while IFS= read -r line; do echo "$line"; done
+
+# Cypher streaming
+curl -s -X POST http://localhost:8000/cypher/stream \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer my-key' \
+  -d '{"cypher": "MATCH (a:Person) RETURN a.name"}'
+```
+
+The server delivers results in chunks of 500 bindings. The connection stays open until the result set is exhausted or the client disconnects. At the gRPC level, use the `QueryStream` and `CypherQueryStream` server-streaming RPCs directly.
+
+### Diagnostics
+
+Inspect index statistics and server internals without restarting:
+
+```bash
+# Per-column-family key counts, estimated sizes, and HNSW space metadata
+curl -s http://localhost:8000/indexes \
+  -H 'Authorization: Bearer my-key'
+
+# RocksDB internal properties, oracle timestamp, open transaction count
+curl -s http://localhost:8000/stats \
+  -H 'Authorization: Bearer my-key'
+```
+
+Or via gRPC:
+
+```bash
+grpcurl -plaintext -d '{}' localhost:50051 polargraph.v1.PolarGraphService/ShowIndexes
+grpcurl -plaintext -d '{}' localhost:50051 polargraph.v1.PolarGraphService/ShowStats
+```
 
 ### Time-travel queries
 
@@ -983,6 +1124,15 @@ Service: `polargraph.v1.PolarGraphService` — full proto at `crates/polargraph-
 | `StreamWal` | Server-streaming WAL entries from the primary (replica use only) |
 | `MigrateSchema` | Apply pending schema migrations; `dry_run` for preview |
 | `MigrationStatus` | Current and latest version; full applied-migration history |
+| `CypherQuery` | Parse and execute a Cypher read query (MATCH/WHERE/RETURN) |
+| `CypherWrite` | Execute a Cypher write statement (CREATE/MERGE/SET/DELETE) |
+| `QueryStream` | Server-streaming `Query` — delivers bindings in 500-row chunks |
+| `CypherQueryStream` | Server-streaming `CypherQuery` |
+| `BeginTransaction` | Open a wire transaction; returns `tx_id` token |
+| `CommitTransaction` | Commit a wire transaction atomically |
+| `RollbackTransaction` | Discard a wire transaction |
+| `ShowIndexes` | CF key counts, estimated sizes, HNSW space metadata |
+| `ShowStats` | RocksDB properties, oracle timestamp, open transaction count |
 
 ### Authentication
 
@@ -998,6 +1148,100 @@ grpcurl -plaintext \
   localhost:50051 grpc.health.v1.Health/Check
 # {"status": "SERVING"}
 ```
+
+---
+
+## Client SDKs
+
+Official client libraries are under `clients/`. Each has its own README with full method listings.
+
+### Python
+
+```bash
+pip install polargraph-client
+```
+
+```python
+from polargraph import PolarGraphClient
+
+with PolarGraphClient("localhost", 50051, api_key="secret") as client:
+    client.insert_node(alice_id, "Person", name="Alice", age=30)
+    rows = client.cypher("MATCH (a:Person)-[:knows]->(b) RETURN a, b LIMIT 10")
+    print(rows)
+
+    # Wire transaction
+    with client.transaction() as tx:
+        client.insert_edge(alice_id, "knows", bob_id, tx_id=tx)
+```
+
+An async variant (`AsyncPolarGraphClient`) is available for use with `asyncio`. See [`clients/python/README.md`](clients/python/README.md).
+
+### Go
+
+```bash
+go get github.com/polarops/polargraph-go
+```
+
+```go
+client, _ := polargraph.New("localhost:50051",
+    polargraph.WithAPIKey("secret"),
+)
+defer client.Close()
+
+rows, _ := client.Cypher(ctx, "MATCH (a:Person) RETURN a LIMIT 10")
+result, _ := client.CypherWrite(ctx, `CREATE (c:Company {name: "Acme"})`)
+```
+
+See [`clients/go/README.md`](clients/go/README.md) for the full method surface and transaction example.
+
+### JavaScript / TypeScript
+
+```bash
+npm install @polargraph/client
+```
+
+```typescript
+import { PolarGraphClient } from "@polargraph/client";
+
+const client = new PolarGraphClient("localhost", 50051, { apiKey: "secret" });
+
+// Streaming query — no memory buffering
+for await (const row of client.streamQuery([{ s: "?a", p: "knows", o: "?b" }])) {
+  console.log(row.a, row.b);
+}
+
+// Wire transaction
+const txId = await client.beginTx();
+await client.insertNode(id, "Person", { name: "Eve" });
+await client.commitTx(txId);
+
+client.close();
+```
+
+See [`clients/js/README.md`](clients/js/README.md) for TypeScript types and full API reference.
+
+---
+
+## Kubernetes / Helm
+
+A production-ready Helm chart lives at `deploy/helm/polargraph/`.
+
+```bash
+helm install polargraph ./deploy/helm/polargraph \
+  --set image.tag=latest \
+  --set auth.apiKey=my-secret-key \
+  --set storage.size=50Gi
+```
+
+The chart deploys:
+
+- **Namespace** — isolated `polargraph` namespace
+- **ConfigMap** — `polargraph.toml` rendered from Helm values
+- **Secret** — API key
+- **PersistentVolumeClaim** — configurable storage class and size
+- **Deployment** — single `polargraphd` pod (increase replicas for read-only replicas)
+- **Services** — ClusterIP for gRPC (50051), NodePort/LoadBalancer for the management UI (8080), and Prometheus (9090)
+- **HorizontalPodAutoscaler** — scales on CPU; configure `minReplicas`/`maxReplicas` in `values.yaml`
 
 ---
 
@@ -1049,10 +1293,16 @@ polargraph/
 ├── docs/
 │   ├── architecture.md         # design narrative and internals
 │   └── api-reference.md        # public API surface
+├── clients/
+│   ├── python/                 # Python SDK
+│   ├── go/                     # Go SDK
+│   └── js/                     # TypeScript/JavaScript SDK
+├── deploy/
+│   └── helm/polargraph/        # Helm chart
 └── crates/
     ├── polargraph-core/        # shared types — no I/O, no async
     ├── polargraph-storage/     # RocksDB triple store, MVCC, HNSW, migrations
-    ├── polargraph-query/       # Datalog evaluator, Cypher parser, view projection, EXPLAIN
+    ├── polargraph-query/       # Datalog evaluator, Cypher parser, aggregations, view projection, EXPLAIN
     ├── polargraph-server/      # polargraphd — gRPC binary + management UI
     ├── polargraph-rest/        # REST gateway — HTTP/JSON → gRPC proxy
     ├── polargraph-import/      # bulk N-Triples import via SST ingestion (offline)

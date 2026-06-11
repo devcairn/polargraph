@@ -2001,6 +2001,288 @@ pub static MIGRATIONS: &[Migration] = &[
 
 ---
 
+## Cypher query layer
+
+PolarGraph exposes a Cypher surface over the Datalog evaluator. The compiler in `polargraph-query::cypher` translates Cypher AST nodes into `Query` / `Rule` / `VarPattern` structs that the existing evaluator pipeline already understands. No separate execution engine exists for Cypher — it is purely a frontend.
+
+### Compiler pipeline
+
+```
+Cypher string
+  → lexer / parser (hand-written recursive descent)
+  → AST (MatchClause, WhereClause, ReturnClause, WriteClause)
+  → CypherCompiler::compile()
+  → Query { patterns, rules } + optional AggregationPlan
+  → execute_query() / execute_recursive() / apply_aggregations()
+  → CypherResponse
+```
+
+### MATCH and WHERE
+
+Node patterns `(a:Person)` become two `VarPattern`s: one binding `a` to any subject and one constraining `a :__type "Person"`. Relationship patterns `(a)-[:knows]->(b)` add a third pattern for the relation triple.
+
+`WHERE` equality predicates (`a.name = "Alice"`) compile to bound patterns `(a, "name", "Alice")`. Comparison predicates use post-filter evaluation. Text predicates (`CONTAINS`, `STARTS WITH`, `=~`) are routed to the trigram index (see Full-text trigram search below) and therefore do not generate Datalog patterns at all — the trigram scan returns a candidate node set that is then intersected with the rest of the join.
+
+### Aggregations
+
+`polargraph-query::aggregation` implements `apply_aggregations()` which runs after the core evaluator. The `AggregationPlan` struct describes:
+
+- **Grouping keys** — the non-aggregated `RETURN` variables
+- **Aggregates** — `COUNT(*)`, `COUNT(var)`, `COLLECT(var)`
+- **Order spec** — list of `(key, Direction)` pairs
+- **Skip / limit** — applied after sorting
+
+The `WITH` clause compiles to a sub-plan: run the left-hand query, apply any aggregations, then feed the resulting bindings as a seed into the right-hand query via `execute_query_seeded`.
+
+### Cypher writes
+
+`polargraph-query::cypher::parse_write()` parses the write portion of a Cypher statement into a `Vec<WriteOp>`:
+
+| WriteOp | Action |
+|---------|--------|
+| `CreateNode { var, labels, props }` | Allocates a new `NodeId`; inserts `__type` + property triples |
+| `CreateRelation { from_var, predicate, to_var, props }` | Inserts a relation triple |
+| `Merge { pattern }` | Runs a MATCH; if no results, executes CREATE |
+| `SetProperty { var, key, value }` | Writes a new property triple (MVCC supersedes the old one) |
+| `Delete { var }` | Marks facts as logically deleted by writing an end-of-life triple |
+
+`execute_write_ops()` in the service handler runs these ops inside an MVCC `Transaction` and returns the new node IDs and total triple count.
+
+### VECTOR_NEAR
+
+`VECTOR_NEAR(a, "space", k)` is a special Cypher predicate. The compiler recognises it in the WHERE clause and emits a `VectorSeedCall` annotation instead of a Datalog pattern. The gRPC handler runs the ANN search first to obtain seed bindings, then calls `execute_query_seeded` with those bindings, exactly as `VectorSeedQuery` does. An inline `ef=N` argument overrides the exploration factor for that specific call.
+
+---
+
+## Full-text trigram search
+
+### TRI column family
+
+Text properties that are candidates for `CONTAINS` / `STARTS WITH` / `=~` filtering are indexed in a seventh column family (`TRI`). On every property triple write where `value` is `Value::Text`, the storage layer calls `extract_trigrams()` and writes one entry per trigram:
+
+```
+Key:   [trigram: 3 bytes][pred_id: 4 bytes][subject_id: 16 bytes]
+Value: (empty)
+```
+
+The key layout sorts first by trigram, then by predicate, then by subject. A prefix scan on `[trigram][pred_id]` returns all subjects that contain the trigram under that predicate in O(log n + |results|) time.
+
+### Trigram extraction
+
+`extract_trigrams(text) -> HashSet<[u8; 3]>` pads the input with two null bytes, then slides a 3-byte window across the UTF-8 bytes. For `STARTS WITH`, only the leading trigram(s) of the pattern are extracted. For `=~`, the regex is statically analysed for literal substrings long enough to produce trigrams; if none can be found, the query falls back to a full SPO scan.
+
+### Query path
+
+1. `compile_cypher()` identifies text predicates in the WHERE clause.
+2. It calls `text_search(store, predicate, pattern, mode)` → `HashSet<NodeId>`.
+3. The resulting node set becomes an allowed-set filter applied to the join variables before the Datalog patterns execute, equivalent to the `SearchVectorInSet` approach used for vector post-filtering.
+
+### Insert path
+
+`TripleStore::insert()` detects `Value::Text` payloads and calls `insert_trigrams()` inside the same `WriteBatch` as the hexastore keys. There is no separate indexing step — trigrams are always consistent with the triple data.
+
+---
+
+## Schema-aware query optimization
+
+`evaluate_with_registry(pattern, snapshot, registry: &EdgeTypeRegistry)` is an augmented variant of `evaluate()` in `polargraph-query::eval`. Before issuing the storage scan, it consults the registry for the pattern's predicate:
+
+1. If the predicate has a registered `EdgeTypeDef` with a `domain` type, the evaluator prefixes the scan with a type filter: only subjects that have `__type = domain` are considered.
+2. If the predicate has a `range` type, the same filter is applied to the object variable.
+
+This prunes join branches early when the schema indicates only a subset of node types can participate in a predicate, avoiding unnecessary hexastore scans. The optimization is applied automatically by the gRPC handler when an `EdgeTypeRegistry` is present; no query syntax changes are required.
+
+`SchemaHints` is a lightweight wrapper that caches per-predicate domain/range lookups in a `HashMap` to avoid repeated registry reads within a single multi-pattern query.
+
+---
+
+## Wire transactions
+
+### Overview
+
+Wire transactions allow a client to group multiple writes (and reads) into a single atomic MVCC unit across several RPC calls. The server holds the in-progress `Transaction` in memory until the client commits or rolls back.
+
+### Storage in PolarGraphServer
+
+```rust
+open_txns: Arc<DashMap<String, Arc<Mutex<Transaction>>>>
+```
+
+`DashMap` provides lock-free sharded concurrent access. The outer `Arc` enables the map to be shared across tasks; the inner `Mutex<Transaction>` serializes access to each transaction.
+
+### Lifecycle
+
+1. **BeginTransaction** — allocates a UUID v4 token, calls `TripleStore::begin()`, stores the transaction in `open_txns`, returns the token as `tx_id`.
+2. **InsertRequest / CypherWriteRequest with `tx_id`** — locks the transaction, buffers writes, releases the lock.
+3. **QueryRequest with `tx_id`** — locks the transaction, performs a read at the transaction's `read_ts` (consistent snapshot).
+4. **CommitTransaction** — removes the transaction from `open_txns`, calls `txn.commit()`, returns the commit timestamp.
+5. **RollbackTransaction** — removes and drops the transaction (silent rollback).
+
+### TTL cleanup
+
+A background task runs every 60 seconds and evicts transactions whose last-access timestamp is more than 5 minutes old. Evicted transactions are silently rolled back. Clients that hold a transaction for longer than 5 minutes must handle `NOT_FOUND` on commit and retry.
+
+### Conflict behavior
+
+Commit returns `ABORTED` (gRPC) if the MVCC conflict checker detects a concurrent write to any (subject, predicate) pair touched by the transaction since `read_ts`.
+
+---
+
+## Server-streaming queries
+
+### QueryStream and CypherQueryStream
+
+Both RPCs follow the same pattern: the server opens the result cursor, then sends `StreamChunk` messages until exhausted.
+
+```
+STREAM_CHUNK_SIZE = 500  // bindings per message
+```
+
+Choosing 500 balances message-framing overhead against head-of-line blocking on slow consumers. The value is a compile-time constant in `polargraph-server::service`.
+
+### REST NDJSON endpoints
+
+`POST /query/stream` and `POST /cypher/stream` in `polargraph-rest` accept the same JSON bodies as their non-streaming counterparts but respond with `Content-Type: application/x-ndjson`. Each line is one JSON object representing a single variable binding map. The connection closes after the last result.
+
+Clients that want to process results incrementally can consume the stream line-by-line without waiting for the full response body. This avoids buffering arbitrarily large result sets in the REST gateway process.
+
+---
+
+## Diagnostics RPCs
+
+### ShowIndexes
+
+Returns metadata for every column family (including `TRI` and `HNSW`) without performing any data scans:
+
+| Field | Source |
+|-------|--------|
+| `cf_name` | Column family name string |
+| `estimated_key_count` | RocksDB `estimate-num-keys` property |
+| `estimated_size_bytes` | RocksDB `live-sst-files-size` property |
+| `hnsw_space` | Present for the `hnsw` CF; includes space name, node count, dimensions, storage mode |
+
+### ShowStats
+
+Returns a snapshot of server internals:
+
+| Field | Description |
+|-------|-------------|
+| `rocksdb_*` | Selected RocksDB statistics properties |
+| `oracle_ts` | Current committed timestamp from the MVCC oracle |
+| `open_transaction_count` | Number of in-flight wire transactions |
+| `triple_count` | Approximate triple count from `estimate-num-keys` on the SPO CF |
+
+Neither RPC touches the data plane, so they are safe to call on heavily loaded primaries.
+
+---
+
+## Scheduled retention
+
+The `retention_scheduler.rs` module in `polargraph-server` provides an async loop that fires `CompactionManager::run_retention()` on a configurable interval.
+
+### Configuration
+
+```toml
+[storage.retention_schedule]
+enabled       = true
+interval_secs = 3600   # default: hourly
+```
+
+Or at runtime via `--retention-schedule` / `POLARGRAPH_RETENTION_SCHEDULE` and `--retention-interval-secs` / `POLARGRAPH_RETENTION_INTERVAL_SECS`.
+
+### Prometheus counters added
+
+| Metric | Description |
+|--------|-------------|
+| `polargraph_retention_runs_total` | Total number of scheduled retention runs |
+| `polargraph_retention_deleted_total` | Triples deleted across all scheduled runs |
+| `polargraph_retention_last_run_ts` | Unix timestamp (seconds) of the most recent run |
+
+The scheduler respects the `CancellationToken` and exits cleanly on graceful shutdown.
+
+---
+
+## Client SDKs
+
+Three official client libraries wrap the gRPC API. All support API key auth, TLS, the full RPC surface, and wire transactions.
+
+### Python (`clients/python/`)
+
+Package name: `polargraph-client` (PyPI).
+
+- `PolarGraphClient` — synchronous client backed by `grpc` channel
+- `AsyncPolarGraphClient` — async client backed by `grpc.aio`
+- Helper methods: `insert_node`, `insert_edge`, `query`, `cypher`, `cypher_write`, `insert_vector`, `search_vector`, `stream_query`, `begin_tx` / `commit_tx` / `rollback_tx`
+- Proto stubs regenerated via `clients/python/scripts/regen_proto.sh`
+
+### Go (`clients/go/`)
+
+Module: `github.com/polarops/polargraph-go`.
+
+- `polargraph.New(addr, ...Option) (*Client, error)` — constructor
+- Functional options: `WithAPIKey(key)`, `WithTLSCA(path)`
+- Methods mirror the gRPC surface; return `(result, error)` idiom
+- 5 unit tests; integration tests behind `POLARGRAPH_TEST_ADDR` env var
+
+### JavaScript / TypeScript (`clients/js/`)
+
+Package name: `@polargraph/client` (npm).
+
+- `PolarGraphClient` class and `createClient(addr, key)` factory shorthand
+- Full TypeScript types for all request/response shapes
+- `streamQuery` and `cypherStream` return `AsyncIterable`
+- `beginTx` / `commitTx` / `rollbackTx` for wire transactions
+- Built with `tsup`; ships both ESM and CJS bundles
+
+---
+
+## Helm chart / deployment
+
+The chart at `deploy/helm/polargraph/` provides a production-ready deployment for Kubernetes.
+
+### Resources
+
+| Kind | Name | Purpose |
+|------|------|---------|
+| `Namespace` | `polargraph` | Isolation boundary |
+| `ConfigMap` | `polargraph-config` | Rendered `polargraph.toml` from Helm values |
+| `Secret` | `polargraph-auth` | API key(s) |
+| `PersistentVolumeClaim` | `polargraph-data` | RocksDB data; configurable `storageClass` and `size` |
+| `Deployment` | `polargraph` | Single `polargraphd` pod |
+| `Service` (ClusterIP) | `polargraph-grpc` | Internal gRPC access on port 50051 |
+| `Service` (configurable) | `polargraph-ui` | Management UI on port 8080 |
+| `Service` (ClusterIP) | `polargraph-metrics` | Prometheus scrape on port 9090 |
+| `HorizontalPodAutoscaler` | `polargraph` | CPU-based autoscaling; set `minReplicas`/`maxReplicas` in values |
+
+### Key values
+
+```yaml
+image:
+  repository: polargraph/polargraphd
+  tag: latest
+
+auth:
+  apiKey: "change-me"
+
+storage:
+  size: 20Gi
+  storageClass: ""   # default storage class
+
+replicaCount: 1      # increase for read replicas (requires --replica-of)
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+  limits:
+    cpu: "2"
+    memory: "2Gi"
+```
+
+For read-replica deployments, set `polargraph.replicaOf` in values to point at the primary's gRPC service address.
+
+---
+
 ## Planned extensions
 
 | Feature | Notes |
