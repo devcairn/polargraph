@@ -139,8 +139,26 @@ class AsyncPolarGraphClient:
         query: str,
         vector: Optional[list[float]] = None,
         ef: Optional[int] = None,
+        params: Optional[dict] = None,
     ) -> list[dict]:
-        req = pb.CypherQueryRequest(cypher=query, vector=vector or [], ef=ef or 0)
+        """Execute a Cypher read query asynchronously.
+
+        Args:
+            query: Cypher query string. May contain ``$param`` placeholders.
+            vector: Query embedding vector for VECTOR_NEAR clauses.
+            ef: HNSW exploration factor override (0 = server default).
+            params: Named parameter values for ``$param`` substitution.
+        """
+        serialised_params: dict = {}
+        if params:
+            import json
+            serialised_params = {k: json.dumps(v) for k, v in params.items()}
+        req = pb.CypherQueryRequest(
+            cypher=query,
+            vector=vector or [],
+            ef=ef or 0,
+            params=serialised_params,
+        )
         resp: pb.CypherQueryResponse = await self._stub.CypherQuery(req, metadata=self._metadata)
         return [_cypher_binding_to_dict(r) for r in resp.rows]
 

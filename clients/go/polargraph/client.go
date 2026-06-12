@@ -197,6 +197,12 @@ func WithEF(ef uint32) CypherOption {
 	return func(r *pb.CypherQueryRequest) { r.Ef = ef }
 }
 
+// WithParams sets named query parameters for `$param` substitution.
+// Values must be JSON-encoded strings (e.g. `"\"Alice\""` for a string value).
+func WithParams(params map[string]string) CypherOption {
+	return func(r *pb.CypherQueryRequest) { r.Params = params }
+}
+
 // Cypher executes a Cypher read query. Each result row is a map of variable
 // name to either a node-ID string (for graph nodes) or a scalar Go value.
 func (c *Client) Cypher(ctx context.Context, query string, opts ...CypherOption) ([]map[string]interface{}, error) {

@@ -247,6 +247,15 @@ struct Cli {
     )]
     default_vector_ef: Option<u32>,
 
+    /// Maximum number of compiled Cypher query plans to cache. 0 disables caching.
+    /// Default: 1000.
+    #[arg(
+        long = "query-cache-size",
+        env = "POLARGRAPH_QUERY_CACHE_SIZE",
+        value_name = "N"
+    )]
+    query_cache_size: Option<usize>,
+
     /// Path to PEM certificate file. When combined with --tls-key, enables TLS
     /// on the gRPC server, management UI, and metrics endpoint.
     #[arg(
@@ -352,6 +361,7 @@ async fn main() -> Result<()> {
     let rate_limit_rps = resolve(cli.rate_limit_rps, cfg.rate_limit.max_rps, 0u32);
     let default_vector_ef = resolve(cli.default_vector_ef, cfg.query.default_vector_ef, 50u32);
     let tx_idle_timeout_ms = resolve(cli.tx_idle_timeout_ms, None::<u64>, 300_000u64);
+    let query_cache_size = resolve(cli.query_cache_size, cfg.query.cache_size, 1000usize);
 
     // ── Tracing ───────────────────────────────────────────────────────────────
     let filter = EnvFilter::try_new(&log_level)
@@ -600,6 +610,7 @@ async fn main() -> Result<()> {
             .with_slow_query_ms(slow_query_ms)
             .with_default_vector_ef(default_vector_ef)
             .with_tx_idle_timeout_ms(tx_idle_timeout_ms)
+            .with_query_cache_size(query_cache_size)
             .with_key_store(key_store.clone());
 
         (server, Some(rs))
@@ -610,6 +621,7 @@ async fn main() -> Result<()> {
             .with_slow_query_ms(slow_query_ms)
             .with_default_vector_ef(default_vector_ef)
             .with_tx_idle_timeout_ms(tx_idle_timeout_ms)
+            .with_query_cache_size(query_cache_size)
             .with_key_store(key_store.clone());
         (server, None)
     };

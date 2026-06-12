@@ -1587,6 +1587,7 @@ async fn vector_seed_query_with_node_type_filter() {
             })),
             ef: 0,
             user_id: String::new(),
+            params: Default::default(),
         }))
         .await
         .unwrap()

@@ -173,6 +173,9 @@ message QueryRequest {
     /// has an access cache entry for this user, results are filtered to nodes
     /// the user is allowed to see. Empty string = no filtering.
     string user_id = 7;
+    /// Named query parameters for use with `$param` syntax. Keys are parameter names
+    /// (without the `$`); values are JSON-encoded `Value` objects.
+    map<string, string> params = 8;
 }
 
 /// One satisfying assignment of all variables in the query.
@@ -494,6 +497,9 @@ message VectorSeedQueryRequest {
     uint32              ef           = 9;
     /// Optional identity for access-control filtering.
     string              user_id      = 10;
+    /// Named query parameters for `$param` substitution. Keys are parameter names
+    /// (without the `$`); values are JSON-encoded `Value` objects.
+    map<string, string> params       = 11;
 }
 
 message VectorSeedQueryResponse {
@@ -645,6 +651,10 @@ message ShowStatsResponse {
     uint32 predicate_intern_count = 5;
     uint32 open_transaction_count = 6;
     string mode                  = 7;
+    /// Query plan cache statistics.
+    uint64 query_cache_hits      = 8;
+    uint64 query_cache_misses    = 9;
+    uint32 query_cache_size      = 10;
 }
 
 // ── CypherQuery ───────────────────────────────────────────────────────────────
@@ -677,6 +687,9 @@ message CypherQueryRequest {
     string tx_id = 6;
     /// Optional identity for access-control filtering.
     string user_id = 7;
+    /// Named query parameters for `$param` substitution. Keys are parameter names
+    /// (without the `$`); values are JSON-encoded `Value` objects.
+    map<string, string> params = 8;
 }
 
 /// One result row from a CypherQuery.

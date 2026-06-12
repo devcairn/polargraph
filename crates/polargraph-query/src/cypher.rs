@@ -66,6 +66,8 @@ pub enum CypherValue {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// A named query parameter, e.g. `$name`.
+    Param(String),
 }
 
 impl CypherValue {
@@ -75,8 +77,28 @@ impl CypherValue {
             CypherValue::Int(i) => Value::Int(*i),
             CypherValue::Float(f) => Value::Float(*f),
             CypherValue::Bool(b) => Value::Bool(*b),
+            // Params must be substituted before calling to_core_value;
+            // treat as Null as a safe fallback (substitution errors earlier).
+            CypherValue::Param(_) => Value::Null,
         }
     }
+
+    /// Convert this value to a [`FilterValue`], preserving parameter references.
+    pub fn to_filter_value(&self) -> FilterValue {
+        match self {
+            CypherValue::Param(name) => FilterValue::Param(name.clone()),
+            other => FilterValue::Literal(other.to_core_value()),
+        }
+    }
+}
+
+/// A filter value that may be a literal or an unsubstituted parameter reference.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilterValue {
+    /// A concrete literal value ready for comparison.
+    Literal(Value),
+    /// A named parameter `$name` that must be substituted before execution.
+    Param(String),
 }
 
 // ── AST ───────────────────────────────────────────────────────────────────────
@@ -544,14 +566,16 @@ fn close_valid_time(triple: Triple, now: Timestamp) -> Triple {
 /// For each satisfying binding set, check that the node bound to `var` has a
 /// property triple `(node, predicate, value)`.  Bindings that fail the check
 /// are dropped.
+#[derive(Clone, Debug)]
 pub struct ValueFilter {
     pub var: String,
     pub predicate: String,
-    pub value: Value,
+    pub value: FilterValue,
 }
 
 /// Compiled representation of a `VECTOR_NEAR(var, "space", k[, ef=N])` predicate
 /// — produced by either the WHERE form or the CALL/YIELD form.
+#[derive(Clone, Debug)]
 pub struct VectorNearClause {
     pub seed_variable: String,
     pub space: String,
@@ -564,6 +588,7 @@ pub struct VectorNearClause {
 }
 
 /// The match kind for a full-text / substring filter.
+#[derive(Clone, Debug)]
 pub enum TextFilterKind {
     /// `CONTAINS "needle"` — `str.contains()` check.
     Contains(String),
@@ -574,6 +599,7 @@ pub enum TextFilterKind {
 }
 
 /// A text predicate applied post-execution via snapshot scan.
+#[derive(Clone, Debug)]
 pub struct TextFilter {
     pub var: String,
     pub predicate: String,
@@ -584,6 +610,7 @@ pub struct TextFilter {
 ///
 /// The variable `var` is expected to hold an EdgeId reinterpreted as a NodeId
 /// in the binding map (as set by `edge_var` on `VarPattern`).
+#[derive(Clone, Debug)]
 pub struct EdgeAnnotationFilter {
     /// The edge variable bound in Bindings as NodeId (EdgeId bytes reinterpreted).
     pub var: String,
@@ -593,6 +620,7 @@ pub struct EdgeAnnotationFilter {
 }
 
 /// The result of compiling a `CypherQuery` to the Datalog IR.
+#[derive(Clone, Debug)]
 pub struct CompiledQuery {
     pub query: Query,
     pub rules: Vec<Rule>,
@@ -617,6 +645,29 @@ pub struct CompiledQuery {
     pub edge_vars: std::collections::HashSet<String>,
     /// Annotation filters from WHERE clauses on edge variables.
     pub edge_annotation_filters: Vec<EdgeAnnotationFilter>,
+}
+
+impl CompiledQuery {
+    /// Substitute all `FilterValue::Param` placeholders in this compiled query
+    /// with concrete values from `params`.
+    ///
+    /// Returns an error if any parameter referenced in the query is absent from
+    /// `params`. The substitution is done on an owned copy of the query so the
+    /// cached (pre-substitution) plan is not mutated.
+    pub fn substitute_params(
+        mut self,
+        params: &std::collections::HashMap<String, polargraph_core::value::Value>,
+    ) -> Result<Self, CypherError> {
+        for vf in &mut self.value_filters {
+            if let FilterValue::Param(ref name) = vf.value {
+                let val = params.get(name).ok_or_else(|| {
+                    CypherError::at(0, format!("missing required parameter '${}'", name))
+                })?;
+                vf.value = FilterValue::Literal(val.clone());
+            }
+        }
+        Ok(self)
+    }
 }
 
 // ── Tokenizer ─────────────────────────────────────────────────────────────────
@@ -648,6 +699,8 @@ enum Token {
     Str(String),
     Int(i64),
     Float(f64),
+    /// A named parameter token: `$name`.
+    Param(String),
 }
 
 struct Lexer<'a> {
@@ -792,6 +845,22 @@ impl<'a> Lexer<'a> {
                 Some(c @ b'0'..=b'9') => {
                     let t = self.read_number(c);
                     tokens.push((pos, t));
+                }
+                Some(b'$') => {
+                    // Named parameter: $identifier
+                    let start = self.pos;
+                    let mut s = String::new();
+                    while let Some(nc) = self.peek() {
+                        if nc.is_ascii_alphanumeric() || nc == b'_' {
+                            s.push(self.advance().unwrap() as char);
+                        } else {
+                            break;
+                        }
+                    }
+                    if s.is_empty() {
+                        return Err(CypherError::at(start, "expected identifier after '$'"));
+                    }
+                    tokens.push((pos, Token::Param(s)));
                 }
                 Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
                     // Check for TRUE/FALSE keywords
@@ -1429,6 +1498,7 @@ impl Parser {
             Some(Token::Str(s)) => { self.advance(); Ok(CypherValue::Str(s)) }
             Some(Token::Int(n)) => { self.advance(); Ok(CypherValue::Int(n)) }
             Some(Token::Float(f)) => { self.advance(); Ok(CypherValue::Float(f)) }
+            Some(Token::Param(name)) => { self.advance(); Ok(CypherValue::Param(name)) }
             Some(Token::Ident(s)) => {
                 let lower = s.to_ascii_lowercase();
                 match lower.as_str() {
@@ -1708,7 +1778,7 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
                 if evs.contains(&var) {
                     eaf.push(EdgeAnnotationFilter { var, predicate: prop, op: ComparisonOp::Eq, value: value.to_core_value() });
                 } else {
-                    vf.push(ValueFilter { var, predicate: prop, value: value.to_core_value() });
+                    vf.push(ValueFilter { var, predicate: prop, value: value.to_filter_value() });
                 }
             }
             WhereClause::PropertyCmp { var, prop, op, value } => {
@@ -1718,7 +1788,7 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
                     // For node properties, only equality is currently supported;
                     // treat as a value filter for equality, skip others.
                     if matches!(op, ComparisonOp::Eq) {
-                        vf.push(ValueFilter { var, predicate: prop, value: value.to_core_value() });
+                        vf.push(ValueFilter { var, predicate: prop, value: value.to_filter_value() });
                     }
                 }
             }
@@ -1963,7 +2033,7 @@ fn emit_node_binding(
         value_filters.push(ValueFilter {
             var: var.to_string(),
             predicate: "__type".into(),
-            value: Value::Text(label.clone()),
+            value: FilterValue::Literal(Value::Text(label.clone())),
         });
     }
 
@@ -1982,7 +2052,7 @@ fn emit_node_binding(
         value_filters.push(ValueFilter {
             var: var.to_string(),
             predicate: key.clone(),
-            value: val.to_core_value(),
+            value: val.to_filter_value(),
         });
     }
 }
@@ -1993,14 +2063,14 @@ fn emit_node_filters(var: &str, node: &NodePat, value_filters: &mut Vec<ValueFil
         value_filters.push(ValueFilter {
             var: var.to_string(),
             predicate: "__type".into(),
-            value: Value::Text(label.clone()),
+            value: FilterValue::Literal(Value::Text(label.clone())),
         });
     }
     for (key, val) in &node.props {
         value_filters.push(ValueFilter {
             var: var.to_string(),
             predicate: key.clone(),
-            value: val.to_core_value(),
+            value: val.to_filter_value(),
         });
     }
 }
@@ -2036,10 +2106,23 @@ pub fn apply_value_filters(
                 None => continue 'binding, // incomplete binding — drop
             };
 
+            let expected_val = match &filter.value {
+                FilterValue::Literal(v) => v,
+                FilterValue::Param(name) => {
+                    // Unsubstituted parameter — caller should have called substitute_params first.
+                    // Treat as a failed match (drop the binding) to avoid panicking.
+                    tracing::warn!(
+                        param = %name,
+                        "unsubstituted parameter in apply_value_filters; binding dropped"
+                    );
+                    continue 'binding;
+                }
+            };
+
             let triples = snapshot.scan_by_subject_predicate(&node_id, &filter.predicate)?;
 
             let matched = triples.iter().any(|t| match t {
-                Triple::Property { value, .. } => value == &filter.value,
+                Triple::Property { value, .. } => value == expected_val,
                 _ => false,
             });
 
@@ -2351,7 +2434,7 @@ mod tests {
         // Should emit a value filter for __type = Person
         assert_eq!(compiled.value_filters.len(), 1);
         assert_eq!(compiled.value_filters[0].predicate, "__type");
-        assert_eq!(compiled.value_filters[0].value, Value::Text("Person".into()));
+        assert_eq!(compiled.value_filters[0].value, FilterValue::Literal(Value::Text("Person".into())));
     }
 
     #[test]
@@ -2387,7 +2470,7 @@ mod tests {
         assert_eq!(compiled.value_filters.len(), 1);
         assert_eq!(compiled.value_filters[0].var, "a");
         assert_eq!(compiled.value_filters[0].predicate, "name");
-        assert_eq!(compiled.value_filters[0].value, Value::Text("Alice".into()));
+        assert_eq!(compiled.value_filters[0].value, FilterValue::Literal(Value::Text("Alice".into())));
     }
 
     // ── apply_value_filters integration ──────────────────────────────────────
@@ -2440,7 +2523,7 @@ mod tests {
         }];
 
         let filters = vec![
-            ValueFilter { var: "a".into(), predicate: "__type".into(), value: Value::Text("Person".into()) },
+            ValueFilter { var: "a".into(), predicate: "__type".into(), value: FilterValue::Literal(Value::Text("Person".into())) },
         ];
 
         let result = apply_value_filters(bindings, &filters, &snap).unwrap();
@@ -2463,7 +2546,7 @@ mod tests {
         }];
 
         let filters = vec![
-            ValueFilter { var: "a".into(), predicate: "__type".into(), value: Value::Text("Person".into()) },
+            ValueFilter { var: "a".into(), predicate: "__type".into(), value: FilterValue::Literal(Value::Text("Person".into())) },
         ];
 
         let result = apply_value_filters(bindings, &filters, &snap).unwrap();
@@ -2499,8 +2582,8 @@ mod tests {
         };
 
         let filters = vec![
-            ValueFilter { var: "a".into(), predicate: "__type".into(), value: Value::Text("Person".into()) },
-            ValueFilter { var: "b".into(), predicate: "__type".into(), value: Value::Text("Person".into()) },
+            ValueFilter { var: "a".into(), predicate: "__type".into(), value: FilterValue::Literal(Value::Text("Person".into())) },
+            ValueFilter { var: "b".into(), predicate: "__type".into(), value: FilterValue::Literal(Value::Text("Person".into())) },
         ];
 
         let result = apply_value_filters(vec![b1, b2], &filters, &snap).unwrap();
@@ -2820,7 +2903,7 @@ mod tests {
             .find(|f| f.predicate == "active")
             .expect("expected active filter");
         assert_eq!(active_filter.var, "a");
-        assert_eq!(active_filter.value, Value::Bool(true));
+        assert!(matches!(&active_filter.value, FilterValue::Literal(Value::Bool(true))));
     }
 
     #[test]
@@ -3111,5 +3194,88 @@ mod tests {
         let found: Vec<NodeId> = filtered.iter().filter_map(|b| b.get("b").copied()).collect();
         assert_eq!(found.len(), 1, "only direct neighbour should be reachable at depth 1");
         assert_eq!(found[0], b);
+    }
+
+    // ── Named parameter tests ────────────────────────────────────────────────
+
+    #[test]
+    fn param_string_substitution() {
+        // Parse a query with a $name parameter.
+        let q = parse(r#"MATCH (a:Person) WHERE a.name = $name RETURN a"#).unwrap();
+        let compiled = compile(q);
+
+        // The value filter should contain a Param placeholder.
+        let name_filter = compiled.value_filters.iter()
+            .find(|f| f.predicate == "name")
+            .expect("expected name filter");
+        assert!(matches!(&name_filter.value, FilterValue::Param(n) if n == "name"),
+            "expected FilterValue::Param(\"name\"), got {:?}", name_filter.value);
+
+        // After substitution, the placeholder should become a literal.
+        let mut params = std::collections::HashMap::new();
+        params.insert("name".to_string(), Value::Text("Alice".to_string()));
+        let substituted = compiled.substitute_params(&params).unwrap();
+        let name_filter = substituted.value_filters.iter()
+            .find(|f| f.predicate == "name")
+            .expect("expected name filter after substitution");
+        assert!(matches!(&name_filter.value, FilterValue::Literal(Value::Text(s)) if s == "Alice"),
+            "expected FilterValue::Literal(Text(\"Alice\")), got {:?}", name_filter.value);
+    }
+
+    #[test]
+    fn param_int_substitution() {
+        let q = parse(r#"MATCH (a:Product) WHERE a.price = $min_price RETURN a"#).unwrap();
+        let compiled = compile(q);
+
+        let price_filter = compiled.value_filters.iter()
+            .find(|f| f.predicate == "price")
+            .expect("expected price filter");
+        assert!(matches!(&price_filter.value, FilterValue::Param(n) if n == "min_price"));
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("min_price".to_string(), Value::Int(42));
+        let substituted = compiled.substitute_params(&params).unwrap();
+        let price_filter = substituted.value_filters.iter()
+            .find(|f| f.predicate == "price")
+            .expect("expected price filter after substitution");
+        assert!(matches!(&price_filter.value, FilterValue::Literal(Value::Int(42))));
+    }
+
+    #[test]
+    fn missing_param_returns_error() {
+        let q = parse(r#"MATCH (a:Person) WHERE a.name = $missing RETURN a"#).unwrap();
+        let compiled = compile(q);
+
+        // No params provided — should return an error.
+        let params: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        let result = compiled.substitute_params(&params);
+        assert!(result.is_err(), "expected error for missing parameter");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("missing") && msg.contains("missing"),
+            "error should mention the missing param: {msg}");
+    }
+
+    #[test]
+    fn param_in_variable_length_path_query() {
+        // Parameters should work in queries that also have variable-length paths.
+        let q = parse(r#"MATCH (a:Person)-[:knows*]->(b) WHERE a.name = $name RETURN b"#).unwrap();
+        let compiled = compile(q);
+
+        let name_filter = compiled.value_filters.iter()
+            .find(|f| f.predicate == "name")
+            .expect("expected name filter");
+        assert!(matches!(&name_filter.value, FilterValue::Param(n) if n == "name"));
+
+        // Verify the transitive rule was generated.
+        assert!(!compiled.rules.is_empty(), "expected transitive rules for [:knows*]");
+
+        // Substitution should still work.
+        let mut params = std::collections::HashMap::new();
+        params.insert("name".to_string(), Value::Text("Bob".to_string()));
+        let substituted = compiled.substitute_params(&params).unwrap();
+        let name_filter = substituted.value_filters.iter()
+            .find(|f| f.predicate == "name")
+            .expect("expected name filter after substitution");
+        assert!(matches!(&name_filter.value, FilterValue::Literal(Value::Text(s)) if s == "Bob"));
     }
 }

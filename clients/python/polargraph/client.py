@@ -212,12 +212,27 @@ class PolarGraphClient:
         query: str,
         vector: Optional[list[float]] = None,
         ef: Optional[int] = None,
+        params: Optional[dict] = None,
     ) -> list[dict]:
-        """Execute a Cypher read query. Returns list of row dicts."""
+        """Execute a Cypher read query. Returns list of row dicts.
+
+        Args:
+            query: Cypher query string. May contain ``$param`` placeholders.
+            vector: Query embedding vector for VECTOR_NEAR clauses.
+            ef: HNSW exploration factor override (0 = server default).
+            params: Named parameter values for ``$param`` substitution.
+                Keys are parameter names (without ``$``); values are any
+                JSON-serialisable Python object (str, int, float, bool, None).
+        """
+        serialised_params: dict = {}
+        if params:
+            import json
+            serialised_params = {k: json.dumps(v) for k, v in params.items()}
         req = pb.CypherQueryRequest(
             cypher=query,
             vector=vector or [],
             ef=ef or 0,
+            params=serialised_params,
         )
         resp: pb.CypherQueryResponse = self._stub.CypherQuery(req, metadata=self._metadata)
         return [_cypher_binding_to_dict(r) for r in resp.rows]

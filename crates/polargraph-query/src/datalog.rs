@@ -76,6 +76,10 @@ pub enum Term {
     Var(String),
     /// Wildcard — matches anything, binds nothing.
     Any,
+    /// A named query parameter (e.g. `$name`) that should be substituted before
+    /// evaluation. Treated like `Any` at evaluation time — the actual substitution
+    /// is handled at the Cypher layer via `CompiledQuery::substitute_params`.
+    Param(String),
 }
 
 impl Term {
@@ -162,6 +166,8 @@ fn resolve_term(term: &Term, bindings: &Bindings) -> Option<NodeId> {
         Term::Bound(id) => Some(*id),
         Term::Var(name) => bindings.get(name).copied(),
         Term::Any => None,
+        // Params should be substituted before evaluation; treat as wildcard.
+        Term::Param(_) => None,
     }
 }
 
@@ -186,7 +192,7 @@ fn extend_bindings(
 
     // Bind / check object slot — only relation triples have a NodeId object.
     match &vp.object {
-        Term::Any => {} // nothing to bind
+        Term::Any | Term::Param(_) => {} // nothing to bind
         Term::Bound(_) => {} // substitution already handled this; storage only returned matching triples
         Term::Var(_name) => {
             match triple {
@@ -229,7 +235,7 @@ fn extend_bindings(
 /// Returns `None` on conflict.
 fn bind_term(term: &Term, value: NodeId, bindings: &Bindings) -> Option<Bindings> {
     match term {
-        Term::Any | Term::Bound(_) => Some(bindings.clone()),
+        Term::Any | Term::Bound(_) | Term::Param(_) => Some(bindings.clone()),
         Term::Var(name) => {
             if let Some(&existing) = bindings.get(name) {
                 if existing == value {
@@ -315,7 +321,7 @@ pub fn execute_query_seeded(
                         let reachable = reachable_from_hops(start_id, pred, snapshot, hops, deadline)?;
                         for target in reachable {
                             match &vp.object {
-                                Term::Any => next.push(base.clone()),
+                                Term::Any | Term::Param(_) => next.push(base.clone()),
                                 Term::Bound(id) => {
                                     if *id == target { next.push(base.clone()); }
                                 }

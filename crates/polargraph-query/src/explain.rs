@@ -159,6 +159,7 @@ fn format_term(term: &Term) -> String {
         Term::Bound(id) => format!("<{}>", &id.to_string()[..8]),
         Term::Var(name) => format!("?{name}"),
         Term::Any => "_".to_string(),
+        Term::Param(name) => format!("${name}"),
     }
 }
 

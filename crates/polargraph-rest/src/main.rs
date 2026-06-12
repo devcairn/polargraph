@@ -407,6 +407,7 @@ async fn handle_query(
         as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
         tx_id: body.tx_id.unwrap_or_default(),
         user_id: user_id.clone(),
+        params: std::collections::HashMap::new(),
     };
 
     let mut client = state.client.clone();
@@ -639,6 +640,10 @@ struct CypherBody {
     /// Optional user identity for access-control filtering.
     #[serde(default)]
     user_id: Option<String>,
+    /// Named query parameters for `$param` substitution.
+    /// Values must be JSON-encoded `Value` objects (e.g. `"\"Alice\""` for a string).
+    #[serde(default)]
+    params: std::collections::HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -666,6 +671,7 @@ async fn handle_cypher(
         ef: body.ef,
         tx_id: body.tx_id.unwrap_or_default(),
         user_id: user_id.clone(),
+        params: body.params,
     };
 
     let mut client = state.client.clone();
@@ -778,6 +784,7 @@ async fn handle_cypher_stream(
         as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
         vector: body.vector,
         ef: body.ef,
+        params: body.params,
         ..Default::default()
     };
 
