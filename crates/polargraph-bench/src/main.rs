@@ -582,6 +582,7 @@ async fn run_filtered_search(mut client: PolarGraphServiceClient<Channel>, args:
                 filter: Some(SvfFilter::NodeTypeFilter(NodeTypeFilter {
                     type_name: TYPE_NAME.into(),
                 })),
+                user_id: String::new(),
             })
             .await
             .context("search_vector_filtered")?

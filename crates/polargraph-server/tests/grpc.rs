@@ -18,6 +18,7 @@ use polargraph_server::{
         GetEdgeTypeRequest, GetNodeTypeRequest, InsertRequest, InsertVectorRequest,
         ListBackupsRequest, ListEdgeTypesRequest, ListNodeTypesRequest,
         ListPredicatesBetweenRequest, MigrateRequest, MigrationStatusRequest, NodeId,
+        AddUserToGroupRequest, GrantAccessRequest, GetUserAccessRequest, RevokeAccessRequest,
         NodeTypeDef, NodeTypeFilter,
         PropertyTriple, PurgeOldBackupsRequest, QueryRequest, ReachableRequest,
         RegisterEdgeTypeRequest, RegisterNodeTypeRequest, RelationTriple,
@@ -1422,6 +1423,7 @@ async fn search_vector_filtered_missing_filter_returns_invalid_argument() {
             k: 5,
             filter: None,
             ef: 0,
+            user_id: String::new(),
         }))
         .await
         .unwrap_err();
@@ -1470,6 +1472,7 @@ async fn search_vector_filtered_by_node_type_returns_only_matching_nodes() {
             k: 5,
             filter: Some(Filter::NodeTypeFilter(NodeTypeFilter { type_name: "Widget".into() })),
             ef: 0,
+            user_id: String::new(),
         }))
         .await
         .unwrap()
@@ -1583,6 +1586,7 @@ async fn vector_seed_query_with_node_type_filter() {
                 type_name: "TypedNode".into(), ..Default::default()
             })),
             ef: 0,
+            user_id: String::new(),
         }))
         .await
         .unwrap()

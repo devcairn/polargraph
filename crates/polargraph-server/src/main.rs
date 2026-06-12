@@ -747,11 +747,11 @@ async fn serve_axum_tls(
     let tls_stream = TcpListenerStream::new(listener).then(move |res| {
         let acceptor = acceptor.clone();
         async move {
-            let tcp = res.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let tcp = res.map_err(std::io::Error::other)?;
             acceptor
                 .accept(tcp)
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                .map_err(std::io::Error::other)
         }
     });
 

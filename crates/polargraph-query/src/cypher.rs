@@ -266,7 +266,7 @@ pub struct CompiledWrite {
 /// Top-level Cypher statement — either a read query or a write statement.
 #[derive(Debug)]
 pub enum CypherStatement {
-    Read(CypherQuery),
+    Read(Box<CypherQuery>),
     Write(WriteStatement),
 }
 
@@ -1564,7 +1564,7 @@ impl Parser {
 
     fn parse_statement_inner(&mut self) -> Result<CypherStatement, CypherError> {
         if self.peek_keyword("MATCH") {
-            Ok(CypherStatement::Read(self.parse_query()?))
+            Ok(CypherStatement::Read(Box::new(self.parse_query()?)))
         } else {
             Ok(CypherStatement::Write(self.parse_write_statement()?))
         }

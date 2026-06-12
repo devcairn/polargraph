@@ -174,6 +174,7 @@ pub struct RateLimitConfig {
 /// - If `path` is `None`, the following locations are tried in order:
 ///   1. `./polargraph.toml`
 ///   2. `~/.config/polargraph/config.toml`
+///
 ///   If neither exists, `Config::default()` is returned silently.
 pub fn load_config(path: Option<&Path>) -> Result<Config, ConfigError> {
     if let Some(p) = path {

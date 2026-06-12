@@ -180,7 +180,7 @@ pub struct PolarGraphServer {
     slow_query_ms: u64,
     /// Default HNSW exploration factor for all vector search RPCs.
     default_vector_ef: u32,
-    /// Server start time, used to compute uptime in ShowStats.
+    #[allow(dead_code)]
     start_time: Instant,
     /// Live wire transactions. Shared across all clones via Arc.
     tx_map: Arc<TxMap>,
@@ -1786,7 +1786,7 @@ impl PolarGraphService for PolarGraphServer {
             let k = vn.k as usize;
             let ef = vn.ef.map(|e| e as usize)
                 .filter(|&e| e > 0)
-                .unwrap_or_else(|| if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize });
+                .unwrap_or(if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize });
             let seed_var = vn.seed_variable.clone();
 
             let ann_hits = self
@@ -2144,7 +2144,7 @@ impl PolarGraphService for PolarGraphServer {
             let k = vn.k as usize;
             let ef = vn.ef.map(|e| e as usize)
                 .filter(|&e| e > 0)
-                .unwrap_or_else(|| if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize });
+                .unwrap_or(if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize });
             let seed_var = vn.seed_variable.clone();
             let ann_hits = self
                 .store

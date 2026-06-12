@@ -18,6 +18,7 @@ use tonic::transport::Channel;
 use tracing::info;
 use uuid::Uuid;
 
+#[allow(clippy::enum_variant_names)]
 mod proto {
     tonic::include_proto!("polargraph.v1");
 }
@@ -363,6 +364,7 @@ fn uuid_string_to_node_id(s: &str) -> Result<proto::NodeId, String> {
         .map_err(|_| format!("invalid UUID: {:?}", s))
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_patterns(raw: &[String]) -> Result<Vec<proto::VarPattern>, Response> {
     raw.iter()
         .map(|p| parse_pattern(p))
@@ -405,7 +407,6 @@ async fn handle_query(
         as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
         tx_id: body.tx_id.unwrap_or_default(),
         user_id: user_id.clone(),
-        ..Default::default()
     };
 
     let mut client = state.client.clone();
@@ -665,7 +666,6 @@ async fn handle_cypher(
         ef: body.ef,
         tx_id: body.tx_id.unwrap_or_default(),
         user_id: user_id.clone(),
-        ..Default::default()
     };
 
     let mut client = state.client.clone();
@@ -702,7 +702,6 @@ async fn handle_cypher_write(
     let req = proto::CypherWriteRequest {
         cypher: body.cypher,
         tx_id: body.tx_id.unwrap_or_default(),
-        ..Default::default()
     };
 
     let mut client = state.client.clone();
