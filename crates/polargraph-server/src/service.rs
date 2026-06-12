@@ -10,7 +10,10 @@ use crate::{
         polar_graph_service_server::PolarGraphService,
         search_vector_filtered_request::Filter,
         vector_seed_query_request::Filter as SeedFilter,
+        grant_access_request::Target as GrantTarget,
+        revoke_access_request::Target as RevokeTarget,
         AddApiKeyRequest, AddApiKeyResponse,
+        AddUserToGroupRequest, AddUserToGroupResponse,
         BackupInfo as ProtoBackupInfo,
         BatchInsertError, BatchInsertVectorsRequest, BatchInsertVectorsResponse,
         BeginTransactionRequest, BeginTransactionResponse,
@@ -22,6 +25,8 @@ use crate::{
         GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse,
         GetEdgeTypeRequest, GetEdgeTypeResponse,
         GetNodeTypeRequest, GetNodeTypeResponse,
+        GetUserAccessRequest, GetUserAccessResponse,
+        GrantAccessRequest, GrantAccessResponse,
         InsertRequest, InsertResponse, InsertVectorRequest, InsertVectorResponse,
         ListApiKeysRequest, ListApiKeysResponse,
         ListBackupsRequest, ListBackupsResponse,
@@ -36,6 +41,7 @@ use crate::{
         RegisterEdgeTypeRequest, RegisterEdgeTypeResponse,
         RegisterNodeTypeRequest, RegisterNodeTypeResponse,
         ReplicaStatusRequest, ReplicaStatusResponse,
+        RevokeAccessRequest, RevokeAccessResponse,
         RevokeApiKeyRequest, RevokeApiKeyResponse,
         RollbackTransactionRequest, RollbackTransactionResponse,
         RunRetentionRequest, RunRetentionResponse,
@@ -53,7 +59,15 @@ use crate::{
     },
 };
 use dashmap::DashMap;
-use polargraph_core::{id::NodeId, schema::{RetentionPolicy, StorageMode}, triple::Triple, value::Value};
+use polargraph_core::{
+    id::{EdgeId, NodeId},
+    schema::{
+        RetentionPolicy, StorageMode,
+        BUILTIN_HAS_ACCESS_PRED, BUILTIN_HAS_ACCESS_TYPE_PRED, BUILTIN_MEMBER_OF_PRED,
+    },
+    triple::Triple,
+    value::Value,
+};
 use polargraph_query::datalog::{
     execute_query, execute_query_hybrid, execute_query_seeded, execute_query_with_pending,
     execute_recursive, reachable_from, reachable_from_hops, Bindings, DerivedFacts, Query,
@@ -134,12 +148,29 @@ impl ReplicaState {
 /// `PolarGraphServer` share the same underlying map via `Arc`.
 type TypeCache = Arc<RwLock<HashMap<String, HashSet<NodeId>>>>;
 
+/// Access cache for graph-native access control.
+///
+/// Key: user node UUID as a hex string (the NodeId UUID).
+/// Value: set of all NodeIds this user is allowed to see, derived from
+/// their group memberships (`MEMBER_OF`) and the groups' access grants
+/// (`HAS_ACCESS` for direct node grants, `HAS_ACCESS_TYPE` for type-level
+/// grants expanded via the type cache).
+///
+/// An absent entry means the user has no recorded access grants.
+/// An *empty* entry means the user has no access to any node.
+///
+/// Filtering is only applied when `user_id` is set on a request.
+type AccessCache = Arc<RwLock<HashMap<String, HashSet<NodeId>>>>;
+
 #[derive(Clone)]
 pub struct PolarGraphServer {
     store: TripleStore,
     registry: NodeTypeRegistry,
     edge_registry: EdgeTypeRegistry,
     type_cache: TypeCache,
+    /// Graph-native access control cache. Populated at startup and updated
+    /// incrementally after every Insert that touches access-control triples.
+    access_cache: AccessCache,
     backup_manager: Option<Arc<BackupManager>>,
     /// Non-None when this server is a read replica.
     replica_state: Option<Arc<ReplicaState>>,
@@ -182,7 +213,10 @@ impl PolarGraphServer {
     ) -> Result<Self, StorageError> {
         let registry = NodeTypeRegistry::new(store.clone())?;
         let edge_registry = EdgeTypeRegistry::new(store.clone())?;
-        let type_cache = Arc::new(RwLock::new(Self::build_type_cache(&store)?));
+        let type_cache_map = Self::build_type_cache(&store)?;
+        let access_cache_map = Self::build_access_cache(&store, &type_cache_map)?;
+        let type_cache = Arc::new(RwLock::new(type_cache_map));
+        let access_cache = Arc::new(RwLock::new(access_cache_map));
         let backup_manager = backup_dir
             .map(|dir| BackupManager::open(dir, &store).map(Arc::new))
             .transpose()?;
@@ -191,6 +225,7 @@ impl PolarGraphServer {
             registry,
             edge_registry,
             type_cache,
+            access_cache,
             backup_manager,
             replica_state: None,
             query_timeout_ms: 30_000,
@@ -267,13 +302,17 @@ impl PolarGraphServer {
     ) -> Result<(Self, Arc<ReplicaState>), StorageError> {
         let registry = NodeTypeRegistry::new(store.clone())?;
         let edge_registry = EdgeTypeRegistry::new(store.clone())?;
-        let type_cache = Arc::new(RwLock::new(Self::build_type_cache(&store)?));
+        let type_cache_map = Self::build_type_cache(&store)?;
+        let access_cache_map = Self::build_access_cache(&store, &type_cache_map)?;
+        let type_cache = Arc::new(RwLock::new(type_cache_map));
+        let access_cache = Arc::new(RwLock::new(access_cache_map));
         let replica_state = ReplicaState::new(primary_address.to_owned());
         let server = Self {
             store,
             registry,
             edge_registry,
             type_cache,
+            access_cache,
             backup_manager: None,
             replica_state: Some(replica_state.clone()),
             query_timeout_ms: 30_000,
@@ -366,6 +405,133 @@ impl PolarGraphServer {
         Ok(cache)
     }
 
+    /// Build the access cache from scratch by scanning MEMBER_OF and HAS_ACCESS
+    /// triples. Called once at startup.
+    ///
+    /// Algorithm:
+    /// 1. Scan `MEMBER_OF` → build `group_id → Vec<user_id>` mapping.
+    /// 2. Scan `HAS_ACCESS` (Relation) → build `group_id → Vec<NodeId>` direct grants.
+    /// 3. Scan `HAS_ACCESS_TYPE` (Property) → build `group_id → Vec<type_name>` type grants.
+    /// 4. For each user, union direct grants and type-expanded grants across all their groups.
+    fn build_access_cache(
+        store: &TripleStore,
+        type_cache: &HashMap<String, HashSet<NodeId>>,
+    ) -> Result<HashMap<String, HashSet<NodeId>>, StorageError> {
+        let end_of_time = polargraph_core::temporal::Timestamp::END_OF_TIME;
+
+        // 1. group_id → list of user node IDs (only currently-valid MEMBER_OF triples).
+        let mut group_to_users: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for triple in store.scan_by_predicate(BUILTIN_MEMBER_OF_PRED)? {
+            if let Triple::Relation { subject: user_id, object: group_id, temporal, .. } = triple {
+                if temporal.vt_end == end_of_time {
+                    group_to_users.entry(group_id).or_default().push(user_id);
+                }
+            }
+        }
+
+        // 2. group_id → set of directly-granted node IDs (only currently-valid HAS_ACCESS triples).
+        let mut group_to_nodes: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
+        for triple in store.scan_by_predicate(BUILTIN_HAS_ACCESS_PRED)? {
+            if let Triple::Relation { subject: group_id, object: node_id, temporal, .. } = triple {
+                if temporal.vt_end == end_of_time {
+                    group_to_nodes.entry(group_id).or_default().insert(node_id);
+                }
+            }
+        }
+
+        // 3. group_id → set of type-level grants (only currently-valid HAS_ACCESS_TYPE triples).
+        let mut group_to_types: HashMap<NodeId, Vec<String>> = HashMap::new();
+        for triple in store.scan_by_predicate(BUILTIN_HAS_ACCESS_TYPE_PRED)? {
+            if let Triple::Property { subject: group_id, value: Value::Text(type_name), temporal, .. } = triple {
+                if temporal.vt_end == end_of_time {
+                    group_to_types.entry(group_id).or_default().push(type_name);
+                }
+            }
+        }
+
+        // 4. For each user, accumulate accessible node IDs from all their groups.
+        let mut cache: HashMap<String, HashSet<NodeId>> = HashMap::new();
+        for (group_id, users) in &group_to_users {
+            // Direct node grants for this group.
+            let direct_nodes: HashSet<NodeId> = group_to_nodes
+                .get(group_id)
+                .cloned()
+                .unwrap_or_default();
+
+            // Type-expanded nodes for this group.
+            let mut type_nodes: HashSet<NodeId> = HashSet::new();
+            if let Some(type_names) = group_to_types.get(group_id) {
+                for type_name in type_names {
+                    if let Some(nodes) = type_cache.get(type_name) {
+                        type_nodes.extend(nodes.iter().copied());
+                    }
+                }
+            }
+
+            // Merge into each user's access set.
+            for user_id in users {
+                let user_key = user_id.to_string();
+                let entry = cache.entry(user_key).or_default();
+                entry.extend(direct_nodes.iter().copied());
+                entry.extend(type_nodes.iter().copied());
+            }
+        }
+
+        info!(users = cache.len(), "access cache built");
+        Ok(cache)
+    }
+
+    /// Rebuild the access cache if the inserted triples contain any access-control
+    /// predicates (`MEMBER_OF`, `HAS_ACCESS`, `HAS_ACCESS_TYPE`) or `__type`
+    /// triples that could expand type-level grants.
+    ///
+    /// Called after every successful `Insert` commit.
+    fn update_access_cache_if_needed(&self, triples: &[Triple]) {
+        let needs_rebuild = triples.iter().any(|t| match t {
+            Triple::Relation { predicate, .. }
+                if predicate.0 == BUILTIN_MEMBER_OF_PRED
+                    || predicate.0 == BUILTIN_HAS_ACCESS_PRED =>
+            {
+                true
+            }
+            Triple::Property { predicate, .. }
+                if predicate.0 == BUILTIN_HAS_ACCESS_TYPE_PRED
+                    || predicate.0 == "__type" =>
+            {
+                true
+            }
+            _ => false,
+        });
+
+        if !needs_rebuild {
+            return;
+        }
+
+        // Rebuild the full access cache using the current type cache snapshot.
+        let type_cache_snapshot: HashMap<String, HashSet<NodeId>> = {
+            self.type_cache.read().unwrap().clone()
+        };
+
+        match Self::build_access_cache(&self.store, &type_cache_snapshot) {
+            Ok(new_cache) => {
+                *self.access_cache.write().unwrap() = new_cache;
+                debug!("access cache rebuilt after insert");
+            }
+            Err(e) => {
+                warn!("failed to rebuild access cache after insert: {e}");
+            }
+        }
+    }
+
+    /// Return the set of allowed NodeIds for `user_id`, or `None` when no
+    /// filtering should be applied (empty user_id or no entry in the cache).
+    fn get_access_filter(&self, user_id: &str) -> Option<HashSet<NodeId>> {
+        if user_id.is_empty() {
+            return None;
+        }
+        self.access_cache.read().unwrap().get(user_id).cloned()
+    }
+
     /// Compute a query deadline from `query_timeout_ms`. Returns `None` when
     /// timeout is disabled (value is 0).
     fn make_deadline(&self) -> Option<Instant> {
@@ -409,6 +575,36 @@ impl PolarGraphServer {
         for (subject, type_name) in updates {
             cache.entry(type_name).or_default().insert(subject);
         }
+    }
+}
+
+// ── Access-control helpers ────────────────────────────────────────────────────
+
+/// Extract the `x-polargraph-user-id` gRPC metadata header value, returning
+/// an empty string when the header is absent or not valid ASCII.
+fn meta_user_id(metadata: &tonic::metadata::MetadataMap) -> String {
+    metadata
+        .get("x-polargraph-user-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Resolve the effective user identity: prefer the explicit proto field over
+/// the metadata header.  Returns an empty string when neither is set.
+fn resolve_user_id(field: &str, from_meta: &str) -> String {
+    if !field.is_empty() { field.to_string() } else { from_meta.to_string() }
+}
+
+/// Filter a set of Datalog `Bindings` rows to only those where every bound
+/// NodeId is present in `allowed`. When `allowed` is `None`, returns all rows.
+fn filter_bindings(results: Vec<Bindings>, allowed: Option<&HashSet<NodeId>>) -> Vec<Bindings> {
+    match allowed {
+        None => results,
+        Some(set) => results
+            .into_iter()
+            .filter(|b| b.values().all(|id| set.contains(id)))
+            .collect(),
     }
 }
 
@@ -484,6 +680,8 @@ impl PolarGraphService for PolarGraphServer {
 
         // Incrementally update the type cache for any __type triples.
         self.update_type_cache(&all_triples);
+        // Rebuild access cache if any access-control triples were inserted.
+        self.update_access_cache_if_needed(&all_triples);
 
         metrics::gauge!("polargraph_triples_total").increment(all_triples.len() as f64);
 
@@ -495,7 +693,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<QueryRequest>,
     ) -> Result<Response<QueryResponse>, Status> {
+        let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let user_id = resolve_user_id(&req.user_id, &meta_uid);
 
         if req.patterns.is_empty() {
             return Err(Status::invalid_argument("query must contain at least one pattern"));
@@ -572,6 +772,9 @@ impl PolarGraphService for PolarGraphServer {
         };
         self.check_slow_query("Query", t0.elapsed(), &format!("patterns={pattern_count} rules={}", rules.len()));
 
+        // Apply access-control filter when a user_id is set.
+        let allowed = self.get_access_filter(&user_id);
+        let results = filter_bindings(results, allowed.as_ref());
         let bindings = results.iter().map(convert::binding_to_proto).collect();
 
         Ok(Response::new(QueryResponse { bindings }))
@@ -655,7 +858,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<SearchVectorFilteredRequest>,
     ) -> Result<Response<SearchVectorFilteredResponse>, Status> {
+        let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let user_id = resolve_user_id(&req.user_id, &meta_uid);
 
         if req.query.is_empty() {
             return Err(Status::invalid_argument("query vector must not be empty"));
@@ -664,12 +869,15 @@ impl PolarGraphService for PolarGraphServer {
         let space = if req.space.is_empty() { "default" } else { &req.space };
         let ef = if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize };
 
+        // Access filter (may be None when user_id is not set).
+        let access_allowed = self.get_access_filter(&user_id);
+
         match req.filter {
             // ── NodeTypeFilter: O(1) cache read, no triple scan ───────────────
             Some(Filter::NodeTypeFilter(f)) => {
                 // Clone the allowed set out from under the read lock so we don't
                 // hold it across the (potentially slow) HNSW search.
-                let allowed: HashSet<NodeId> = {
+                let type_allowed: HashSet<NodeId> = {
                     let cache = self.type_cache.read().unwrap();
                     cache.get(&f.type_name).cloned().unwrap_or_default()
                 };
@@ -677,14 +885,15 @@ impl PolarGraphService for PolarGraphServer {
                 debug!(
                     "search_vector_filtered(NodeType={}): {} candidates in cache",
                     f.type_name,
-                    allowed.len()
+                    type_allowed.len()
                 );
 
                 // HNSW with large ef, then O(1)-per-candidate HashSet filter.
                 let candidates = self.store.search_vector_ef(space, &req.query, ef, ef);
                 let results: Vec<_> = candidates
                     .into_iter()
-                    .filter(|(id, _)| allowed.contains(id))
+                    .filter(|(id, _)| type_allowed.contains(id))
+                    .filter(|(id, _)| access_allowed.as_ref().map_or(true, |s| s.contains(id)))
                     .take(k)
                     .map(|(id, score)| VectorSearchResult {
                         node_id: Some(convert::node_id_to_proto(id)),
@@ -703,7 +912,7 @@ impl PolarGraphService for PolarGraphServer {
 
                 let snapshot = self.store.snapshot(self.store.begin().read_ts);
                 let deadline = self.make_deadline();
-                let allowed: HashSet<NodeId> = if f.max_hops == 0 {
+                let reach_allowed: HashSet<NodeId> = if f.max_hops == 0 {
                     reachable_from(from, &f.predicate, &snapshot, deadline)
                 } else {
                     reachable_from_hops(from, &f.predicate, &snapshot, f.max_hops as usize, deadline)
@@ -713,7 +922,8 @@ impl PolarGraphService for PolarGraphServer {
                 let candidates = self.store.search_vector_ef(space, &req.query, ef, ef);
                 let results: Vec<_> = candidates
                     .into_iter()
-                    .filter(|(id, _)| allowed.contains(id))
+                    .filter(|(id, _)| reach_allowed.contains(id))
+                    .filter(|(id, _)| access_allowed.as_ref().map_or(true, |s| s.contains(id)))
                     .take(k)
                     .map(|(id, score)| VectorSearchResult {
                         node_id: Some(convert::node_id_to_proto(id)),
@@ -1147,7 +1357,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<VectorSeedQueryRequest>,
     ) -> Result<Response<VectorSeedQueryResponse>, Status> {
+        let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let user_id = resolve_user_id(&req.user_id, &meta_uid);
 
         if req.query_vector.is_empty() {
             return Err(Status::invalid_argument("query_vector must not be empty"));
@@ -1251,6 +1463,10 @@ impl PolarGraphService for PolarGraphServer {
             t0.elapsed(),
             &format!("space={space} k={k} patterns={}", query.patterns.len()),
         );
+
+        // Apply access-control filter before building scored bindings.
+        let access_allowed = self.get_access_filter(&user_id);
+        let results = filter_bindings(results, access_allowed.as_ref());
 
         // Step 4: attach scores by looking up the seed variable in each result.
         let bindings = results
@@ -1511,7 +1727,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<CypherQueryRequest>,
     ) -> Result<Response<CypherQueryResponse>, Status> {
+        let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let user_id = resolve_user_id(&req.user_id, &meta_uid);
 
         if req.cypher.is_empty() {
             return Err(Status::invalid_argument("cypher query string must not be empty"));
@@ -1608,6 +1826,10 @@ impl PolarGraphService for PolarGraphServer {
             t0.elapsed(),
             &format!("patterns={} rules={}", compiled.query.patterns.len(), compiled.rules.len()),
         );
+
+        // Apply access-control filter before other Cypher filters.
+        let access_allowed = self.get_access_filter(&user_id);
+        let raw_results = filter_bindings(raw_results, access_allowed.as_ref());
 
         // Apply value filters (type constraints and WHERE clause checks).
         let filtered =
@@ -2231,6 +2453,212 @@ impl PolarGraphService for PolarGraphServer {
             .collect();
         drop(keys);
         Ok(Response::new(ListApiKeysResponse { key_prefixes, total_keys }))
+    }
+
+    // ── Graph-native access control ───────────────────────────────────────────
+
+    /// Grant a group access to a node (direct) or all nodes of a type.
+    async fn grant_access(
+        &self,
+        request: Request<GrantAccessRequest>,
+    ) -> Result<Response<GrantAccessResponse>, Status> {
+        self.check_not_replica()?;
+        let req = request.into_inner();
+
+        let group_id = NodeId(uuid::Uuid::from_slice(&req.group_id)
+            .map_err(|_| Status::invalid_argument("group_id must be a 16-byte UUID"))?);
+
+        let triple = match req.target {
+            Some(GrantTarget::NodeId(bytes)) => {
+                let node_id = NodeId(uuid::Uuid::from_slice(&bytes)
+                    .map_err(|_| Status::invalid_argument("node_id must be a 16-byte UUID"))?);
+                Triple::Relation {
+                    subject: group_id,
+                    predicate: polargraph_core::triple::Predicate(BUILTIN_HAS_ACCESS_PRED.to_string()),
+                    object: node_id,
+                    edge_id: EdgeId::new(),
+                    temporal: polargraph_core::temporal::BiTemporalRange {
+                        vt_start: polargraph_core::temporal::Timestamp(0),
+                        vt_end: polargraph_core::temporal::Timestamp::END_OF_TIME,
+                        tt: polargraph_core::temporal::Timestamp::now(),
+                    },
+                }
+            }
+            Some(GrantTarget::TypeName(type_name)) => {
+                Triple::Property {
+                    subject: group_id,
+                    predicate: polargraph_core::triple::Predicate(BUILTIN_HAS_ACCESS_TYPE_PRED.to_string()),
+                    value: Value::Text(type_name),
+                    temporal: polargraph_core::temporal::BiTemporalRange {
+                        vt_start: polargraph_core::temporal::Timestamp(0),
+                        vt_end: polargraph_core::temporal::Timestamp::END_OF_TIME,
+                        tt: polargraph_core::temporal::Timestamp::now(),
+                    },
+                }
+            }
+            None => return Err(Status::invalid_argument("target (node_id or type_name) must be set")),
+        };
+
+        let all_triples = vec![triple];
+        let mut tx = self.store.begin();
+        for t in &all_triples { tx.insert(t.clone()); }
+        tx.commit().map_err(storage_err_to_status)?;
+
+        self.update_access_cache_if_needed(&all_triples);
+        info!("GrantAccess: group={:?}", group_id);
+        Ok(Response::new(GrantAccessResponse {}))
+    }
+
+    /// Revoke a group's access grant by closing its valid time.
+    async fn revoke_access(
+        &self,
+        request: Request<RevokeAccessRequest>,
+    ) -> Result<Response<RevokeAccessResponse>, Status> {
+        self.check_not_replica()?;
+        let req = request.into_inner();
+
+        let group_id = NodeId(uuid::Uuid::from_slice(&req.group_id)
+            .map_err(|_| Status::invalid_argument("group_id must be a 16-byte UUID"))?);
+
+        let now_ts = polargraph_core::temporal::Timestamp::now();
+
+        match req.target {
+            Some(RevokeTarget::NodeId(bytes)) => {
+                let node_id = NodeId(uuid::Uuid::from_slice(&bytes)
+                    .map_err(|_| Status::invalid_argument("node_id must be a 16-byte UUID"))?);
+                // Find existing HAS_ACCESS triple and close its valid time.
+                let existing = self.store.scan_by_subject_predicate(&group_id, BUILTIN_HAS_ACCESS_PRED)
+                    .map_err(storage_err_to_status)?;
+                let mut tx = self.store.begin();
+                for t in existing {
+                    if let Triple::Relation { object, temporal, .. } = &t {
+                        if *object == node_id && temporal.vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME {
+                            // Insert a superseding triple that closes valid time.
+                            tx.insert(Triple::Relation {
+                                subject: group_id,
+                                predicate: polargraph_core::triple::Predicate(BUILTIN_HAS_ACCESS_PRED.to_string()),
+                                object: node_id,
+                                edge_id: EdgeId::new(),
+                                temporal: polargraph_core::temporal::BiTemporalRange {
+                                    vt_start: temporal.vt_start,
+                                    vt_end: now_ts,
+                                    tt: polargraph_core::temporal::Timestamp::now(),
+                                },
+                            });
+                        }
+                    }
+                }
+                tx.commit().map_err(storage_err_to_status)?;
+            }
+            Some(RevokeTarget::TypeName(type_name)) => {
+                let existing = self.store.scan_by_subject_predicate(&group_id, BUILTIN_HAS_ACCESS_TYPE_PRED)
+                    .map_err(storage_err_to_status)?;
+                let mut tx = self.store.begin();
+                for t in existing {
+                    if let Triple::Property { value: Value::Text(ref tn), temporal, .. } = t {
+                        if tn == &type_name && temporal.vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME {
+                            tx.insert(Triple::Property {
+                                subject: group_id,
+                                predicate: polargraph_core::triple::Predicate(BUILTIN_HAS_ACCESS_TYPE_PRED.to_string()),
+                                value: Value::Text(type_name.clone()),
+                                temporal: polargraph_core::temporal::BiTemporalRange {
+                                    vt_start: temporal.vt_start,
+                                    vt_end: now_ts,
+                                    tt: polargraph_core::temporal::Timestamp::now(),
+                                },
+                            });
+                        }
+                    }
+                }
+                tx.commit().map_err(storage_err_to_status)?;
+            }
+            None => return Err(Status::invalid_argument("target (node_id or type_name) must be set")),
+        }
+
+        // Rebuild access cache since an access triple changed.
+        let type_cache_snapshot = self.type_cache.read().unwrap().clone();
+        match Self::build_access_cache(&self.store, &type_cache_snapshot) {
+            Ok(new_cache) => { *self.access_cache.write().unwrap() = new_cache; }
+            Err(e) => { warn!("failed to rebuild access cache after revoke: {e}"); }
+        }
+        info!("RevokeAccess: group={:?}", group_id);
+        Ok(Response::new(RevokeAccessResponse {}))
+    }
+
+    /// Add a user to a group by writing a MEMBER_OF triple.
+    async fn add_user_to_group(
+        &self,
+        request: Request<AddUserToGroupRequest>,
+    ) -> Result<Response<AddUserToGroupResponse>, Status> {
+        self.check_not_replica()?;
+        let req = request.into_inner();
+
+        let user_id = NodeId(uuid::Uuid::from_slice(&req.user_id)
+            .map_err(|_| Status::invalid_argument("user_id must be a 16-byte UUID"))?);
+        let group_id = NodeId(uuid::Uuid::from_slice(&req.group_id)
+            .map_err(|_| Status::invalid_argument("group_id must be a 16-byte UUID"))?);
+
+        let triple = Triple::Relation {
+            subject: user_id,
+            predicate: polargraph_core::triple::Predicate(BUILTIN_MEMBER_OF_PRED.to_string()),
+            object: group_id,
+            edge_id: EdgeId::new(),
+            temporal: polargraph_core::temporal::BiTemporalRange {
+                vt_start: polargraph_core::temporal::Timestamp(0),
+                vt_end: polargraph_core::temporal::Timestamp::END_OF_TIME,
+                tt: polargraph_core::temporal::Timestamp::now(),
+            },
+        };
+
+        let all_triples = vec![triple];
+        let mut tx = self.store.begin();
+        for t in &all_triples { tx.insert(t.clone()); }
+        tx.commit().map_err(storage_err_to_status)?;
+
+        self.update_access_cache_if_needed(&all_triples);
+        info!("AddUserToGroup: user={:?} group={:?}", user_id, group_id);
+        Ok(Response::new(AddUserToGroupResponse {}))
+    }
+
+    /// Return the accessible nodes and type grants for a user.
+    async fn get_user_access(
+        &self,
+        request: Request<GetUserAccessRequest>,
+    ) -> Result<Response<GetUserAccessResponse>, Status> {
+        let req = request.into_inner();
+
+        let user_id = NodeId(uuid::Uuid::from_slice(&req.user_id)
+            .map_err(|_| Status::invalid_argument("user_id must be a 16-byte UUID"))?);
+        let user_key = user_id.to_string();
+
+        // Get expanded node set from the cache.
+        let node_ids: Vec<Vec<u8>> = {
+            let cache = self.access_cache.read().unwrap();
+            cache.get(&user_key)
+                .map(|s| s.iter().map(|id| id.as_bytes().to_vec()).collect())
+                .unwrap_or_default()
+        };
+
+        // Compute type grants by live scan (group memberships × HAS_ACCESS_TYPE).
+        let mut type_grants: Vec<String> = Vec::new();
+        let member_of = self.store.scan_by_subject_predicate(&user_id, BUILTIN_MEMBER_OF_PRED)
+            .map_err(storage_err_to_status)?;
+        for t in &member_of {
+            if let Triple::Relation { object: group_id, .. } = t {
+                let type_triples = self.store
+                    .scan_by_subject_predicate(group_id, BUILTIN_HAS_ACCESS_TYPE_PRED)
+                    .map_err(storage_err_to_status)?;
+                for tt in type_triples {
+                    if let Triple::Property { value: Value::Text(type_name), .. } = tt {
+                        if !type_grants.contains(&type_name) {
+                            type_grants.push(type_name);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Response::new(GetUserAccessResponse { node_ids, type_grants }))
     }
 }
 

@@ -2283,6 +2283,71 @@ For read-replica deployments, set `polargraph.replicaOf` in values to point at t
 
 ---
 
+## Access Control
+
+PolarGraph implements graph-native access control: permissions are stored as
+ordinary triples, enabling the same query and traversal primitives that work
+on domain data to also express policy.
+
+### Data model
+
+Two built-in node types (`User`, `Group`) and three built-in predicates form
+the access-control schema:
+
+| Triple pattern | Semantics |
+|---|---|
+| `(User) -[MEMBER_OF]-> (Group)` | User belongs to a group. |
+| `(Group) -[HAS_ACCESS]-> (Node)` | Group has explicit access to a specific node. |
+| `(Group) -[HAS_ACCESS_TYPE]-> type_name` | Group has access to *all* nodes of a registered type. |
+
+`HAS_ACCESS_TYPE` is stored as a `Triple::Property` (text value = the type
+name) rather than a relation, so no sentinel node is needed for type grants.
+
+### AccessCache
+
+At startup the server scans all `MEMBER_OF`, `HAS_ACCESS`, and
+`HAS_ACCESS_TYPE` triples and builds an in-memory
+`HashMap<String, HashSet<NodeId>>` keyed by `user_id.to_string()`.
+This cache is invalidated and rebuilt after any `Insert` that touches the AC
+predicates or `__type` (which changes the nodes covered by type-level grants).
+
+The cache contains the *expanded* node set: for each user, all nodes
+reachable via their group memberships (both direct and type-expanded grants)
+are stored together so access checks are a single `HashSet::contains` call.
+
+### Identity propagation
+
+Every query RPC (`Query`, `CypherQuery`, `VectorSeedQuery`,
+`SearchVectorFiltered`) accepts an optional `user_id: string` field.
+When non-empty the server looks up the access set for that user and post-filters
+result bindings to those whose bound `NodeId` values all appear in the set.
+Bindings with no `NodeId` values (e.g., scalar-only results) are retained.
+
+The user identity can also be supplied out-of-band via the
+`x-polargraph-user-id` gRPC metadata header (or `X-User-Id` HTTP header in
+the REST gateway). The proto field takes precedence.
+
+### Management RPCs
+
+| RPC | Description |
+|---|---|
+| `AddUserToGroup(user_id, group_id)` | Write `(User) -[MEMBER_OF]-> (Group)` and refresh the cache. |
+| `GrantAccess(group_id, target)` | Write `HAS_ACCESS` (node) or `HAS_ACCESS_TYPE` (type name) triple. |
+| `RevokeAccess(group_id, target)` | Close the `vt_end` of the matching access triple. |
+| `GetUserAccess(user_id)` | Return the expanded node ID set and type grants for a user. |
+
+REST equivalents: `POST /access/add-user`, `POST /access/grant`,
+`POST /access/revoke`, `GET /access/user/:user_id`.
+
+### Replica behaviour
+
+`AddUserToGroup`, `GrantAccess`, and `RevokeAccess` return
+`FAILED_PRECONDITION` on read replicas (write RPCs are always blocked). The
+cache on a replica is built from replicated triples at startup and refreshed
+on each WAL-applied batch that touches AC predicates.
+
+---
+
 ## Planned extensions
 
 | Feature | Notes |

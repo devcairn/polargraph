@@ -169,6 +169,10 @@ message QueryRequest {
     /// Optional open-transaction ID. When set, the query reads from the
     /// transaction's snapshot (including its uncommitted write buffer).
     string tx_id = 6;
+    /// Optional identity for access-control filtering. When set and the server
+    /// has an access cache entry for this user, results are filtered to nodes
+    /// the user is allowed to see. Empty string = no filtering.
+    string user_id = 7;
 }
 
 /// One satisfying assignment of all variables in the query.
@@ -265,6 +269,8 @@ message SearchVectorFilteredRequest {
     }
     /// HNSW exploration factor. 0 = use server default.
     uint32         ef    = 6;
+    /// Optional identity for access-control filtering.
+    string         user_id = 7;
 }
 
 message SearchVectorFilteredResponse {
@@ -486,6 +492,8 @@ message VectorSeedQueryRequest {
     }
     /// HNSW exploration factor. 0 = use server default.
     uint32              ef           = 9;
+    /// Optional identity for access-control filtering.
+    string              user_id      = 10;
 }
 
 message VectorSeedQueryResponse {
@@ -667,6 +675,8 @@ message CypherQueryRequest {
     uint32         ef       = 5;
     /// Optional open-transaction ID. Reads from the transaction's snapshot.
     string tx_id = 6;
+    /// Optional identity for access-control filtering.
+    string user_id = 7;
 }
 
 /// One result row from a CypherQuery.
@@ -787,6 +797,56 @@ message ListApiKeysResponse {
     /// never returned.
     repeated string key_prefixes = 1;
     uint32 total_keys = 2;
+}
+
+// ── Graph-native access control ───────────────────────────────────────────────
+
+/// Grant a group access to a specific node or all nodes of a given type.
+message GrantAccessRequest {
+    /// 16-byte UUID of the Group node.
+    bytes group_id = 1;
+    oneof target {
+        /// Grant access to a specific node (16-byte NodeId UUID).
+        bytes  node_id   = 2;
+        /// Grant access to all nodes of this registered type (e.g. "Service").
+        string type_name = 3;
+    }
+}
+
+message GrantAccessResponse {}
+
+/// Revoke a group's access grant (closes valid time on the HAS_ACCESS triple).
+message RevokeAccessRequest {
+    bytes group_id = 1;
+    oneof target {
+        bytes  node_id   = 2;
+        string type_name = 3;
+    }
+}
+
+message RevokeAccessResponse {}
+
+/// Add a user to a group (writes a MEMBER_OF triple).
+message AddUserToGroupRequest {
+    /// 16-byte UUID of the User node.
+    bytes user_id  = 1;
+    /// 16-byte UUID of the Group node.
+    bytes group_id = 2;
+}
+
+message AddUserToGroupResponse {}
+
+/// Return all nodes and type grants accessible to a user.
+message GetUserAccessRequest {
+    /// 16-byte UUID of the User node.
+    bytes user_id = 1;
+}
+
+message GetUserAccessResponse {
+    /// Node IDs of all explicitly accessible nodes (expanded from all groups).
+    repeated bytes  node_ids    = 1;
+    /// Type names whose all-nodes the user has access to.
+    repeated string type_grants = 2;
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -963,4 +1023,24 @@ service PolarGraphService {
     /// Never reveals full key values. Returns FAILED_PRECONDITION on a read
     /// replica.
     rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse);
+
+    /// Grant a group access to a specific node or all nodes of a given type.
+    /// Writes a HAS_ACCESS (or HAS_ACCESS_TYPE) triple and updates the
+    /// in-memory access cache immediately.
+    /// Returns FAILED_PRECONDITION on a read replica.
+    rpc GrantAccess(GrantAccessRequest) returns (GrantAccessResponse);
+
+    /// Revoke a group's access grant by closing the valid time of the
+    /// HAS_ACCESS / HAS_ACCESS_TYPE triple and updating the cache.
+    /// Returns FAILED_PRECONDITION on a read replica.
+    rpc RevokeAccess(RevokeAccessRequest) returns (RevokeAccessResponse);
+
+    /// Add a user to a group by writing a MEMBER_OF triple and updating
+    /// the in-memory access cache.
+    /// Returns FAILED_PRECONDITION on a read replica.
+    rpc AddUserToGroup(AddUserToGroupRequest) returns (AddUserToGroupResponse);
+
+    /// Return all node IDs and type grants accessible to a user, derived from
+    /// their group memberships and HAS_ACCESS / HAS_ACCESS_TYPE triples.
+    rpc GetUserAccess(GetUserAccessRequest) returns (GetUserAccessResponse);
 }

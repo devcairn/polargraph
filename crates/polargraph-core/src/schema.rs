@@ -227,6 +227,54 @@ impl EdgeTypeDef {
     }
 }
 
+// ── Built-in access-control types and predicates ─────────────────────────────
+
+/// The built-in node type name for identity principals.
+pub const BUILTIN_USER_TYPE: &str = "User";
+/// The built-in node type name for access-control groups.
+pub const BUILTIN_GROUP_TYPE: &str = "Group";
+/// Predicate: `(User) -[MEMBER_OF]-> (Group)`.
+pub const BUILTIN_MEMBER_OF_PRED: &str = "MEMBER_OF";
+/// Predicate: `(Group) -[HAS_ACCESS]-> (Node)` — explicit node grant.
+pub const BUILTIN_HAS_ACCESS_PRED: &str = "HAS_ACCESS";
+/// Predicate: `(Group) -[HAS_ACCESS_TYPE]-> type_name_text` — type-level grant.
+pub const BUILTIN_HAS_ACCESS_TYPE_PRED: &str = "HAS_ACCESS_TYPE";
+
+/// Returns the built-in node type definitions for `User` and `Group`.
+///
+/// These definitions are registered at server startup if not already present.
+pub fn builtin_node_types() -> Vec<NodeTypeDef> {
+    vec![
+        NodeTypeDef::new(BUILTIN_USER_TYPE, vec![
+            FieldDef::optional("display_name", FieldKind::Text),
+        ]),
+        NodeTypeDef::new(BUILTIN_GROUP_TYPE, vec![
+            FieldDef::required("name", FieldKind::Text),
+        ]),
+    ]
+}
+
+/// Returns the built-in edge type definitions for `MEMBER_OF` and `HAS_ACCESS`.
+///
+/// - `MEMBER_OF`: `(User) -[MEMBER_OF]-> (Group)`.
+/// - `HAS_ACCESS`: `(Group) -[HAS_ACCESS]-> (Node)` — explicit node grant.
+pub fn builtin_edge_types() -> Vec<EdgeTypeDef> {
+    vec![
+        EdgeTypeDef::new(
+            BUILTIN_MEMBER_OF_PRED,
+            Some(BUILTIN_USER_TYPE),
+            Some(BUILTIN_GROUP_TYPE),
+            vec![],
+        ),
+        EdgeTypeDef::new(
+            BUILTIN_HAS_ACCESS_PRED,
+            Some(BUILTIN_GROUP_TYPE),
+            None::<&str>,
+            vec![],
+        ),
+    ]
+}
+
 /// Policy controlling bitemporal data retention.
 ///
 /// Any triple matching either condition is eligible for deletion by

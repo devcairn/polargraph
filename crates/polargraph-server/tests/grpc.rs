@@ -4872,3 +4872,227 @@ async fn edge_annotation_in_insert_batch() {
     assert!(predicates.contains("weight"));
     assert!(predicates.contains("source"));
 }
+
+// ── Access control tests ──────────────────────────────────────────────────────
+
+use polargraph_server::proto::{
+    grant_access_request::Target as GrantTarget,
+    revoke_access_request::Target as RevokeTarget,
+};
+
+/// add_user_to_group writes a MEMBER_OF triple; get_user_access returns the
+/// expanded node set.
+#[tokio::test]
+async fn add_user_to_group_and_grant_access_visible_in_get_user_access() {
+    let (svc, _dir) = open();
+    let (core_user, _)  = new_node();
+    let (core_group, _) = new_node();
+    let (core_node, _)  = new_node();
+
+    // Add user to group.
+    svc.add_user_to_group(Request::new(AddUserToGroupRequest {
+        user_id:  core_user.as_bytes().to_vec(),
+        group_id: core_group.as_bytes().to_vec(),
+    }))
+    .await
+    .unwrap();
+
+    // Grant group access to a node.
+    svc.grant_access(Request::new(GrantAccessRequest {
+        group_id: core_group.as_bytes().to_vec(),
+        target: Some(GrantTarget::NodeId(core_node.as_bytes().to_vec())),
+    }))
+    .await
+    .unwrap();
+
+    // User should now have the node in their access set.
+    let resp = svc
+        .get_user_access(Request::new(GetUserAccessRequest {
+            user_id: core_user.as_bytes().to_vec(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let ids: std::collections::HashSet<Vec<u8>> = resp.node_ids.into_iter().collect();
+    assert!(
+        ids.contains(&core_node.as_bytes().to_vec()),
+        "expected node_a in user access set"
+    );
+}
+
+/// grant_access with type_name appears in GetUserAccess.type_grants.
+#[tokio::test]
+async fn grant_access_type_name_appears_in_type_grants() {
+    let (svc, _dir) = open();
+    let (core_user, _)  = new_node();
+    let (core_group, _) = new_node();
+
+    svc.add_user_to_group(Request::new(AddUserToGroupRequest {
+        user_id:  core_user.as_bytes().to_vec(),
+        group_id: core_group.as_bytes().to_vec(),
+    }))
+    .await
+    .unwrap();
+
+    svc.grant_access(Request::new(GrantAccessRequest {
+        group_id: core_group.as_bytes().to_vec(),
+        target: Some(GrantTarget::TypeName("Service".to_string())),
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .get_user_access(Request::new(GetUserAccessRequest {
+            user_id: core_user.as_bytes().to_vec(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(
+        resp.type_grants.contains(&"Service".to_string()),
+        "expected 'Service' in type_grants, got {:?}",
+        resp.type_grants
+    );
+}
+
+/// revoke_access removes the node from the user's access set.
+#[tokio::test]
+async fn revoke_access_removes_node_from_access_set() {
+    let (svc, _dir) = open();
+    let (core_user, _)  = new_node();
+    let (core_group, _) = new_node();
+    let (core_node, _)  = new_node();
+
+    svc.add_user_to_group(Request::new(AddUserToGroupRequest {
+        user_id:  core_user.as_bytes().to_vec(),
+        group_id: core_group.as_bytes().to_vec(),
+    }))
+    .await
+    .unwrap();
+
+    svc.grant_access(Request::new(GrantAccessRequest {
+        group_id: core_group.as_bytes().to_vec(),
+        target: Some(GrantTarget::NodeId(core_node.as_bytes().to_vec())),
+    }))
+    .await
+    .unwrap();
+
+    // Revoke the grant.
+    svc.revoke_access(Request::new(RevokeAccessRequest {
+        group_id: core_group.as_bytes().to_vec(),
+        target: Some(RevokeTarget::NodeId(core_node.as_bytes().to_vec())),
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .get_user_access(Request::new(GetUserAccessRequest {
+            user_id: core_user.as_bytes().to_vec(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let ids: std::collections::HashSet<Vec<u8>> = resp.node_ids.into_iter().collect();
+    assert!(
+        !ids.contains(&core_node.as_bytes().to_vec()),
+        "node should have been removed after revoke"
+    );
+}
+
+/// query results are filtered by user_id when the user has a non-empty access set.
+///
+/// Uses `any()` for the object so property triples bind only `?s` (the subject).
+/// `extend_bindings` skips the object slot for Var when the triple is a Property,
+/// so we must use `any()` to avoid the row being dropped entirely.
+#[tokio::test]
+async fn query_filtered_by_user_id() {
+    let (svc, _dir) = open();
+    let (core_user, _)  = new_node();
+    let (core_group, _) = new_node();
+    let (core_allowed, proto_allowed) = new_node();
+    let (_, proto_hidden) = new_node();
+
+    // Insert both nodes as subjects of a property predicate.
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            text_prop(proto_allowed.clone(), "label", "allowed"),
+            text_prop(proto_hidden.clone(),  "label", "hidden"),
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    // Grant user access to only the allowed node.
+    svc.add_user_to_group(Request::new(AddUserToGroupRequest {
+        user_id:  core_user.as_bytes().to_vec(),
+        group_id: core_group.as_bytes().to_vec(),
+    }))
+    .await
+    .unwrap();
+
+    svc.grant_access(Request::new(GrantAccessRequest {
+        group_id: core_group.as_bytes().to_vec(),
+        target: Some(GrantTarget::NodeId(core_allowed.as_bytes().to_vec())),
+    }))
+    .await
+    .unwrap();
+
+    // Query with user_id set. Use any() for object so property triples bind ?s.
+    let resp = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(var("s"), "label", any())],
+            user_id: core_user.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Only the allowed node's binding should survive.
+    let subjects: Vec<_> = resp
+        .bindings
+        .iter()
+        .filter_map(|r| r.vars.get("s").cloned())
+        .collect();
+
+    assert_eq!(subjects.len(), 1, "expected exactly one result after filtering");
+    assert_eq!(
+        subjects[0].bytes,
+        core_allowed.as_bytes().to_vec(),
+        "hidden node should have been filtered out"
+    );
+}
+
+/// query without user_id returns all results (no filtering).
+#[tokio::test]
+async fn query_without_user_id_returns_all() {
+    let (svc, _dir) = open();
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            text_prop(a.clone(), "color", "red"),
+            text_prop(b.clone(), "color", "blue"),
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(var("s"), "color", any())],
+            user_id: String::new(),  // no user_id → no filtering
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.bindings.len(), 2, "expected both nodes without access filter");
+}

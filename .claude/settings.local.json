@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo test *)",
+      "Bash(brew install *)",
+      "Bash(protoc --version)",
+      "Bash(cargo build *)",
+      "Bash(rm -rf /tmp/polargraph-test)",
+      "Bash(mkdir -p /tmp/polargraph-test)",
+      "Bash(./target/release/polargraphd --data-dir /tmp/polargraph-test --listen 127.0.0.1:50051)",
+      "Bash(echo \"PID=$!\")",
+      "Bash(grpcurl -plaintext -import-path '/Users/mark/Documents/Claude/Projects/PolarGraph DB Engine/crates/polargraph-server/proto' -proto polargraph.proto -d '{ *)",
+      "Bash(pip3 install *)",
+      "Read(//private/tmp/**)",
+      "Bash(python3 -m grpc_tools.protoc --python_out=. --grpc_python_out=. -I '/Users/mark/Documents/Claude/Projects/PolarGraph DB Engine/crates/polargraph-server/proto' polargraph.proto)",
+      "Bash(ls /tmp/polargraph*pb2*)",
+      "Bash(cargo check *)",
+      "Bash(rm -rf /tmp/pg-bench-run)",
+      "Bash(cargo run *)",
+      "Bash(cargo bench *)",
+      "Bash(pkill -f polargraphd)",
+      "Bash(ls /Users/mark/.claude/projects/)",
+      "Bash(mkdir -p \"/Users/mark/.claude/projects/-Users-mark-Documents-Claude-Projects-PolarGraph-DB-Engine/memory\")",
+      "Bash(cat /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rocksdb-0.22.0/src/backup.rs)",
+      "Bash(find ~/.cargo/registry -name \"*.rs\" -path \"*/rocksdb-0.22*\" | xargs grep -l \"SstFileWriter\" 2>/dev/null | head -5)",
+      "Bash(find ~/.cargo/registry/src -name \"db.rs\" -path \"*/rocksdb-0.22*\" 2>/dev/null | head -5)",
+      "Bash(grep -A3 \"^name = \\\\\"http\\\\\"$\" \"/Users/mark/Documents/Claude/Projects/PolarGraph DB Engine/Cargo.lock\")",
+      "Bash(grep -r \"to_http\\\\|fn to_http\" ~/.cargo/registry/src/*/tonic-0.11.0/src/status.rs 2>/dev/null | head -10)",
+      "Bash(grep -r \"BoxBody\\\\|pub type Box\" ~/.cargo/registry/src/*/tonic-0.11.0/src/body.rs 2>/dev/null | head -20)",
+      "Bash(git push *)",
+      "Bash(cargo clippy *)"
+    ]
+  }
+}

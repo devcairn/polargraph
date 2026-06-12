@@ -69,6 +69,17 @@ impl tonic::service::Interceptor for AuthInterceptor {
     }
 }
 
+/// Attach an `x-polargraph-user-id` metadata header to a gRPC request when
+/// `user_id` is non-empty.
+fn attach_user_id<T>(mut req: tonic::Request<T>, user_id: &str) -> tonic::Request<T> {
+    if !user_id.is_empty() {
+        if let Ok(val) = user_id.parse::<MetadataValue<tonic::metadata::Ascii>>() {
+            req.metadata_mut().insert("x-polargraph-user-id", val);
+        }
+    }
+    req
+}
+
 type GrpcClient = PolarGraphServiceClient<
     tonic::service::interceptor::InterceptedService<Channel, AuthInterceptor>,
 >;
@@ -115,6 +126,10 @@ struct QueryBody {
     /// Open transaction ID to read from (write-your-own-reads overlay).
     #[serde(default)]
     tx_id: Option<String>,
+    /// Optional user identity for access-control filtering.
+    /// Also forwarded from the `X-User-Id` HTTP header when this field is absent.
+    #[serde(default)]
+    user_id: Option<String>,
 }
 
 /// A scalar property to attach to an edge at insert time.
@@ -361,6 +376,7 @@ fn parse_patterns(raw: &[String]) -> Result<Vec<proto::VarPattern>, Response> {
 
 async fn handle_query(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<QueryBody>,
 ) -> Response {
     let patterns = match parse_patterns(&body.patterns) {
@@ -376,6 +392,11 @@ async fn handle_query(
         Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
     };
 
+    // Resolve user_id: prefer JSON body field, fall back to X-User-Id header.
+    let user_id = body.user_id.clone()
+        .or_else(|| headers.get("x-user-id").and_then(|v| v.to_str().ok()).map(str::to_string))
+        .unwrap_or_default();
+
     let req = proto::QueryRequest {
         patterns,
         rules,
@@ -383,11 +404,13 @@ async fn handle_query(
         as_of_valid_time: body.as_of_valid_time.unwrap_or(0),
         as_of_tx_time: body.as_of_tx_time.unwrap_or(0),
         tx_id: body.tx_id.unwrap_or_default(),
+        user_id: user_id.clone(),
         ..Default::default()
     };
 
     let mut client = state.client.clone();
-    let resp = match client.query(tonic::Request::new(req)).await {
+    let grpc_req = attach_user_id(tonic::Request::new(req), &user_id);
+    let resp = match client.query(grpc_req).await {
         Ok(r) => r.into_inner(),
         Err(e) => return grpc_error(e),
     };
@@ -612,6 +635,9 @@ struct CypherBody {
     /// Open transaction ID to read from.
     #[serde(default)]
     tx_id: Option<String>,
+    /// Optional user identity for access-control filtering.
+    #[serde(default)]
+    user_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -624,8 +650,13 @@ struct CypherWriteBody {
 
 async fn handle_cypher(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<CypherBody>,
 ) -> Response {
+    let user_id = body.user_id.clone()
+        .or_else(|| headers.get("x-user-id").and_then(|v| v.to_str().ok()).map(str::to_string))
+        .unwrap_or_default();
+
     let req = proto::CypherQueryRequest {
         cypher: body.cypher,
         as_of_valid_time: body.as_of_valid_time.unwrap_or(0),
@@ -633,11 +664,13 @@ async fn handle_cypher(
         vector: body.vector,
         ef: body.ef,
         tx_id: body.tx_id.unwrap_or_default(),
+        user_id: user_id.clone(),
         ..Default::default()
     };
 
     let mut client = state.client.clone();
-    let resp = match client.cypher_query(tonic::Request::new(req)).await {
+    let grpc_req = attach_user_id(tonic::Request::new(req), &user_id);
+    let resp = match client.cypher_query(grpc_req).await {
         Ok(r) => r.into_inner(),
         Err(e) => return grpc_error(e),
     };
@@ -1066,6 +1099,145 @@ async fn handle_get_edge_annotations(
     }
 }
 
+// ── POST /access/grant ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct GrantAccessBody {
+    /// UUID string of the Group node.
+    group_id: String,
+    /// UUID string of the target node (for a direct grant).
+    node_id: Option<String>,
+    /// Type name string (for a type-level grant).
+    type_name: Option<String>,
+}
+
+async fn handle_grant_access(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<GrantAccessBody>,
+) -> Response {
+    let group_id = match uuid_string_to_node_id(&body.group_id) {
+        Ok(n) => n.bytes,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    };
+
+    let target = if let Some(ref nid_str) = body.node_id {
+        match uuid_string_to_node_id(nid_str) {
+            Ok(n) => proto::grant_access_request::Target::NodeId(n.bytes),
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+        }
+    } else if let Some(ref tn) = body.type_name {
+        proto::grant_access_request::Target::TypeName(tn.clone())
+    } else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "node_id or type_name must be set" }))).into_response();
+    };
+
+    let req = proto::GrantAccessRequest { group_id, target: Some(target) };
+    let mut client = state.client.clone();
+    match client.grant_access(tonic::Request::new(req)).await {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+// ── POST /access/revoke ───────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct RevokeAccessBody {
+    group_id: String,
+    node_id: Option<String>,
+    type_name: Option<String>,
+}
+
+async fn handle_revoke_access(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RevokeAccessBody>,
+) -> Response {
+    let group_id = match uuid_string_to_node_id(&body.group_id) {
+        Ok(n) => n.bytes,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    };
+
+    let target = if let Some(ref nid_str) = body.node_id {
+        match uuid_string_to_node_id(nid_str) {
+            Ok(n) => proto::revoke_access_request::Target::NodeId(n.bytes),
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+        }
+    } else if let Some(ref tn) = body.type_name {
+        proto::revoke_access_request::Target::TypeName(tn.clone())
+    } else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "node_id or type_name must be set" }))).into_response();
+    };
+
+    let req = proto::RevokeAccessRequest { group_id, target: Some(target) };
+    let mut client = state.client.clone();
+    match client.revoke_access(tonic::Request::new(req)).await {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+// ── POST /access/add-user ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct AddUserToGroupBody {
+    user_id: String,
+    group_id: String,
+}
+
+async fn handle_add_user_to_group(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AddUserToGroupBody>,
+) -> Response {
+    let user_id = match uuid_string_to_node_id(&body.user_id) {
+        Ok(n) => n.bytes,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    };
+    let group_id = match uuid_string_to_node_id(&body.group_id) {
+        Ok(n) => n.bytes,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    };
+
+    let req = proto::AddUserToGroupRequest { user_id, group_id };
+    let mut client = state.client.clone();
+    match client.add_user_to_group(tonic::Request::new(req)).await {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+// ── GET /access/user/:user_id ─────────────────────────────────────────────────
+
+async fn handle_get_user_access(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(user_id_str): axum::extract::Path<String>,
+) -> Response {
+    let user_id = match uuid_string_to_node_id(&user_id_str) {
+        Ok(n) => n.bytes,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    };
+
+    let req = proto::GetUserAccessRequest { user_id };
+    let mut client = state.client.clone();
+    match client.get_user_access(tonic::Request::new(req)).await {
+        Ok(r) => {
+            let inner = r.into_inner();
+            let node_ids: Vec<String> = inner.node_ids
+                .iter()
+                .filter(|b| b.len() == 16)
+                .map(|b| {
+                    let arr: [u8; 16] = b[..16].try_into().unwrap_or([0u8; 16]);
+                    Uuid::from_bytes(arr).to_string()
+                })
+                .collect();
+            Json(serde_json::json!({
+                "node_ids": node_ids,
+                "type_grants": inner.type_grants,
+            })).into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
 // ── GET /stats ────────────────────────────────────────────────────────────────
 
 async fn handle_stats(State(state): State<Arc<AppState>>) -> Response {
@@ -1134,6 +1306,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/tx/rollback", post(handle_tx_rollback))
         .route("/edge-annotations", post(handle_insert_edge_annotations))
         .route("/edge-annotations/:edge_id", get(handle_get_edge_annotations))
+        .route("/access/grant", post(handle_grant_access))
+        .route("/access/revoke", post(handle_revoke_access))
+        .route("/access/add-user", post(handle_add_user_to_group))
+        .route("/access/user/:user_id", get(handle_get_user_access))
         .with_state(state);
 
     info!(addr = %args.listen, upstream = %args.upstream, "polargraph-rest listening");
@@ -1214,5 +1390,29 @@ mod tests {
         assert_eq!(grpc_to_http_status(Code::DeadlineExceeded), StatusCode::REQUEST_TIMEOUT);
         assert_eq!(grpc_to_http_status(Code::InvalidArgument), StatusCode::BAD_REQUEST);
         assert_eq!(grpc_to_http_status(Code::Internal), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// attach_user_id sets the x-polargraph-user-id metadata header for a
+    /// non-empty user_id and leaves the request unmodified for an empty one.
+    #[test]
+    fn attach_user_id_sets_metadata_when_non_empty() {
+        let req = tonic::Request::new(());
+        let req = attach_user_id(req, "alice-uuid-123");
+        assert_eq!(
+            req.metadata().get("x-polargraph-user-id")
+                .map(|v| v.to_str().unwrap()),
+            Some("alice-uuid-123"),
+            "metadata header should be set for non-empty user_id"
+        );
+    }
+
+    #[test]
+    fn attach_user_id_is_noop_for_empty_string() {
+        let req = tonic::Request::new(());
+        let req = attach_user_id(req, "");
+        assert!(
+            req.metadata().get("x-polargraph-user-id").is_none(),
+            "no metadata header should be set for empty user_id"
+        );
     }
 }
