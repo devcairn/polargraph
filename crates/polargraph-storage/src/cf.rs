@@ -18,4 +18,19 @@ pub const HNSW: &str = "hnsw";
 /// Key layout: [trigram(3)][pred_id LE(4)][subject(16)] = 23 bytes, value empty.
 pub const TRI: &str = "tri";
 
-pub const ALL: &[&str] = &[SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI];
+/// RDF-star edge-property annotations (scalar values keyed by edge).
+/// Key layout: [edge_id(16)][pred_id BE(4)][tt BE(8)] = 28 bytes.
+/// Value: same codec as Property triple (DISC_PROPERTY + temporal + json_value).
+pub const EPA: &str = "epa";
+
+/// RDF-star edge-relation annotations (node references keyed by edge).
+/// Key layout: [edge_id(16)][pred_id BE(4)][obj_id(16)][tt BE(8)] = 44 bytes.
+/// Value: [vt_start BE(8)][vt_end BE(8)] = 16 bytes.
+pub const EPO: &str = "epo";
+
+/// Predicate-first secondary index for edge property annotations.
+/// Key layout: [pred_id BE(4)][edge_id(16)][tt BE(8)] = 28 bytes.
+/// Value: same bytes as the corresponding EPA entry.
+pub const PEA: &str = "pea";
+
+pub const ALL: &[&str] = &[SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, EPA, EPO, PEA];

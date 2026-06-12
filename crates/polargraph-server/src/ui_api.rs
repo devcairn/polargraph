@@ -616,6 +616,7 @@ async fn api_search(
             if let Some(ref allowed) = type_subjects {
                 let subj = match t {
                     Triple::Relation { subject, .. } | Triple::Property { subject, .. } => subject,
+                    Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => return false,
                 };
                 if !allowed.contains(subj) {
                     return false;
@@ -631,6 +632,7 @@ async fn api_search(
                         || predicate.0.to_lowercase().contains(&q)
                 }
                 Triple::Property { predicate, .. } => predicate.0.to_lowercase().contains(&q),
+                Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => false,
             }
         })
         .take(limit)
@@ -644,6 +646,16 @@ async fn api_search(
                 subject: subject.to_string(),
                 predicate: predicate.0.clone(),
                 object: format_value(&value),
+            },
+            Triple::EdgeProperty { edge, predicate, value, .. } => SearchHit {
+                subject: edge.0.to_string(),
+                predicate: predicate.0.clone(),
+                object: format_value(&value),
+            },
+            Triple::EdgeRelation { edge, predicate, object, .. } => SearchHit {
+                subject: edge.0.to_string(),
+                predicate: predicate.0.clone(),
+                object: object.to_string(),
             },
         })
         .collect();

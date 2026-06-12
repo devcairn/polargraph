@@ -4,7 +4,7 @@
 # Stage 2 (runtime): slim image that ships only the binary.
 
 # ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM rust:1.78-bookworm AS builder
+FROM rust:1-bookworm AS builder
 
 WORKDIR /build
 
@@ -27,16 +27,24 @@ COPY crates/polargraph-query/Cargo.toml     crates/polargraph-query/Cargo.toml
 COPY crates/polargraph-server/Cargo.toml    crates/polargraph-server/Cargo.toml
 COPY crates/polargraph-server/build.rs      crates/polargraph-server/build.rs
 COPY crates/polargraph-server/proto/        crates/polargraph-server/proto/
+COPY crates/polargraph-bench/Cargo.toml     crates/polargraph-bench/Cargo.toml
+COPY crates/polargraph-import/Cargo.toml    crates/polargraph-import/Cargo.toml
+COPY crates/polargraph-rest/Cargo.toml      crates/polargraph-rest/Cargo.toml
+COPY crates/polargraph-rest/build.rs        crates/polargraph-rest/build.rs
 
 # Stub out every crate's source so `cargo fetch` / dependency compilation
 # succeeds without the real source files.
-RUN for crate in polargraph-core polargraph-storage polargraph-query; do \
+RUN for crate in polargraph-core polargraph-storage polargraph-query polargraph-rest; do \
         mkdir -p crates/$crate/src && \
         printf 'pub fn _stub() {}' > crates/$crate/src/lib.rs; \
     done && \
-    mkdir -p crates/polargraph-server/src && \
-    printf 'pub fn _stub() {}' > crates/polargraph-server/src/lib.rs && \
-    printf 'fn main() {}'      > crates/polargraph-server/src/main.rs
+    for crate in polargraph-server polargraph-bench polargraph-import; do \
+        mkdir -p crates/$crate/src && \
+        printf 'pub fn _stub() {}' > crates/$crate/src/lib.rs && \
+        printf 'fn main() {}'      > crates/$crate/src/main.rs; \
+    done && \
+    mkdir -p crates/polargraph-storage/benches && \
+    printf 'fn main() {}'  > crates/polargraph-storage/benches/storage.rs
 
 # Pre-compile dependencies (cached as long as Cargo.toml/lock don't change).
 RUN cargo build --release -p polargraph-server 2>&1 || true
@@ -59,6 +67,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgcc-s1 \
         libstdc++6 \
         ca-certificates \
+        wget \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

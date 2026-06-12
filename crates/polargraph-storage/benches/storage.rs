@@ -11,6 +11,7 @@ use criterion::{
 };
 use polargraph_core::{
     id::{EdgeId, NodeId},
+    schema::StorageMode,
     temporal::{BiTemporalRange, Timestamp},
     triple::{Predicate, Triple},
     value::Value,
@@ -160,7 +161,7 @@ fn bench_hnsw_insert(c: &mut Criterion) {
             // Seed with a few nodes so the index structure is non-trivial.
             for i in 0u64..20 {
                 store
-                    .insert_vector("bench", NodeId::new(), lcg_vec(i * 137, dims))
+                    .insert_vector("bench", NodeId::new(), lcg_vec(i * 137, dims), StorageMode::Memory)
                     .unwrap();
             }
             let mut seed = 999u64;
@@ -168,7 +169,7 @@ fn bench_hnsw_insert(c: &mut Criterion) {
                 seed = seed.wrapping_add(1);
                 let id = NodeId::new();
                 let vec = lcg_vec(seed, dims);
-                std::hint::black_box(store.insert_vector("bench", id, vec).unwrap())
+                std::hint::black_box(store.insert_vector("bench", id, vec, StorageMode::Memory).unwrap())
             });
             drop(dir);
         });
@@ -188,7 +189,7 @@ fn bench_hnsw_search(c: &mut Criterion) {
             let items: Vec<(NodeId, Vec<f32>)> = (0..n as u64)
                 .map(|i| (NodeId::new(), lcg_vec(i, dims)))
                 .collect();
-            store.batch_insert_vectors("bench", &items).0;
+            store.batch_insert_vectors("bench", &items, StorageMode::Memory).0;
             let query = lcg_vec(u64::MAX, dims);
             b.iter(|| {
                 std::hint::black_box(store.search_vector("bench", query.clone(), 10))
@@ -216,7 +217,7 @@ fn bench_hnsw_recall(c: &mut Criterion) {
         let items: Vec<(NodeId, Vec<f32>)> = (0..N as u64)
             .map(|i| (NodeId::new(), lcg_vec(i, DIMS)))
             .collect();
-        store.batch_insert_vectors("bench", &items).0;
+        store.batch_insert_vectors("bench", &items, StorageMode::Memory).0;
 
         let mut q_seed = 0xdeadbeef_u64;
         b.iter(|| {
@@ -267,7 +268,7 @@ fn bench_filtered_search(c: &mut Criterion) {
         .map(|i| {
             let id = NodeId::new();
             store
-                .insert_vector("bench", id, lcg_vec(i, DIMS))
+                .insert_vector("bench", id, lcg_vec(i, DIMS), StorageMode::Memory)
                 .unwrap();
             id
         })
@@ -300,9 +301,109 @@ fn bench_filtered_search(c: &mut Criterion) {
     drop(dir);
 }
 
+// ── annotation benchmarks ─────────────────────────────────────────────────────
+
+fn bench_annotation_write(c: &mut Criterion) {
+    // Measure: insert N relations each with M EdgeProperty annotations.
+    let mut group = c.benchmark_group("annotation_write");
+
+    for &(n, m) in &[(100usize, 5usize), (100, 20)] {
+        let label = format!("{n}rels_{m}ann");
+        group.throughput(Throughput::Elements((n * m) as u64));
+        group.bench_function(&label, |b| {
+            b.iter_batched(
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = TripleStore::open(dir.path()).unwrap();
+                    let nodes: Vec<(NodeId, NodeId, EdgeId)> = (0..n)
+                        .map(|_| (NodeId::new(), NodeId::new(), EdgeId::new()))
+                        .collect();
+                    (dir, store, nodes)
+                },
+                |(_dir, store, nodes)| {
+                    let mut tx = store.begin();
+                    for (a, b, edge_id) in &nodes {
+                        tx.insert(Triple::Relation {
+                            subject: *a,
+                            predicate: polargraph_core::triple::Predicate::new("relates"),
+                            object: *b,
+                            edge_id: *edge_id,
+                            temporal: BiTemporalRange::assert_now(Timestamp::now()),
+                        });
+                        for i in 0..m {
+                            tx.insert(Triple::EdgeProperty {
+                                edge: *edge_id,
+                                predicate: polargraph_core::triple::Predicate::new("weight"),
+                                value: polargraph_core::value::Value::Float(i as f64 * 0.1),
+                                temporal: BiTemporalRange::assert_now(Timestamp::now()),
+                            });
+                        }
+                    }
+                    std::hint::black_box(tx.commit().unwrap())
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_annotation_scan(c: &mut Criterion) {
+    // EPA scan: point lookup by edge_id vs PEA scan by predicate.
+    const N: usize = 1_000;
+    const M: usize = 5; // annotations per edge
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+
+    let edge_ids: Vec<EdgeId> = (0..N).map(|_| EdgeId::new()).collect();
+    let mut tx = store.begin();
+    for &eid in &edge_ids {
+        let a = NodeId::new();
+        let b = NodeId::new();
+        tx.insert(Triple::Relation {
+            subject: a,
+            predicate: polargraph_core::triple::Predicate::new("relates"),
+            object: b,
+            edge_id: eid,
+            temporal: BiTemporalRange::assert_now(Timestamp::now()),
+        });
+        for i in 0..M {
+            tx.insert(Triple::EdgeProperty {
+                edge: eid,
+                predicate: polargraph_core::triple::Predicate::new(&format!("prop{i}")),
+                value: polargraph_core::value::Value::Float(i as f64),
+                temporal: BiTemporalRange::assert_now(Timestamp::now()),
+            });
+        }
+    }
+    let ts = tx.commit().unwrap();
+
+    let mut idx = 0usize;
+    let mut group = c.benchmark_group("annotation_scan");
+
+    group.bench_function("scan_by_edge_1k_edges", |b| {
+        b.iter(|| {
+            let eid = edge_ids[idx % N];
+            idx = idx.wrapping_add(1);
+            std::hint::black_box(store.scan_edge_annotations(eid, ts).unwrap())
+        });
+    });
+
+    group.bench_function("scan_by_predicate_1k_edges", |b| {
+        b.iter(|| {
+            std::hint::black_box(store.scan_annotations_by_predicate("prop0", ts).unwrap())
+        });
+    });
+
+    group.finish();
+    drop(dir);
+}
+
 // ── criterion wiring ──────────────────────────────────────────────────────────
 
 criterion_group!(writes, bench_triple_writes);
 criterion_group!(queries, bench_pattern_query);
 criterion_group!(vector, bench_hnsw_insert, bench_hnsw_search, bench_hnsw_recall, bench_filtered_search);
-criterion_main!(writes, queries, vector);
+criterion_group!(annotations, bench_annotation_write, bench_annotation_scan);
+criterion_main!(writes, queries, vector, annotations);

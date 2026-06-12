@@ -7,6 +7,7 @@
 
 use crate::proto::{
     self,
+    edge_annotation::Value as AnnotationValueProto,
     triple::Kind as TripleKind,
     term::Kind as TermKind,
     value::Kind as ValueKind,
@@ -19,6 +20,7 @@ use polargraph_core::{
     value::Value,
 };
 use polargraph_query::datalog::{Bindings, Rule, Term, VarPattern};
+use polargraph_storage::{EdgeAnnotation, EdgeAnnotationValue};
 use tonic::Status;
 use uuid::Uuid;
 
@@ -180,7 +182,7 @@ pub fn var_pattern_from_proto(proto: &proto::VarPattern) -> Result<VarPattern, S
     };
     let predicate = if proto.predicate.is_empty() { None } else { Some(proto.predicate.clone()) };
 
-    Ok(VarPattern { subject, predicate, object })
+    Ok(VarPattern { subject, predicate, object, edge_var: None, max_hops: None })
 }
 
 // ── Bindings ──────────────────────────────────────────────────────────────────
@@ -433,6 +435,66 @@ pub fn edge_type_def_to_proto(def: &EdgeTypeDef) -> proto::EdgeTypeDef {
                 required: f.required,
             })
             .collect(),
+    }
+}
+
+// ── RDF-star edge annotations ─────────────────────────────────────────────────
+
+/// Convert a proto `EdgeAnnotation` to a Rust `Triple` (EdgeProperty or EdgeRelation).
+///
+/// Returns the triple ready to be buffered into a `Transaction`.
+pub fn edge_annotation_from_proto(
+    proto: &proto::EdgeAnnotation,
+) -> Result<Triple, Status> {
+    let edge_bytes: [u8; 16] = proto
+        .edge_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| Status::invalid_argument("edge_id must be exactly 16 bytes"))?;
+    let edge = EdgeId(uuid::Uuid::from_bytes(edge_bytes));
+
+    if proto.predicate.is_empty() {
+        return Err(Status::invalid_argument("edge annotation predicate must not be empty"));
+    }
+    let predicate = Predicate::new(proto.predicate.clone());
+    let temporal = BiTemporalRange::assert_now(Timestamp::now());
+
+    match &proto.value {
+        Some(AnnotationValueProto::NodeId(bytes)) => {
+            let node_bytes: [u8; 16] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| Status::invalid_argument("annotation node_id must be exactly 16 bytes"))?;
+            let object = NodeId(uuid::Uuid::from_bytes(node_bytes));
+            Ok(Triple::EdgeRelation { edge, predicate, object, temporal })
+        }
+        Some(AnnotationValueProto::Scalar(v)) => {
+            let value = value_from_proto(v)?;
+            Ok(Triple::EdgeProperty { edge, predicate, value, temporal })
+        }
+        None => Err(Status::invalid_argument("edge annotation must have a value (scalar or node_id)")),
+    }
+}
+
+/// Convert a storage `EdgeAnnotation` to its proto representation.
+///
+/// `edge_id_bytes` must be the 16-byte UUID of the edge being annotated.
+pub fn edge_annotation_to_proto(
+    annotation: &EdgeAnnotation,
+    edge_id_bytes: Vec<u8>,
+) -> proto::EdgeAnnotation {
+    let value = match &annotation.value {
+        EdgeAnnotationValue::Scalar(v) => {
+            AnnotationValueProto::Scalar(value_to_proto(v))
+        }
+        EdgeAnnotationValue::Node(node_id) => {
+            AnnotationValueProto::NodeId(node_id.as_bytes().to_vec())
+        }
+    };
+    proto::EdgeAnnotation {
+        edge_id: edge_id_bytes,
+        predicate: annotation.predicate.0.clone(),
+        value: Some(value),
     }
 }
 

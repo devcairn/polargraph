@@ -4714,3 +4714,161 @@ async fn ui_keys_add_and_revoke() {
 
     let _ = shutdown.send(());
 }
+
+// ── Edge annotation (RDF-star) tests ─────────────────────────────────────────
+
+use polargraph_server::proto::{
+    EdgeAnnotation, GetEdgeAnnotationsRequest,
+    edge_annotation::Value as AnnotationValue,
+};
+
+/// Insert a relation and return its edge UUID bytes (from InsertResponse).
+async fn insert_relation_with_known_edge(
+    svc: &PolarGraphServer,
+    subject: NodeId,
+    pred: &str,
+    object: NodeId,
+) -> Vec<u8> {
+    let req = InsertRequest {
+        triples: vec![rel(subject, pred, object)],
+        ..Default::default()
+    };
+    let resp = svc.insert(Request::new(req)).await.unwrap().into_inner();
+    resp.edge_ids.into_iter().next().unwrap_or_default()
+}
+
+#[tokio::test]
+async fn edge_annotation_property_roundtrip() {
+    let (svc, _dir) = open();
+    let (_, alice) = new_node();
+    let (_, bob)   = new_node();
+
+    let edge_bytes = insert_relation_with_known_edge(&svc, alice, "trusts", bob).await;
+    assert_eq!(edge_bytes.len(), 16, "edge_id should be 16 bytes");
+
+    // Annotate the edge with a scalar property.
+    let ann_req = InsertRequest {
+        edge_annotations: vec![EdgeAnnotation {
+            edge_id: edge_bytes.clone(),
+            predicate: "confidence".into(),
+            value: Some(AnnotationValue::Scalar(Value {
+                kind: Some(ValueKind::FloatVal(0.9)),
+            })),
+        }],
+        ..Default::default()
+    };
+    svc.insert(Request::new(ann_req)).await.unwrap();
+
+    let get_req = GetEdgeAnnotationsRequest { edge_id: edge_bytes };
+    let resp = svc
+        .get_edge_annotations(Request::new(get_req))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.annotations.len(), 1);
+    let ann = &resp.annotations[0];
+    assert_eq!(ann.predicate, "confidence");
+    match &ann.value {
+        Some(AnnotationValue::Scalar(v)) => match &v.kind {
+            Some(ValueKind::FloatVal(f)) => assert!((f - 0.9).abs() < 1e-6),
+            _ => panic!("unexpected scalar kind"),
+        },
+        _ => panic!("expected Scalar annotation"),
+    }
+}
+
+#[tokio::test]
+async fn edge_annotation_relation_roundtrip() {
+    let (svc, _dir) = open();
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    let (_, provenance) = new_node();
+
+    let edge_bytes = insert_relation_with_known_edge(&svc, a, "knows", b).await;
+    assert_eq!(edge_bytes.len(), 16);
+
+    let ann_req = InsertRequest {
+        edge_annotations: vec![EdgeAnnotation {
+            edge_id: edge_bytes.clone(),
+            predicate: "assertedBy".into(),
+            value: Some(AnnotationValue::NodeId(provenance.bytes.clone())),
+        }],
+        ..Default::default()
+    };
+    svc.insert(Request::new(ann_req)).await.unwrap();
+
+    let get_req = GetEdgeAnnotationsRequest { edge_id: edge_bytes };
+    let resp = svc
+        .get_edge_annotations(Request::new(get_req))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.annotations.len(), 1);
+    let ann = &resp.annotations[0];
+    assert_eq!(ann.predicate, "assertedBy");
+    match &ann.value {
+        Some(AnnotationValue::NodeId(nid_bytes)) => {
+            assert_eq!(nid_bytes, &provenance.bytes)
+        }
+        _ => panic!("expected NodeId annotation"),
+    }
+}
+
+#[tokio::test]
+async fn edge_annotation_in_insert_batch() {
+    let (svc, _dir) = open();
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+
+    // Insert relation first to get its edge id.
+    let insert_resp = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(a.clone(), "likes", b.clone())],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let edge_bytes = insert_resp.edge_ids.into_iter().next().unwrap();
+
+    // Insert a property triple and two annotations in the same batch.
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(a.clone(), "name", "Alice")],
+        edge_annotations: vec![
+            EdgeAnnotation {
+                edge_id: edge_bytes.clone(),
+                predicate: "weight".into(),
+                value: Some(AnnotationValue::Scalar(Value {
+                    kind: Some(ValueKind::FloatVal(1.0)),
+                })),
+            },
+            EdgeAnnotation {
+                edge_id: edge_bytes.clone(),
+                predicate: "source".into(),
+                value: Some(AnnotationValue::Scalar(Value {
+                    kind: Some(ValueKind::TextVal("test".into())),
+                })),
+            },
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .get_edge_annotations(Request::new(GetEdgeAnnotationsRequest {
+            edge_id: edge_bytes,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.annotations.len(), 2);
+    let predicates: std::collections::HashSet<_> =
+        resp.annotations.iter().map(|a| a.predicate.as_str()).collect();
+    assert!(predicates.contains("weight"));
+    assert!(predicates.contains("source"));
+}

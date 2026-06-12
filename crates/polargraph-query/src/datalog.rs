@@ -93,11 +93,18 @@ pub struct VarPattern {
     pub subject: Term,
     pub predicate: Option<String>,
     pub object: Term,
+    /// When set, the EdgeId from a matched Relation triple is bound to this variable
+    /// as a `NodeId` (same UUID bytes, reinterpreted).
+    pub edge_var: Option<String>,
+    /// When `Some(n)`, this pattern performs a bounded BFS up to `n` hops rather
+    /// than a single-step triple scan. Used by the Cypher compiler for `[r*1..n]`
+    /// patterns. Requires the subject to be bound before evaluation.
+    pub max_hops: Option<usize>,
 }
 
 impl VarPattern {
     pub fn new() -> Self {
-        Self { subject: Term::Any, predicate: None, object: Term::Any }
+        Self { subject: Term::Any, predicate: None, object: Term::Any, edge_var: None, max_hops: None }
     }
 
     pub fn subject(mut self, s: Term) -> Self { self.subject = s; self }
@@ -106,6 +113,10 @@ impl VarPattern {
         self
     }
     pub fn object(mut self, o: Term) -> Self { self.object = o; self }
+    pub fn with_edge_var(mut self, v: impl Into<String>) -> Self {
+        self.edge_var = Some(v.into());
+        self
+    }
 }
 
 impl Default for VarPattern {
@@ -186,11 +197,22 @@ fn extend_bindings(
                         return None;
                     }
                 }
-                Triple::Property { .. } => {
-                    // Object variable can't bind to a scalar value — skip.
+                Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => {
+                    // Object variable can't bind to a scalar/annotation value — skip.
                     return None;
                 }
             }
+        }
+    }
+
+    // Bind edge variable if requested (only applicable to Relation triples).
+    if let (Some(ev), Triple::Relation { edge_id, .. }) = (&vp.edge_var, triple) {
+        // Reinterpret EdgeId as NodeId so it can live in Bindings (which maps to NodeId).
+        let as_node = NodeId(edge_id.0);
+        if let Some(updated) = bind_term(&Term::Var(ev.clone()), as_node, &out) {
+            out = updated;
+        } else {
+            return None;
         }
     }
 
@@ -258,13 +280,68 @@ pub fn execute_query_seeded(
 
         let mut next = Vec::new();
 
-        for bindings in solutions {
-            let pattern = substitute(vp, &bindings);
-            let triples = evaluate_with_registry(&pattern, snapshot, registry)?;
+        if let Some(hops) = vp.max_hops {
+            // Bounded transitive: BFS up to `hops` steps.
+            if let Some(pred) = &vp.predicate {
+                for bindings in solutions {
+                    let start = resolve_term(&vp.subject, &bindings);
 
-            for triple in triples {
-                if let Some(extended) = extend_bindings(&triple, vp, &bindings) {
-                    next.push(extended);
+                    // Collect starting nodes: use the bound subject directly, or
+                    // enumerate all subjects with outgoing `pred` edges when unbound.
+                    let starts: Vec<NodeId> = if let Some(id) = start {
+                        vec![id]
+                    } else {
+                        let all = snapshot.scan_by_predicate(pred)?;
+                        let mut seen = HashSet::new();
+                        all.into_iter()
+                            .filter_map(|t| match t {
+                                Triple::Relation { subject, .. } if seen.insert(subject) => Some(subject),
+                                _ => None,
+                            })
+                            .collect()
+                    };
+
+                    for start_id in starts {
+                        // Bind the subject variable (if any) to the starting node.
+                        let mut base = bindings.clone();
+                        if let Term::Var(sv) = &vp.subject {
+                            if let Some(&existing) = base.get(sv.as_str()) {
+                                if existing != start_id { continue; }
+                            } else {
+                                base.insert(sv.clone(), start_id);
+                            }
+                        }
+
+                        let reachable = reachable_from_hops(start_id, pred, snapshot, hops, deadline)?;
+                        for target in reachable {
+                            match &vp.object {
+                                Term::Any => next.push(base.clone()),
+                                Term::Bound(id) => {
+                                    if *id == target { next.push(base.clone()); }
+                                }
+                                Term::Var(name) => {
+                                    if let Some(&existing) = base.get(name.as_str()) {
+                                        if existing == target { next.push(base.clone()); }
+                                    } else {
+                                        let mut b = base.clone();
+                                        b.insert(name.clone(), target);
+                                        next.push(b);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            for bindings in solutions {
+                let pattern = substitute(vp, &bindings);
+                let triples = evaluate_with_registry(&pattern, snapshot, registry)?;
+
+                for triple in triples {
+                    if let Some(extended) = extend_bindings(&triple, vp, &bindings) {
+                        next.push(extended);
+                    }
                 }
             }
         }
@@ -548,7 +625,7 @@ pub fn reachable_from(
             Triple::Relation { subject, object, .. } => {
                 Some(("reachable".into(), *subject, *object))
             }
-            Triple::Property { .. } => None,
+            Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => None,
         })
         .collect();
 
@@ -1315,5 +1392,64 @@ mod tests {
         let result = execute_query(&q, &snap, None, None);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 1);
+    }
+
+    // ── bounded-hop VarPattern (max_hops) ─────────────────────────────────────
+
+    #[test]
+    fn bounded_hop_1_returns_direct_neighbours_only() {
+        let (store, _dir) = open();
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let c = NodeId::new();
+        // chain: a → b → c
+        let snap = commit(&store, vec![rel(a, "hop", b), rel(b, "hop", c)]);
+
+        let mut vp = VarPattern::new()
+            .subject(Term::Bound(a))
+            .predicate("hop")
+            .object(Term::var("x"));
+        vp.max_hops = Some(1);
+
+        let q = Query::new().pattern(vp);
+        let results = execute_query(&q, &snap, None, None).unwrap();
+        let found: Vec<NodeId> = results.iter().filter_map(|b| b.get("x").copied()).collect();
+        assert_eq!(found.len(), 1);
+        assert!(found.contains(&b), "only direct neighbour should be reachable at depth 1");
+        assert!(!found.contains(&c), "c is 2 hops away, should not appear");
+    }
+
+    #[test]
+    fn bounded_hop_3_reaches_across_chain() {
+        let (store, _dir) = open();
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let c = NodeId::new();
+        let d = NodeId::new();
+        let e = NodeId::new();
+        // chain: a → b → c → d → e
+        let snap = commit(&store, vec![
+            rel(a, "hop", b),
+            rel(b, "hop", c),
+            rel(c, "hop", d),
+            rel(d, "hop", e),
+        ]);
+
+        let mut vp = VarPattern::new()
+            .subject(Term::Bound(a))
+            .predicate("hop")
+            .object(Term::var("x"));
+        vp.max_hops = Some(3);
+
+        let q = Query::new().pattern(vp);
+        let results = execute_query(&q, &snap, None, None).unwrap();
+        let found: std::collections::HashSet<NodeId> = results.iter()
+            .filter_map(|b| b.get("x").copied())
+            .collect();
+
+        assert!(found.contains(&b), "b is 1 hop away");
+        assert!(found.contains(&c), "c is 2 hops away");
+        assert!(found.contains(&d), "d is 3 hops away");
+        assert!(!found.contains(&e), "e is 4 hops away, beyond max_hops=3");
     }
 }

@@ -105,11 +105,40 @@ message DatalogRule {
 
 // ── Requests and responses ────────────────────────────────────────────────────
 
+// ── RDF-star edge annotations ─────────────────────────────────────────────────
+
+/// An annotation on a relation triple (RDF-star / RDF*).
+///
+/// `edge_id` is the 16-byte UUID of the relation triple to annotate — obtained
+/// from `InsertResponse.edge_ids`. `value` is either a scalar (`scalar`) or a
+/// reference to another node (`node_id`).
+message EdgeAnnotation {
+    bytes  edge_id   = 1;
+    string predicate = 2;
+    oneof value {
+        bytes node_id = 3;
+        Value scalar  = 4;
+    }
+}
+
+message GetEdgeAnnotationsRequest {
+    bytes edge_id = 1;
+}
+
+message GetEdgeAnnotationsResponse {
+    repeated EdgeAnnotation annotations = 1;
+}
+
 message InsertRequest {
     repeated Triple triples = 1;
     /// Optional open-transaction ID. When set, triples are buffered into the
     /// named transaction rather than auto-committed.
     string tx_id = 2;
+    /// Optional RDF-star annotations to attach to relation triples in the same
+    /// atomic commit. Each annotation references an edge by its UUID bytes
+    /// (either from a previous insert or from a relation in `triples` above
+    /// where the edge UUID must be known in advance).
+    repeated EdgeAnnotation edge_annotations = 3;
 }
 
 message InsertResponse {
@@ -914,6 +943,10 @@ service PolarGraphService {
     /// Returns NOT_FOUND if tx_id is unknown or has expired.
     /// Returns FAILED_PRECONDITION on a read replica.
     rpc RollbackTransaction(RollbackTransactionRequest) returns (RollbackTransactionResponse);
+
+    /// Return all RDF-star annotations on the edge identified by `edge_id`.
+    /// Returns an empty list if the edge has no annotations or does not exist.
+    rpc GetEdgeAnnotations(GetEdgeAnnotationsRequest) returns (GetEdgeAnnotationsResponse);
 
     /// Add a new API key to the live key store. Takes effect immediately.
     /// Returns FAILED_PRECONDITION when the server was started without any

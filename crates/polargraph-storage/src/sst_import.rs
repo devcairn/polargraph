@@ -129,6 +129,12 @@ impl SstImporter {
         let mut ops_buf: Vec<([u8; 44], Vec<u8>)> = Vec::with_capacity(n);
 
         for triple in &self.triples {
+            // EdgeProperty / EdgeRelation go to EPA/EPO via WriteBatch below.
+            match triple {
+                Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => continue,
+                _ => {}
+            }
+
             let s = triple.subject();
             let p = *pred_ids.get(triple.predicate().0.as_str()).unwrap();
             let o = object_of(triple);
@@ -178,12 +184,25 @@ impl SstImporter {
             store.db_ref().ingest_external_file_cf(&cf, vec![sst_path])?;
         }
 
-        // ── 5. Write trigram index entries for text properties via WriteBatch ──
+        // ── 5. Write trigram + EPA/EPO entries via WriteBatch ────────────────
         let mut tri_batch = WriteBatch::default();
         for triple in &self.triples {
-            if let Triple::Property { subject, value: polargraph_core::value::Value::Text(text), .. } = triple {
-                let p = *pred_ids.get(triple.predicate().0.as_str()).unwrap();
-                store.batch_text_trigrams(&mut tri_batch, subject, p, text)?;
+            let p = *pred_ids.get(triple.predicate().0.as_str()).unwrap();
+            match triple {
+                Triple::Property { subject, value: polargraph_core::value::Value::Text(text), .. } => {
+                    store.batch_text_trigrams(&mut tri_batch, subject, p, text)?;
+                }
+                Triple::EdgeProperty { edge, value, temporal, .. } => {
+                    let temporal_stamped = BiTemporalRange { tt: commit_ts, ..*temporal };
+                    let value_bytes = codec::encode_property(value, &temporal_stamped)?;
+                    store.batch_epa(&mut tri_batch, *edge, p, commit_ts, &value_bytes)?;
+                }
+                Triple::EdgeRelation { edge, object, temporal, .. } => {
+                    let temporal_stamped = BiTemporalRange { tt: commit_ts, ..*temporal };
+                    let epo_val = crate::store::encode_epo_value(&temporal_stamped);
+                    store.batch_epo(&mut tri_batch, *edge, p, *object, commit_ts, &epo_val)?;
+                }
+                _ => {}
             }
         }
 
@@ -205,6 +224,8 @@ fn object_of(triple: &Triple) -> NodeId {
     match triple {
         Triple::Relation { object, .. } => *object,
         Triple::Property { .. } => NodeId(uuid::Uuid::from_bytes(keys::PROPERTY_SENTINEL)),
+        // EdgeProperty/EdgeRelation don't go through the hexastore loop.
+        Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => unreachable!(),
     }
 }
 
@@ -212,5 +233,7 @@ fn encode_value(triple: &Triple, temporal: &BiTemporalRange) -> Result<Vec<u8>, 
     match triple {
         Triple::Relation { edge_id, .. } => Ok(codec::encode_relation(edge_id, temporal)),
         Triple::Property { value, .. } => codec::encode_property(value, temporal),
+        // EdgeProperty/EdgeRelation don't go through the hexastore loop.
+        Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => unreachable!(),
     }
 }

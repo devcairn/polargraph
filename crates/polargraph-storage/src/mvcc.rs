@@ -27,12 +27,13 @@ use crate::{
     codec,
     error::StorageError,
     keys,
-    store::TripleStore,
+    store::{encode_epo_value, TripleStore},
 };
 use polargraph_core::{
     id::NodeId,
     temporal::{BiTemporalRange, Timestamp},
     triple::Triple,
+    value::Value,
 };
 use rocksdb::{Direction, IteratorMode, WriteBatch};
 use std::{
@@ -219,8 +220,9 @@ impl Transaction {
     ///
     /// Steps:
     ///   1. Acquire commit lock, get `commit_ts`.
-    ///   2. For each buffered triple, check no conflicting write exists in
-    ///      storage with `read_ts < tt <= commit_ts`.
+    ///   2. For each buffered hexastore triple, check no conflicting write exists
+    ///      in storage with `read_ts < tt <= commit_ts`. Edge annotations skip
+    ///      conflict checking (additive-only semantics).
     ///   3. If clean, write all triples with `commit_ts` as their `tt`.
     ///   4. Persist updated oracle counter to META CF.
     ///   5. Release commit lock.
@@ -232,13 +234,17 @@ impl Transaction {
         let (commit_ts, _guard) = self.store.oracle().begin_commit();
         debug!("tx commit: read_ts={} commit_ts={}", self.read_ts.0, commit_ts.0);
 
-        // ── conflict check ────────────────────────────────────────────────────
+        // ── conflict check (hexastore triples only) ───────────────────────────
         for triple in &self.write_buffer {
-            if let Some(conflict) = self.check_conflict(triple, commit_ts)? {
-                // Release commit lock by dropping guard (happens at end of
-                // scope), roll back oracle counter? No — we just skip writing.
-                // The gap in the timestamp sequence is harmless.
-                return Err(StorageError::WriteConflict(conflict));
+            match triple {
+                Triple::Relation { .. } | Triple::Property { .. } => {
+                    if let Some(conflict) = self.check_conflict(triple, commit_ts)? {
+                        return Err(StorageError::WriteConflict(conflict));
+                    }
+                }
+                // Edge annotations don't participate in hexastore conflict
+                // checking; they use additive append-only semantics.
+                Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => {}
             }
         }
 
@@ -248,17 +254,30 @@ impl Transaction {
         for triple in &self.write_buffer {
             let temporal_stamped = stamp_temporal(triple.temporal(), commit_ts);
             let pred_id = self.store.intern_predicate(triple.predicate().0.as_str())?;
-            self.store.batch_triple(
-                &mut batch,
-                triple.subject(),
-                pred_id,
-                object_of(triple),
-                commit_ts,
-                &encode_value(triple, &temporal_stamped)?,
-            )?;
-            // Trigram index: write TRI CF entries for text property values.
-            if let Triple::Property { value: polargraph_core::value::Value::Text(text), .. } = triple {
-                self.store.batch_text_trigrams(&mut batch, &triple.subject(), pred_id, text)?;
+
+            match triple {
+                Triple::Relation { .. } | Triple::Property { .. } => {
+                    self.store.batch_triple(
+                        &mut batch,
+                        triple.subject(),
+                        pred_id,
+                        object_of(triple),
+                        commit_ts,
+                        &encode_value(triple, &temporal_stamped)?,
+                    )?;
+                    // Trigram index: write TRI CF entries for text property values.
+                    if let Triple::Property { value: Value::Text(text), .. } = triple {
+                        self.store.batch_text_trigrams(&mut batch, &triple.subject(), pred_id, text)?;
+                    }
+                }
+                Triple::EdgeProperty { edge, value, .. } => {
+                    let value_bytes = codec::encode_property(value, &temporal_stamped)?;
+                    self.store.batch_epa(&mut batch, *edge, pred_id, commit_ts, &value_bytes)?;
+                }
+                Triple::EdgeRelation { edge, object, .. } => {
+                    let epo_val = encode_epo_value(&temporal_stamped);
+                    self.store.batch_epo(&mut batch, *edge, pred_id, *object, commit_ts, &epo_val)?;
+                }
             }
         }
 
@@ -390,16 +409,47 @@ impl Snapshot {
     pub fn text_search(&self, predicate: &str, query: &str) -> Result<Vec<polargraph_core::id::NodeId>, StorageError> {
         self.store.text_search(predicate, query, self.ts, self.vt_as_of)
     }
+
+    /// Return all annotations on `edge` as of this snapshot's timestamp.
+    pub fn scan_edge_annotations(
+        &self,
+        edge: polargraph_core::id::EdgeId,
+    ) -> Result<Vec<crate::store::EdgeAnnotation>, StorageError> {
+        self.store.scan_edge_annotations(edge, self.ts)
+    }
+
+    /// Return edge property annotations for `predicate` as `Triple::EdgeProperty` variants.
+    pub fn scan_annotations_by_predicate(
+        &self,
+        predicate: &str,
+    ) -> Result<Vec<polargraph_core::triple::Triple>, StorageError> {
+        self.store.scan_annotations_by_predicate(predicate, self.ts)
+    }
+
+    /// Return all annotations on `edge` as Triple variants.
+    pub fn scan_edge_annotations_as_triples(
+        &self,
+        edge: polargraph_core::id::EdgeId,
+    ) -> Result<Vec<polargraph_core::triple::Triple>, StorageError> {
+        self.store.scan_edge_annotations_as_triples(edge, self.ts)
+    }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Return the object NodeId for a triple, using the property sentinel for
-/// property triples so the same index functions work for both variants.
+/// Return the object NodeId for a hexastore triple, using the property sentinel
+/// for property triples. Edge annotations are not routed through this helper.
 fn object_of(triple: &Triple) -> NodeId {
     match triple {
         Triple::Relation { object, .. } => *object,
-        Triple::Property { .. } => NodeId(uuid::Uuid::from_bytes(keys::PROPERTY_SENTINEL)),
+        Triple::Property { .. }
+        | Triple::EdgeProperty { .. }
+        | Triple::EdgeRelation { .. } => {
+            // Property triples and edge annotations use the sentinel.
+            // (EdgeProperty/EdgeRelation are handled separately before this
+            // function would be reached, but we need an arm to satisfy Rust.)
+            NodeId(uuid::Uuid::from_bytes(keys::PROPERTY_SENTINEL))
+        }
     }
 }
 
@@ -413,7 +463,10 @@ fn stamp_temporal(original: &BiTemporalRange, commit_ts: Timestamp) -> BiTempora
     }
 }
 
-/// Encode the RocksDB value bytes for a triple given a stamped temporal range.
+/// Encode the RocksDB value bytes for a hexastore triple given a stamped temporal range.
+///
+/// Edge annotations (`EdgeProperty`/`EdgeRelation`) are handled separately in
+/// `commit()` and should never be passed here; returns an empty vec for them.
 fn encode_value(
     triple: &Triple,
     temporal: &BiTemporalRange,
@@ -421,5 +474,7 @@ fn encode_value(
     match triple {
         Triple::Relation { edge_id, .. } => Ok(codec::encode_relation(edge_id, temporal)),
         Triple::Property { value, .. } => codec::encode_property(value, temporal),
+        // Edge annotations routed to EPA/EPO — not encoded via this function.
+        Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => Ok(vec![]),
     }
 }

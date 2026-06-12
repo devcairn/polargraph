@@ -339,7 +339,7 @@ fn edge_id_survives_insert_and_scan() {
         Triple::Relation { edge_id, .. } => {
             assert_eq!(*edge_id, original_edge_id, "EdgeId must survive the round-trip");
         }
-        Triple::Property { .. } => panic!("expected Relation"),
+        Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => panic!("expected Relation"),
     }
 }
 

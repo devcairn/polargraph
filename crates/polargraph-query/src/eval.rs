@@ -8,7 +8,7 @@
 //! The evaluator deliberately does not know about `View`s — that layer sits
 //! above and is handled by `projection::apply_view`.
 
-use crate::planner::{choose_index, IndexChoice, Pattern};
+use crate::planner::{choose_annotation_index, choose_index, AnnotationIndexChoice, AnnotationPattern, IndexChoice, Pattern};
 use polargraph_core::{id::NodeId, triple::Triple, value::Value};
 use polargraph_storage::{EdgeTypeRegistry, Snapshot, StorageError};
 use tracing::warn;
@@ -105,8 +105,8 @@ fn triple_matches_pattern(triple: &Triple, pattern: &Pattern) -> bool {
                     return false;
                 }
             }
-            // Property triples carry a scalar value, not a NodeId object.
-            Triple::Property { .. } => return false,
+            // Property/annotation triples carry a scalar value, not a NodeId object.
+            Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => return false,
         }
     }
     true
@@ -128,6 +128,33 @@ fn results_contain_key(results: &[Triple], candidate: &Triple) -> bool {
         }
         _ => false,
     })
+}
+
+/// Evaluate an annotation pattern against a snapshot.
+///
+/// Routes to EPA (by edge), EPA (by edge+pred), or PEA (by pred) based on
+/// which slots are bound.
+pub fn evaluate_annotations(
+    pattern: &AnnotationPattern,
+    snapshot: &Snapshot,
+) -> Result<Vec<Triple>, StorageError> {
+    match choose_annotation_index(pattern) {
+        AnnotationIndexChoice::EpaByEdge { edge } => {
+            snapshot.scan_edge_annotations_as_triples(edge)
+        }
+        AnnotationIndexChoice::EpaByEdgePred { edge, predicate } => {
+            // Scan edge annotations and filter to the requested predicate.
+            let all = snapshot.scan_edge_annotations_as_triples(edge)?;
+            Ok(all.into_iter().filter(|t| t.predicate().0 == predicate).collect())
+        }
+        AnnotationIndexChoice::PeaByPred { predicate } => {
+            snapshot.scan_annotations_by_predicate(&predicate)
+        }
+        AnnotationIndexChoice::EpaFull => {
+            // Full annotation scan is not supported — return empty.
+            Ok(vec![])
+        }
+    }
 }
 
 fn execute(choice: IndexChoice, snap: &Snapshot) -> Result<Vec<Triple>, StorageError> {
@@ -184,7 +211,7 @@ fn execute(choice: IndexChoice, snap: &Snapshot) -> Result<Vec<Triple>, StorageE
 fn object_matches(triple: &Triple, expected: &NodeId) -> bool {
     match triple {
         Triple::Relation { object, .. } => object == expected,
-        Triple::Property { .. } => false,
+        Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => false,
     }
 }
 

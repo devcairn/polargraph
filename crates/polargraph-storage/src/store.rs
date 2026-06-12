@@ -37,10 +37,11 @@ use crate::{
     mvcc::{Snapshot, TimestampOracle, Transaction, META_ORACLE_CTR},
 };
 use polargraph_core::{
-    id::NodeId,
+    id::{EdgeId, NodeId},
     schema::StorageMode,
-    temporal::Timestamp,
+    temporal::{BiTemporalRange, Timestamp},
     triple::{Predicate, Triple},
+    value::Value,
 };
 use rocksdb::{
     BoundColumnFamily, ColumnFamilyDescriptor, DBWithThreadMode, Direction, IteratorMode,
@@ -52,6 +53,30 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tracing::info;
+
+// ── RDF-star annotation types ─────────────────────────────────────────────────
+
+/// The value carried by an edge annotation — either a scalar or a node reference.
+#[derive(Debug, Clone)]
+pub enum EdgeAnnotationValue {
+    Scalar(Value),
+    Node(NodeId),
+}
+
+/// A single annotation on an edge triple (RDF-star).
+#[derive(Debug, Clone)]
+pub struct EdgeAnnotation {
+    pub predicate: Predicate,
+    pub value: EdgeAnnotationValue,
+}
+
+/// Encode the EPO column family value: `[vt_start BE(8)][vt_end BE(8)]`.
+pub(crate) fn encode_epo_value(temporal: &BiTemporalRange) -> [u8; 16] {
+    let mut v = [0u8; 16];
+    v[0..8].copy_from_slice(&temporal.vt_start.to_be_bytes());
+    v[8..16].copy_from_slice(&temporal.vt_end.to_be_bytes());
+    v
+}
 
 // ── Store mode ────────────────────────────────────────────────────────────────
 
@@ -1022,6 +1047,280 @@ impl TripleStore {
         Ok(())
     }
 
+    // ── RDF-star EPA / EPO write helpers ──────────────────────────────────────
+
+    /// Write one EPA (edge property annotation) entry into a caller-supplied batch.
+    /// Also writes the corresponding PEA (predicate-first) secondary index entry.
+    pub(crate) fn batch_epa(
+        &self,
+        batch: &mut WriteBatch,
+        edge: EdgeId,
+        pred_id: keys::PredId,
+        tt: Timestamp,
+        value_bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        batch.put_cf(&self.cf_handle(cf::EPA)?, keys::encode_epa_key(&edge, pred_id, tt), value_bytes);
+        batch.put_cf(&self.cf_handle(cf::PEA)?, keys::encode_pea_key(pred_id, &edge, tt), value_bytes);
+        Ok(())
+    }
+
+    /// Write one PEA (predicate-first annotation index) entry into a caller-supplied batch.
+    ///
+    /// Normally called indirectly through `batch_epa`. Use this directly only
+    /// when the EPA entry has already been written separately.
+    #[allow(dead_code)]
+    pub(crate) fn batch_pea(
+        &self,
+        batch: &mut WriteBatch,
+        pred_id: keys::PredId,
+        edge: EdgeId,
+        tt: Timestamp,
+        value_bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        batch.put_cf(&self.cf_handle(cf::PEA)?, keys::encode_pea_key(pred_id, &edge, tt), value_bytes);
+        Ok(())
+    }
+
+    /// Write one EPO (edge relation annotation) entry into a caller-supplied batch.
+    ///
+    /// Value layout: `[vt_start BE(8)][vt_end BE(8)]` = 16 bytes.
+    pub(crate) fn batch_epo(
+        &self,
+        batch: &mut WriteBatch,
+        edge: EdgeId,
+        pred_id: keys::PredId,
+        object: NodeId,
+        tt: Timestamp,
+        value_bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        batch.put_cf(&self.cf_handle(cf::EPO)?, keys::encode_epo_key(&edge, pred_id, &object, tt), value_bytes);
+        Ok(())
+    }
+
+    // ── RDF-star scan methods ─────────────────────────────────────────────────
+
+    /// Scan all annotations (property + relation) on a given edge visible at `snapshot_ts`.
+    ///
+    /// Returns a deduplicated list: for each (pred_id) group in EPA and each
+    /// (pred_id, obj_id) group in EPO, only the entry with the highest
+    /// `tt <= snapshot_ts` is returned.
+    pub fn scan_edge_annotations(
+        &self,
+        edge: EdgeId,
+        snapshot_ts: Timestamp,
+    ) -> Result<Vec<EdgeAnnotation>, StorageError> {
+        let mut result = Vec::new();
+
+        // ── EPA (property annotations) ────────────────────────────────────────
+        {
+            let cf = self.cf_handle(cf::EPA)?;
+            let prefix = keys::epa_prefix_edge(&edge);
+            let iter = self.inner.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+
+            // Map: pred_id → (tt, value_bytes)
+            let mut latest: HashMap<keys::PredId, (Timestamp, Vec<u8>)> = HashMap::new();
+            for item in iter {
+                let (key, value) = item?;
+                if !key.starts_with(&prefix) { break; }
+                let dk = keys::decode_epa_key(&key)?;
+                if dk.tt > snapshot_ts { continue; }
+                let slot = latest.entry(dk.pred_id).or_insert((Timestamp(i64::MIN), vec![]));
+                if dk.tt > slot.0 {
+                    *slot = (dk.tt, value.to_vec());
+                }
+            }
+
+            for (pred_id, (_, value_bytes)) in latest {
+                let pred_str = self
+                    .predicate_string(pred_id)
+                    .ok_or_else(|| StorageError::KeyDecode(format!("unknown pred_id {pred_id}")))?;
+                let decoded = codec::decode_value(&value_bytes)?;
+                if let codec::DecodedValue::Property { value, .. } = decoded {
+                    result.push(EdgeAnnotation {
+                        predicate: Predicate::new(pred_str),
+                        value: EdgeAnnotationValue::Scalar(value),
+                    });
+                }
+            }
+        }
+
+        // ── EPO (relation annotations) ────────────────────────────────────────
+        {
+            let cf = self.cf_handle(cf::EPO)?;
+            let prefix = keys::epo_prefix_edge(&edge);
+            let iter = self.inner.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+
+            // Map: (pred_id, obj_id) → tt
+            let mut latest: HashMap<(keys::PredId, NodeId), Timestamp> = HashMap::new();
+            for item in iter {
+                let (key, _value) = item?;
+                if !key.starts_with(&prefix) { break; }
+                let dk = keys::decode_epo_key(&key)?;
+                if dk.tt > snapshot_ts { continue; }
+                let slot = latest.entry((dk.pred_id, dk.object)).or_insert(Timestamp(i64::MIN));
+                if dk.tt > *slot {
+                    *slot = dk.tt;
+                }
+            }
+
+            for ((pred_id, obj_id), _tt) in latest {
+                let pred_str = self
+                    .predicate_string(pred_id)
+                    .ok_or_else(|| StorageError::KeyDecode(format!("unknown pred_id {pred_id}")))?;
+                result.push(EdgeAnnotation {
+                    predicate: Predicate::new(pred_str),
+                    value: EdgeAnnotationValue::Node(obj_id),
+                });
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Point-lookup: retrieve the annotation for `(edge, predicate)` at `snapshot_ts`.
+    ///
+    /// Checks EPA first (property), then EPO (relation). Returns `None` if no
+    /// annotation exists for the given predicate on this edge.
+    pub fn get_edge_annotation(
+        &self,
+        edge: EdgeId,
+        predicate: &str,
+        snapshot_ts: Timestamp,
+    ) -> Result<Option<EdgeAnnotation>, StorageError> {
+        let pred_id = match self.predicate_id(predicate) {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        // Check EPA.
+        {
+            let cf = self.cf_handle(cf::EPA)?;
+            let prefix = keys::epa_prefix_edge_pred(&edge, pred_id);
+            let iter = self.inner.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+            let mut best: Option<(Timestamp, Vec<u8>)> = None;
+            for item in iter {
+                let (key, value) = item?;
+                if !key.starts_with(&prefix) { break; }
+                let dk = keys::decode_epa_key(&key)?;
+                if dk.tt > snapshot_ts { continue; }
+                match &best {
+                    Some((bt, _)) if dk.tt <= *bt => {}
+                    _ => best = Some((dk.tt, value.to_vec())),
+                }
+            }
+            if let Some((_, value_bytes)) = best {
+                let decoded = codec::decode_value(&value_bytes)?;
+                if let codec::DecodedValue::Property { value, .. } = decoded {
+                    return Ok(Some(EdgeAnnotation {
+                        predicate: Predicate::new(predicate.to_owned()),
+                        value: EdgeAnnotationValue::Scalar(value),
+                    }));
+                }
+            }
+        }
+
+        // Check EPO.
+        {
+            let cf = self.cf_handle(cf::EPO)?;
+            let prefix = keys::epa_prefix_edge_pred(&edge, pred_id); // same first 20 bytes
+            let iter = self.inner.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+            let mut best: Option<(Timestamp, NodeId)> = None;
+            for item in iter {
+                let (key, _) = item?;
+                if !key.starts_with(&prefix) { break; }
+                if key.len() != 44 { continue; }
+                let dk = keys::decode_epo_key(&key)?;
+                if dk.tt > snapshot_ts { continue; }
+                match &best {
+                    Some((bt, _)) if dk.tt <= *bt => {}
+                    _ => best = Some((dk.tt, dk.object)),
+                }
+            }
+            if let Some((_, obj_id)) = best {
+                return Ok(Some(EdgeAnnotation {
+                    predicate: Predicate::new(predicate.to_owned()),
+                    value: EdgeAnnotationValue::Node(obj_id),
+                }));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Scan all edge property annotations with a given predicate, as of `snapshot_ts`.
+    ///
+    /// Uses the PEA (predicate-first) index. Returns one `Triple::EdgeProperty` per
+    /// (edge_id, predicate) pair, deduplicated to the latest version ≤ `snapshot_ts`.
+    pub fn scan_annotations_by_predicate(
+        &self,
+        predicate: &str,
+        snapshot_ts: Timestamp,
+    ) -> Result<Vec<Triple>, StorageError> {
+        let pred_id = match self.predicate_id(predicate) {
+            Some(id) => id,
+            None => return Ok(vec![]),
+        };
+
+        let cf = self.cf_handle(cf::PEA)?;
+        let prefix = keys::pea_prefix_pred(pred_id);
+        let iter = self.inner.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+
+        // Deduplicate by edge_id: keep highest tt ≤ snapshot_ts.
+        let mut latest: HashMap<EdgeId, (Timestamp, Vec<u8>)> = HashMap::new();
+        for item in iter {
+            let (key, value) = item?;
+            if !key.starts_with(&prefix) { break; }
+            let dk = keys::decode_pea_key(&key)?;
+            if dk.tt > snapshot_ts { continue; }
+            let slot = latest.entry(dk.edge_id).or_insert((Timestamp(i64::MIN), vec![]));
+            if dk.tt > slot.0 {
+                *slot = (dk.tt, value.to_vec());
+            }
+        }
+
+        let mut triples = Vec::with_capacity(latest.len());
+        let pred = Predicate::new(predicate.to_owned());
+        for (edge_id, (tt, value_bytes)) in latest {
+            let decoded = codec::decode_value(&value_bytes)?;
+            if let codec::DecodedValue::Property { value, temporal } = decoded {
+                triples.push(Triple::EdgeProperty {
+                    edge: edge_id,
+                    predicate: pred.clone(),
+                    value,
+                    temporal: BiTemporalRange { tt, ..temporal },
+                });
+            }
+        }
+        Ok(triples)
+    }
+
+    /// Return all annotations on `edge` as `Triple::EdgeProperty` / `Triple::EdgeRelation` variants.
+    pub fn scan_edge_annotations_as_triples(
+        &self,
+        edge: EdgeId,
+        snapshot_ts: Timestamp,
+    ) -> Result<Vec<Triple>, StorageError> {
+        let annotations = self.scan_edge_annotations(edge, snapshot_ts)?;
+        let triples = annotations
+            .into_iter()
+            .map(|ann| match ann.value {
+                EdgeAnnotationValue::Scalar(value) => Triple::EdgeProperty {
+                    edge,
+                    predicate: ann.predicate,
+                    value,
+                    temporal: BiTemporalRange::assert_now(Timestamp::now()),
+                },
+                EdgeAnnotationValue::Node(object) => Triple::EdgeRelation {
+                    edge,
+                    predicate: ann.predicate,
+                    object,
+                    temporal: BiTemporalRange::assert_now(Timestamp::now()),
+                },
+            })
+            .collect();
+        Ok(triples)
+    }
+
     /// Prefix-scan the `tri` CF for all subjects that contain `trigram` under `pred_id`.
     pub fn scan_trigram_candidates(&self, pred_id: keys::PredId, trigram: [u8; 3]) -> Vec<NodeId> {
         let prefix = keys::tri_prefix_tp(trigram, pred_id);
@@ -1127,25 +1426,37 @@ impl TripleStore {
         if self.is_replica() {
             return Err(Self::read_only_err());
         }
-        let (s, pred_str, o, value_bytes) = match triple {
+        let mut batch = WriteBatch::default();
+        match triple {
             Triple::Relation { subject, predicate, object, edge_id, temporal } => {
-                let v = codec::encode_relation(edge_id, temporal);
-                (*subject, predicate.0.clone(), *object, v)
+                let temporal_stamped = BiTemporalRange { tt, ..*temporal };
+                let value_bytes = codec::encode_relation(edge_id, &temporal_stamped);
+                let p = self.intern_predicate(&predicate.0)?;
+                self.batch_triple(&mut batch, *subject, p, *object, tt, &value_bytes)?;
             }
             Triple::Property { subject, predicate, value, temporal } => {
-                let v = codec::encode_property(value, temporal)?;
-                let sentinel = polargraph_core::id::NodeId(
-                    uuid::Uuid::from_bytes(keys::PROPERTY_SENTINEL),
-                );
-                (*subject, predicate.0.clone(), sentinel, v)
+                let temporal_stamped = BiTemporalRange { tt, ..*temporal };
+                let value_bytes = codec::encode_property(value, &temporal_stamped)?;
+                let sentinel = NodeId(uuid::Uuid::from_bytes(keys::PROPERTY_SENTINEL));
+                let p = self.intern_predicate(&predicate.0)?;
+                self.batch_triple(&mut batch, *subject, p, sentinel, tt, &value_bytes)?;
+                // Trigram index for text properties.
+                if let Value::Text(text) = value {
+                    self.batch_text_trigrams(&mut batch, subject, p, text)?;
+                }
             }
-        };
-        let p = self.intern_predicate(&pred_str)?;
-        let mut batch = WriteBatch::default();
-        self.batch_triple(&mut batch, s, p, o, tt, &value_bytes)?;
-        // Trigram index for text properties.
-        if let Triple::Property { value: polargraph_core::value::Value::Text(text), .. } = triple {
-            self.batch_text_trigrams(&mut batch, &s, p, text)?;
+            Triple::EdgeProperty { edge, predicate, value, temporal } => {
+                let temporal_stamped = BiTemporalRange { tt, ..*temporal };
+                let value_bytes = codec::encode_property(value, &temporal_stamped)?;
+                let p = self.intern_predicate(&predicate.0)?;
+                self.batch_epa(&mut batch, *edge, p, tt, &value_bytes)?;
+            }
+            Triple::EdgeRelation { edge, predicate, object, temporal } => {
+                let temporal_stamped = BiTemporalRange { tt, ..*temporal };
+                let epo_val = encode_epo_value(&temporal_stamped);
+                let p = self.intern_predicate(&predicate.0)?;
+                self.batch_epo(&mut batch, *edge, p, *object, tt, &epo_val)?;
+            }
         }
         self.db_write(batch)?;
         // Advance oracle so subsequent scans can see this triple.

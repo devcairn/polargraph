@@ -19,6 +19,7 @@ use crate::{
         AppliedMigrationInfo,
         CypherBinding, CypherQueryRequest, CypherQueryResponse, CypherWriteRequest, CypherWriteResponse,
         ExplainResponse, PlanNode,
+        GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse,
         GetEdgeTypeRequest, GetEdgeTypeResponse,
         GetNodeTypeRequest, GetNodeTypeResponse,
         InsertRequest, InsertResponse, InsertVectorRequest, InsertVectorResponse,
@@ -60,6 +61,7 @@ use polargraph_query::datalog::{
 };
 use polargraph_query::explain::explain_query;
 use polargraph_storage::{BackupManager, CompactionManager, EdgeTypeRegistry, MigrationRunner, NodeTypeRegistry, StorageError, Transaction, TripleStore, WalStreamer, MIGRATIONS};
+use uuid;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -426,8 +428,8 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let req = request.into_inner();
 
-        if req.triples.is_empty() {
-            return Err(Status::invalid_argument("insert request must contain at least one triple"));
+        if req.triples.is_empty() && req.edge_annotations.is_empty() {
+            return Err(Status::invalid_argument("insert request must contain at least one triple or edge annotation"));
         }
 
         // Convert proto triples → core triples, collecting EdgeIds for relations.
@@ -441,7 +443,13 @@ impl PolarGraphService for PolarGraphServer {
             }
         }
 
-        debug!("insert: {} triple(s) ({} relation(s))", all_triples.len(), edge_ids.len());
+        // Convert edge annotations (RDF-star).
+        for ann in &req.edge_annotations {
+            let triple = convert::edge_annotation_from_proto(ann)?;
+            all_triples.push(triple);
+        }
+
+        debug!("insert: {} triple(s) ({} relation(s), {} annotation(s))", all_triples.len(), edge_ids.len(), req.edge_annotations.len());
 
         // If a tx_id is provided, buffer into the open transaction without committing.
         if !req.tx_id.is_empty() {
@@ -1619,6 +1627,7 @@ impl PolarGraphService for PolarGraphServer {
             &compiled.order_by,
             compiled.skip,
             compiled.limit,
+            Some(&snapshot),
         );
 
         // Build CypherQueryResponse rows.
@@ -2107,6 +2116,34 @@ impl PolarGraphService for PolarGraphServer {
         debug!(tx_id, "transaction rolled back");
 
         Ok(Response::new(RollbackTransactionResponse {}))
+    }
+
+    // ── RDF-star edge annotations ─────────────────────────────────────────────
+
+    async fn get_edge_annotations(
+        &self,
+        request: Request<GetEdgeAnnotationsRequest>,
+    ) -> Result<Response<GetEdgeAnnotationsResponse>, Status> {
+        let req = request.into_inner();
+        let edge_bytes: [u8; 16] = req
+            .edge_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("edge_id must be exactly 16 bytes"))?;
+        let edge = polargraph_core::id::EdgeId(uuid::Uuid::from_bytes(edge_bytes));
+
+        let snapshot_ts = self.store.begin().read_ts;
+        let annotations = self
+            .store
+            .scan_edge_annotations(edge, snapshot_ts)
+            .map_err(storage_err_to_status)?;
+
+        let proto_annotations = annotations
+            .iter()
+            .map(|ann| convert::edge_annotation_to_proto(ann, req.edge_id.clone()))
+            .collect();
+
+        Ok(Response::new(GetEdgeAnnotationsResponse { annotations: proto_annotations }))
     }
 
     // ── API key management ────────────────────────────────────────────────────

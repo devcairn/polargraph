@@ -55,7 +55,7 @@ pub fn apply_view(view: &View, triples: Vec<Triple>) -> Vec<ProjectedTriple> {
             let display_label = view.edge_label(&pred).to_owned();
             let display_reversed = match &t {
                 Triple::Relation { .. } => view.is_reversed(&pred),
-                Triple::Property { .. } => false, // properties have no direction
+                Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => false,
             };
             ProjectedTriple { triple: t, display_label, display_reversed }
         })

@@ -8,7 +8,8 @@
 
 use std::collections::HashMap;
 
-use polargraph_core::{id::NodeId, value::Value};
+use polargraph_core::{id::NodeId, triple::Triple, value::Value};
+use polargraph_storage::Snapshot;
 
 use crate::datalog::Bindings;
 
@@ -23,6 +24,14 @@ pub enum AggFunc {
     Count(String),
     /// `collect(var)` — collect all NodeId values of `var` as a JSON array of UUID strings.
     Collect(String),
+    /// `sum(var.prop)` — sum of numeric property values for `prop` on the node bound to `var`.
+    Sum { var: String, prop: String },
+    /// `avg(var.prop)` — arithmetic mean of numeric property values.
+    Avg { var: String, prop: String },
+    /// `min(var.prop)` — minimum numeric property value.
+    Min { var: String, prop: String },
+    /// `max(var.prop)` — maximum numeric property value.
+    Max { var: String, prop: String },
 }
 
 /// A single aggregation in the RETURN clause (e.g. `count(*) AS n`).
@@ -64,6 +73,10 @@ pub struct AggregatedRow {
 /// When `specs` is empty, no grouping is performed and the bindings are wrapped
 /// as-is into [`AggregatedRow`] values. ORDER BY and SKIP are still applied.
 ///
+/// `snapshot` is required for `SUM`, `AVG`, `MIN`, and `MAX` aggregations that
+/// look up property values from storage. Pass `None` when no numeric aggregations
+/// are present (existing `COUNT`/`COLLECT` functions do not need it).
+///
 /// Ordering on aggregate aliases uses Value comparison (Int < Float < Text).
 /// Ordering on group-key variables falls back to UUID string comparison.
 pub fn apply_aggregations(
@@ -73,6 +86,7 @@ pub fn apply_aggregations(
     order_by: &[OrderSpec],
     skip: Option<usize>,
     limit: Option<usize>,
+    snapshot: Option<&Snapshot>,
 ) -> Vec<AggregatedRow> {
     if specs.is_empty() {
         let mut rows: Vec<AggregatedRow> = bindings
@@ -110,7 +124,7 @@ pub fn apply_aggregations(
                 .unwrap_or_default();
             let agg_values: HashMap<String, Value> = specs
                 .iter()
-                .map(|spec| (spec.alias.clone(), compute_agg(&spec.func, group)))
+                .map(|spec| (spec.alias.clone(), compute_agg(&spec.func, group, snapshot)))
                 .collect();
             AggregatedRow { group_keys: group_keys_map, agg_values }
         })
@@ -139,7 +153,7 @@ fn group_key_bytes(binding: &Bindings, group_keys: &[String]) -> Vec<u8> {
     out
 }
 
-fn compute_agg(func: &AggFunc, group: &[Bindings]) -> Value {
+fn compute_agg(func: &AggFunc, group: &[Bindings], snapshot: Option<&Snapshot>) -> Value {
     match func {
         AggFunc::CountStar => Value::Int(group.len() as i64),
         AggFunc::Count(var) => {
@@ -155,7 +169,63 @@ fn compute_agg(func: &AggFunc, group: &[Bindings]) -> Value {
             ids.dedup();
             Value::Text(format_json_array(&ids))
         }
+        AggFunc::Sum { var, prop } => {
+            let vals = extract_numeric_values(group, var, prop, snapshot);
+            Value::Float(vals.iter().sum())
+        }
+        AggFunc::Avg { var, prop } => {
+            let vals = extract_numeric_values(group, var, prop, snapshot);
+            if vals.is_empty() {
+                Value::Null
+            } else {
+                Value::Float(vals.iter().sum::<f64>() / vals.len() as f64)
+            }
+        }
+        AggFunc::Min { var, prop } => {
+            let vals = extract_numeric_values(group, var, prop, snapshot);
+            vals.into_iter()
+                .reduce(f64::min)
+                .map(Value::Float)
+                .unwrap_or(Value::Null)
+        }
+        AggFunc::Max { var, prop } => {
+            let vals = extract_numeric_values(group, var, prop, snapshot);
+            vals.into_iter()
+                .reduce(f64::max)
+                .map(Value::Float)
+                .unwrap_or(Value::Null)
+        }
     }
+}
+
+/// Look up numeric (Float or Int) property values for `var.prop` across a group
+/// of bindings. Returns a `Vec<f64>` with one entry per binding that has a
+/// resolvable numeric value; bindings with missing or non-numeric values are skipped.
+fn extract_numeric_values(
+    group: &[Bindings],
+    var: &str,
+    prop: &str,
+    snapshot: Option<&Snapshot>,
+) -> Vec<f64> {
+    let snap = match snapshot {
+        Some(s) => s,
+        None => return vec![],
+    };
+    group
+        .iter()
+        .filter_map(|b| b.get(var).copied())
+        .filter_map(|node_id| {
+            snap.scan_by_subject_predicate(&node_id, prop)
+                .ok()
+                .and_then(|triples| {
+                    triples.into_iter().find_map(|t| match t {
+                        Triple::Property { value: Value::Float(f), .. } => Some(f),
+                        Triple::Property { value: Value::Int(i), .. } => Some(i as f64),
+                        _ => None,
+                    })
+                })
+        })
+        .collect()
 }
 
 fn format_json_array(items: &[String]) -> String {
@@ -252,7 +322,7 @@ mod tests {
         ];
 
         let specs = vec![AggregationSpec { func: AggFunc::CountStar, alias: "n".into() }];
-        let mut rows = apply_aggregations(bindings, &["a".to_string()], &specs, &[], None, None);
+        let mut rows = apply_aggregations(bindings, &["a".to_string()], &specs, &[], None, None, None);
 
         // Two groups: alice (count=2) and bob (count=1)
         assert_eq!(rows.len(), 2);
@@ -271,7 +341,7 @@ mod tests {
 
         // group_keys is empty → all 5 rows are in the same universal group → one row with count=5
         let specs = vec![AggregationSpec { func: AggFunc::CountStar, alias: "n".into() }];
-        let rows = apply_aggregations(bindings, &[], &specs, &[], None, None);
+        let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].agg_values.get("n"), Some(&Value::Int(5)));
     }
@@ -290,7 +360,7 @@ mod tests {
         ];
 
         let specs = vec![AggregationSpec { func: AggFunc::Collect("b".into()), alias: "bs".into() }];
-        let rows = apply_aggregations(bindings, &["a".to_string()], &specs, &[], None, None);
+        let rows = apply_aggregations(bindings, &["a".to_string()], &specs, &[], None, None, None);
 
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
@@ -320,7 +390,7 @@ mod tests {
         ];
 
         let specs = vec![AggregationSpec { func: AggFunc::Count("b".into()), alias: "n".into() }];
-        let rows = apply_aggregations(bindings, &["a".to_string()], &specs, &[], None, None);
+        let rows = apply_aggregations(bindings, &["a".to_string()], &specs, &[], None, None, None);
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].agg_values.get("n"), Some(&Value::Int(2)));
@@ -339,7 +409,7 @@ mod tests {
 
         let specs = vec![AggregationSpec { func: AggFunc::CountStar, alias: "n".into() }];
         let order_by = vec![OrderSpec { key: "n".into(), direction: SortDir::Asc }];
-        let rows = apply_aggregations(bindings, &["a".to_string()], &specs, &order_by, None, None);
+        let rows = apply_aggregations(bindings, &["a".to_string()], &specs, &order_by, None, None, None);
 
         let counts: Vec<i64> = rows.iter()
             .map(|r| if let Some(Value::Int(n)) = r.agg_values.get("n") { *n } else { 0 })
@@ -357,7 +427,7 @@ mod tests {
 
         let specs = vec![AggregationSpec { func: AggFunc::CountStar, alias: "n".into() }];
         let order_by = vec![OrderSpec { key: "n".into(), direction: SortDir::Desc }];
-        let rows = apply_aggregations(bindings, &["a".to_string()], &specs, &order_by, None, None);
+        let rows = apply_aggregations(bindings, &["a".to_string()], &specs, &order_by, None, None, None);
 
         let counts: Vec<i64> = rows.iter()
             .map(|r| if let Some(Value::Int(n)) = r.agg_values.get("n") { *n } else { 0 })
@@ -373,7 +443,7 @@ mod tests {
         let bindings: Vec<Bindings> = ids.iter().map(|&id| make_bindings(&[("a", id)])).collect();
 
         // No aggregation, just skip + limit
-        let rows = apply_aggregations(bindings, &[], &[], &[], Some(3), Some(4));
+        let rows = apply_aggregations(bindings, &[], &[], &[], Some(3), Some(4), None);
 
         assert_eq!(rows.len(), 4);
         for (i, row) in rows.iter().enumerate() {
@@ -386,7 +456,7 @@ mod tests {
         let ids: Vec<NodeId> = (0..3).map(|_| NodeId::new()).collect();
         let bindings: Vec<Bindings> = ids.iter().map(|&id| make_bindings(&[("a", id)])).collect();
 
-        let rows = apply_aggregations(bindings, &[], &[], &[], Some(10), None);
+        let rows = apply_aggregations(bindings, &[], &[], &[], Some(10), None, None);
         assert!(rows.is_empty());
     }
 
@@ -397,11 +467,252 @@ mod tests {
         let ids: Vec<NodeId> = (0..5).map(|_| NodeId::new()).collect();
         let bindings: Vec<Bindings> = ids.iter().map(|&id| make_bindings(&[("a", id)])).collect();
 
-        let rows = apply_aggregations(bindings, &[], &[], &[], None, None);
+        let rows = apply_aggregations(bindings, &[], &[], &[], None, None, None);
         assert_eq!(rows.len(), 5);
         for (i, row) in rows.iter().enumerate() {
             assert_eq!(row.group_keys.get("a"), Some(&ids[i]));
             assert!(row.agg_values.is_empty());
         }
+    }
+
+    // ── SUM / AVG / MIN / MAX with snapshot ───────────────────────────────────
+
+    use polargraph_core::{
+        temporal::{BiTemporalRange, Timestamp},
+        triple::{Predicate, Triple},
+    };
+    use polargraph_storage::TripleStore;
+    use tempfile::TempDir;
+
+    fn open_store() -> (TripleStore, TempDir) {
+        let dir = TempDir::new().unwrap();
+        (TripleStore::open(dir.path()).unwrap(), dir)
+    }
+
+    fn float_prop(node: NodeId, pred: &str, val: f64) -> Triple {
+        Triple::Property {
+            subject: node,
+            predicate: Predicate::new(pred),
+            value: Value::Float(val),
+            temporal: BiTemporalRange::assert_now(Timestamp::now()),
+        }
+    }
+
+    fn commit_snap(store: &TripleStore, triples: Vec<Triple>) -> polargraph_storage::Snapshot {
+        let mut tx = store.begin();
+        for t in triples { tx.insert(t); }
+        let ts = tx.commit().unwrap();
+        store.snapshot(ts)
+    }
+
+    #[test]
+    fn sum_floats_across_group() {
+        let (store, _dir) = open_store();
+        let n1 = NodeId::new();
+        let n2 = NodeId::new();
+        let n3 = NodeId::new();
+        let snap = commit_snap(&store, vec![
+            float_prop(n1, "score", 1.0),
+            float_prop(n2, "score", 2.5),
+            float_prop(n3, "score", 3.5),
+        ]);
+        let bindings = vec![
+            make_bindings(&[("n", n1)]),
+            make_bindings(&[("n", n2)]),
+            make_bindings(&[("n", n3)]),
+        ];
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Sum { var: "n".into(), prop: "score".into() },
+            alias: "total".into(),
+        }];
+        let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, Some(&snap));
+        assert_eq!(rows.len(), 1);
+        match rows[0].agg_values.get("total") {
+            Some(Value::Float(f)) => assert!((f - 7.0).abs() < 1e-9),
+            other => panic!("expected Float(7.0), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sum_empty_group_is_zero() {
+        let (store, _dir) = open_store();
+        let snap = commit_snap(&store, vec![]);
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Sum { var: "n".into(), prop: "score".into() },
+            alias: "total".into(),
+        }];
+        let rows = apply_aggregations(vec![], &[], &specs, &[], None, None, Some(&snap));
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn sum_no_snapshot_returns_zero() {
+        let n1 = NodeId::new();
+        let bindings = vec![make_bindings(&[("n", n1)])];
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Sum { var: "n".into(), prop: "score".into() },
+            alias: "total".into(),
+        }];
+        let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].agg_values.get("total"), Some(&Value::Float(0.0)));
+    }
+
+    #[test]
+    fn avg_floats_across_group() {
+        let (store, _dir) = open_store();
+        let n1 = NodeId::new();
+        let n2 = NodeId::new();
+        let snap = commit_snap(&store, vec![
+            float_prop(n1, "conf", 0.4),
+            float_prop(n2, "conf", 0.8),
+        ]);
+        let bindings = vec![
+            make_bindings(&[("n", n1)]),
+            make_bindings(&[("n", n2)]),
+        ];
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Avg { var: "n".into(), prop: "conf".into() },
+            alias: "mean".into(),
+        }];
+        let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, Some(&snap));
+        assert_eq!(rows.len(), 1);
+        match rows[0].agg_values.get("mean") {
+            Some(Value::Float(f)) => assert!((f - 0.6).abs() < 1e-9),
+            other => panic!("expected Float(0.6), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn avg_empty_group_returns_null() {
+        let (store, _dir) = open_store();
+        let snap = commit_snap(&store, vec![]);
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Avg { var: "n".into(), prop: "conf".into() },
+            alias: "mean".into(),
+        }];
+        let rows = apply_aggregations(vec![], &[], &specs, &[], None, None, Some(&snap));
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn avg_missing_prop_returns_null() {
+        let n1 = NodeId::new();
+        let (store, _dir) = open_store();
+        let snap = commit_snap(&store, vec![]); // no properties at all
+        let bindings = vec![make_bindings(&[("n", n1)])];
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Avg { var: "n".into(), prop: "conf".into() },
+            alias: "mean".into(),
+        }];
+        let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, Some(&snap));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].agg_values.get("mean"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn min_returns_smallest_value() {
+        let (store, _dir) = open_store();
+        let n1 = NodeId::new();
+        let n2 = NodeId::new();
+        let n3 = NodeId::new();
+        let snap = commit_snap(&store, vec![
+            float_prop(n1, "v", 5.0),
+            float_prop(n2, "v", 2.0),
+            float_prop(n3, "v", 8.0),
+        ]);
+        let bindings = vec![
+            make_bindings(&[("n", n1)]),
+            make_bindings(&[("n", n2)]),
+            make_bindings(&[("n", n3)]),
+        ];
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Min { var: "n".into(), prop: "v".into() },
+            alias: "lo".into(),
+        }];
+        let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, Some(&snap));
+        assert_eq!(rows.len(), 1);
+        match rows[0].agg_values.get("lo") {
+            Some(Value::Float(f)) => assert!((f - 2.0).abs() < 1e-9),
+            other => panic!("expected Float(2.0), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn min_empty_returns_null() {
+        let (store, _dir) = open_store();
+        let snap = commit_snap(&store, vec![]);
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Min { var: "n".into(), prop: "v".into() },
+            alias: "lo".into(),
+        }];
+        let rows = apply_aggregations(vec![], &[], &specs, &[], None, None, Some(&snap));
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn min_no_snapshot_returns_null() {
+        let n1 = NodeId::new();
+        let bindings = vec![make_bindings(&[("n", n1)])];
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Min { var: "n".into(), prop: "v".into() },
+            alias: "lo".into(),
+        }];
+        let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].agg_values.get("lo"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn max_returns_largest_value() {
+        let (store, _dir) = open_store();
+        let n1 = NodeId::new();
+        let n2 = NodeId::new();
+        let n3 = NodeId::new();
+        let snap = commit_snap(&store, vec![
+            float_prop(n1, "v", 5.0),
+            float_prop(n2, "v", 2.0),
+            float_prop(n3, "v", 8.0),
+        ]);
+        let bindings = vec![
+            make_bindings(&[("n", n1)]),
+            make_bindings(&[("n", n2)]),
+            make_bindings(&[("n", n3)]),
+        ];
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Max { var: "n".into(), prop: "v".into() },
+            alias: "hi".into(),
+        }];
+        let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, Some(&snap));
+        assert_eq!(rows.len(), 1);
+        match rows[0].agg_values.get("hi") {
+            Some(Value::Float(f)) => assert!((f - 8.0).abs() < 1e-9),
+            other => panic!("expected Float(8.0), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn max_empty_returns_null() {
+        let (store, _dir) = open_store();
+        let snap = commit_snap(&store, vec![]);
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Max { var: "n".into(), prop: "v".into() },
+            alias: "hi".into(),
+        }];
+        let rows = apply_aggregations(vec![], &[], &specs, &[], None, None, Some(&snap));
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn max_no_snapshot_returns_null() {
+        let n1 = NodeId::new();
+        let bindings = vec![make_bindings(&[("n", n1)])];
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Max { var: "n".into(), prop: "v".into() },
+            alias: "hi".into(),
+        }];
+        let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].agg_values.get("hi"), Some(&Value::Null));
     }
 }

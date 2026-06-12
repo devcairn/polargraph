@@ -29,7 +29,10 @@ pub use datalog::{
     execute_recursive, reachable_from, reachable_from_hops, Bindings, DerivedFacts, Query,
     QueryError, Rule, Term, VarPattern,
 };
-pub use eval::{evaluate, evaluate_with_registry};
+pub use eval::{evaluate, evaluate_annotations, evaluate_with_registry};
 pub use explain::{explain_query, ExplainPlan, ExplainStep};
-pub use planner::{choose_index, IndexChoice, Pattern, SchemaHints};
+pub use planner::{
+    choose_annotation_index, choose_index, AnnotationIndexChoice, AnnotationPattern,
+    IndexChoice, Pattern, SchemaHints,
+};
 pub use projection::{apply_view, ProjectedTriple};

@@ -35,5 +35,5 @@ pub use mvcc::{ConflictError, Snapshot, Transaction};
 pub use polargraph_core::schema::{RetentionPolicy, VectorSpaceDef};
 pub use registry::{EdgeTypeRegistry, NodeTypeRegistry, ValidationError, SCHEMA_REGISTRY_NODE};
 pub use sst_import::{ImportStats, SstImporter};
-pub use store::{StoreMode, TripleStore};
+pub use store::{EdgeAnnotation, EdgeAnnotationValue, StoreMode, TripleStore};
 pub use wal_stream::{WalEntry, WalStreamer};

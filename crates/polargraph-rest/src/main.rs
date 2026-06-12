@@ -324,6 +324,24 @@ fn proto_value_to_json(v: &proto::Value) -> serde_json::Value {
     }
 }
 
+fn json_to_proto_value(v: &serde_json::Value) -> proto::Value {
+    use proto::value::Kind;
+    let kind = match v {
+        serde_json::Value::Null => Kind::NullVal(true),
+        serde_json::Value::Bool(b) => Kind::BoolVal(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Kind::IntVal(i)
+            } else {
+                Kind::FloatVal(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => Kind::TextVal(s.clone()),
+        other => Kind::TextVal(other.to_string()),
+    };
+    proto::Value { kind: Some(kind) }
+}
+
 fn uuid_string_to_node_id(s: &str) -> Result<proto::NodeId, String> {
     Uuid::parse_str(s)
         .map(|u| proto::NodeId { bytes: u.as_bytes().to_vec() })
@@ -911,6 +929,143 @@ async fn handle_tx_rollback(
     }
 }
 
+// ── POST /edge-annotations ────────────────────────────────────────────────────
+
+/// JSON body for inserting edge annotations (RDF-star / statement metadata).
+///
+/// `edge_id` must be the UUID of an edge that already exists (or will be
+/// inserted in the same call via the normal `/insert` endpoint).
+/// Either `node_id` (a UUID string) or `scalar` (any JSON value) must be
+/// present.
+#[derive(Deserialize)]
+struct EdgeAnnotationBody {
+    edge_id:   String,
+    predicate: String,
+    node_id:   Option<String>,
+    scalar:    Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct InsertEdgeAnnotationsBody {
+    annotations: Vec<EdgeAnnotationBody>,
+}
+
+async fn handle_insert_edge_annotations(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<InsertEdgeAnnotationsBody>,
+) -> Response {
+    let mut annotations = Vec::new();
+    for a in body.annotations {
+        // Parse edge_id
+        let edge_uuid = match Uuid::parse_str(&a.edge_id) {
+            Ok(u) => u,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("invalid edge_id UUID: {}", a.edge_id) })),
+                )
+                    .into_response()
+            }
+        };
+        let edge_bytes = edge_uuid.as_bytes().to_vec();
+
+        let value = if let Some(node_id_str) = a.node_id {
+            let node_uuid = match Uuid::parse_str(&node_id_str) {
+                Ok(u) => u,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": format!("invalid node_id UUID: {}", node_id_str) })),
+                    )
+                        .into_response()
+                }
+            };
+            Some(proto::edge_annotation::Value::NodeId(node_uuid.as_bytes().to_vec()))
+        } else if let Some(scalar_val) = a.scalar {
+            let v = json_to_proto_value(&scalar_val);
+            Some(proto::edge_annotation::Value::Scalar(v))
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "each annotation must have either node_id or scalar" })),
+            )
+                .into_response();
+        };
+
+        annotations.push(proto::EdgeAnnotation {
+            edge_id: edge_bytes,
+            predicate: a.predicate,
+            value,
+        });
+    }
+
+    let req = proto::InsertRequest {
+        edge_annotations: annotations,
+        ..Default::default()
+    };
+
+    let mut client = state.client.clone();
+    match client.insert(tonic::Request::new(req)).await {
+        Ok(r) => {
+            let inner = r.into_inner();
+            Json(serde_json::json!({ "ok": true, "commit_ts": inner.commit_ts }))
+                .into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
+// ── GET /edge-annotations/:edge_id ───────────────────────────────────────────
+
+async fn handle_get_edge_annotations(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(edge_id): axum::extract::Path<String>,
+) -> Response {
+    let edge_uuid = match Uuid::parse_str(&edge_id) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid edge_id UUID: {}", edge_id) })),
+            )
+                .into_response()
+        }
+    };
+
+    let req = proto::GetEdgeAnnotationsRequest {
+        edge_id: edge_uuid.as_bytes().to_vec(),
+    };
+
+    let mut client = state.client.clone();
+    match client.get_edge_annotations(tonic::Request::new(req)).await {
+        Ok(r) => {
+            let annotations: Vec<serde_json::Value> = r
+                .into_inner()
+                .annotations
+                .into_iter()
+                .map(|a| {
+                    let val = match a.value {
+                        Some(proto::edge_annotation::Value::NodeId(bytes)) if bytes.len() == 16 => {
+                            let arr: [u8; 16] = bytes[..16].try_into().unwrap_or([0u8; 16]);
+                            serde_json::json!({ "node_id": Uuid::from_bytes(arr).to_string() })
+                        }
+                        Some(proto::edge_annotation::Value::Scalar(v)) => {
+                            serde_json::json!({ "scalar": proto_value_to_json(&v) })
+                        }
+                        _ => serde_json::json!(null),
+                    };
+                    serde_json::json!({
+                        "predicate": a.predicate,
+                        "value": val,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "annotations": annotations })).into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
 // ── GET /stats ────────────────────────────────────────────────────────────────
 
 async fn handle_stats(State(state): State<Arc<AppState>>) -> Response {
@@ -977,6 +1132,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/tx/begin", post(handle_tx_begin))
         .route("/tx/commit", post(handle_tx_commit))
         .route("/tx/rollback", post(handle_tx_rollback))
+        .route("/edge-annotations", post(handle_insert_edge_annotations))
+        .route("/edge-annotations/:edge_id", get(handle_get_edge_annotations))
         .with_state(state);
 
     info!(addr = %args.listen, upstream = %args.upstream, "polargraph-rest listening");

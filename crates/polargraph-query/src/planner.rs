@@ -160,6 +160,51 @@ pub fn choose_index(pattern: &Pattern) -> IndexChoice {
     }
 }
 
+// ── Annotation patterns and index selection ───────────────────────────────────
+
+/// A pattern for querying edge annotation CFs (EPA/PEA/EPO).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationPattern {
+    pub edge: Option<polargraph_core::id::EdgeId>,
+    pub predicate: Option<String>,
+}
+
+impl AnnotationPattern {
+    pub fn new() -> Self { Self { edge: None, predicate: None } }
+    pub fn with_edge(mut self, e: polargraph_core::id::EdgeId) -> Self { self.edge = Some(e); self }
+    pub fn with_predicate(mut self, p: impl Into<String>) -> Self { self.predicate = Some(p.into()); self }
+}
+
+impl Default for AnnotationPattern {
+    fn default() -> Self { Self::new() }
+}
+
+/// Index choice for annotation CF scans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnotationIndexChoice {
+    /// EPA scan by edge_id (all predicates on that edge).
+    EpaByEdge { edge: polargraph_core::id::EdgeId },
+    /// EPA scan by (edge_id, predicate) — point lookup.
+    EpaByEdgePred { edge: polargraph_core::id::EdgeId, predicate: String },
+    /// PEA scan by predicate (all edges with that annotation).
+    PeaByPred { predicate: String },
+    /// Full EPA scan — avoid; no useful prefix.
+    EpaFull,
+}
+
+/// Choose the cheapest annotation index for a pattern.
+pub fn choose_annotation_index(pattern: &AnnotationPattern) -> AnnotationIndexChoice {
+    match (pattern.edge.is_some(), pattern.predicate.is_some()) {
+        (true, true) => AnnotationIndexChoice::EpaByEdgePred {
+            edge: pattern.edge.unwrap(),
+            predicate: pattern.predicate.clone().unwrap(),
+        },
+        (true, false) => AnnotationIndexChoice::EpaByEdge { edge: pattern.edge.unwrap() },
+        (false, true) => AnnotationIndexChoice::PeaByPred { predicate: pattern.predicate.clone().unwrap() },
+        (false, false) => AnnotationIndexChoice::EpaFull,
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -82,12 +82,16 @@ impl Edge {
 
 /// The atomic storage unit.
 ///
-/// Two flavours:
+/// Four flavours:
 /// - **Relationship triple**: subject → predicate → object (both are NodeIds)
 /// - **Property triple**:    subject → predicate → value  (object is a scalar)
+/// - **EdgeProperty**:       edge annotation → predicate → scalar value  (RDF-star)
+/// - **EdgeRelation**:       edge annotation → predicate → object node   (RDF-star)
 ///
-/// Both share the same index structure; property triples use a reserved
-/// sentinel for the object slot in the index key.
+/// Relation and Property triples share the hexastore index; property triples
+/// use a reserved sentinel for the object slot in the index key.
+/// EdgeProperty and EdgeRelation triples are stored in the EPA and EPO column
+/// families respectively, keyed by EdgeId rather than NodeId.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Triple {
     /// subject → predicate → object node
@@ -105,24 +109,54 @@ pub enum Triple {
         value: Value,
         temporal: BiTemporalRange,
     },
+    /// RDF-star: annotate a relation triple (by EdgeId) with a scalar value.
+    ///
+    /// Stored in the `EPA` column family: `[edge_id:16][pred_id:4][tt:8]`.
+    EdgeProperty {
+        edge: EdgeId,
+        predicate: Predicate,
+        value: Value,
+        temporal: BiTemporalRange,
+    },
+    /// RDF-star: annotate a relation triple (by EdgeId) with a relation to a node.
+    ///
+    /// Stored in the `EPO` column family: `[edge_id:16][pred_id:4][obj_id:16][tt:8]`.
+    EdgeRelation {
+        edge: EdgeId,
+        predicate: Predicate,
+        object: NodeId,
+        temporal: BiTemporalRange,
+    },
 }
 
 impl Triple {
+    /// Return the subject NodeId.
+    ///
+    /// For `EdgeProperty` and `EdgeRelation`, the EdgeId bytes are reinterpreted
+    /// as a NodeId (both wrap `Uuid`). This is safe since the actual routing to
+    /// EPA/EPO CFs is done before `subject()` would be used for storage writes.
     pub fn subject(&self) -> NodeId {
         match self {
             Triple::Relation { subject, .. } | Triple::Property { subject, .. } => *subject,
+            Triple::EdgeProperty { edge, .. } | Triple::EdgeRelation { edge, .. } => NodeId(edge.0),
         }
     }
 
     pub fn predicate(&self) -> &Predicate {
         match self {
-            Triple::Relation { predicate, .. } | Triple::Property { predicate, .. } => predicate,
+            Triple::Relation { predicate, .. }
+            | Triple::Property { predicate, .. }
+            | Triple::EdgeProperty { predicate, .. }
+            | Triple::EdgeRelation { predicate, .. } => predicate,
         }
     }
 
     pub fn temporal(&self) -> &BiTemporalRange {
         match self {
-            Triple::Relation { temporal, .. } | Triple::Property { temporal, .. } => temporal,
+            Triple::Relation { temporal, .. }
+            | Triple::Property { temporal, .. }
+            | Triple::EdgeProperty { temporal, .. }
+            | Triple::EdgeRelation { temporal, .. } => temporal,
         }
     }
 }

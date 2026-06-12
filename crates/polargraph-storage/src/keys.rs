@@ -19,7 +19,7 @@
 //!   OPS  [object(16)][pred(4)][subject(16)][tt(8)]
 
 use crate::error::StorageError;
-use polargraph_core::{id::NodeId, temporal::Timestamp};
+use polargraph_core::{id::{EdgeId, NodeId}, temporal::Timestamp};
 use uuid::Uuid;
 
 /// Interned predicate ID — 32-bit so keys stay compact.
@@ -229,6 +229,119 @@ fn check_len(key: &[u8], expected: usize, name: &str) -> Result<(), StorageError
     } else {
         Ok(())
     }
+}
+
+// ── RDF-star EPA / EPO key encoding ──────────────────────────────────────────
+
+/// EPA key layout: `[edge_id(16)][pred_id BE(4)][tt BE(8)]` = 28 bytes.
+pub fn encode_epa_key(edge: &EdgeId, pred_id: PredId, tt: Timestamp) -> [u8; 28] {
+    let mut k = [0u8; 28];
+    k[0..16].copy_from_slice(edge.as_bytes());
+    k[16..20].copy_from_slice(&pred_id.to_be_bytes());
+    k[20..28].copy_from_slice(&tt.to_be_bytes());
+    k
+}
+
+/// Decoded EPA key.
+pub struct DecodedEpa {
+    pub edge_id: EdgeId,
+    pub pred_id: PredId,
+    pub tt: Timestamp,
+}
+
+pub fn decode_epa_key(key: &[u8]) -> Result<DecodedEpa, StorageError> {
+    check_len(key, 28, "EPA")?;
+    Ok(DecodedEpa {
+        edge_id: EdgeId(Uuid::from_bytes(key[0..16].try_into().expect("16 bytes"))),
+        pred_id: pred_from(&key[16..20]),
+        tt: tt_from(&key[20..28]),
+    })
+}
+
+/// EPO key layout: `[edge_id(16)][pred_id BE(4)][obj_id(16)][tt BE(8)]` = 44 bytes.
+pub fn encode_epo_key(edge: &EdgeId, pred_id: PredId, obj: &NodeId, tt: Timestamp) -> [u8; 44] {
+    let mut k = [0u8; 44];
+    k[0..16].copy_from_slice(edge.as_bytes());
+    k[16..20].copy_from_slice(&pred_id.to_be_bytes());
+    k[20..36].copy_from_slice(obj.as_bytes());
+    k[36..44].copy_from_slice(&tt.to_be_bytes());
+    k
+}
+
+/// Decoded EPO key.
+pub struct DecodedEpo {
+    pub edge_id: EdgeId,
+    pub pred_id: PredId,
+    pub object: NodeId,
+    pub tt: Timestamp,
+}
+
+pub fn decode_epo_key(key: &[u8]) -> Result<DecodedEpo, StorageError> {
+    check_len(key, 44, "EPO")?;
+    Ok(DecodedEpo {
+        edge_id: EdgeId(Uuid::from_bytes(key[0..16].try_into().expect("16 bytes"))),
+        pred_id: pred_from(&key[16..20]),
+        object: node_id_from(&key[20..36]),
+        tt: tt_from(&key[36..44]),
+    })
+}
+
+/// EPA prefix: all property annotations for a given edge.
+pub fn epa_prefix_edge(edge: &EdgeId) -> [u8; 16] {
+    *edge.as_bytes()
+}
+
+/// EPA prefix: all property annotations for (edge, predicate).
+pub fn epa_prefix_edge_pred(edge: &EdgeId, pred_id: PredId) -> [u8; 20] {
+    let mut k = [0u8; 20];
+    k[0..16].copy_from_slice(edge.as_bytes());
+    k[16..20].copy_from_slice(&pred_id.to_be_bytes());
+    k
+}
+
+/// EPO prefix: all relation annotations for a given edge.
+pub fn epo_prefix_edge(edge: &EdgeId) -> [u8; 16] {
+    *edge.as_bytes()
+}
+
+// ── PEA (predicate-first annotation index) key encoding ──────────────────────
+
+/// PEA key layout: `[pred_id BE(4)][edge_id(16)][tt BE(8)]` = 28 bytes.
+pub fn encode_pea_key(pred_id: PredId, edge: &EdgeId, tt: Timestamp) -> [u8; 28] {
+    let mut k = [0u8; 28];
+    k[0..4].copy_from_slice(&pred_id.to_be_bytes());
+    k[4..20].copy_from_slice(edge.as_bytes());
+    k[20..28].copy_from_slice(&tt.to_be_bytes());
+    k
+}
+
+/// Decoded PEA key.
+pub struct DecodedPea {
+    pub pred_id: PredId,
+    pub edge_id: EdgeId,
+    pub tt: Timestamp,
+}
+
+pub fn decode_pea_key(key: &[u8]) -> Result<DecodedPea, StorageError> {
+    check_len(key, 28, "PEA")?;
+    Ok(DecodedPea {
+        pred_id: pred_from(&key[0..4]),
+        edge_id: EdgeId(Uuid::from_bytes(key[4..20].try_into().expect("16 bytes"))),
+        tt: tt_from(&key[20..28]),
+    })
+}
+
+/// PEA prefix: all property annotations with a given predicate.
+pub fn pea_prefix_pred(pred_id: PredId) -> [u8; 4] {
+    pred_id.to_be_bytes()
+}
+
+/// PEA prefix: all annotations for a specific (predicate, edge) pair.
+pub fn pea_prefix_pred_edge(pred_id: PredId, edge: &EdgeId) -> [u8; 20] {
+    let mut k = [0u8; 20];
+    k[0..4].copy_from_slice(&pred_id.to_be_bytes());
+    k[4..20].copy_from_slice(edge.as_bytes());
+    k
 }
 
 // ── prefix helpers for range scans ───────────────────────────────────────────
@@ -519,5 +632,81 @@ mod tests {
     #[test]
     fn decode_osp_wrong_length_errors() {
         assert!(decode_osp(&[0u8; 43]).is_err());
+    }
+
+    // ── PEA encode/decode round-trips ─────────────────────────────────────────
+
+    #[test]
+    fn pea_round_trip() {
+        use polargraph_core::id::EdgeId;
+        let edge = EdgeId(Uuid::from_bytes([0xAB; 16]));
+        let pred: PredId = 0x0000_007F;
+        let tt = ts(123_456_789);
+
+        let key = encode_pea_key(pred, &edge, tt);
+        assert_eq!(key.len(), 28);
+        let d = decode_pea_key(&key).unwrap();
+
+        assert_eq!(d.pred_id, pred);
+        assert_eq!(d.edge_id.as_bytes(), edge.as_bytes());
+        assert_eq!(d.tt, tt);
+    }
+
+    #[test]
+    fn pea_prefix_pred_is_prefix_of_pea_key() {
+        use polargraph_core::id::EdgeId;
+        let edge = EdgeId(Uuid::from_bytes([0xCD; 16]));
+        let pred: PredId = 42;
+        let key = encode_pea_key(pred, &edge, ts(0));
+        let prefix = pea_prefix_pred(pred);
+        assert!(key.starts_with(&prefix));
+    }
+
+    #[test]
+    fn pea_prefix_pred_edge_is_prefix_of_pea_key() {
+        use polargraph_core::id::EdgeId;
+        let edge = EdgeId(Uuid::from_bytes([0xEF; 16]));
+        let pred: PredId = 7;
+        let key = encode_pea_key(pred, &edge, ts(999));
+        let prefix = pea_prefix_pred_edge(pred, &edge);
+        assert!(key.starts_with(&prefix));
+    }
+
+    #[test]
+    fn pea_different_pred_does_not_match_prefix() {
+        use polargraph_core::id::EdgeId;
+        let edge = EdgeId(Uuid::from_bytes([0x11; 16]));
+        let key = encode_pea_key(1, &edge, ts(0));
+        let wrong_prefix = pea_prefix_pred(2);
+        assert!(!key.starts_with(&wrong_prefix));
+    }
+
+    #[test]
+    fn decode_pea_wrong_length_errors() {
+        assert!(decode_pea_key(&[0u8; 27]).is_err());
+        assert!(decode_pea_key(&[0u8; 29]).is_err());
+        assert!(decode_pea_key(&[]).is_err());
+    }
+
+    #[test]
+    fn pea_keys_sort_by_pred_then_edge_then_tt() {
+        use polargraph_core::id::EdgeId;
+        let edge1 = EdgeId(Uuid::from_bytes([0x01; 16]));
+        let edge2 = EdgeId(Uuid::from_bytes([0x02; 16]));
+
+        // Same pred, different edge
+        let k1 = encode_pea_key(5, &edge1, ts(0));
+        let k2 = encode_pea_key(5, &edge2, ts(0));
+        assert!(k1 < k2, "lower edge bytes should sort first");
+
+        // Different pred
+        let k3 = encode_pea_key(4, &edge2, ts(0));
+        let k4 = encode_pea_key(5, &edge1, ts(0));
+        assert!(k3 < k4, "lower pred_id should sort first");
+
+        // Same pred+edge, different tt
+        let k5 = encode_pea_key(5, &edge1, ts(100));
+        let k6 = encode_pea_key(5, &edge1, ts(200));
+        assert!(k5 < k6, "lower tt should sort first");
     }
 }
