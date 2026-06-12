@@ -190,6 +190,15 @@ pub struct PolarGraphServer {
     /// `None` when the server was started without auth (e.g. in tests that
     /// don't pass a key store).
     key_store: Option<KeyStore>,
+    /// Compiled Cypher query plan cache. Key = raw Cypher string, value = compiled plan.
+    /// Shared across all clones. Plans are stored pre-substitution (with Param placeholders).
+    query_plan_cache: Arc<DashMap<String, Arc<polargraph_query::cypher::CompiledQuery>>>,
+    /// Maximum number of entries in `query_plan_cache`. 0 = disabled.
+    query_cache_size: usize,
+    /// Number of cache hits since startup.
+    query_cache_hits: Arc<std::sync::atomic::AtomicU64>,
+    /// Number of cache misses since startup.
+    query_cache_misses: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PolarGraphServer {
@@ -235,6 +244,10 @@ impl PolarGraphServer {
             tx_map: Arc::new(DashMap::new()),
             tx_idle_timeout_ms: 300_000,
             key_store: None,
+            query_plan_cache: Arc::new(DashMap::new()),
+            query_cache_size: 1000,
+            query_cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            query_cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -263,6 +276,25 @@ impl PolarGraphServer {
     pub fn with_tx_idle_timeout_ms(mut self, ms: u64) -> Self {
         self.tx_idle_timeout_ms = ms;
         self
+    }
+
+    /// Set the maximum number of compiled Cypher query plans to cache. 0 disables caching.
+    pub fn with_query_cache_size(mut self, size: usize) -> Self {
+        self.query_cache_size = size;
+        self
+    }
+
+    /// Deserialize a `map<string, string>` params field (values are JSON-encoded Values).
+    fn deserialize_params(
+        raw: &std::collections::HashMap<String, String>,
+    ) -> Result<std::collections::HashMap<String, polargraph_core::value::Value>, Status> {
+        raw.iter()
+            .map(|(k, v)| {
+                let val: polargraph_core::value::Value = serde_json::from_str(v)
+                    .map_err(|e| Status::invalid_argument(format!("invalid param '{}': {}", k, e)))?;
+                Ok((k.clone(), val))
+            })
+            .collect()
     }
 
     /// Attach the shared API key store so the `AddApiKey`, `RevokeApiKey`,
@@ -322,6 +354,10 @@ impl PolarGraphServer {
             tx_map: Arc::new(DashMap::new()),
             tx_idle_timeout_ms: 300_000,
             key_store: None,
+            query_plan_cache: Arc::new(DashMap::new()),
+            query_cache_size: 1000,
+            query_cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            query_cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         Ok((server, replica_state))
     }
@@ -1742,12 +1778,43 @@ impl PolarGraphService for PolarGraphServer {
             ));
         }
 
-        // Parse the Cypher string into an AST.
-        let parsed = polargraph_query::cypher::parse(&req.cypher)
-            .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
+        // Deserialize named parameters from the request.
+        let params = Self::deserialize_params(&req.params)?;
 
-        // Compile the AST into the Datalog IR.
-        let compiled = polargraph_query::cypher::compile(parsed);
+        // Look up or compile the query plan (with caching when enabled).
+        let compiled: polargraph_query::cypher::CompiledQuery = if self.query_cache_size > 0 {
+            if let Some(cached) = self.query_plan_cache.get(&req.cypher) {
+                self.query_cache_hits.fetch_add(1, Ordering::Relaxed);
+                metrics::counter!("polargraph_query_cache_hits_total").increment(1);
+                cached.as_ref().clone()
+            } else {
+                self.query_cache_misses.fetch_add(1, Ordering::Relaxed);
+                metrics::counter!("polargraph_query_cache_misses_total").increment(1);
+                let parsed = polargraph_query::cypher::parse(&req.cypher)
+                    .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
+                let plan = polargraph_query::cypher::compile(parsed);
+                // Evict oldest entry if cache is full (simple LRU-like drop).
+                if self.query_plan_cache.len() >= self.query_cache_size {
+                    if let Some(entry) = self.query_plan_cache.iter().next().map(|e| e.key().clone()) {
+                        self.query_plan_cache.remove(&entry);
+                    }
+                }
+                self.query_plan_cache.insert(req.cypher.clone(), Arc::new(plan.clone()));
+                plan
+            }
+        } else {
+            // Cache disabled — compile fresh each time.
+            self.query_cache_misses.fetch_add(1, Ordering::Relaxed);
+            metrics::counter!("polargraph_query_cache_misses_total").increment(1);
+            let parsed = polargraph_query::cypher::parse(&req.cypher)
+                .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
+            polargraph_query::cypher::compile(parsed)
+        };
+
+        // Substitute named parameters into the plan.
+        let compiled = compiled
+            .substitute_params(&params)
+            .map_err(|e| Status::invalid_argument(format!("parameter error: {e}")))?;
 
         // Resolve snapshot. If tx_id is set, read from the transaction's snapshot.
         let mut snapshot = if !req.tx_id.is_empty() {
@@ -2117,9 +2184,38 @@ impl PolarGraphService for PolarGraphServer {
             return Err(Status::invalid_argument("cypher query string must not be empty"));
         }
 
-        let parsed = polargraph_query::cypher::parse(&req.cypher)
-            .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
-        let compiled = polargraph_query::cypher::compile(parsed);
+        let params = Self::deserialize_params(&req.params)?;
+
+        let compiled: polargraph_query::cypher::CompiledQuery = if self.query_cache_size > 0 {
+            if let Some(cached) = self.query_plan_cache.get(&req.cypher) {
+                self.query_cache_hits.fetch_add(1, Ordering::Relaxed);
+                metrics::counter!("polargraph_query_cache_hits_total").increment(1);
+                cached.as_ref().clone()
+            } else {
+                self.query_cache_misses.fetch_add(1, Ordering::Relaxed);
+                metrics::counter!("polargraph_query_cache_misses_total").increment(1);
+                let parsed = polargraph_query::cypher::parse(&req.cypher)
+                    .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
+                let plan = polargraph_query::cypher::compile(parsed);
+                if self.query_plan_cache.len() >= self.query_cache_size {
+                    if let Some(entry) = self.query_plan_cache.iter().next().map(|e| e.key().clone()) {
+                        self.query_plan_cache.remove(&entry);
+                    }
+                }
+                self.query_plan_cache.insert(req.cypher.clone(), Arc::new(plan.clone()));
+                plan
+            }
+        } else {
+            self.query_cache_misses.fetch_add(1, Ordering::Relaxed);
+            metrics::counter!("polargraph_query_cache_misses_total").increment(1);
+            let parsed = polargraph_query::cypher::parse(&req.cypher)
+                .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
+            polargraph_query::cypher::compile(parsed)
+        };
+
+        let compiled = compiled
+            .substitute_params(&params)
+            .map_err(|e| Status::invalid_argument(format!("parameter error: {e}")))?;
 
         let tx_ts = if req.as_of_tx_time != 0 { req.as_of_tx_time } else { 0 };
         let mut snapshot = if tx_ts == 0 {
@@ -2265,6 +2361,9 @@ impl PolarGraphService for PolarGraphServer {
             predicate_intern_count: self.store.predicate_count(),
             open_transaction_count: self.tx_map.len() as u32,
             mode: mode.to_owned(),
+            query_cache_hits: self.query_cache_hits.load(Ordering::Relaxed),
+            query_cache_misses: self.query_cache_misses.load(Ordering::Relaxed),
+            query_cache_size: self.query_plan_cache.len() as u32,
         }))
     }
 

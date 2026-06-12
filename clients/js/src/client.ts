@@ -307,6 +307,7 @@ export class PolarGraphClient {
       asOfValidTime: options.asOfValidTime ?? 0,
       asOfTxTime: options.asOfTxTime ?? 0,
       txId: options.txId ?? "",
+      params: options.params ?? {},
     };
     const resp = await this._unary(this._grpc.cypherQuery.bind(this._grpc), req);
     return resp.rows.map((row) => {

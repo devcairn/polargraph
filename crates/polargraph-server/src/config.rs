@@ -156,6 +156,9 @@ pub struct QueryConfig {
     /// Default ef for HNSW vector searches (higher = better recall, slower).
     /// Equivalent to `--default-vector-ef` / `POLARGRAPH_DEFAULT_VECTOR_EF`.
     pub default_vector_ef: Option<u32>,
+    /// Maximum number of compiled Cypher plans to cache (0 = disabled).
+    /// Equivalent to `--query-cache-size` / `POLARGRAPH_QUERY_CACHE_SIZE`.
+    pub cache_size: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -258,6 +261,7 @@ no_ui      = false
 timeout_ms       = 5000
 slow_query_ms    = 250
 default_vector_ef = 100
+cache_size       = 500
 "#
         )
         .unwrap();
@@ -300,6 +304,7 @@ default_vector_ef = 100
         assert_eq!(cfg.query.timeout_ms, Some(5_000));
         assert_eq!(cfg.query.slow_query_ms, Some(250));
         assert_eq!(cfg.query.default_vector_ef, Some(100));
+        assert_eq!(cfg.query.cache_size, Some(500));
     }
 
     #[test]

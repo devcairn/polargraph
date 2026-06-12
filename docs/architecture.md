@@ -2348,6 +2348,83 @@ on each WAL-applied batch that touches AC predicates.
 
 ---
 
+## Named Cypher parameters
+
+Cypher queries may include `$param` placeholders in WHERE clauses and
+property equality filters:
+
+```cypher
+MATCH (a:Person) WHERE a.name = $name AND a.age > $min_age RETURN a
+```
+
+Parameters are supplied as a `map<string, string>` in the gRPC request (both
+`CypherQueryRequest` and `VectorSeedQueryRequest`).  Each map value is a
+JSON-encoded `Value` (e.g. `"\"Alice\""` for a string, `"42"` for an integer,
+`"true"` for a boolean).
+
+### How it works
+
+1. **Lexer**: `$identifier` tokens are emitted as `Token::Param(name)`.
+2. **Compiler**: `parse_literal()` returns `CypherValue::Param(name)`.
+   The `emit_node_filters()` path propagates this through to
+   `FilterValue::Param(name)` in the compiled `ValueFilter`.
+3. **Cache hit**: the pre-substitution `CompiledQuery` (with `Param` placeholders)
+   is stored in the plan cache keyed by the raw Cypher string.
+4. **Substitution**: after retrieval from cache, `substitute_params()` clones
+   the plan and replaces every `FilterValue::Param(name)` with
+   `FilterValue::Literal(value)`.  Returns `CypherError` if a referenced
+   parameter is absent from the map.
+5. **Execution**: the substituted plan is executed normally.
+
+REST endpoint: the `params` key of the JSON body sent to `POST /cypher` or
+`POST /cypher/stream` accepts the same `{"name": "\"Alice\""}` shape.
+
+Python SDK: `client.cypher(q, params={"name": "Alice"})` — the SDK
+JSON-serialises values automatically.
+
+Go SDK: `WithParams(map[string]string{"name": `\`"Alice"`\`})` option.
+
+TypeScript SDK: `params?: Record<string, string>` in `CypherOptions`.
+
+---
+
+## Query plan cache
+
+Compiled Cypher plans are cached in-process to avoid re-parsing and
+re-compiling the same query string on every request.
+
+### Cache behaviour
+
+- **Key**: the raw Cypher string (before parameter substitution).
+- **Value**: `Arc<CompiledQuery>` — the pre-substitution plan.
+- **Implementation**: `Arc<DashMap<String, Arc<CompiledQuery>>>` on
+  `PolarGraphServer` (lock-free sharded hash map from the `dashmap` crate).
+- **Size limit**: configurable via `--query-cache-size N`
+  (`POLARGRAPH_QUERY_CACHE_SIZE`, `[query] cache_size` TOML key); default
+  1 000 entries.  When the cache is full, new entries are evicted (LRU
+  eviction is not implemented — the cache silently skips inserting when at
+  capacity).
+- **Eviction on schema change**: not yet implemented; restarting the server
+  clears the cache.
+
+### Prometheus metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `polargraph_query_cache_hits_total` | counter | Plans served from cache |
+| `polargraph_query_cache_misses_total` | counter | Plans compiled fresh |
+
+`ShowStats` also returns `query_cache_hits`, `query_cache_misses`, and
+`query_cache_size` as fields on `ShowStatsResponse`.
+
+### Configuration
+
+| Flag | Env variable | Default | Description |
+|---|---|---|---|
+| `--query-cache-size N` | `POLARGRAPH_QUERY_CACHE_SIZE` | `1000` | Maximum number of cached query plans |
+
+---
+
 ## Planned extensions
 
 | Feature | Notes |

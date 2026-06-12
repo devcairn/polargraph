@@ -57,6 +57,12 @@ export interface CypherOptions {
   asOfTxTime?: number;
   /** Transaction ID to read from. */
   txId?: string;
+  /**
+   * Named query parameters for `$param` substitution.
+   * Keys are parameter names (without `$`); values are JSON-encoded strings
+   * (e.g. `'"Alice"'` for a string value, `'42'` for an integer).
+   */
+  params?: Record<string, string>;
 }
 
 /**
