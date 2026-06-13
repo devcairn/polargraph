@@ -164,6 +164,8 @@ pub enum WhereClause {
 pub enum ReturnItem {
     /// Plain variable, e.g. `RETURN a`.
     Variable(String),
+    /// Property projection, e.g. `RETURN n.name`.
+    PropProjection { var: String, prop: String },
     /// Aggregate function with alias, e.g. `count(*) AS n`.
     Aggregation { func: AggFunc, alias: String },
 }
@@ -645,6 +647,9 @@ pub struct CompiledQuery {
     pub edge_vars: std::collections::HashSet<String>,
     /// Annotation filters from WHERE clauses on edge variables.
     pub edge_annotation_filters: Vec<EdgeAnnotationFilter>,
+    /// Property projections from `RETURN n.prop` expressions.
+    /// Each entry is `(var_name, prop_name)`; the output key in CypherBinding.values is `"var.prop"`.
+    pub prop_projections: Vec<(String, String)>,
 }
 
 impl CompiledQuery {
@@ -1477,6 +1482,12 @@ impl Parser {
                 }
             }
             _ => {
+                // Check for dot-property access: RETURN n.prop
+                if self.peek() == Some(&Token::Dot) {
+                    self.advance(); // consume '.'
+                    let prop = self.expect_ident()?;
+                    return Ok(ReturnItem::PropProjection { var: name, prop });
+                }
                 // Not an aggregate — plain variable.
                 return Ok(ReturnItem::Variable(name));
             }
@@ -1833,12 +1844,14 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
         }
     }
 
-    // Split return_items into plain variables (group keys) and aggregations.
+    // Split return_items into plain variables, property projections, and aggregations.
     let mut return_vars: Vec<String> = Vec::new();
     let mut aggregations: Vec<AggregationSpec> = Vec::new();
+    let mut prop_projections: Vec<(String, String)> = Vec::new();
     for item in cypher.return_items {
         match item {
             ReturnItem::Variable(v) => return_vars.push(v),
+            ReturnItem::PropProjection { var, prop } => prop_projections.push((var, prop)),
             ReturnItem::Aggregation { func, alias } => aggregations.push(AggregationSpec { func, alias }),
         }
     }
@@ -1858,6 +1871,7 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
         skip: cypher.skip,
         edge_vars,
         edge_annotation_filters,
+        prop_projections,
     }
 }
 
@@ -3277,5 +3291,98 @@ mod tests {
             .find(|f| f.predicate == "name")
             .expect("expected name filter after substitution");
         assert!(matches!(&name_filter.value, FilterValue::Literal(Value::Text(s)) if s == "Bob"));
+    }
+
+    // ── property projection (RETURN n.prop) ───────────────────────────────────
+
+    #[test]
+    fn parse_prop_projection_single() {
+        let q = parse("MATCH (n) RETURN n.name").unwrap();
+        assert_eq!(q.return_items.len(), 1);
+        match &q.return_items[0] {
+            ReturnItem::PropProjection { var, prop } => {
+                assert_eq!(var, "n");
+                assert_eq!(prop, "name");
+            }
+            other => panic!("expected PropProjection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_prop_projection_multiple() {
+        let q = parse("MATCH (n) RETURN n.name, n.description").unwrap();
+        assert_eq!(q.return_items.len(), 2);
+        assert!(matches!(&q.return_items[0], ReturnItem::PropProjection { var, prop } if var == "n" && prop == "name"));
+        assert!(matches!(&q.return_items[1], ReturnItem::PropProjection { var, prop } if var == "n" && prop == "description"));
+    }
+
+    #[test]
+    fn parse_prop_projection_mixed_with_variable() {
+        let q = parse("MATCH (n)-[:knows]->(m) RETURN n, m.name").unwrap();
+        assert_eq!(q.return_items.len(), 2);
+        assert!(matches!(&q.return_items[0], ReturnItem::Variable(v) if v == "n"));
+        assert!(matches!(&q.return_items[1], ReturnItem::PropProjection { var, prop } if var == "m" && prop == "name"));
+    }
+
+    #[test]
+    fn compile_prop_projection_populates_field() {
+        let q = parse("MATCH (n) RETURN n.name, n.description").unwrap();
+        let compiled = compile(q);
+        assert_eq!(compiled.prop_projections, vec![
+            ("n".to_string(), "name".to_string()),
+            ("n".to_string(), "description".to_string()),
+        ]);
+        // No plain return_vars when only prop projections are used.
+        assert!(compiled.return_vars.is_empty());
+    }
+
+    #[test]
+    fn compile_prop_projection_mixed_with_return_var() {
+        let q = parse("MATCH (n)-[:knows]->(m) RETURN n, m.name").unwrap();
+        let compiled = compile(q);
+        assert_eq!(compiled.return_vars, vec!["n"]);
+        assert_eq!(compiled.prop_projections, vec![("m".to_string(), "name".to_string())]);
+    }
+
+    #[test]
+    fn prop_projection_resolves_values_from_snapshot() {
+        let (store, _dir) = open();
+        let n = NodeId::new();
+        let snap = commit(&store, vec![
+            prop_triple(n, "__type", "Crate"),
+            prop_triple(n, "name", "serde"),
+            prop_triple(n, "description", "Rust serialization framework"),
+        ]);
+
+        // Use (n:Crate) label syntax so the binding pattern for `n` is emitted.
+        let q = parse("MATCH (n:Crate) RETURN n.name, n.description").unwrap();
+        let compiled = compile(q);
+
+        let raw = crate::datalog::execute_query(&compiled.query, &snap, None, None).unwrap();
+        let filtered = apply_value_filters(raw, &compiled.value_filters, &snap).unwrap();
+        assert_eq!(filtered.len(), 1, "should match exactly one Crate node");
+
+        // Verify the binding has `n` → the node id.
+        let binding = &filtered[0];
+        assert_eq!(binding.get("n"), Some(&n));
+
+        // Simulate what the service does: resolve prop projections.
+        let mut values: HashMap<String, Value> = HashMap::new();
+        for (var, prop) in &compiled.prop_projections {
+            if let Some(&node_id) = binding.get(var.as_str()) {
+                let key = format!("{}.{}", var, prop);
+                if let Ok(triples) = snap.scan_by_subject_predicate(&node_id, prop) {
+                    if let Some(value) = triples.into_iter().find_map(|t| match t {
+                        Triple::Property { value, .. } => Some(value),
+                        _ => None,
+                    }) {
+                        values.insert(key, value);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(values.get("n.name"), Some(&Value::Text("serde".to_string())));
+        assert_eq!(values.get("n.description"), Some(&Value::Text("Rust serialization framework".to_string())));
     }
 }

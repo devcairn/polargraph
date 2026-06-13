@@ -1924,7 +1924,7 @@ impl PolarGraphService for PolarGraphServer {
             .iter()
             .map(|row| {
                 // Project group-key nodes to the declared return_vars (or all if unspecified).
-                let nodes = if compiled.return_vars.is_empty() {
+                let nodes = if compiled.return_vars.is_empty() && compiled.prop_projections.is_empty() {
                     row.group_keys
                         .iter()
                         .map(|(k, &id)| (k.clone(), convert::node_id_to_proto(id)))
@@ -1937,10 +1937,24 @@ impl PolarGraphService for PolarGraphServer {
                         })
                         .collect()
                 };
-                let values = row.agg_values
+                let mut values: HashMap<String, _> = row.agg_values
                     .iter()
                     .map(|(k, v)| (k.clone(), convert::value_to_proto(v)))
                     .collect();
+                // Resolve property projections (RETURN n.prop) via snapshot lookup.
+                for (var, prop) in &compiled.prop_projections {
+                    if let Some(&node_id) = row.group_keys.get(var.as_str()) {
+                        let key = format!("{}.{}", var, prop);
+                        if let Ok(triples) = snapshot.scan_by_subject_predicate(&node_id, prop) {
+                            if let Some(value) = triples.into_iter().find_map(|t| match t {
+                                Triple::Property { value, .. } => Some(value),
+                                _ => None,
+                            }) {
+                                values.insert(key, convert::value_to_proto(&value));
+                            }
+                        }
+                    }
+                }
                 CypherBinding { nodes, values }
             })
             .collect();
