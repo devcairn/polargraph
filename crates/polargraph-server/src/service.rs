@@ -1968,6 +1968,17 @@ impl PolarGraphService for PolarGraphServer {
                         );
                     }
                 }
+                // Resolve node ID projections (RETURN id(n) / elementId(n)).
+                for proj in &compiled.node_id_projections {
+                    if let Some(&node_id) = row.group_keys.get(proj.node_var.as_str()) {
+                        values.insert(
+                            proj.output_key.clone(),
+                            convert::value_to_proto(&polargraph_core::value::Value::Text(
+                                node_id.to_string(),
+                            )),
+                        );
+                    }
+                }
                 CypherBinding { nodes, values }
             })
             .collect();
@@ -2319,8 +2330,11 @@ impl PolarGraphService for PolarGraphServer {
             None => filtered,
         };
 
-        // Project to RETURN variables; also inject edge ID projections as NodeId bytes.
-        let projected: Vec<_> = if compiled.return_vars.is_empty() && compiled.edge_id_projections.is_empty() {
+        // Project to RETURN variables; also inject ID projections as NodeId bytes.
+        let projected: Vec<_> = if compiled.return_vars.is_empty()
+            && compiled.edge_id_projections.is_empty()
+            && compiled.node_id_projections.is_empty()
+        {
             limited
         } else {
             limited.into_iter().map(|b| {
@@ -2330,6 +2344,12 @@ impl PolarGraphService for PolarGraphServer {
                 // Edge ID projections: reuse the NodeId-aliased EdgeId bytes already in bindings.
                 for proj in &compiled.edge_id_projections {
                     if let Some(&id) = b.get(proj.rel_var.as_str()) {
+                        out.insert(proj.output_key.clone(), id);
+                    }
+                }
+                // Node ID projections: NodeId bytes are stored directly in bindings.
+                for proj in &compiled.node_id_projections {
+                    if let Some(&id) = b.get(proj.node_var.as_str()) {
                         out.insert(proj.output_key.clone(), id);
                     }
                 }

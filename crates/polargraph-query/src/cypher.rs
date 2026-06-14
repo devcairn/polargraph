@@ -636,6 +636,19 @@ pub struct EdgeIdProjection {
     pub rel_var: String,
 }
 
+/// The result of compiling `RETURN id(n)` or `RETURN elementId(n)` for a node variable.
+///
+/// The node ID is bound in `Bindings` as a `NodeId` by the evaluator when the pattern
+/// includes a node variable (`(n:Label)`). The service layer formats it directly as a
+/// hyphenated UUID string.
+#[derive(Clone, Debug)]
+pub struct NodeIdProjection {
+    /// The output key in `CypherBinding.values`, e.g. `"id(n)"`.
+    pub output_key: String,
+    /// The node variable from which the NodeId is drawn, e.g. `"n"`.
+    pub node_var: String,
+}
+
 /// The result of compiling a `CypherQuery` to the Datalog IR.
 #[derive(Clone, Debug)]
 pub struct CompiledQuery {
@@ -667,6 +680,8 @@ pub struct CompiledQuery {
     pub prop_projections: Vec<(String, String)>,
     /// Edge ID projections from `RETURN id(r)` / `RETURN elementId(r)` expressions.
     pub edge_id_projections: Vec<EdgeIdProjection>,
+    /// Node ID projections from `RETURN id(n)` / `RETURN elementId(n)` expressions.
+    pub node_id_projections: Vec<NodeIdProjection>,
 }
 
 impl CompiledQuery {
@@ -1869,21 +1884,30 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
         }
     }
 
-    // Split return_items into plain variables, property projections, aggregations, and edge ID projections.
+    // Split return_items into plain variables, property projections, aggregations, and ID projections.
     let mut return_vars: Vec<String> = Vec::new();
     let mut aggregations: Vec<AggregationSpec> = Vec::new();
     let mut prop_projections: Vec<(String, String)> = Vec::new();
     let mut edge_id_projections: Vec<EdgeIdProjection> = Vec::new();
+    let mut node_id_projections: Vec<NodeIdProjection> = Vec::new();
     for item in cypher.return_items {
         match item {
             ReturnItem::Variable(v) => return_vars.push(v),
             ReturnItem::PropProjection { var, prop } => prop_projections.push((var, prop)),
             ReturnItem::Aggregation { func, alias } => aggregations.push(AggregationSpec { func, alias }),
             ReturnItem::EdgeId { rel_var } => {
-                edge_id_projections.push(EdgeIdProjection {
-                    output_key: format!("id({})", rel_var),
-                    rel_var,
-                });
+                // id(var) / elementId(var) — route to edge or node projection based on var type.
+                if edge_vars.contains(&rel_var) {
+                    edge_id_projections.push(EdgeIdProjection {
+                        output_key: format!("id({})", rel_var),
+                        rel_var,
+                    });
+                } else {
+                    node_id_projections.push(NodeIdProjection {
+                        output_key: format!("id({})", rel_var),
+                        node_var: rel_var,
+                    });
+                }
             }
         }
     }
@@ -1905,6 +1929,7 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
         edge_annotation_filters,
         prop_projections,
         edge_id_projections,
+        node_id_projections,
     }
 }
 
@@ -3496,5 +3521,51 @@ mod tests {
         let r_as_node = binding.get("r").expect("r should be bound");
         let recovered_edge = EdgeId(r_as_node.0);
         assert_eq!(recovered_edge, edge_id, "recovered EdgeId from binding should match");
+    }
+
+    // ── id(n) / elementId(n) tests ────────────────────────────────────────────
+
+    #[test]
+    fn compile_id_projection_for_node() {
+        let q = parse("MATCH (n:Person) RETURN id(n)").unwrap();
+        let compiled = compile(q);
+        // id(n) goes to node_id_projections, not edge_id_projections
+        assert_eq!(compiled.node_id_projections.len(), 1);
+        assert_eq!(compiled.node_id_projections[0].output_key, "id(n)");
+        assert_eq!(compiled.node_id_projections[0].node_var, "n");
+        assert_eq!(compiled.edge_id_projections.len(), 0);
+        // id(n) should not appear in return_vars
+        assert!(!compiled.return_vars.contains(&"id(n)".to_string()));
+    }
+
+    #[test]
+    fn id_function_node_with_execution() {
+        let tmp = TempDir::new().unwrap();
+        let store = TripleStore::open(tmp.path()).unwrap();
+
+        let person = NodeId::new();
+        let temporal = BiTemporalRange::assert_now(Timestamp::now());
+
+        let mut tx = store.begin();
+        tx.insert(Triple::Property {
+            subject: person,
+            predicate: Predicate::new("__type"),
+            value: polargraph_core::value::Value::Text("Person".into()),
+            temporal,
+        });
+        tx.commit().unwrap();
+
+        let snap = store.snapshot(store.begin().read_ts);
+        let q = parse("MATCH (n:Person) RETURN id(n)").unwrap();
+        let compiled = compile(q);
+
+        assert_eq!(compiled.node_id_projections.len(), 1);
+
+        let raw = crate::datalog::execute_query(&compiled.query, &snap, None, None).unwrap();
+        assert_eq!(raw.len(), 1);
+
+        // n is bound as a NodeId
+        let n_id = *raw[0].get("n").expect("n should be bound");
+        assert_eq!(n_id, person, "bound NodeId should match inserted node");
     }
 }

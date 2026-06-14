@@ -5183,3 +5183,71 @@ async fn cypher_element_id_alias_returns_same_uuid() {
     let returned_uuid = uuid::Uuid::parse_str(&uuid_str).expect("should be valid UUID");
     assert_eq!(returned_uuid, expected_uuid);
 }
+
+#[tokio::test]
+async fn cypher_id_n_returns_node_uuid() {
+    let (svc, _dir) = open();
+    let (a_core, a) = new_node();
+
+    // Insert a typed node so MATCH (n:Person) can find it.
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(a.clone(), "__type", "Person")],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (n:Person) RETURN id(n)".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.rows.len(), 1, "one matching row expected");
+    let row = &resp.rows[0];
+
+    let id_val = row.values.get("id(n)").expect("id(n) should be in values");
+    let uuid_str = match &id_val.kind {
+        Some(ValueKind::TextVal(s)) => s.clone(),
+        other => panic!("expected TextVal, got {:?}", other),
+    };
+    let returned_uuid = uuid::Uuid::parse_str(&uuid_str).expect("id(n) should be a valid UUID");
+    assert_eq!(returned_uuid, a_core.0, "node UUID from id(n) should match the inserted NodeId");
+}
+
+#[tokio::test]
+async fn cypher_element_id_n_returns_node_uuid() {
+    let (svc, _dir) = open();
+    let (b_core, b) = new_node();
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(b.clone(), "__type", "Employee")],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (n:Employee) RETURN elementId(n)".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.rows.len(), 1);
+    let row = &resp.rows[0];
+
+    // elementId(n) maps to the same output key as id(n).
+    let id_val = row.values.get("id(n)").expect("id(n) key should be present for elementId(n)");
+    let uuid_str = match &id_val.kind {
+        Some(ValueKind::TextVal(s)) => s.clone(),
+        other => panic!("expected TextVal, got {:?}", other),
+    };
+    let returned_uuid = uuid::Uuid::parse_str(&uuid_str).expect("should be valid UUID");
+    assert_eq!(returned_uuid, b_core.0, "node UUID from elementId(n) should match the inserted NodeId");
+}
