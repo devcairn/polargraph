@@ -1955,6 +1955,19 @@ impl PolarGraphService for PolarGraphServer {
                         }
                     }
                 }
+                // Resolve edge ID projections (RETURN id(r) / elementId(r)).
+                // The rel var is stored in group_keys as NodeId bytes reinterpreting the EdgeId UUID.
+                for proj in &compiled.edge_id_projections {
+                    if let Some(&node_id) = row.group_keys.get(proj.rel_var.as_str()) {
+                        let edge_id = polargraph_core::id::EdgeId(node_id.0);
+                        values.insert(
+                            proj.output_key.clone(),
+                            convert::value_to_proto(&polargraph_core::value::Value::Text(
+                                edge_id.to_string(),
+                            )),
+                        );
+                    }
+                }
                 CypherBinding { nodes, values }
             })
             .collect();
@@ -2306,14 +2319,21 @@ impl PolarGraphService for PolarGraphServer {
             None => filtered,
         };
 
-        // Project to RETURN variables (same as cypher_query).
-        let projected: Vec<_> = if compiled.return_vars.is_empty() {
+        // Project to RETURN variables; also inject edge ID projections as NodeId bytes.
+        let projected: Vec<_> = if compiled.return_vars.is_empty() && compiled.edge_id_projections.is_empty() {
             limited
         } else {
             limited.into_iter().map(|b| {
-                compiled.return_vars.iter()
+                let mut out: polargraph_query::datalog::Bindings = compiled.return_vars.iter()
                     .filter_map(|v| b.get(v).map(|&id| (v.clone(), id)))
-                    .collect()
+                    .collect();
+                // Edge ID projections: reuse the NodeId-aliased EdgeId bytes already in bindings.
+                for proj in &compiled.edge_id_projections {
+                    if let Some(&id) = b.get(proj.rel_var.as_str()) {
+                        out.insert(proj.output_key.clone(), id);
+                    }
+                }
+                out
             }).collect()
         };
 

@@ -164,8 +164,10 @@ pub enum WhereClause {
 pub enum ReturnItem {
     /// Plain variable, e.g. `RETURN a`.
     Variable(String),
-    /// Property projection, e.g. `RETURN n.name`.
+    /// Property projection, e.g. `RETURN n.prop`.
     PropProjection { var: String, prop: String },
+    /// Edge ID function, e.g. `RETURN id(r)` or `RETURN elementId(r)`.
+    EdgeId { rel_var: String },
     /// Aggregate function with alias, e.g. `count(*) AS n`.
     Aggregation { func: AggFunc, alias: String },
 }
@@ -621,6 +623,19 @@ pub struct EdgeAnnotationFilter {
     pub value: Value,
 }
 
+/// The result of compiling `RETURN id(r)` or `RETURN elementId(r)`.
+///
+/// The edge ID is already bound in `Bindings` (stored as NodeId bytes) when the pattern
+/// included a relationship variable (`[r:PRED]`). The service layer reinterprets those
+/// bytes as `EdgeId` and formats them as a hyphenated UUID string.
+#[derive(Clone, Debug)]
+pub struct EdgeIdProjection {
+    /// The output key in `CypherBinding.values`, e.g. `"id(r)"`.
+    pub output_key: String,
+    /// The relationship variable from which the EdgeId is drawn, e.g. `"r"`.
+    pub rel_var: String,
+}
+
 /// The result of compiling a `CypherQuery` to the Datalog IR.
 #[derive(Clone, Debug)]
 pub struct CompiledQuery {
@@ -650,6 +665,8 @@ pub struct CompiledQuery {
     /// Property projections from `RETURN n.prop` expressions.
     /// Each entry is `(var_name, prop_name)`; the output key in CypherBinding.values is `"var.prop"`.
     pub prop_projections: Vec<(String, String)>,
+    /// Edge ID projections from `RETURN id(r)` / `RETURN elementId(r)` expressions.
+    pub edge_id_projections: Vec<EdgeIdProjection>,
 }
 
 impl CompiledQuery {
@@ -1447,6 +1464,14 @@ impl Parser {
         let name = self.expect_ident()?;
         let upper = name.to_ascii_uppercase();
 
+        // id(r) and elementId(r) — edge ID projection.
+        if upper == "ID" || upper == "ELEMENTID" {
+            self.expect(&Token::LParen)?;
+            let rel_var = self.expect_ident()?;
+            self.expect(&Token::RParen)?;
+            return Ok(ReturnItem::EdgeId { rel_var });
+        }
+
         let func = match upper.as_str() {
             "COUNT" => {
                 self.expect(&Token::LParen)?;
@@ -1844,15 +1869,22 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
         }
     }
 
-    // Split return_items into plain variables, property projections, and aggregations.
+    // Split return_items into plain variables, property projections, aggregations, and edge ID projections.
     let mut return_vars: Vec<String> = Vec::new();
     let mut aggregations: Vec<AggregationSpec> = Vec::new();
     let mut prop_projections: Vec<(String, String)> = Vec::new();
+    let mut edge_id_projections: Vec<EdgeIdProjection> = Vec::new();
     for item in cypher.return_items {
         match item {
             ReturnItem::Variable(v) => return_vars.push(v),
             ReturnItem::PropProjection { var, prop } => prop_projections.push((var, prop)),
             ReturnItem::Aggregation { func, alias } => aggregations.push(AggregationSpec { func, alias }),
+            ReturnItem::EdgeId { rel_var } => {
+                edge_id_projections.push(EdgeIdProjection {
+                    output_key: format!("id({})", rel_var),
+                    rel_var,
+                });
+            }
         }
     }
     let group_keys = return_vars.clone();
@@ -1872,6 +1904,7 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
         edge_vars,
         edge_annotation_filters,
         prop_projections,
+        edge_id_projections,
     }
 }
 
@@ -3384,5 +3417,84 @@ mod tests {
 
         assert_eq!(values.get("n.name"), Some(&Value::Text("serde".to_string())));
         assert_eq!(values.get("n.description"), Some(&Value::Text("Rust serialization framework".to_string())));
+    }
+
+    // ── id(r) / elementId(r) tests ────────────────────────────────────────────
+
+    #[test]
+    fn parse_id_function() {
+        let q = parse("MATCH (a)-[r:DEPENDS_ON]->(b) RETURN a, b, id(r)").unwrap();
+        let edge_id_items: Vec<_> = q.return_items.iter().filter_map(|item| {
+            if let ReturnItem::EdgeId { rel_var } = item { Some(rel_var.as_str()) } else { None }
+        }).collect();
+        assert_eq!(edge_id_items, vec!["r"]);
+    }
+
+    #[test]
+    fn parse_element_id_function() {
+        let q = parse("MATCH (a)-[r:DEPENDS_ON]->(b) RETURN a, b, elementId(r)").unwrap();
+        let edge_id_items: Vec<_> = q.return_items.iter().filter_map(|item| {
+            if let ReturnItem::EdgeId { rel_var } = item { Some(rel_var.as_str()) } else { None }
+        }).collect();
+        assert_eq!(edge_id_items, vec!["r"]);
+    }
+
+    #[test]
+    fn compile_id_projection() {
+        let q = parse("MATCH (a)-[r:DEPENDS_ON]->(b) RETURN a, b, id(r)").unwrap();
+        let compiled = compile(q);
+        assert_eq!(compiled.edge_id_projections.len(), 1);
+        assert_eq!(compiled.edge_id_projections[0].output_key, "id(r)");
+        assert_eq!(compiled.edge_id_projections[0].rel_var, "r");
+        // id(r) should not appear in return_vars
+        assert!(!compiled.return_vars.contains(&"id(r)".to_string()));
+        assert!(compiled.return_vars.contains(&"a".to_string()));
+        assert!(compiled.return_vars.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn rel_var_tracking() {
+        let q = parse("MATCH (a)-[r:DEPENDS_ON]->(b) RETURN a, b, id(r)").unwrap();
+        let compiled = compile(q);
+        // r should be in edge_vars so WHERE clauses on it are handled correctly
+        assert!(compiled.edge_vars.contains("r"), "r should be in edge_vars");
+        // The VarPattern for the hop should have edge_var = Some("r")
+        let vp = compiled.query.patterns.iter().find(|p| p.predicate.as_deref() == Some("DEPENDS_ON"));
+        assert!(vp.is_some(), "DEPENDS_ON pattern should exist");
+        assert_eq!(vp.unwrap().edge_var.as_deref(), Some("r"));
+    }
+
+    #[test]
+    fn id_function_with_execution() {
+        let tmp = TempDir::new().unwrap();
+        let store = TripleStore::open(tmp.path()).unwrap();
+
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let edge_id = EdgeId::new();
+        let temporal = BiTemporalRange::assert_now(Timestamp::now());
+
+        let mut tx = store.begin();
+        tx.insert(Triple::Relation {
+            subject: a,
+            predicate: Predicate::new("DEPENDS_ON"),
+            object: b,
+            edge_id,
+            temporal,
+        });
+        tx.commit().unwrap();
+
+        let snap = store.snapshot(store.begin().read_ts);
+        let q = parse("MATCH (a)-[r:DEPENDS_ON]->(b) RETURN a, b, id(r)").unwrap();
+        let compiled = compile(q);
+
+        let raw = crate::datalog::execute_query(&compiled.query, &snap, None, None).unwrap();
+        assert_eq!(raw.len(), 1);
+
+        let binding = &raw[0];
+        // r is bound as NodeId bytes reinterpreting EdgeId
+        let r_as_node = binding.get("r").expect("r should be bound");
+        let recovered_edge = EdgeId(r_as_node.0);
+        assert_eq!(recovered_edge, edge_id, "recovered EdgeId from binding should match");
     }
 }

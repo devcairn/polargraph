@@ -5101,3 +5101,85 @@ async fn query_without_user_id_returns_all() {
 
     assert_eq!(resp.bindings.len(), 2, "expected both nodes without access filter");
 }
+
+#[tokio::test]
+async fn cypher_id_function_returns_edge_uuid() {
+    let (svc, _dir) = open();
+    let (_a_core, a) = new_node();
+    let (_b_core, b) = new_node();
+
+    // Insert a relation and capture the returned edge_id.
+    let insert_resp = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(a.clone(), "DEPENDS_ON", b.clone())],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // The insert response returns edge UUIDs for relation triples.
+    assert_eq!(insert_resp.edge_ids.len(), 1, "one edge_id expected");
+    let edge_id_bytes = &insert_resp.edge_ids[0];
+    let expected_uuid = uuid::Uuid::from_bytes(edge_id_bytes[..16].try_into().unwrap());
+
+    // Query using id(r) and verify the returned UUID matches.
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (a)-[r:DEPENDS_ON]->(b) RETURN a, b, id(r)".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.rows.len(), 1, "one matching row expected");
+    let row = &resp.rows[0];
+
+    // id(r) appears in the values map as a string UUID.
+    let id_val = row.values.get("id(r)").expect("id(r) should be in values");
+    let uuid_str = match &id_val.kind {
+        Some(ValueKind::TextVal(s)) => s.clone(),
+        other => panic!("expected TextVal, got {:?}", other),
+    };
+    let returned_uuid = uuid::Uuid::parse_str(&uuid_str).expect("id(r) should be a valid UUID");
+    assert_eq!(returned_uuid, expected_uuid, "edge UUID from id(r) should match the inserted edge_id");
+}
+
+#[tokio::test]
+async fn cypher_element_id_alias_returns_same_uuid() {
+    let (svc, _dir) = open();
+    let (_a_core, a) = new_node();
+    let (_b_core, b) = new_node();
+
+    let insert_resp = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(a.clone(), "KNOWS", b.clone())],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let edge_id_bytes = &insert_resp.edge_ids[0];
+    let expected_uuid = uuid::Uuid::from_bytes(edge_id_bytes[..16].try_into().unwrap());
+
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (a)-[r:KNOWS]->(b) RETURN elementId(r)".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.rows.len(), 1);
+    let row = &resp.rows[0];
+    let id_val = row.values.get("id(r)").expect("id(r) should be in values (elementId maps to same key)");
+    let uuid_str = match &id_val.kind {
+        Some(ValueKind::TextVal(s)) => s.clone(),
+        other => panic!("expected TextVal, got {:?}", other),
+    };
+    let returned_uuid = uuid::Uuid::parse_str(&uuid_str).expect("should be valid UUID");
+    assert_eq!(returned_uuid, expected_uuid);
+}
