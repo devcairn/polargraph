@@ -23,6 +23,7 @@ use crate::{
         CypherBinding, CypherQueryRequest, CypherQueryResponse, CypherWriteRequest, CypherWriteResponse,
         ExplainResponse, PlanNode,
         GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse,
+        GetPropertyHistoryRequest, GetPropertyHistoryResponse, PropertyVersion,
         GetEdgeTypeRequest, GetEdgeTypeResponse,
         GetNodeTypeRequest, GetNodeTypeResponse,
         GetUserAccessRequest, GetUserAccessResponse,
@@ -2812,6 +2813,37 @@ impl PolarGraphService for PolarGraphServer {
         }
 
         Ok(Response::new(GetUserAccessResponse { node_ids, type_grants }))
+    }
+
+    // ── Property history ──────────────────────────────────────────────────────
+
+    async fn get_property_history(
+        &self,
+        request: Request<GetPropertyHistoryRequest>,
+    ) -> Result<Response<GetPropertyHistoryResponse>, Status> {
+        let req = request.into_inner();
+        let subject_bytes: [u8; 16] = req
+            .subject_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("subject_id must be exactly 16 bytes"))?;
+        let subject = NodeId(uuid::Uuid::from_bytes(subject_bytes));
+
+        let versions = self
+            .store
+            .scan_property_history(subject, &req.predicate, req.limit)
+            .map_err(storage_err_to_status)?;
+
+        let proto_versions = versions
+            .into_iter()
+            .map(|(value, tt)| {
+                let value_json = serde_json::to_string(&value)
+                    .unwrap_or_else(|_| "null".to_owned());
+                PropertyVersion { value_json, transaction_time: tt }
+            })
+            .collect();
+
+        Ok(Response::new(GetPropertyHistoryResponse { versions: proto_versions }))
     }
 }
 

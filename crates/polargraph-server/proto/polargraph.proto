@@ -862,6 +862,30 @@ message GetUserAccessResponse {
     repeated string type_grants = 2;
 }
 
+// ── Property history ──────────────────────────────────────────────────────────
+
+message GetPropertyHistoryRequest {
+    /// 16-byte NodeId of the subject node.
+    bytes  subject_id = 1;
+    /// Predicate name (interned on first use).
+    string predicate  = 2;
+    /// Maximum number of versions to return. 0 = default (50).
+    uint32 limit      = 3;
+}
+
+/// One historical version of a node property.
+message PropertyVersion {
+    /// JSON-encoded Value (matches the Value wire format used elsewhere).
+    string value_json        = 1;
+    /// Transaction time of this write, microseconds since Unix epoch.
+    int64  transaction_time  = 2;
+}
+
+message GetPropertyHistoryResponse {
+    /// Versions ordered newest-first by transaction time.
+    repeated PropertyVersion versions = 1;
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 service PolarGraphService {
@@ -1056,4 +1080,9 @@ service PolarGraphService {
     /// Return all node IDs and type grants accessible to a user, derived from
     /// their group memberships and HAS_ACCESS / HAS_ACCESS_TYPE triples.
     rpc GetUserAccess(GetUserAccessRequest) returns (GetUserAccessResponse);
+
+    /// Return all historical versions of a node property, ordered newest-first
+    /// by transaction time. Scans the full SPO column family without MVCC
+    /// deduplication so every committed write is visible.
+    rpc GetPropertyHistory(GetPropertyHistoryRequest) returns (GetPropertyHistoryResponse);
 }

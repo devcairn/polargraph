@@ -1105,6 +1105,58 @@ async fn handle_get_edge_annotations(
     }
 }
 
+// ── GET /property-history ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct PropertyHistoryParams {
+    subject: String,
+    predicate: String,
+    limit: Option<u32>,
+}
+
+async fn handle_property_history(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<PropertyHistoryParams>,
+) -> Response {
+    let subject_uuid = match Uuid::parse_str(&params.subject) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid subject UUID: {}", params.subject) })),
+            )
+                .into_response()
+        }
+    };
+
+    let req = proto::GetPropertyHistoryRequest {
+        subject_id: subject_uuid.as_bytes().to_vec(),
+        predicate: params.predicate,
+        limit: params.limit.unwrap_or(0),
+    };
+
+    let mut client = state.client.clone();
+    match client.get_property_history(tonic::Request::new(req)).await {
+        Ok(r) => {
+            let versions: Vec<serde_json::Value> = r
+                .into_inner()
+                .versions
+                .into_iter()
+                .map(|v| {
+                    let value: serde_json::Value =
+                        serde_json::from_str(&v.value_json).unwrap_or(serde_json::Value::Null);
+                    serde_json::json!({
+                        "value": value,
+                        "transaction_time": v.transaction_time,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "versions": versions })).into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
 // ── POST /access/grant ────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1312,6 +1364,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/tx/rollback", post(handle_tx_rollback))
         .route("/edge-annotations", post(handle_insert_edge_annotations))
         .route("/edge-annotations/:edge_id", get(handle_get_edge_annotations))
+        .route("/property-history", get(handle_property_history))
         .route("/access/grant", post(handle_grant_access))
         .route("/access/revoke", post(handle_revoke_access))
         .route("/access/add-user", post(handle_add_user_to_group))

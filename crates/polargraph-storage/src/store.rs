@@ -1321,6 +1321,64 @@ impl TripleStore {
         Ok(triples)
     }
 
+    /// Return all historical versions of a node property ordered newest-first by
+    /// transaction time.
+    ///
+    /// Unlike the snapshot-based scans, this does **not** deduplicate: every
+    /// committed write to `(subject, predicate)` is returned so callers can
+    /// inspect the full audit trail.
+    ///
+    /// `limit` is the maximum number of versions to return; 0 means 50.
+    pub fn scan_property_history(
+        &self,
+        subject: NodeId,
+        predicate: &str,
+        limit: u32,
+    ) -> Result<Vec<(Value, i64)>, StorageError> {
+        let limit = if limit == 0 { 50 } else { limit as usize };
+
+        let pred_id = match self.predicate_id(predicate) {
+            Some(id) => id,
+            None => return Ok(vec![]),
+        };
+
+        // Build the 36-byte SPO prefix: [subject(16)][pred_id(4)][sentinel(16)]
+        let mut prefix = [0u8; 36];
+        prefix[0..16].copy_from_slice(subject.as_bytes());
+        prefix[16..20].copy_from_slice(&pred_id.to_be_bytes());
+        prefix[20..36].copy_from_slice(&keys::PROPERTY_SENTINEL);
+
+        let cf = self.cf_handle(cf::SPO)?;
+        let iter = self
+            .inner
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+
+        let mut versions: Vec<(Value, i64)> = Vec::new();
+        for item in iter {
+            let (key, value_bytes) = item?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if key.len() < 44 {
+                continue;
+            }
+            let tt = i64::from_be_bytes(key[36..44].try_into().unwrap());
+            match codec::decode_value(&value_bytes) {
+                Ok(codec::DecodedValue::Property { value, .. }) => {
+                    versions.push((value, tt));
+                }
+                Ok(codec::DecodedValue::Relation { .. }) => {}
+                Err(_) => {}
+            }
+        }
+
+        // SPO keys sort oldest-first (lowest tt first), so reverse for newest-first.
+        versions.reverse();
+        versions.truncate(limit);
+        Ok(versions)
+    }
+
     /// Prefix-scan the `tri` CF for all subjects that contain `trigram` under `pred_id`.
     pub fn scan_trigram_candidates(&self, pred_id: keys::PredId, trigram: [u8; 3]) -> Vec<NodeId> {
         let prefix = keys::tri_prefix_tp(trigram, pred_id);

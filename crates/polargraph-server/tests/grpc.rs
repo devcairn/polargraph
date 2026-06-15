@@ -5251,3 +5251,104 @@ async fn cypher_element_id_n_returns_node_uuid() {
     let returned_uuid = uuid::Uuid::parse_str(&uuid_str).expect("should be valid UUID");
     assert_eq!(returned_uuid, b_core.0, "node UUID from elementId(n) should match the inserted NodeId");
 }
+
+// ── GetPropertyHistory tests ──────────────────────────────────────────────────
+
+use polargraph_server::proto::{GetPropertyHistoryRequest};
+
+fn int_prop(subject: NodeId, predicate: &str, n: i64) -> Triple {
+    Triple {
+        kind: Some(TripleKind::Property(PropertyTriple {
+            subject: Some(subject),
+            predicate: predicate.into(),
+            value: Some(Value { kind: Some(ValueKind::IntVal(n)) }),
+            vt_start: 0,
+            vt_end: 0,
+        })),
+    }
+}
+
+#[tokio::test]
+async fn property_history_empty() {
+    let (svc, _dir) = open();
+    let (core, _) = new_node();
+    let req = GetPropertyHistoryRequest {
+        subject_id: core.as_bytes().to_vec(),
+        predicate: "description".into(),
+        limit: 0,
+    };
+    let resp = svc
+        .get_property_history(Request::new(req))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(resp.versions.is_empty());
+}
+
+#[tokio::test]
+async fn property_history_single_write() {
+    let (svc, _dir) = open();
+    let (core, proto) = new_node();
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(proto.clone(), "label", "hello")],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let req = GetPropertyHistoryRequest {
+        subject_id: core.as_bytes().to_vec(),
+        predicate: "label".into(),
+        limit: 0,
+    };
+    let resp = svc
+        .get_property_history(Request::new(req))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.versions.len(), 1);
+    assert!(resp.versions[0].transaction_time > 0);
+    // Value uses #[serde(tag = "type", content = "v")]: {"type":"Text","v":"hello"}.
+    let v: serde_json::Value = serde_json::from_str(&resp.versions[0].value_json).unwrap();
+    assert_eq!(v["type"], "Text");
+    assert_eq!(v["v"], "hello");
+}
+
+#[tokio::test]
+async fn property_history_multiple_writes_newest_first() {
+    let (svc, _dir) = open();
+    let (core, proto) = new_node();
+
+    for i in 1i64..=3 {
+        svc.insert(Request::new(InsertRequest {
+            triples: vec![int_prop(proto.clone(), "counter", i)],
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    }
+
+    let req = GetPropertyHistoryRequest {
+        subject_id: core.as_bytes().to_vec(),
+        predicate: "counter".into(),
+        limit: 0,
+    };
+    let resp = svc
+        .get_property_history(Request::new(req))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.versions.len(), 3);
+    // Newest first. Value: {"type":"Int","v":N}.
+    let vals: Vec<i64> = resp.versions.iter().map(|v| {
+        let j: serde_json::Value = serde_json::from_str(&v.value_json).unwrap();
+        j["v"].as_i64().unwrap()
+    }).collect();
+    assert_eq!(vals, vec![3, 2, 1]);
+    // Transaction times strictly decreasing (newest first).
+    assert!(resp.versions[0].transaction_time > resp.versions[1].transaction_time);
+    assert!(resp.versions[1].transaction_time > resp.versions[2].transaction_time);
+}
