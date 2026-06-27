@@ -4239,6 +4239,66 @@ async fn show_stats_returns_primary_mode() {
 }
 
 #[tokio::test]
+async fn show_stats_reflects_inserts() {
+    use polargraph_server::proto::{ShowStatsRequest, ShowStatsResponse};
+
+    let (svc, _dir) = open();
+
+    let (_, alice) = new_node();
+    let (_, bob) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(alice.clone(), "knows", bob.clone())],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp: ShowStatsResponse = svc
+        .show_stats(Request::new(ShowStatsRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.mode, "primary");
+    assert!(resp.mvcc_oracle_ts > 0, "oracle_ts should advance after an insert");
+    assert!(resp.predicate_intern_count >= 1, "at least 'knows' should be interned");
+    assert_eq!(resp.open_transaction_count, 0, "no open transactions after committed insert");
+}
+
+#[tokio::test]
+async fn slow_query_threshold_does_not_break_results() {
+    // Set a 1 ms slow-query threshold — almost any query will exceed it in
+    // the test environment. Verify that the service still returns correct
+    // results (the slow-query check is a pure side-effect, not a gate).
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let svc = PolarGraphServer::new(store)
+        .unwrap()
+        .with_slow_query_ms(1); // trigger slow-query path on nearly every query
+
+    let (_, alice) = new_node();
+    let (_, bob) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(alice.clone(), "friends", bob.clone())],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(bound(&alice), "friends", var("x"))],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.bindings.len(), 1, "query should return one binding even when slow-query threshold fires");
+    assert_eq!(resp.bindings[0].vars.get("x").map(|v| v.bytes.clone()), Some(bob.bytes));
+}
+
+#[tokio::test]
 async fn show_indexes_reflects_registered_vector_space() {
     use polargraph_server::proto::{ShowIndexesRequest, ShowIndexesResponse, InsertVectorRequest};
 

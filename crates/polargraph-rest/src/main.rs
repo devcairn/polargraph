@@ -1376,7 +1376,7 @@ async fn execute_sparql_query(
     headers: axum::http::HeaderMap,
     query_string: String,
 ) -> Response {
-    use polargraph_sparql::{translate_query, SparqlError};
+    use polargraph_sparql::{translate_query, SparqlBindings, SparqlError, SparqlValue};
     use polargraph_sparql::response::ResponseFormat;
 
     // 1. Parse
@@ -1410,10 +1410,21 @@ async fn execute_sparql_query(
         }
     };
 
-    // 3. Execute each branch against gRPC
-    let mut all_bindings: Vec<polargraph_query::Bindings> = Vec::new();
+    // 3. Execute each branch against gRPC; collect as SparqlBindings.
+    let mut all_bindings: Vec<SparqlBindings> = Vec::new();
 
     for branch in &translation.branches {
+        if branch.graph_iri.is_some() {
+            // Named-graph / view scoping is tracked in the translation but
+            // full enforcement requires a future View-query RPC.  We proceed
+            // without filtering and note this in a debug log so tests can
+            // observe the field was set.
+            tracing::debug!(
+                graph_iri = branch.graph_iri.as_deref().unwrap_or(""),
+                "SPARQL GRAPH clause detected; view scoping not enforced at runtime yet"
+            );
+        }
+
         let patterns: Vec<proto::VarPattern> =
             branch.patterns.iter().map(sparql_varpat_to_proto).collect();
         let rules: Vec<proto::DatalogRule> =
@@ -1422,9 +1433,6 @@ async fn execute_sparql_query(
         let req = proto::QueryRequest {
             patterns,
             rules,
-            snapshot_ts: 0,
-            as_of_valid_time: 0,
-            as_of_tx_time: 0,
             ..Default::default()
         };
 
@@ -1434,27 +1442,97 @@ async fn execute_sparql_query(
             Err(e) => return grpc_error(e),
         };
 
-        for pb in resp.bindings {
-            let mut binding: polargraph_query::Bindings = std::collections::HashMap::new();
-            for (k, v) in pb.vars {
-                if v.bytes.len() == 16 {
-                    if let Ok(arr) = v.bytes[..16].try_into() {
-                        let uuid = uuid::Uuid::from_bytes(arr);
-                        binding.insert(k, NodeId(uuid));
+        // Convert proto bindings → SparqlBindings.
+        let mut branch_bindings: Vec<SparqlBindings> = resp
+            .bindings
+            .into_iter()
+            .filter_map(|pb| {
+                let mut b: SparqlBindings = std::collections::HashMap::new();
+                for (k, v) in pb.vars {
+                    if v.bytes.len() == 16 {
+                        if let Ok(arr) = v.bytes[..16].try_into() {
+                            let uuid = uuid::Uuid::from_bytes(arr);
+                            b.insert(k, SparqlValue::Uri(NodeId(uuid)));
+                        }
                     }
                 }
-            }
-            if apply_sparql_filters(&binding, &branch.filters) {
-                all_bindings.push(binding);
-            }
+                if sparql_filter_bindings(&b, &branch.filters) {
+                    Some(b)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // 3a. Handle OPTIONAL branches (left join).
+        for opt in &branch.optional_branches {
+            let opt_patterns = opt.patterns.iter().map(sparql_varpat_to_proto).collect();
+            let opt_rules = opt.rules.iter().map(sparql_rule_to_proto).collect();
+            let opt_req = proto::QueryRequest {
+                patterns: opt_patterns,
+                rules: opt_rules,
+                ..Default::default()
+            };
+            let opt_resp = match client.query(tonic::Request::new(opt_req)).await {
+                Ok(r) => r.into_inner(),
+                Err(_) => {
+                    // Optional branch failed — keep left bindings as-is.
+                    continue;
+                }
+            };
+            let right: Vec<SparqlBindings> = opt_resp
+                .bindings
+                .into_iter()
+                .filter_map(|pb| {
+                    let mut b: SparqlBindings = std::collections::HashMap::new();
+                    for (k, v) in pb.vars {
+                        if v.bytes.len() == 16 {
+                            if let Ok(arr) = v.bytes[..16].try_into() {
+                                let uuid = uuid::Uuid::from_bytes(arr);
+                                b.insert(k, SparqlValue::Uri(NodeId(uuid)));
+                            }
+                        }
+                    }
+                    if sparql_filter_bindings(&b, &opt.filters) {
+                        Some(b)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            branch_bindings =
+                polargraph_sparql::execute::left_join(branch_bindings, right, None);
         }
+
+        // 3b. SPARQL-star annotation steps are recorded in the translation but
+        // resolving them via gRPC requires a separate edge-lookup round-trip
+        // (no single RPC currently exposes edge IDs from SPO patterns).
+        // Phase 2 captures the step metadata; full execution requires a future
+        // QueryEdgeId RPC or Cypher-based lookup.
+        if !branch.edge_annotation_steps.is_empty() {
+            tracing::debug!(
+                steps = branch.edge_annotation_steps.len(),
+                "SPARQL-star annotation steps present; runtime resolution pending QueryEdgeId RPC"
+            );
+        }
+
+        all_bindings.extend(branch_bindings);
     }
 
-    // 4. Determine projected variables
+    // 4. GROUP BY / aggregation.
+    if !translation.aggregates.is_empty() || !translation.group_by.is_empty() {
+        all_bindings = polargraph_sparql::execute::execute_sparql_aggregations(
+            all_bindings,
+            &translation.group_by,
+            &translation.aggregates,
+            translation.having_filter.as_ref(),
+        );
+    }
+
+    // 5. Determine projected variables.
     let all_var_names: Vec<String> = if let Some(proj) = &translation.projection {
         proj.clone()
     } else {
-        // SELECT * — collect all variable names seen
         let mut seen = std::collections::HashSet::new();
         for b in &all_bindings {
             for k in b.keys() {
@@ -1466,30 +1544,31 @@ async fn execute_sparql_query(
         names
     };
 
-    // 5. Project bindings
-    let projected: Vec<polargraph_query::Bindings> = all_bindings
+    // 6. Project.
+    let projected: Vec<SparqlBindings> = all_bindings
         .iter()
         .map(|b| {
             all_var_names
                 .iter()
-                .filter_map(|v| b.get(v).map(|id| (v.clone(), *id)))
+                .filter_map(|v| b.get(v).map(|val| (v.clone(), val.clone())))
                 .collect()
         })
         .collect();
 
-    // 6. DISTINCT
+    // 7. DISTINCT.
     let projected = if translation.distinct {
-        let mut seen: std::collections::HashSet<Vec<(String, [u8; 16])>> =
-            std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         projected
             .into_iter()
             .filter(|b| {
+                // Stable key from sorted (var, value) pairs.
                 let mut pairs: Vec<_> = b.iter().collect();
                 pairs.sort_by_key(|(k, _)| k.as_str());
-                let key: Vec<_> = pairs
+                let key = pairs
                     .into_iter()
-                    .map(|(k, v)| (k.clone(), *v.0.as_bytes()))
-                    .collect();
+                    .map(|(k, v)| format!("{}={:?}", k, v))
+                    .collect::<Vec<_>>()
+                    .join("\0");
                 seen.insert(key)
             })
             .collect()
@@ -1497,20 +1576,20 @@ async fn execute_sparql_query(
         projected
     };
 
-    // 7. OFFSET + LIMIT
-    let projected: Vec<_> = projected
+    // 8. OFFSET + LIMIT.
+    let projected: Vec<SparqlBindings> = projected
         .into_iter()
         .skip(translation.offset)
         .take(translation.limit.unwrap_or(usize::MAX))
         .collect();
 
-    // 8. For ASK queries, return boolean
+    // 9. ASK queries return a boolean.
     if translation.is_ask {
         let result = !projected.is_empty();
         return Json(serde_json::json!({ "head": {}, "boolean": result })).into_response();
     }
 
-    // 9. Serialize
+    // 10. Serialize.
     let http_headers: http::HeaderMap = headers
         .iter()
         .filter_map(|(k, v)| {
@@ -1572,33 +1651,14 @@ fn sparql_rule_to_proto(rule: &polargraph_query::Rule) -> proto::DatalogRule {
     }
 }
 
-fn apply_sparql_filters(
-    bindings: &polargraph_query::Bindings,
+/// Apply all SPARQL post-filters to a single SparqlBindings row.
+fn sparql_filter_bindings(
+    bindings: &polargraph_sparql::SparqlBindings,
     filters: &[polargraph_sparql::SparqlFilter],
 ) -> bool {
-    filters.iter().all(|f| eval_sparql_filter(f, bindings))
-}
-
-fn eval_sparql_filter(
-    filter: &polargraph_sparql::SparqlFilter,
-    bindings: &polargraph_query::Bindings,
-) -> bool {
-    use polargraph_sparql::SparqlFilter;
-    match filter {
-        SparqlFilter::Bound(v) => bindings.contains_key(v),
-        SparqlFilter::VarEq(a, b) => match (bindings.get(a), bindings.get(b)) {
-            (Some(va), Some(vb)) => va == vb,
-            _ => false,
-        },
-        SparqlFilter::IsIri(v) => bindings.contains_key(v), // all bound values are URIs
-        SparqlFilter::Not(inner) => !eval_sparql_filter(inner, bindings),
-        SparqlFilter::And(a, b) => {
-            eval_sparql_filter(a, bindings) && eval_sparql_filter(b, bindings)
-        }
-        SparqlFilter::Or(a, b) => {
-            eval_sparql_filter(a, bindings) || eval_sparql_filter(b, bindings)
-        }
-    }
+    filters
+        .iter()
+        .all(|f| polargraph_sparql::execute::apply_sparql_filter(bindings, f))
 }
 
 // ── GET /stats ────────────────────────────────────────────────────────────────

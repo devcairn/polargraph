@@ -2,14 +2,24 @@
 //!
 //! Translates parsed SPARQL queries into PolarGraph native query types
 //! (`VarPattern`, `Rule`, etc.) for execution against the graph store.
+//!
+//! Also provides in-process execution helpers for SPARQL semantics that cannot
+//! be expressed as simple pattern queries (left join, aggregation).
 
+pub mod execute;
 pub mod protocol;
 pub mod response;
 pub mod translate;
 
 pub use protocol::negotiate_format;
-pub use response::{serialize_csv, serialize_json, ResponseFormat};
-pub use translate::{translate_query, Branch, SparqlFilter, SparqlTranslation};
+pub use response::{
+    node_bindings_to_sparql, serialize_csv, serialize_json, ResponseFormat, SparqlBindings,
+    SparqlValue,
+};
+pub use translate::{
+    translate_query, Branch, EdgeAnnotationStep, SparqlAggFunc, SparqlAggregateSpec, SparqlFilter,
+    SparqlLiteral, SparqlTranslation,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SparqlError {

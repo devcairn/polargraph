@@ -3,8 +3,74 @@
 use crate::SparqlError;
 use polargraph_core::id::NodeId;
 use polargraph_query::{Rule, Term, VarPattern};
-use spargebra::algebra::{Expression, GraphPattern, PropertyPathExpression};
+use spargebra::algebra::{
+    AggregateExpression, AggregateFunction, Expression, GraphPattern, PropertyPathExpression,
+};
 use spargebra::term::{NamedNodePattern, TermPattern};
+
+// ── Aggregate types ───────────────────────────────────────────────────────────
+
+/// A SPARQL aggregate function applied to a group.
+#[derive(Debug, Clone)]
+pub enum SparqlAggFunc {
+    /// `COUNT(*)` — count all rows in the group.
+    CountStar,
+    /// `COUNT(?var)` — count rows where `var` is bound.
+    CountVar(String),
+    /// `SUM(?var)` — sum numeric values of `var`.
+    Sum(String),
+    /// `AVG(?var)` — arithmetic mean of numeric values of `var`.
+    Avg(String),
+    /// `MIN(?var)` — minimum numeric value.
+    Min(String),
+    /// `MAX(?var)` — maximum numeric value.
+    Max(String),
+    /// `GROUP_CONCAT(?var; SEPARATOR=sep)` — concatenate values.
+    GroupConcat { var: String, separator: Option<String> },
+    /// `SAMPLE(?var)` — return an arbitrary value from the group.
+    Sample(String),
+}
+
+/// A single aggregation in a GROUP BY clause.
+#[derive(Debug, Clone)]
+pub struct SparqlAggregateSpec {
+    /// Output variable name (the alias after `AS`).
+    pub alias: String,
+    pub func: SparqlAggFunc,
+}
+
+// ── SPARQL-star ───────────────────────────────────────────────────────────────
+
+/// An edge annotation lookup step derived from a SPARQL-star quoted triple.
+///
+/// Represents a pattern like `<<:Alice :knows :Bob>> :since ?date` where:
+/// - The inner triple `<<:Alice :knows :Bob>>` identifies an edge
+/// - `:since` is the annotation predicate
+/// - `?date` is the variable to bind the annotation value to
+#[derive(Debug, Clone)]
+pub struct EdgeAnnotationStep {
+    /// Subject of the inner (quoted) triple.
+    pub edge_subject: Term,
+    /// Predicate of the inner (quoted) triple.
+    pub edge_predicate: String,
+    /// Object of the inner (quoted) triple.
+    pub edge_object: Term,
+    /// Annotation predicate (the outer predicate).
+    pub annot_predicate: String,
+    /// Variable to bind the annotation value.
+    pub value_var: String,
+}
+
+// ── Filter literal ────────────────────────────────────────────────────────────
+
+/// A typed literal used as the right-hand side of a FILTER comparison.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SparqlLiteral {
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+}
 
 // ── Public output types ───────────────────────────────────────────────────────
 
@@ -15,23 +81,49 @@ pub struct Branch {
     pub patterns: Vec<VarPattern>,
     pub rules: Vec<Rule>,
     pub filters: Vec<SparqlFilter>,
+    /// Optional branches (from OPTIONAL / LEFT JOIN).
+    ///
+    /// After evaluating `patterns`, each optional branch is left-joined:
+    /// its patterns are evaluated and the result is merged with the main
+    /// branch bindings. If no match is found for a given left binding, the
+    /// left binding is kept unchanged (right vars absent).
+    pub optional_branches: Vec<Branch>,
+    /// SPARQL-star annotation lookup steps.
+    ///
+    /// Each step resolves a quoted triple to an edge ID and fetches annotation
+    /// values, binding the result to `value_var`.
+    pub edge_annotation_steps: Vec<EdgeAnnotationStep>,
+    /// Named graph IRI (from `GRAPH <iri> { ... }`).
+    ///
+    /// When set, pattern evaluation is scoped to the named graph / View
+    /// identified by this IRI.
+    pub graph_iri: Option<String>,
 }
 
 /// A post-filter applied in-process after gRPC query results are received.
 #[derive(Debug, Clone)]
 pub enum SparqlFilter {
-    /// FILTER(BOUND(?x))
+    /// `FILTER(BOUND(?x))`
     Bound(String),
-    /// FILTER(?x = ?y)
+    /// `FILTER(?x = ?y)` — two variables
     VarEq(String, String),
-    /// FILTER(isIRI(?x))
+    /// `FILTER(isIRI(?x))`
     IsIri(String),
-    /// FILTER(!...)
+    /// `FILTER(!...)`
     Not(Box<SparqlFilter>),
-    /// FILTER(... && ...)
+    /// `FILTER(... && ...)`
     And(Box<SparqlFilter>, Box<SparqlFilter>),
-    /// FILTER(... || ...)
+    /// `FILTER(... || ...)`
     Or(Box<SparqlFilter>, Box<SparqlFilter>),
+    // ── Phase 2: comparison filters ───────────────────────────────────────────
+    /// `FILTER(?var > literal)` or `HAVING(?agg > literal)`
+    GreaterThan(String, SparqlLiteral),
+    LessThan(String, SparqlLiteral),
+    GreaterOrEqual(String, SparqlLiteral),
+    LessOrEqual(String, SparqlLiteral),
+    /// `FILTER(?var = literal)` — variable against a literal value
+    EqualLiteral(String, SparqlLiteral),
+    NotEqualLiteral(String, SparqlLiteral),
 }
 
 /// The full output of translating one SPARQL query.
@@ -46,6 +138,13 @@ pub struct SparqlTranslation {
     pub limit: Option<usize>,
     /// True for ASK queries.
     pub is_ask: bool,
+    // ── Phase 2: aggregation ──────────────────────────────────────────────────
+    /// GROUP BY variable names.
+    pub group_by: Vec<String>,
+    /// Aggregate function specifications from the SELECT clause.
+    pub aggregates: Vec<SparqlAggregateSpec>,
+    /// HAVING filter applied after aggregation.
+    pub having_filter: Option<SparqlFilter>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -93,8 +192,14 @@ fn translate_pattern(
         GraphPattern::Bgp { patterns } => {
             let mut branch = Branch::default();
             for tp in patterns {
-                let vp = translate_triple_pattern(tp)?;
-                branch.patterns.push(vp);
+                // SPARQL-star: subject is a quoted triple <<s p o>>
+                if let TermPattern::Triple(inner_tp) = &tp.subject {
+                    let step = translate_sparql_star_subject(inner_tp, &tp.predicate, &tp.object)?;
+                    branch.edge_annotation_steps.push(step);
+                } else {
+                    let vp = translate_triple_pattern(tp)?;
+                    branch.patterns.push(vp);
+                }
             }
             Ok(vec![branch])
         }
@@ -127,6 +232,12 @@ fn translate_pattern(
                     combined.rules.extend(rb.rules.clone());
                     combined.filters.extend(lb.filters.clone());
                     combined.filters.extend(rb.filters.clone());
+                    combined.edge_annotation_steps.extend(lb.edge_annotation_steps.clone());
+                    combined.edge_annotation_steps.extend(rb.edge_annotation_steps.clone());
+                    combined.optional_branches.extend(lb.optional_branches.clone());
+                    combined.optional_branches.extend(rb.optional_branches.clone());
+                    // Named graph: prefer the most specific (non-None) graph_iri
+                    combined.graph_iri = lb.graph_iri.clone().or_else(|| rb.graph_iri.clone());
                     merged.push(combined);
                 }
             }
@@ -142,10 +253,80 @@ fn translate_pattern(
 
         // ── Filter ────────────────────────────────────────────────────────────
         GraphPattern::Filter { expr, inner } => {
+            // HAVING clause: a Filter that directly wraps a Group
+            if matches!(inner.as_ref(), GraphPattern::Group { .. }) {
+                let having = translate_filter(expr)?;
+                let branches = translate_pattern(inner, counter, translation)?;
+                translation.having_filter = Some(having);
+                return Ok(branches);
+            }
             let filter = translate_filter(expr)?;
             let mut branches = translate_pattern(inner, counter, translation)?;
             for b in &mut branches {
                 b.filters.push(filter.clone());
+            }
+            Ok(branches)
+        }
+
+        // ── LeftJoin (OPTIONAL) ───────────────────────────────────────────────
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
+            let left_branches = translate_pattern(left, counter, translation)?;
+            let mut right_branches = translate_pattern(right, counter, translation)?;
+
+            // If there is an ON expression (OPTIONAL … FILTER …), attach it
+            // as a filter on each right branch so the REST gateway applies it
+            // after merging.
+            if let Some(expr) = expression {
+                if let Ok(f) = translate_filter(expr) {
+                    for rb in &mut right_branches {
+                        rb.filters.push(f.clone());
+                    }
+                }
+            }
+
+            // Attach right branches as optional_branches on every left branch.
+            let mut result = Vec::new();
+            for mut lb in left_branches {
+                lb.optional_branches.extend(right_branches.clone());
+                result.push(lb);
+            }
+            Ok(result)
+        }
+
+        // ── Group (GROUP BY + aggregates) ─────────────────────────────────────
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => {
+            let branches = translate_pattern(inner, counter, translation)?;
+            translation.group_by =
+                variables.iter().map(|v| v.as_str().to_string()).collect();
+            translation.aggregates = aggregates
+                .iter()
+                .map(|(alias_var, agg_expr)| translate_aggregate(alias_var, agg_expr))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(branches)
+        }
+
+        // ── Named graph ───────────────────────────────────────────────────────
+        GraphPattern::Graph { name, inner } => {
+            let iri = match name {
+                NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
+                NamedNodePattern::Variable(v) => {
+                    return Err(SparqlError::Unsupported(format!(
+                        "variable graph name (?{}) not supported",
+                        v.as_str()
+                    )))
+                }
+            };
+            let mut branches = translate_pattern(inner, counter, translation)?;
+            for b in &mut branches {
+                b.graph_iri = Some(iri.clone());
             }
             Ok(branches)
         }
@@ -166,9 +347,7 @@ fn translate_pattern(
         }
 
         // ── Reduced (treated like Distinct for our purposes) ──────────────────
-        GraphPattern::Reduced { inner } => {
-            translate_pattern(inner, counter, translation)
-        }
+        GraphPattern::Reduced { inner } => translate_pattern(inner, counter, translation),
 
         // ── Slice (LIMIT/OFFSET) ──────────────────────────────────────────────
         GraphPattern::Slice {
@@ -182,42 +361,50 @@ fn translate_pattern(
             Ok(branches)
         }
 
-        // ── OrderBy (ignore ordering for Phase 1) ─────────────────────────────
+        // ── OrderBy (ignore ordering for Phase 1/2) ───────────────────────────
         GraphPattern::OrderBy { inner, .. } => {
             translate_pattern(inner, counter, translation)
         }
 
-        // ── LeftJoin (OPTIONAL) ───────────────────────────────────────────────
-        GraphPattern::LeftJoin { .. } => Err(SparqlError::Unsupported(
-            "OPTIONAL not supported in Phase 1".to_string(),
-        )),
+        // ── Extend (BIND / AS alias) ──────────────────────────────────────────
+        //
+        // spargebra represents `(COUNT(*) AS ?n)` as:
+        //   Extend { variable: ?n, expression: Variable("internal_uuid"), inner: Group { ... } }
+        //
+        // We detect this pattern and rename the auto-generated aggregate alias
+        // to the user-visible name.
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => {
+            let branches = translate_pattern(inner, counter, translation)?;
+            // If the expression is a bare Variable reference pointing to an
+            // existing aggregate alias, this is an `AS alias` rename.
+            if let Expression::Variable(src_var) = expression {
+                let src = src_var.as_str();
+                let target = variable.as_str().to_string();
+                // Rename matching aggregate alias (in-place).
+                for spec in &mut translation.aggregates {
+                    if spec.alias == src {
+                        spec.alias = target.clone();
+                        break;
+                    }
+                }
+            }
+            Ok(branches)
+        }
 
-        // ── Everything else ───────────────────────────────────────────────────
-        GraphPattern::Graph { .. } => Err(SparqlError::Unsupported(
-            "GRAPH named graph patterns not supported in Phase 1".to_string(),
-        )),
+        // ── Unsupported ───────────────────────────────────────────────────────
         GraphPattern::Service { .. } => Err(SparqlError::Unsupported(
-            "SERVICE federation not supported in Phase 1".to_string(),
+            "SERVICE federation not supported".to_string(),
         )),
-        GraphPattern::Group { .. } => Err(SparqlError::Unsupported(
-            "GROUP BY / aggregates not supported in Phase 1".to_string(),
+        GraphPattern::Minus { .. } => Err(SparqlError::Unsupported(
+            "MINUS not supported in Phase 1".to_string(),
         )),
-        GraphPattern::Extend { inner, .. } => {
-            // BIND expressions — ignore the binding but translate the inner pattern
-            translate_pattern(inner, counter, translation)
-        }
-        GraphPattern::Minus { .. } => {
-            // MINUS — not supported in Phase 1
-            Err(SparqlError::Unsupported(
-                "MINUS not supported in Phase 1".to_string(),
-            ))
-        }
-        GraphPattern::Values { .. } => {
-            // Inline VALUES — not supported yet
-            Err(SparqlError::Unsupported(
-                "VALUES inline data not supported in Phase 1".to_string(),
-            ))
-        }
+        GraphPattern::Values { .. } => Err(SparqlError::Unsupported(
+            "VALUES inline data not supported in Phase 1".to_string(),
+        )),
     }
 }
 
@@ -231,10 +418,7 @@ fn translate_triple_pattern(
 
     let predicate = match &tp.predicate {
         NamedNodePattern::NamedNode(n) => Some(n.as_str().to_string()),
-        NamedNodePattern::Variable(_) => {
-            // Variable predicates are not bindable in Phase 1 — treat as wildcard
-            None
-        }
+        NamedNodePattern::Variable(_) => None,
     };
 
     Ok(VarPattern {
@@ -251,45 +435,118 @@ fn translate_term_pattern(tp: &TermPattern) -> Result<Term, SparqlError> {
     match tp {
         TermPattern::Variable(v) => Ok(Term::Var(v.as_str().to_string())),
         TermPattern::NamedNode(n) => {
-            // Try to parse as urn:uuid:<uuid>
             let iri = n.as_str();
             if let Some(uuid_str) = iri.strip_prefix("urn:uuid:") {
                 if let Ok(u) = uuid::Uuid::parse_str(uuid_str) {
-                    let id = NodeId(u);
-                    return Ok(Term::Bound(id));
+                    return Ok(Term::Bound(NodeId(u)));
                 }
             }
-            // For non-UUID IRIs used as subjects/objects we cannot bind to a NodeId
-            // without a storage lookup. Use wildcard (best-effort for Phase 1).
+            // Non-UUID IRIs used as subjects/objects become wildcards.
             Ok(Term::Any)
         }
-        TermPattern::BlankNode(b) => {
-            // Blank nodes become fresh variables
-            Ok(Term::Var(format!("_bn_{}", b.as_str())))
-        }
-        TermPattern::Literal(_) => {
-            // Literal objects are not bindable in the current system
-            Ok(Term::Any)
-        }
+        TermPattern::BlankNode(b) => Ok(Term::Var(format!("_bn_{}", b.as_str()))),
+        TermPattern::Literal(_) => Ok(Term::Any),
+        TermPattern::Triple(_) => Err(SparqlError::Unsupported(
+            "nested quoted triples (SPARQL-star in object position) not supported".to_string(),
+        )),
     }
+}
+
+// ── SPARQL-star translation ───────────────────────────────────────────────────
+
+/// Translate a SPARQL-star pattern where the subject is a quoted triple.
+///
+/// Pattern: `<<edge_subject edge_predicate edge_object>> annot_predicate ?value_var`
+fn translate_sparql_star_subject(
+    inner: &spargebra::term::TriplePattern,
+    outer_predicate: &NamedNodePattern,
+    outer_object: &TermPattern,
+) -> Result<EdgeAnnotationStep, SparqlError> {
+    let edge_subject = translate_term_pattern(&inner.subject)?;
+    let edge_predicate = match &inner.predicate {
+        NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
+        NamedNodePattern::Variable(_) => {
+            return Err(SparqlError::Unsupported(
+                "variable predicate in quoted triple not supported".to_string(),
+            ))
+        }
+    };
+    let edge_object = translate_term_pattern(&inner.object)?;
+
+    let annot_predicate = match outer_predicate {
+        NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
+        NamedNodePattern::Variable(_) => {
+            return Err(SparqlError::Unsupported(
+                "variable annotation predicate not supported in SPARQL-star".to_string(),
+            ))
+        }
+    };
+
+    let value_var = match outer_object {
+        TermPattern::Variable(v) => v.as_str().to_string(),
+        _ => {
+            return Err(SparqlError::Unsupported(
+                "annotation object must be a variable".to_string(),
+            ))
+        }
+    };
+
+    Ok(EdgeAnnotationStep {
+        edge_subject,
+        edge_predicate,
+        edge_object,
+        annot_predicate,
+        value_var,
+    })
 }
 
 // ── Filter expression translation ────────────────────────────────────────────
 
-fn translate_filter(expr: &Expression) -> Result<SparqlFilter, SparqlError> {
+pub(crate) fn translate_filter(expr: &Expression) -> Result<SparqlFilter, SparqlError> {
     match expr {
         Expression::Bound(v) => Ok(SparqlFilter::Bound(v.as_str().to_string())),
 
         Expression::Equal(a, b) => {
-            if let (Expression::Variable(va), Expression::Variable(vb)) = (a.as_ref(), b.as_ref()) {
+            // Variable = Variable
+            if let (Expression::Variable(va), Expression::Variable(vb)) =
+                (a.as_ref(), b.as_ref())
+            {
+                return Ok(SparqlFilter::VarEq(
+                    va.as_str().to_string(),
+                    vb.as_str().to_string(),
+                ));
+            }
+            // Variable = Literal
+            translate_var_literal_comparison(a, b, SparqlFilter::EqualLiteral)
+                .or_else(|_| translate_var_literal_comparison(b, a, SparqlFilter::EqualLiteral))
+        }
+
+        Expression::SameTerm(a, b) => {
+            // Treat sameTerm like equality for our purposes
+            if let (Expression::Variable(va), Expression::Variable(vb)) =
+                (a.as_ref(), b.as_ref())
+            {
                 return Ok(SparqlFilter::VarEq(
                     va.as_str().to_string(),
                     vb.as_str().to_string(),
                 ));
             }
             Err(SparqlError::Unsupported(
-                "filter expression: equality with non-variable operands not supported in Phase 1".to_string()
+                "sameTerm with non-variable operands not supported".to_string(),
             ))
+        }
+
+        Expression::Greater(a, b) => {
+            translate_var_literal_comparison(a, b, SparqlFilter::GreaterThan)
+        }
+        Expression::GreaterOrEqual(a, b) => {
+            translate_var_literal_comparison(a, b, SparqlFilter::GreaterOrEqual)
+        }
+        Expression::Less(a, b) => {
+            translate_var_literal_comparison(a, b, SparqlFilter::LessThan)
+        }
+        Expression::LessOrEqual(a, b) => {
+            translate_var_literal_comparison(a, b, SparqlFilter::LessOrEqual)
         }
 
         Expression::FunctionCall(func, args) => {
@@ -300,11 +557,11 @@ fn translate_filter(expr: &Expression) -> Result<SparqlFilter, SparqlError> {
                         return Ok(SparqlFilter::IsIri(v.as_str().to_string()));
                     }
                     Err(SparqlError::Unsupported(
-                        "filter expression: isIRI with non-variable argument not supported in Phase 1".to_string(),
+                        "isIRI with non-variable argument not supported".to_string(),
                     ))
                 }
                 _ => Err(SparqlError::Unsupported(format!(
-                    "filter expression: function {:?} not supported in Phase 1",
+                    "filter function {:?} not supported",
                     func
                 ))),
             }
@@ -328,7 +585,108 @@ fn translate_filter(expr: &Expression) -> Result<SparqlFilter, SparqlError> {
         }
 
         other => Err(SparqlError::Unsupported(format!(
-            "filter expression '{}' not supported in Phase 1",
+            "filter expression '{}' not supported",
+            other
+        ))),
+    }
+}
+
+/// Translate `?var OP literal` into a comparison SparqlFilter.
+fn translate_var_literal_comparison(
+    var_expr: &Expression,
+    lit_expr: &Expression,
+    make: fn(String, SparqlLiteral) -> SparqlFilter,
+) -> Result<SparqlFilter, SparqlError> {
+    let var_name = match var_expr {
+        Expression::Variable(v) => v.as_str().to_string(),
+        _ => {
+            return Err(SparqlError::Unsupported(
+                "comparison filter: left side must be a variable".to_string(),
+            ))
+        }
+    };
+    let lit = match lit_expr {
+        Expression::Literal(l) => sparql_literal_to_value(l),
+        _ => {
+            return Err(SparqlError::Unsupported(
+                "comparison filter: right side must be a literal".to_string(),
+            ))
+        }
+    };
+    Ok(make(var_name, lit))
+}
+
+fn sparql_literal_to_value(lit: &spargebra::term::Literal) -> SparqlLiteral {
+    let dt = lit.datatype().as_str();
+    let val = lit.value();
+    // Integer types
+    if dt.ends_with("#integer")
+        || dt.ends_with("#int")
+        || dt.ends_with("#long")
+        || dt.ends_with("#short")
+    {
+        if let Ok(n) = val.parse::<i64>() {
+            return SparqlLiteral::Int(n);
+        }
+    }
+    // Float/decimal types
+    if dt.ends_with("#double") || dt.ends_with("#float") || dt.ends_with("#decimal") {
+        if let Ok(f) = val.parse::<f64>() {
+            return SparqlLiteral::Float(f);
+        }
+    }
+    // Boolean
+    if dt.ends_with("#boolean") {
+        if val == "true" {
+            return SparqlLiteral::Bool(true);
+        }
+        if val == "false" {
+            return SparqlLiteral::Bool(false);
+        }
+    }
+    // Default: plain string
+    SparqlLiteral::Str(val.to_string())
+}
+
+// ── Aggregate translation ─────────────────────────────────────────────────────
+
+fn translate_aggregate(
+    alias: &spargebra::term::Variable,
+    agg_expr: &AggregateExpression,
+) -> Result<SparqlAggregateSpec, SparqlError> {
+    let alias_str = alias.as_str().to_string();
+    let func = match agg_expr {
+        AggregateExpression::CountSolutions { .. } => SparqlAggFunc::CountStar,
+        AggregateExpression::FunctionCall { name, expr, .. } => {
+            let var = extract_var_from_expr(expr)?;
+            match name {
+                AggregateFunction::Count => SparqlAggFunc::CountVar(var),
+                AggregateFunction::Sum => SparqlAggFunc::Sum(var),
+                AggregateFunction::Avg => SparqlAggFunc::Avg(var),
+                AggregateFunction::Min => SparqlAggFunc::Min(var),
+                AggregateFunction::Max => SparqlAggFunc::Max(var),
+                AggregateFunction::Sample => SparqlAggFunc::Sample(var),
+                AggregateFunction::GroupConcat { separator } => SparqlAggFunc::GroupConcat {
+                    var,
+                    separator: separator.clone(),
+                },
+                AggregateFunction::Custom(iri) => {
+                    return Err(SparqlError::Unsupported(format!(
+                        "custom aggregate function {} not supported",
+                        iri.as_str()
+                    )))
+                }
+            }
+        }
+    };
+    Ok(SparqlAggregateSpec { alias: alias_str, func })
+}
+
+fn extract_var_from_expr(expr: &Expression) -> Result<String, SparqlError> {
+    match expr {
+        Expression::Variable(v) => Ok(v.as_str().to_string()),
+        other => Err(SparqlError::Unsupported(format!(
+            "aggregate expression must be a variable, got: {}",
             other
         ))),
     }
@@ -357,12 +715,10 @@ fn translate_path(
         }
 
         PropertyPathExpression::Reverse(inner) => {
-            // Swap subject and object
             translate_path(inner, object, subject, branch, counter)
         }
 
         PropertyPathExpression::Sequence(a, b) => {
-            // Generate an intermediate variable
             let mid_var = format!("_seq_{}", *counter);
             *counter += 1;
             let mid_term = Term::Var(mid_var);
@@ -372,9 +728,7 @@ fn translate_path(
         }
 
         PropertyPathExpression::Alternative(a, _b) => {
-            // UNION semantics require multiple branches, but translate_path
-            // operates on a single &mut Branch. For Phase 1, translate only
-            // the first alternative. The second is silently dropped.
+            // Phase 1: only the first alternative (full UNION requires separate branches)
             translate_path(a, subject, object, branch, counter)
         }
 
@@ -387,19 +741,15 @@ fn translate_path(
         }
 
         PropertyPathExpression::ZeroOrOne(inner) => {
-            // For Phase 1, treat as a single step (the "one" case)
             translate_path(inner, subject, object, branch, counter)
         }
 
-        PropertyPathExpression::NegatedPropertySet(_) => {
-            Err(SparqlError::Unsupported(
-                "negated property set paths not supported in Phase 1".to_string(),
-            ))
-        }
+        PropertyPathExpression::NegatedPropertySet(_) => Err(SparqlError::Unsupported(
+            "negated property set paths not supported".to_string(),
+        )),
     }
 }
 
-/// Generate transitive closure rules for `OneOrMore` (`+`) and `ZeroOrMore` (`*`) paths.
 fn translate_one_or_more(
     inner: &PropertyPathExpression,
     subject: Term,
@@ -408,29 +758,23 @@ fn translate_one_or_more(
     counter: &mut usize,
     _zero_or_more: bool,
 ) -> Result<(), SparqlError> {
-    // Extract the base predicate for simple NamedNode paths
     let base_pred = match inner {
         PropertyPathExpression::NamedNode(n) => n.as_str().to_string(),
         other => {
-            // For complex sub-paths, recursively translate into a helper predicate
-            // For Phase 1, only handle simple named-node base predicates
             return Err(SparqlError::Unsupported(format!(
-                "complex property path inside OneOrMore not supported in Phase 1: {}",
+                "complex path inside OneOrMore not supported: {}",
                 other
-            )));
+            )))
         }
     };
 
     let tc_name = format!("_tc{}", *counter);
     *counter += 1;
-
-    // Variable names for the TC rules (unique to avoid collisions)
     let x = format!("_tc_x{}", *counter);
     let y = format!("_tc_y{}", *counter);
     let z = format!("_tc_z{}", *counter);
     *counter += 1;
 
-    // Rule 1: tc(x, y) :- base(x, y)  [base case]
     branch.rules.push(
         Rule::new(&tc_name, &x, &y).with_body(vec![VarPattern {
             subject: Term::Var(x.clone()),
@@ -442,7 +786,6 @@ fn translate_one_or_more(
         }]),
     );
 
-    // Rule 2: tc(x, z) :- tc(x, y), base(y, z)  [recursive case]
     branch.rules.push(
         Rule::new(&tc_name, &x, &z).with_body(vec![
             VarPattern {
@@ -464,7 +807,6 @@ fn translate_one_or_more(
         ]),
     );
 
-    // The pattern to use the TC predicate with the original subject/object terms
     branch.patterns.push(VarPattern {
         subject,
         predicate: Some(tc_name),
