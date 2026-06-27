@@ -357,3 +357,84 @@ fn mmap_batch_insert_and_search() {
     let results = store.search_vector("bs", unit_vec(10, 5), 1);
     assert_eq!(results[0].0, ids[5]);
 }
+
+// ── HNSW recall at scale ──────────────────────────────────────────────────────
+
+/// LCG-based pseudo-random unit vector for deterministic recall testing.
+fn lcg_unit_vec(mut seed: u64, dims: usize) -> Vec<f32> {
+    let raw: Vec<f32> = (0..dims)
+        .map(|_| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0
+        })
+        .collect();
+    let norm = raw.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+    raw.into_iter().map(|x| x / norm).collect()
+}
+
+/// Insert 10 000 random 128-d vectors and verify recall@10 stays above 90%.
+///
+/// This exercises the HNSW index at realistic scale. Recall is measured by
+/// comparing the ANN top-10 results against a brute-force cosine sort.
+/// A threshold of 90% is conservative enough to be deterministic across
+/// platforms while still catching serious regressions in the index quality.
+#[test]
+fn hnsw_recall_at_10_with_10k_insertions() {
+    const N: usize = 10_000;
+    const DIMS: usize = 128;
+    const K: usize = 10;
+    const MIN_RECALL: f32 = 0.90;
+
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+
+    // Build deterministic items.
+    let items: Vec<(NodeId, Vec<f32>)> = (0..N as u64)
+        .map(|i| {
+            let id = NodeId(uuid::Uuid::from_u128(i as u128 + 0x10000));
+            let v = lcg_unit_vec(i.wrapping_mul(0xdeadbeef), DIMS);
+            (id, v)
+        })
+        .collect();
+
+    let (inserted, errors) = store.batch_insert_vectors("recall", &items, StorageMode::Memory);
+    assert_eq!(inserted, N, "all items should be inserted");
+    assert!(errors.is_empty(), "no errors during batch insert");
+
+    // Run recall over 20 random queries.
+    let mut total_recall = 0.0f32;
+    let num_queries = 20usize;
+    for q in 0..num_queries {
+        let query = lcg_unit_vec(q as u64 * 0x1234 + 0xabcd, DIMS);
+
+        // Use ef=200 (well above K=10) to get reliable high recall at 10k nodes.
+        let ann: std::collections::HashSet<NodeId> = store
+            .search_vector_ef("recall", &query, K, 200)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        // Brute-force: sort all N vectors by cosine similarity (dot product of unit vecs).
+        let mut scores: Vec<(NodeId, f32)> = items
+            .iter()
+            .map(|(id, v)| {
+                let sim: f32 = v.iter().zip(&query).map(|(a, b)| a * b).sum();
+                (*id, sim)
+            })
+            .collect();
+        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let true_nn: std::collections::HashSet<NodeId> =
+            scores.iter().take(K).map(|(id, _)| *id).collect();
+
+        let recall = ann.intersection(&true_nn).count() as f32 / K as f32;
+        total_recall += recall;
+    }
+
+    let avg_recall = total_recall / num_queries as f32;
+    assert!(
+        avg_recall >= MIN_RECALL,
+        "recall@{K} at 10k nodes = {avg_recall:.2} < {MIN_RECALL} threshold"
+    );
+}

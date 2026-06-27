@@ -78,7 +78,7 @@ regex        = { version = "1" }
 tokio-util   = { version = "0.7" }
 
 # SPARQL parser (Oxigraph project)
-spargebra    = { version = "0.3" }
+spargebra    = { version = "0.3", features = ["rdf-star"] }
 
 # testing
 tempfile     = { version = "3" }

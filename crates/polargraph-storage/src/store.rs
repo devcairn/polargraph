@@ -965,6 +965,18 @@ impl TripleStore {
             if !key.starts_with(prefix) {
                 break;
             }
+
+            // Fast path: tt is always the last 8 bytes of a 44-byte hexastore key.
+            // Check it against snapshot_ts before calling decode_key (which allocates
+            // value.to_vec()). This avoids allocations for the common case of
+            // multiple historical versions where only the newest is needed.
+            if key.len() >= 8 {
+                let raw_tt = i64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
+                if raw_tt > snapshot_ts.0 {
+                    continue;
+                }
+            }
+
             let (subject, pred_id, object, tt, value_bytes) =
                 decode_key(&key, &value)?;
 
@@ -1348,11 +1360,18 @@ impl TripleStore {
         prefix[16..20].copy_from_slice(&pred_id.to_be_bytes());
         prefix[20..36].copy_from_slice(&keys::PROPERTY_SENTINEL);
 
+        // Scan backward from the maximum possible tt for this (subject, pred, sentinel)
+        // so we get newest-first order and can stop as soon as we reach `limit`.
+        // This avoids collecting all historical versions only to reverse and truncate.
+        let mut start = [0xFFu8; 44];
+        start[0..36].copy_from_slice(&prefix);
+        // tt bytes are already 0xFF (i64::MAX in big-endian) from the initializer.
+
         let cf = self.cf_handle(cf::SPO)?;
         let iter = self
             .inner
             .db
-            .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+            .iterator_cf(&cf, IteratorMode::From(&start, Direction::Reverse));
 
         let mut versions: Vec<(Value, i64)> = Vec::new();
         for item in iter {
@@ -1367,15 +1386,16 @@ impl TripleStore {
             match codec::decode_value(&value_bytes) {
                 Ok(codec::DecodedValue::Property { value, .. }) => {
                     versions.push((value, tt));
+                    if versions.len() >= limit {
+                        break;
+                    }
                 }
                 Ok(codec::DecodedValue::Relation { .. }) => {}
                 Err(_) => {}
             }
         }
 
-        // SPO keys sort oldest-first (lowest tt first), so reverse for newest-first.
-        versions.reverse();
-        versions.truncate(limit);
+        // Already newest-first from reverse iteration; no reverse needed.
         Ok(versions)
     }
 

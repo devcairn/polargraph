@@ -238,7 +238,7 @@ export class PolarGraphClient {
         } as PropertyTriple,
       });
     }
-    await this._unary(this._grpc.insert.bind(this._grpc), { triples, txId: "" } as InsertRequest);
+    await this._unary(this._grpc.insert.bind(this._grpc), { triples, txId: "", edgeAnnotations: [] } as InsertRequest);
   }
 
   /**
@@ -265,7 +265,7 @@ export class PolarGraphClient {
         properties: edgeProps,
       } as RelationTriple,
     };
-    await this._unary(this._grpc.insert.bind(this._grpc), { triples: [triple], txId: "" } as InsertRequest);
+    await this._unary(this._grpc.insert.bind(this._grpc), { triples: [triple], txId: "", edgeAnnotations: [] } as InsertRequest);
   }
 
   // ── Query ───────────────────────────────────────────────────────────────────
@@ -282,6 +282,8 @@ export class PolarGraphClient {
       asOfValidTime: options.asOfValidTime ?? 0,
       asOfTxTime: options.asOfTxTime ?? 0,
       txId: options.txId ?? "",
+      userId: "",
+      params: {},
     };
     const resp = await this._unary(this._grpc.query.bind(this._grpc), req);
     return resp.bindings.map((b) => {
@@ -307,6 +309,7 @@ export class PolarGraphClient {
       asOfValidTime: options.asOfValidTime ?? 0,
       asOfTxTime: options.asOfTxTime ?? 0,
       txId: options.txId ?? "",
+      userId: "",
       params: options.params ?? {},
     };
     const resp = await this._unary(this._grpc.cypherQuery.bind(this._grpc), req);
@@ -386,6 +389,8 @@ export class PolarGraphClient {
       asOfValidTime: options.asOfValidTime ?? 0,
       asOfTxTime: options.asOfTxTime ?? 0,
       txId: options.txId ?? "",
+      userId: "",
+      params: {},
     };
     const stream = this._grpc.queryStream(req, this._meta);
     for await (const chunk of streamToAsyncIterable<QueryStreamChunk>(stream)) {
