@@ -1,0 +1,21 @@
+[package]
+name        = "polargraph-sparql"
+description = "SPARQL 1.1 translation layer for PolarGraph"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+rust-version.workspace = true
+
+[lib]
+name = "polargraph_sparql"
+
+[dependencies]
+spargebra        = { workspace = true }
+polargraph-core  = { path = "../polargraph-core" }
+polargraph-query = { path = "../polargraph-query" }
+thiserror        = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+uuid             = { workspace = true }
+http             = { version = "0.2" }

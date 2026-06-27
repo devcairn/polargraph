@@ -8,6 +8,7 @@ members = [
     "crates/polargraph-bench",
     "crates/polargraph-import",
     "crates/polargraph-rest",
+    "crates/polargraph-sparql",
 ]
 
 [workspace.package]
@@ -75,6 +76,9 @@ regex        = { version = "1" }
 
 # async utilities (CancellationToken, etc.)
 tokio-util   = { version = "0.7" }
+
+# SPARQL parser (Oxigraph project)
+spargebra    = { version = "0.3" }
 
 # testing
 tempfile     = { version = "3" }

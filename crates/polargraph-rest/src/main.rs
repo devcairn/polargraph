@@ -17,6 +17,7 @@ use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::info;
 use uuid::Uuid;
+use polargraph_core::id::NodeId;
 
 #[allow(clippy::enum_variant_names)]
 mod proto {
@@ -1296,6 +1297,310 @@ async fn handle_get_user_access(
     }
 }
 
+// ── GET /sparql and POST /sparql ──────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SparqlGetParams {
+    query: String,
+}
+
+async fn handle_sparql_get(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    QueryParams(params): QueryParams<SparqlGetParams>,
+) -> Response {
+    execute_sparql_query(state, headers, params.query).await
+}
+
+async fn handle_sparql_post(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let query_string = if content_type.contains("application/sparql-query") {
+        match String::from_utf8(body.to_vec()) {
+            Ok(s) => s,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "invalid UTF-8 body" })),
+                )
+                    .into_response()
+            }
+        }
+    } else if content_type.contains("application/x-www-form-urlencoded") {
+        let form_str = match String::from_utf8(body.to_vec()) {
+            Ok(s) => s,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "invalid UTF-8 body" })),
+                )
+                    .into_response()
+            }
+        };
+        match polargraph_sparql::protocol::extract_query_from_form(&form_str) {
+            Some(q) => q,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "missing query= field in form body" })),
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        // Default: treat body as raw SPARQL
+        match String::from_utf8(body.to_vec()) {
+            Ok(s) => s,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "invalid UTF-8 body" })),
+                )
+                    .into_response()
+            }
+        }
+    };
+
+    execute_sparql_query(state, headers, query_string).await
+}
+
+async fn execute_sparql_query(
+    state: Arc<AppState>,
+    headers: axum::http::HeaderMap,
+    query_string: String,
+) -> Response {
+    use polargraph_sparql::{translate_query, SparqlError};
+    use polargraph_sparql::response::ResponseFormat;
+
+    // 1. Parse
+    let parsed = match spargebra::Query::parse(&query_string, None) {
+        Ok(q) => q,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("SPARQL parse error: {}", e) })),
+            )
+                .into_response()
+        }
+    };
+
+    // 2. Translate to PolarGraph query
+    let translation = match translate_query(&parsed) {
+        Ok(t) => t,
+        Err(SparqlError::Unsupported(msg)) => {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    // 3. Execute each branch against gRPC
+    let mut all_bindings: Vec<polargraph_query::Bindings> = Vec::new();
+
+    for branch in &translation.branches {
+        let patterns: Vec<proto::VarPattern> =
+            branch.patterns.iter().map(sparql_varpat_to_proto).collect();
+        let rules: Vec<proto::DatalogRule> =
+            branch.rules.iter().map(sparql_rule_to_proto).collect();
+
+        let req = proto::QueryRequest {
+            patterns,
+            rules,
+            snapshot_ts: 0,
+            as_of_valid_time: 0,
+            as_of_tx_time: 0,
+            ..Default::default()
+        };
+
+        let mut client = state.client.clone();
+        let resp = match client.query(tonic::Request::new(req)).await {
+            Ok(r) => r.into_inner(),
+            Err(e) => return grpc_error(e),
+        };
+
+        for pb in resp.bindings {
+            let mut binding: polargraph_query::Bindings = std::collections::HashMap::new();
+            for (k, v) in pb.vars {
+                if v.bytes.len() == 16 {
+                    if let Ok(arr) = v.bytes[..16].try_into() {
+                        let uuid = uuid::Uuid::from_bytes(arr);
+                        binding.insert(k, NodeId(uuid));
+                    }
+                }
+            }
+            if apply_sparql_filters(&binding, &branch.filters) {
+                all_bindings.push(binding);
+            }
+        }
+    }
+
+    // 4. Determine projected variables
+    let all_var_names: Vec<String> = if let Some(proj) = &translation.projection {
+        proj.clone()
+    } else {
+        // SELECT * — collect all variable names seen
+        let mut seen = std::collections::HashSet::new();
+        for b in &all_bindings {
+            for k in b.keys() {
+                seen.insert(k.clone());
+            }
+        }
+        let mut names: Vec<String> = seen.into_iter().collect();
+        names.sort();
+        names
+    };
+
+    // 5. Project bindings
+    let projected: Vec<polargraph_query::Bindings> = all_bindings
+        .iter()
+        .map(|b| {
+            all_var_names
+                .iter()
+                .filter_map(|v| b.get(v).map(|id| (v.clone(), *id)))
+                .collect()
+        })
+        .collect();
+
+    // 6. DISTINCT
+    let projected = if translation.distinct {
+        let mut seen: std::collections::HashSet<Vec<(String, [u8; 16])>> =
+            std::collections::HashSet::new();
+        projected
+            .into_iter()
+            .filter(|b| {
+                let mut pairs: Vec<_> = b.iter().collect();
+                pairs.sort_by_key(|(k, _)| k.as_str());
+                let key: Vec<_> = pairs
+                    .into_iter()
+                    .map(|(k, v)| (k.clone(), *v.0.as_bytes()))
+                    .collect();
+                seen.insert(key)
+            })
+            .collect()
+    } else {
+        projected
+    };
+
+    // 7. OFFSET + LIMIT
+    let projected: Vec<_> = projected
+        .into_iter()
+        .skip(translation.offset)
+        .take(translation.limit.unwrap_or(usize::MAX))
+        .collect();
+
+    // 8. For ASK queries, return boolean
+    if translation.is_ask {
+        let result = !projected.is_empty();
+        return Json(serde_json::json!({ "head": {}, "boolean": result })).into_response();
+    }
+
+    // 9. Serialize
+    let http_headers: http::HeaderMap = headers
+        .iter()
+        .filter_map(|(k, v)| {
+            let name = http::header::HeaderName::from_bytes(k.as_str().as_bytes()).ok()?;
+            let val = http::header::HeaderValue::from_bytes(v.as_bytes()).ok()?;
+            Some((name, val))
+        })
+        .collect();
+    let format = polargraph_sparql::negotiate_format(&http_headers);
+    match format {
+        ResponseFormat::Json => {
+            let body = polargraph_sparql::serialize_json(&all_var_names, &projected);
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/sparql-results+json")
+                .body(axum::body::boxed(axum::body::Full::from(body)))
+                .unwrap()
+        }
+        ResponseFormat::Csv => {
+            let body = polargraph_sparql::serialize_csv(&all_var_names, &projected);
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/csv")
+                .body(axum::body::boxed(axum::body::Full::from(body)))
+                .unwrap()
+        }
+    }
+}
+
+fn sparql_varpat_to_proto(vp: &polargraph_query::VarPattern) -> proto::VarPattern {
+    proto::VarPattern {
+        subject: Some(sparql_term_to_proto(&vp.subject)),
+        predicate: vp.predicate.clone().unwrap_or_default(),
+        object: Some(sparql_term_to_proto(&vp.object)),
+    }
+}
+
+fn sparql_term_to_proto(term: &polargraph_query::Term) -> proto::Term {
+    use polargraph_query::Term;
+    match term {
+        Term::Var(v) => proto::Term {
+            kind: Some(proto::term::Kind::Var(v.clone())),
+        },
+        Term::Bound(id) => proto::Term {
+            kind: Some(proto::term::Kind::Bound(proto::NodeId {
+                bytes: id.0.as_bytes().to_vec(),
+            })),
+        },
+        Term::Any | Term::Param(_) => proto::Term { kind: None },
+    }
+}
+
+fn sparql_rule_to_proto(rule: &polargraph_query::Rule) -> proto::DatalogRule {
+    proto::DatalogRule {
+        head_predicate: rule.head_predicate.clone(),
+        head_subject_var: rule.head_subject_var.clone(),
+        head_object_var: rule.head_object_var.clone(),
+        body: rule.body.iter().map(sparql_varpat_to_proto).collect(),
+    }
+}
+
+fn apply_sparql_filters(
+    bindings: &polargraph_query::Bindings,
+    filters: &[polargraph_sparql::SparqlFilter],
+) -> bool {
+    filters.iter().all(|f| eval_sparql_filter(f, bindings))
+}
+
+fn eval_sparql_filter(
+    filter: &polargraph_sparql::SparqlFilter,
+    bindings: &polargraph_query::Bindings,
+) -> bool {
+    use polargraph_sparql::SparqlFilter;
+    match filter {
+        SparqlFilter::Bound(v) => bindings.contains_key(v),
+        SparqlFilter::VarEq(a, b) => match (bindings.get(a), bindings.get(b)) {
+            (Some(va), Some(vb)) => va == vb,
+            _ => false,
+        },
+        SparqlFilter::IsIri(v) => bindings.contains_key(v), // all bound values are URIs
+        SparqlFilter::Not(inner) => !eval_sparql_filter(inner, bindings),
+        SparqlFilter::And(a, b) => {
+            eval_sparql_filter(a, bindings) && eval_sparql_filter(b, bindings)
+        }
+        SparqlFilter::Or(a, b) => {
+            eval_sparql_filter(a, bindings) || eval_sparql_filter(b, bindings)
+        }
+    }
+}
+
 // ── GET /stats ────────────────────────────────────────────────────────────────
 
 async fn handle_stats(State(state): State<Arc<AppState>>) -> Response {
@@ -1369,6 +1674,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/access/revoke", post(handle_revoke_access))
         .route("/access/add-user", post(handle_add_user_to_group))
         .route("/access/user/:user_id", get(handle_get_user_access))
+        .route("/sparql", get(handle_sparql_get).post(handle_sparql_post))
         .with_state(state);
 
     info!(addr = %args.listen, upstream = %args.upstream, "polargraph-rest listening");

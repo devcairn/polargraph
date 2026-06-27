@@ -26,7 +26,11 @@ axum        = { version = "0.6" }
 bytes       = { workspace = true }
 http        = { version = "0.2" }
 hyper       = { version = "0.14", features = ["server", "http1", "http2"] }
-tower       = { version = "0.4" }
+tower               = { version = "0.4" }
+spargebra           = { workspace = true }
+polargraph-sparql   = { path = "../polargraph-sparql" }
+polargraph-core     = { path = "../polargraph-core" }
+polargraph-query    = { path = "../polargraph-query" }
 
 [build-dependencies]
 tonic-build = { workspace = true }
