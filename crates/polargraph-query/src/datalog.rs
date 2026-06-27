@@ -37,8 +37,6 @@
 //!
 //! # Limitations (current phase)
 //!
-//! - Predicate slots are always concrete strings or wildcards — no predicate
-//!   variables. (`?p` over predicates complicates index selection significantly.)
 //! - Object variables only bind to `NodeId`s (relation triples). Property
 //!   triples match subject variables but their scalar value is not bindable.
 //! - No negation, no aggregation.
@@ -90,12 +88,22 @@ impl Term {
 
 /// A triple pattern where subject and object slots can be variables.
 ///
-/// Predicate is `Option<String>`: `Some("knows")` matches that specific
+/// `predicate` is `Option<String>`: `Some("knows")` matches that specific
 /// predicate; `None` matches any predicate.
+///
+/// `predicate_var` names a variable that receives the matched predicate string
+/// (for SPARQL-style `?s ?p ?o` BGPs and OWL 2 RL rules that bind predicates).
+/// When set alongside a `None` predicate, the evaluator enumerates predicates
+/// via a PSO or SPO scan and binds each one into [`PredBindings`].
+/// When a predicate variable was bound in an earlier pattern and appears again
+/// here with `predicate = None`, `substitute_with_preds` fills in the concrete
+/// predicate before dispatching to storage.
 #[derive(Debug, Clone)]
 pub struct VarPattern {
     pub subject: Term,
     pub predicate: Option<String>,
+    /// Names the variable that receives the matched predicate string.
+    pub predicate_var: Option<String>,
     pub object: Term,
     /// When set, the EdgeId from a matched Relation triple is bound to this variable
     /// as a `NodeId` (same UUID bytes, reinterpreted).
@@ -108,12 +116,23 @@ pub struct VarPattern {
 
 impl VarPattern {
     pub fn new() -> Self {
-        Self { subject: Term::Any, predicate: None, object: Term::Any, edge_var: None, max_hops: None }
+        Self {
+            subject: Term::Any,
+            predicate: None,
+            predicate_var: None,
+            object: Term::Any,
+            edge_var: None,
+            max_hops: None,
+        }
     }
 
     pub fn subject(mut self, s: Term) -> Self { self.subject = s; self }
     pub fn predicate(mut self, p: impl Into<String>) -> Self {
         self.predicate = Some(p.into());
+        self
+    }
+    pub fn predicate_var(mut self, v: impl Into<String>) -> Self {
+        self.predicate_var = Some(v.into());
         self
     }
     pub fn object(mut self, o: Term) -> Self { self.object = o; self }
@@ -127,8 +146,15 @@ impl Default for VarPattern {
     fn default() -> Self { Self::new() }
 }
 
-/// A map from variable name to its bound `NodeId`.
+/// A map from node variable name to its bound `NodeId`.
 pub type Bindings = HashMap<String, NodeId>;
+
+/// A map from predicate variable name to its bound predicate string.
+///
+/// Predicate bindings run alongside [`Bindings`] through the evaluation loop so
+/// that a predicate variable bound in one pattern can be substituted as a
+/// concrete predicate in a later pattern (OWL 2 RL / SPARQL BGP use case).
+pub type PredBindings = HashMap<String, String>;
 
 /// A conjunctive query: an ordered list of patterns, all of which must be
 /// satisfied simultaneously (logical AND / natural join).
@@ -152,14 +178,21 @@ impl Query {
 /// the storage evaluator can execute.
 ///
 /// Unbound variables become `None` (wildcard) — the storage layer returns all
-/// candidates; `extend_bindings` then filters and binds them.
-fn substitute(vp: &VarPattern, bindings: &Bindings) -> Pattern {
+/// candidates; `extend_full` then filters and binds them.
+///
+/// When `predicate_var` names a variable already present in `pred_bindings`,
+/// the bound predicate string is used as the concrete predicate, enabling
+/// predicate variables to act as predicates in subsequent patterns.
+fn substitute_with_preds(vp: &VarPattern, bindings: &Bindings, pred_bindings: &PredBindings) -> Pattern {
     Pattern {
         subject: resolve_term(&vp.subject, bindings),
-        predicate: vp.predicate.clone(),
+        predicate: vp.predicate.clone().or_else(|| {
+            vp.predicate_var.as_ref().and_then(|v| pred_bindings.get(v).cloned())
+        }),
         object: resolve_term(&vp.object, bindings),
     }
 }
+
 
 fn resolve_term(term: &Term, bindings: &Bindings) -> Option<NodeId> {
     match term {
@@ -171,34 +204,40 @@ fn resolve_term(term: &Term, bindings: &Bindings) -> Option<NodeId> {
     }
 }
 
-/// Try to extend `bindings` with the variable assignments implied by matching
-/// `triple` against `vp`.
+/// Try to extend `bindings` and `pred_bindings` with the variable assignments
+/// implied by matching `triple` against `vp`.
 ///
-/// Returns `None` if the triple conflicts with an already-bound variable
-/// (i.e. this triple is not a valid solution for the current binding set).
-fn extend_bindings(
+/// Returns `None` if the triple conflicts with an already-bound variable.
+///
+/// Predicate variable binding: when `vp.predicate_var` is `Some(name)`, the
+/// matched triple's predicate string is bound to `name` in `PredBindings`.
+/// Conflicts (same variable already bound to a different predicate) discard
+/// this solution.
+fn extend_full(
     triple: &Triple,
     vp: &VarPattern,
     bindings: &Bindings,
-) -> Option<Bindings> {
-    let mut out = bindings.clone();
+    pred_bindings: &PredBindings,
+) -> Option<(Bindings, PredBindings)> {
+    let mut node_out = bindings.clone();
+    let mut pred_out = pred_bindings.clone();
 
     // Bind / check subject slot.
-    if let Some(updated) = bind_term(&vp.subject, triple.subject(), &out) {
-        out = updated;
+    if let Some(updated) = bind_term(&vp.subject, triple.subject(), &node_out) {
+        node_out = updated;
     } else {
         return None;
     }
 
-    // Bind / check object slot — only relation triples have a NodeId object.
+    // Bind / check object slot — only Relation triples have a NodeId object.
     match &vp.object {
         Term::Any | Term::Param(_) => {} // nothing to bind
-        Term::Bound(_) => {} // substitution already handled this; storage only returned matching triples
-        Term::Var(_name) => {
+        Term::Bound(_) => {} // substitution already handled this
+        Term::Var(_) => {
             match triple {
                 Triple::Relation { object, .. } => {
-                    if let Some(updated) = bind_term(&vp.object, *object, &out) {
-                        out = updated;
+                    if let Some(updated) = bind_term(&vp.object, *object, &node_out) {
+                        node_out = updated;
                     } else {
                         return None;
                     }
@@ -213,17 +252,29 @@ fn extend_bindings(
 
     // Bind edge variable if requested (only applicable to Relation triples).
     if let (Some(ev), Triple::Relation { edge_id, .. }) = (&vp.edge_var, triple) {
-        // Reinterpret EdgeId as NodeId so it can live in Bindings (which maps to NodeId).
         let as_node = NodeId(edge_id.0);
-        if let Some(updated) = bind_term(&Term::Var(ev.clone()), as_node, &out) {
-            out = updated;
+        if let Some(updated) = bind_term(&Term::Var(ev.clone()), as_node, &node_out) {
+            node_out = updated;
         } else {
             return None;
         }
     }
 
-    Some(out)
+    // Bind predicate variable.
+    if let Some(pv) = &vp.predicate_var {
+        let pred_str = triple.predicate().0.clone();
+        if let Some(existing) = pred_out.get(pv) {
+            if *existing != pred_str {
+                return None; // predicate variable conflict
+            }
+        } else {
+            pred_out.insert(pv.clone(), pred_str);
+        }
+    }
+
+    Some((node_out, pred_out))
 }
+
 
 /// Attempt to bind `term` to `value` within `bindings`.
 ///
@@ -254,25 +305,15 @@ fn bind_term(term: &Term, value: NodeId, bindings: &Bindings) -> Option<Bindings
 
 // ── Evaluator ─────────────────────────────────────────────────────────────────
 
-/// Evaluate a conjunctive query against a snapshot, starting from a given set
-/// of initial bindings instead of a single empty binding.
-///
-/// Each element of `initial` is an independent partial solution. Patterns are
-/// evaluated in order, joining against every element; only solutions that
-/// satisfy all patterns survive. An empty `initial` returns immediately with
-/// an empty result. An empty `query.patterns` returns `initial` unchanged.
-///
-/// When `registry` is `Some`, each pattern evaluation consults the
-/// `EdgeTypeRegistry` and short-circuits when the bound subject or object does
-/// not satisfy the predicate's domain/range constraint. Pass `None` to disable
-/// schema-aware pruning and preserve the existing behaviour.
-pub fn execute_query_seeded(
+/// Inner evaluation loop that tracks `(Bindings, PredBindings)` pairs through
+/// every pattern so predicate variables are threaded correctly across joins.
+fn evaluate_seeded_inner(
     query: &Query,
     snapshot: &Snapshot,
-    initial: Vec<Bindings>,
+    initial: Vec<(Bindings, PredBindings)>,
     deadline: Option<Instant>,
     registry: Option<&EdgeTypeRegistry>,
-) -> Result<Vec<Bindings>, QueryError> {
+) -> Result<Vec<(Bindings, PredBindings)>, QueryError> {
     if initial.is_empty() {
         return Ok(vec![]);
     }
@@ -287,9 +328,9 @@ pub fn execute_query_seeded(
         let mut next = Vec::new();
 
         if let Some(hops) = vp.max_hops {
-            // Bounded transitive: BFS up to `hops` steps.
+            // Bounded transitive: BFS up to `hops` steps. Predicate must be fixed.
             if let Some(pred) = &vp.predicate {
-                for bindings in solutions {
+                for (bindings, pred_bindings) in solutions {
                     let start = resolve_term(&vp.subject, &bindings);
 
                     // Collect starting nodes: use the bound subject directly, or
@@ -321,17 +362,17 @@ pub fn execute_query_seeded(
                         let reachable = reachable_from_hops(start_id, pred, snapshot, hops, deadline)?;
                         for target in reachable {
                             match &vp.object {
-                                Term::Any | Term::Param(_) => next.push(base.clone()),
+                                Term::Any | Term::Param(_) => next.push((base.clone(), pred_bindings.clone())),
                                 Term::Bound(id) => {
-                                    if *id == target { next.push(base.clone()); }
+                                    if *id == target { next.push((base.clone(), pred_bindings.clone())); }
                                 }
                                 Term::Var(name) => {
                                     if let Some(&existing) = base.get(name.as_str()) {
-                                        if existing == target { next.push(base.clone()); }
+                                        if existing == target { next.push((base.clone(), pred_bindings.clone())); }
                                     } else {
                                         let mut b = base.clone();
                                         b.insert(name.clone(), target);
-                                        next.push(b);
+                                        next.push((b, pred_bindings.clone()));
                                     }
                                 }
                             }
@@ -340,13 +381,13 @@ pub fn execute_query_seeded(
                 }
             }
         } else {
-            for bindings in solutions {
-                let pattern = substitute(vp, &bindings);
+            for (bindings, pred_bindings) in solutions {
+                let pattern = substitute_with_preds(vp, &bindings, &pred_bindings);
                 let triples = evaluate_with_registry(&pattern, snapshot, registry)?;
 
                 for triple in triples {
-                    if let Some(extended) = extend_bindings(&triple, vp, &bindings) {
-                        next.push(extended);
+                    if let Some(pair) = extend_full(&triple, vp, &bindings, &pred_bindings) {
+                        next.push(pair);
                     }
                 }
             }
@@ -360,6 +401,48 @@ pub fn execute_query_seeded(
     }
 
     Ok(solutions)
+}
+
+/// Evaluate a conjunctive query against a snapshot, starting from a given set
+/// of initial bindings instead of a single empty binding.
+///
+/// Each element of `initial` is an independent partial solution. Patterns are
+/// evaluated in order, joining against every element; only solutions that
+/// satisfy all patterns survive. An empty `initial` returns immediately with
+/// an empty result. An empty `query.patterns` returns `initial` unchanged.
+///
+/// When `registry` is `Some`, each pattern evaluation consults the
+/// `EdgeTypeRegistry` and short-circuits when the bound subject or object does
+/// not satisfy the predicate's domain/range constraint. Pass `None` to disable
+/// schema-aware pruning and preserve the existing behaviour.
+pub fn execute_query_seeded(
+    query: &Query,
+    snapshot: &Snapshot,
+    initial: Vec<Bindings>,
+    deadline: Option<Instant>,
+    registry: Option<&EdgeTypeRegistry>,
+) -> Result<Vec<Bindings>, QueryError> {
+    let seeds = initial.into_iter().map(|b| (b, PredBindings::new())).collect();
+    Ok(evaluate_seeded_inner(query, snapshot, seeds, deadline, registry)?
+        .into_iter()
+        .map(|(b, _pb)| b)
+        .collect())
+}
+
+/// Like [`execute_query_seeded`] but also returns predicate variable bindings.
+///
+/// Use this when the query contains patterns with `predicate_var` set and the
+/// caller needs to inspect which predicate string was bound (e.g. for OWL 2 RL
+/// rule application or SPARQL-style `?s ?p ?o` projection).
+pub fn execute_query_seeded_full(
+    query: &Query,
+    snapshot: &Snapshot,
+    initial: Vec<Bindings>,
+    deadline: Option<Instant>,
+    registry: Option<&EdgeTypeRegistry>,
+) -> Result<Vec<(Bindings, PredBindings)>, QueryError> {
+    let seeds = initial.into_iter().map(|b| (b, PredBindings::new())).collect();
+    evaluate_seeded_inner(query, snapshot, seeds, deadline, registry)
 }
 
 /// Evaluate a conjunctive query against a snapshot.
@@ -379,6 +462,20 @@ pub fn execute_query(
     execute_query_seeded(query, snapshot, vec![HashMap::new()], deadline, registry)
 }
 
+/// Like [`execute_query`] but also returns predicate variable bindings.
+///
+/// Each result is a `(Bindings, PredBindings)` pair. `PredBindings` maps
+/// predicate variable names to the predicate strings that were bound during
+/// evaluation — see [`VarPattern::predicate_var`].
+pub fn execute_query_full(
+    query: &Query,
+    snapshot: &Snapshot,
+    deadline: Option<Instant>,
+    registry: Option<&EdgeTypeRegistry>,
+) -> Result<Vec<(Bindings, PredBindings)>, QueryError> {
+    execute_query_seeded_full(query, snapshot, vec![HashMap::new()], deadline, registry)
+}
+
 /// Like [`execute_query`] but overlays `pending` (uncommitted write-buffer
 /// triples from an open transaction) on top of every storage scan.
 ///
@@ -392,7 +489,7 @@ pub fn execute_query_with_pending(
     deadline: Option<Instant>,
     registry: Option<&EdgeTypeRegistry>,
 ) -> Result<Vec<Bindings>, QueryError> {
-    let mut solutions: Vec<Bindings> = vec![HashMap::new()];
+    let mut solutions: Vec<(Bindings, PredBindings)> = vec![(HashMap::new(), PredBindings::new())];
 
     for vp in &query.patterns {
         if deadline.map(|d| Instant::now() > d).unwrap_or(false) {
@@ -401,13 +498,13 @@ pub fn execute_query_with_pending(
 
         let mut next = Vec::new();
 
-        for bindings in solutions {
-            let pattern = substitute(vp, &bindings);
+        for (bindings, pred_bindings) in solutions {
+            let pattern = substitute_with_preds(vp, &bindings, &pred_bindings);
             let triples = evaluate_with_overlay(&pattern, snapshot, pending, registry)?;
 
             for triple in triples {
-                if let Some(extended) = extend_bindings(&triple, vp, &bindings) {
-                    next.push(extended);
+                if let Some(pair) = extend_full(&triple, vp, &bindings, &pred_bindings) {
+                    next.push(pair);
                 }
             }
         }
@@ -419,7 +516,7 @@ pub fn execute_query_with_pending(
         }
     }
 
-    Ok(solutions)
+    Ok(solutions.into_iter().map(|(b, _pb)| b).collect())
 }
 
 // ── Recursive Datalog ─────────────────────────────────────────────────────────
@@ -672,7 +769,7 @@ pub fn execute_query_hybrid(
     derived: &DerivedFacts,
     deadline: Option<Instant>,
 ) -> Result<Vec<Bindings>, QueryError> {
-    let mut solutions: Vec<Bindings> = vec![HashMap::new()];
+    let mut solutions: Vec<(Bindings, PredBindings)> = vec![(HashMap::new(), PredBindings::new())];
 
     for vp in &query.patterns {
         if deadline.map(|d| Instant::now() > d).unwrap_or(false) {
@@ -681,13 +778,13 @@ pub fn execute_query_hybrid(
 
         let mut next = Vec::new();
 
-        for bindings in solutions {
-            let pattern = substitute(vp, &bindings);
+        for (bindings, pred_bindings) in solutions {
+            let pattern = substitute_with_preds(vp, &bindings, &pred_bindings);
             let triples = evaluate_hybrid(&pattern, snapshot, derived)?;
 
             for triple in triples {
-                if let Some(extended) = extend_bindings(&triple, vp, &bindings) {
-                    next.push(extended);
+                if let Some(pair) = extend_full(&triple, vp, &bindings, &pred_bindings) {
+                    next.push(pair);
                 }
             }
         }
@@ -698,7 +795,7 @@ pub fn execute_query_hybrid(
         }
     }
 
-    Ok(solutions)
+    Ok(solutions.into_iter().map(|(b, _pb)| b).collect())
 }
 
 /// Evaluate a single concrete `Pattern` against storage **or** `derived` facts.
@@ -1457,5 +1554,179 @@ mod tests {
         assert!(found.contains(&c), "c is 2 hops away");
         assert!(found.contains(&d), "d is 3 hops away");
         assert!(!found.contains(&e), "e is 4 hops away, beyond max_hops=3");
+    }
+
+    // ── predicate variable (predicate_var) ────────────────────────────────────
+
+    #[test]
+    fn predicate_var_bound_subject_returns_all_predicates() {
+        let (store, _dir) = open();
+        let alice = NodeId::new();
+        let bob   = NodeId::new();
+        let acme  = NodeId::new();
+
+        let snap = commit(&store, vec![
+            rel(alice, "knows", bob),
+            rel(alice, "manages", acme),
+        ]);
+
+        // Pattern: (alice, ?p, ?o) — enumerate all outgoing edges from alice.
+        let q = Query::new().pattern(
+            VarPattern::new()
+                .subject(bound(alice))
+                .predicate_var("p")
+                .object(var("o"))
+        );
+
+        let results = execute_query_full(&q, &snap, None, None).unwrap();
+        assert_eq!(results.len(), 2, "alice has two outgoing edges");
+
+        let preds: std::collections::HashSet<String> = results.iter()
+            .map(|(_nb, pb)| pb.get("p").cloned().unwrap())
+            .collect();
+        assert!(preds.contains("knows"),   "predicate 'knows' must be bound");
+        assert!(preds.contains("manages"), "predicate 'manages' must be bound");
+
+        // Each binding should also have the object variable set.
+        let objects: std::collections::HashSet<NodeId> = results.iter()
+            .map(|(nb, _pb)| nb.get("o").copied().unwrap())
+            .collect();
+        assert!(objects.contains(&bob));
+        assert!(objects.contains(&acme));
+    }
+
+    #[test]
+    fn predicate_var_fully_unbound_returns_all_triples() {
+        let (store, _dir) = open();
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let c = NodeId::new();
+
+        let snap = commit(&store, vec![
+            rel(a, "knows",   b),
+            rel(b, "manages", c),
+        ]);
+
+        // Fully unbound: (?s, ?p, ?o)
+        let q = Query::new().pattern(
+            VarPattern::new()
+                .subject(var("s"))
+                .predicate_var("p")
+                .object(var("o"))
+        );
+
+        let results = execute_query_full(&q, &snap, None, None).unwrap();
+        assert_eq!(results.len(), 2, "two triples in the store");
+
+        let preds: std::collections::HashSet<String> = results.iter()
+            .map(|(_nb, pb)| pb.get("p").cloned().unwrap())
+            .collect();
+        assert!(preds.contains("knows"));
+        assert!(preds.contains("manages"));
+    }
+
+    #[test]
+    fn predicate_var_joins_correctly_with_fixed_predicate_pattern() {
+        // Pattern 1: (alice, ?p, ?o)  — bind ?p and ?o for each outgoing edge
+        // Pattern 2: (?o, "knows", ?x) — join on ?o with a fixed predicate
+        let (store, _dir) = open();
+        let alice = NodeId::new();
+        let bob   = NodeId::new();
+        let carol = NodeId::new();
+        let dave  = NodeId::new();
+
+        let snap = commit(&store, vec![
+            rel(alice, "knows",   bob),
+            rel(alice, "manages", carol),
+            rel(bob,   "knows",   dave),   // bob knows dave — joins on Pattern 2
+            rel(carol, "reports", dave),   // carol doesn't "know" anyone — no join
+        ]);
+
+        let q = Query::new()
+            .pattern(
+                VarPattern::new()
+                    .subject(bound(alice))
+                    .predicate_var("p")
+                    .object(var("o"))
+            )
+            .pattern(
+                VarPattern::new()
+                    .subject(var("o"))
+                    .predicate("knows")
+                    .object(var("x"))
+            );
+
+        let results = execute_query_full(&q, &snap, None, None).unwrap();
+
+        // Only alice→bob satisfies Pattern 2 (bob knows dave); alice→carol does not.
+        assert_eq!(results.len(), 1, "only the knows→knows chain joins");
+        let (nb, pb) = &results[0];
+        assert_eq!(nb.get("o").copied(), Some(bob));
+        assert_eq!(nb.get("x").copied(), Some(dave));
+        assert_eq!(pb.get("p").map(String::as_str), Some("knows"));
+    }
+
+    #[test]
+    fn predicate_var_respects_conflict_within_pattern() {
+        // Self-join: (?x, ?p, ?x) — only triples where subject == object.
+        let (store, _dir) = open();
+        let a = NodeId::new();
+        let b = NodeId::new();
+
+        let snap = commit(&store, vec![
+            rel(a, "self", a),  // self-loop — satisfies ?x == ?x
+            rel(a, "edge", b),  // a ≠ b — should not match
+        ]);
+
+        let q = Query::new().pattern(
+            VarPattern::new()
+                .subject(var("x"))
+                .predicate_var("p")
+                .object(var("x"))  // same variable → self-loop only
+        );
+
+        let results = execute_query_full(&q, &snap, None, None).unwrap();
+        assert_eq!(results.len(), 1, "only the self-loop satisfies x == x");
+        let (nb, pb) = &results[0];
+        assert_eq!(nb.get("x").copied(), Some(a));
+        assert_eq!(pb.get("p").map(String::as_str), Some("self"));
+    }
+
+    #[test]
+    fn predicate_var_substituted_as_predicate_in_later_pattern() {
+        // Bind ?p in pattern 1, then use ?p as the predicate in pattern 2.
+        // This exercises the substitute_with_preds path.
+        let (store, _dir) = open();
+        let alice = NodeId::new();
+        let bob   = NodeId::new();
+        let carol = NodeId::new();
+
+        let snap = commit(&store, vec![
+            rel(alice, "knows", bob),
+            rel(bob,   "knows", carol),
+            rel(alice, "manages", carol), // different predicate — should not appear
+        ]);
+
+        // Pattern 1: (alice, ?p, bob)   → binds p="knows"
+        // Pattern 2: (bob, ?p, ?x)      → reuses p="knows" as the predicate
+        let q = Query::new()
+            .pattern(
+                VarPattern::new()
+                    .subject(bound(alice))
+                    .predicate_var("p")
+                    .object(bound(bob))
+            )
+            .pattern(
+                VarPattern::new()
+                    .subject(bound(bob))
+                    .predicate_var("p")   // same variable — must reuse "knows"
+                    .object(var("x"))
+            );
+
+        let results = execute_query_full(&q, &snap, None, None).unwrap();
+        assert_eq!(results.len(), 1, "only the knows chain satisfies both patterns");
+        let (nb, pb) = &results[0];
+        assert_eq!(nb.get("x").copied(), Some(carol));
+        assert_eq!(pb.get("p").map(String::as_str), Some("knows"));
     }
 }

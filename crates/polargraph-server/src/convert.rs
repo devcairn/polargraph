@@ -182,7 +182,7 @@ pub fn var_pattern_from_proto(proto: &proto::VarPattern) -> Result<VarPattern, S
     };
     let predicate = if proto.predicate.is_empty() { None } else { Some(proto.predicate.clone()) };
 
-    Ok(VarPattern { subject, predicate, object, edge_var: None, max_hops: None })
+    Ok(VarPattern { subject, predicate, predicate_var: None, object, edge_var: None, max_hops: None })
 }
 
 // ── Bindings ──────────────────────────────────────────────────────────────────
