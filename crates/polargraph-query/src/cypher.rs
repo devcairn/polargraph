@@ -675,9 +675,13 @@ pub struct CompiledQuery {
     pub edge_vars: std::collections::HashSet<String>,
     /// Annotation filters from WHERE clauses on edge variables.
     pub edge_annotation_filters: Vec<EdgeAnnotationFilter>,
-    /// Property projections from `RETURN n.prop` expressions.
+    /// Property projections from `RETURN n.prop` expressions (node variables only).
     /// Each entry is `(var_name, prop_name)`; the output key in CypherBinding.values is `"var.prop"`.
     pub prop_projections: Vec<(String, String)>,
+    /// Edge property projections from `RETURN r.prop` expressions (edge variables only).
+    /// Each entry is `(var_name, prop_name)`; the output key in CypherBinding.values is `"var.prop"`.
+    /// The value is fetched via `get_edge_annotation` at response-build time.
+    pub edge_prop_projections: Vec<(String, String)>,
     /// Edge ID projections from `RETURN id(r)` / `RETURN elementId(r)` expressions.
     pub edge_id_projections: Vec<EdgeIdProjection>,
     /// Node ID projections from `RETURN id(n)` / `RETURN elementId(n)` expressions.
@@ -1888,12 +1892,19 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
     let mut return_vars: Vec<String> = Vec::new();
     let mut aggregations: Vec<AggregationSpec> = Vec::new();
     let mut prop_projections: Vec<(String, String)> = Vec::new();
+    let mut edge_prop_projections: Vec<(String, String)> = Vec::new();
     let mut edge_id_projections: Vec<EdgeIdProjection> = Vec::new();
     let mut node_id_projections: Vec<NodeIdProjection> = Vec::new();
     for item in cypher.return_items {
         match item {
             ReturnItem::Variable(v) => return_vars.push(v),
-            ReturnItem::PropProjection { var, prop } => prop_projections.push((var, prop)),
+            ReturnItem::PropProjection { var, prop } => {
+                if edge_vars.contains(&var) {
+                    edge_prop_projections.push((var, prop));
+                } else {
+                    prop_projections.push((var, prop));
+                }
+            }
             ReturnItem::Aggregation { func, alias } => aggregations.push(AggregationSpec { func, alias }),
             ReturnItem::EdgeId { rel_var } => {
                 // id(var) / elementId(var) — route to edge or node projection based on var type.
@@ -1928,6 +1939,7 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
         edge_vars,
         edge_annotation_filters,
         prop_projections,
+        edge_prop_projections,
         edge_id_projections,
         node_id_projections,
     }
@@ -3567,5 +3579,57 @@ mod tests {
         // n is bound as a NodeId
         let n_id = *raw[0].get("n").expect("n should be bound");
         assert_eq!(n_id, person, "bound NodeId should match inserted node");
+    }
+
+    // ── Edge annotation compilation tests ─────────────────────────────────────
+
+    #[test]
+    fn edge_annotation_filter_eq_compiles() {
+        let q = parse("MATCH (a)-[r:knows]->(b) WHERE r.weight = 5 RETURN a, b").unwrap();
+        let compiled = compile(q);
+        assert_eq!(compiled.edge_annotation_filters.len(), 1);
+        let f = &compiled.edge_annotation_filters[0];
+        assert_eq!(f.var, "r");
+        assert_eq!(f.predicate, "weight");
+        assert_eq!(f.op, ComparisonOp::Eq);
+        assert_eq!(f.value, Value::Int(5));
+        assert!(compiled.value_filters.is_empty(), "should not appear in value_filters");
+    }
+
+    #[test]
+    fn edge_annotation_filter_gt_compiles() {
+        let q = parse("MATCH (a)-[r:knows]->(b) WHERE r.since > 2020 RETURN a, b").unwrap();
+        let compiled = compile(q);
+        assert_eq!(compiled.edge_annotation_filters.len(), 1);
+        let f = &compiled.edge_annotation_filters[0];
+        assert_eq!(f.op, ComparisonOp::Gt);
+        assert_eq!(f.value, Value::Int(2020));
+    }
+
+    #[test]
+    fn edge_annotation_node_prop_not_confused() {
+        // WHERE n.age > 30 should produce a value_filter (node), not an edge_annotation_filter.
+        let q = parse("MATCH (n)-[:knows]->(m) WHERE n.age > 30 RETURN n").unwrap();
+        let compiled = compile(q);
+        // The node filter goes to value_filters (as a Gt comparison on a node var,
+        // which the compiler currently ignores non-Eq comparisons for nodes — but it
+        // must NOT go to edge_annotation_filters).
+        assert!(compiled.edge_annotation_filters.is_empty());
+    }
+
+    #[test]
+    fn edge_prop_projection_routes_to_edge_prop_projections() {
+        let q = parse("MATCH (a)-[r:knows]->(b) RETURN r.since").unwrap();
+        let compiled = compile(q);
+        assert_eq!(compiled.edge_prop_projections, vec![("r".to_string(), "since".to_string())]);
+        assert!(compiled.prop_projections.is_empty(), "should not be in node prop_projections");
+    }
+
+    #[test]
+    fn node_prop_projection_not_in_edge_prop_projections() {
+        let q = parse("MATCH (n)-[:knows]->(m) RETURN n.name").unwrap();
+        let compiled = compile(q);
+        assert_eq!(compiled.prop_projections, vec![("n".to_string(), "name".to_string())]);
+        assert!(compiled.edge_prop_projections.is_empty());
     }
 }

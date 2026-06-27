@@ -1909,6 +1909,11 @@ impl PolarGraphService for PolarGraphServer {
             polargraph_query::cypher::apply_text_filters(filtered, &compiled.text_filters, &snapshot)
                 .map_err(storage_err_to_status)?;
 
+        // Apply edge annotation filters (WHERE r.prop <op> val).
+        let filtered =
+            polargraph_query::cypher::apply_edge_annotation_filters(filtered, &compiled.edge_annotation_filters, &snapshot)
+                .map_err(storage_err_to_status)?;
+
         // Apply aggregations, ORDER BY, SKIP, and LIMIT.
         let agg_rows = polargraph_query::aggregation::apply_aggregations(
             filtered,
@@ -1952,6 +1957,18 @@ impl PolarGraphService for PolarGraphServer {
                                 _ => None,
                             }) {
                                 values.insert(key, convert::value_to_proto(&value));
+                            }
+                        }
+                    }
+                }
+                // Resolve edge property projections (RETURN r.prop) via annotation lookup.
+                for (var, prop) in &compiled.edge_prop_projections {
+                    if let Some(&node_id) = row.group_keys.get(var.as_str()) {
+                        let edge_id = polargraph_core::id::EdgeId(node_id.0);
+                        let key = format!("{}.{}", var, prop);
+                        if let Ok(Some(ann)) = self.store.get_edge_annotation(edge_id, prop, snapshot.ts) {
+                            if let polargraph_storage::EdgeAnnotationValue::Scalar(v) = ann.value {
+                                values.insert(key, convert::value_to_proto(&v));
                             }
                         }
                     }
@@ -2324,6 +2341,11 @@ impl PolarGraphService for PolarGraphServer {
 
         let filtered =
             polargraph_query::cypher::apply_text_filters(filtered, &compiled.text_filters, &snapshot)
+                .map_err(storage_err_to_status)?;
+
+        // Apply edge annotation filters (WHERE r.prop <op> val).
+        let filtered =
+            polargraph_query::cypher::apply_edge_annotation_filters(filtered, &compiled.edge_annotation_filters, &snapshot)
                 .map_err(storage_err_to_status)?;
 
         let limited: Vec<_> = match compiled.limit {

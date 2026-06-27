@@ -5352,3 +5352,174 @@ async fn property_history_multiple_writes_newest_first() {
     assert!(resp.versions[0].transaction_time > resp.versions[1].transaction_time);
     assert!(resp.versions[1].transaction_time > resp.versions[2].transaction_time);
 }
+
+// ── Cypher edge annotation filter + projection tests ─────────────────────────
+
+/// `WHERE r.since > 2020` keeps only the edge whose annotation matches.
+#[tokio::test]
+async fn cypher_edge_prop_filter_gt() {
+    let (svc, _dir) = open();
+    let (_, alice) = new_node();
+    let (_, bob)   = new_node();
+    let (_, carol) = new_node();
+
+    // alice-[r1:knows]->bob  with annotation since=2019
+    // alice-[r2:knows]->carol with annotation since=2022
+    let resp1 = svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(alice.clone(), "knows", bob.clone())],
+        ..Default::default()
+    })).await.unwrap().into_inner();
+    let edge1_bytes = resp1.edge_ids[0].clone();
+
+    let resp2 = svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(alice.clone(), "knows", carol.clone())],
+        ..Default::default()
+    })).await.unwrap().into_inner();
+    let edge2_bytes = resp2.edge_ids[0].clone();
+
+    svc.insert(Request::new(InsertRequest {
+        edge_annotations: vec![
+            EdgeAnnotation {
+                edge_id: edge1_bytes,
+                predicate: "since".into(),
+                value: Some(AnnotationValue::Scalar(Value { kind: Some(ValueKind::IntVal(2019)) })),
+            },
+            EdgeAnnotation {
+                edge_id: edge2_bytes,
+                predicate: "since".into(),
+                value: Some(AnnotationValue::Scalar(Value { kind: Some(ValueKind::IntVal(2022)) })),
+            },
+        ],
+        ..Default::default()
+    })).await.unwrap();
+
+    let resp = svc.cypher_query(Request::new(CypherQueryRequest {
+        cypher: "MATCH (a)-[r:knows]->(b) WHERE r.since > 2020 RETURN a, b".to_string(),
+        ..Default::default()
+    })).await.unwrap().into_inner();
+
+    assert_eq!(resp.rows.len(), 1, "only the 2022 edge should pass the filter");
+    // b should be carol (the 2022 edge target)
+    let b_bytes = &resp.rows[0].nodes["b"].bytes;
+    let b_id = polargraph_core::id::NodeId(
+        uuid::Uuid::from_bytes(b_bytes[..16].try_into().unwrap()),
+    );
+    let carol_core = polargraph_core::id::NodeId(
+        uuid::Uuid::from_bytes(carol.bytes[..16].try_into().unwrap()),
+    );
+    assert_eq!(b_id, carol_core);
+}
+
+/// `WHERE r.since > 9999` matches no edges — returns empty.
+#[tokio::test]
+async fn cypher_edge_prop_filter_no_match() {
+    let (svc, _dir) = open();
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+
+    let resp1 = svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(a.clone(), "knows", b.clone())],
+        ..Default::default()
+    })).await.unwrap().into_inner();
+    let edge_bytes = resp1.edge_ids[0].clone();
+
+    svc.insert(Request::new(InsertRequest {
+        edge_annotations: vec![EdgeAnnotation {
+            edge_id: edge_bytes,
+            predicate: "since".into(),
+            value: Some(AnnotationValue::Scalar(Value { kind: Some(ValueKind::IntVal(2022)) })),
+        }],
+        ..Default::default()
+    })).await.unwrap();
+
+    let resp = svc.cypher_query(Request::new(CypherQueryRequest {
+        cypher: "MATCH (a)-[r:knows]->(b) WHERE r.since > 9999 RETURN a, b".to_string(),
+        ..Default::default()
+    })).await.unwrap().into_inner();
+
+    assert!(resp.rows.is_empty(), "filter that matches nothing should return empty");
+}
+
+/// `RETURN r.since` includes the annotation value in the binding row's values map.
+#[tokio::test]
+async fn cypher_edge_prop_return_projection() {
+    let (svc, _dir) = open();
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+
+    let resp1 = svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(a.clone(), "knows", b.clone())],
+        ..Default::default()
+    })).await.unwrap().into_inner();
+    let edge_bytes = resp1.edge_ids[0].clone();
+
+    svc.insert(Request::new(InsertRequest {
+        edge_annotations: vec![EdgeAnnotation {
+            edge_id: edge_bytes,
+            predicate: "since".into(),
+            value: Some(AnnotationValue::Scalar(Value { kind: Some(ValueKind::IntVal(2021)) })),
+        }],
+        ..Default::default()
+    })).await.unwrap();
+
+    let resp = svc.cypher_query(Request::new(CypherQueryRequest {
+        cypher: "MATCH (a)-[r:knows]->(b) RETURN r.since".to_string(),
+        ..Default::default()
+    })).await.unwrap().into_inner();
+
+    assert_eq!(resp.rows.len(), 1);
+    let row = &resp.rows[0];
+    let since_val = row.values.get("r.since").expect("r.since should be in values");
+    assert_eq!(since_val.kind, Some(ValueKind::IntVal(2021)));
+}
+
+/// `CypherQueryStream` applies edge annotation filters the same way as the unary path.
+#[tokio::test]
+async fn cypher_stream_edge_prop_filter() {
+    let (svc, _dir) = open();
+    let (_, alice) = new_node();
+    let (_, bob)   = new_node();
+    let (_, carol) = new_node();
+
+    let resp1 = svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(alice.clone(), "knows", bob.clone())],
+        ..Default::default()
+    })).await.unwrap().into_inner();
+    let edge1_bytes = resp1.edge_ids[0].clone();
+
+    let resp2 = svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(alice.clone(), "knows", carol.clone())],
+        ..Default::default()
+    })).await.unwrap().into_inner();
+    let edge2_bytes = resp2.edge_ids[0].clone();
+
+    svc.insert(Request::new(InsertRequest {
+        edge_annotations: vec![
+            EdgeAnnotation {
+                edge_id: edge1_bytes,
+                predicate: "weight".into(),
+                value: Some(AnnotationValue::Scalar(Value { kind: Some(ValueKind::IntVal(1)) })),
+            },
+            EdgeAnnotation {
+                edge_id: edge2_bytes,
+                predicate: "weight".into(),
+                value: Some(AnnotationValue::Scalar(Value { kind: Some(ValueKind::IntVal(10)) })),
+            },
+        ],
+        ..Default::default()
+    })).await.unwrap();
+
+    let mut stream = svc.cypher_query_stream(Request::new(CypherQueryRequest {
+        cypher: "MATCH (a)-[r:knows]->(b) WHERE r.weight >= 10 RETURN a, b".to_string(),
+        ..Default::default()
+    })).await.unwrap().into_inner();
+
+    let mut total_rows = 0usize;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        total_rows += chunk.results.len();
+        if chunk.done { break; }
+    }
+
+    assert_eq!(total_rows, 1, "only the edge with weight >= 10 should pass");
+}
