@@ -886,6 +886,24 @@ message GetPropertyHistoryResponse {
     repeated PropertyVersion versions = 1;
 }
 
+// ── DeleteTriples ─────────────────────────────────────────────────────────────
+
+/// Soft-delete request: closes the valid-time window of live triples by writing
+/// a superseding triple with vt_end set to the requested timestamp.
+message DeleteTriplesRequest {
+    /// 16-byte UUID subject IDs to soft-delete triples for.
+    repeated bytes subject_ids = 1;
+    /// Optional predicate filter — if empty, all predicates for each subject are closed.
+    string predicate = 2;
+    /// Explicit vt_end in microseconds since Unix epoch; 0 means use server clock.
+    int64 vt_end = 3;
+}
+
+message DeleteTriplesResponse {
+    /// Number of triple versions that were closed.
+    uint64 deleted_count = 1;
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 service PolarGraphService {
@@ -1085,4 +1103,11 @@ service PolarGraphService {
     /// by transaction time. Scans the full SPO column family without MVCC
     /// deduplication so every committed write is visible.
     rpc GetPropertyHistory(GetPropertyHistoryRequest) returns (GetPropertyHistoryResponse);
+
+    /// Soft-delete triples for one or more subjects by closing their valid-time
+    /// window. Each live triple (vt_end == END_OF_TIME) matching the subject (and
+    /// optional predicate filter) receives a superseding entry with vt_end set to
+    /// the requested timestamp (or server clock when vt_end == 0).
+    /// Returns FAILED_PRECONDITION on a read replica.
+    rpc DeleteTriples(DeleteTriplesRequest) returns (DeleteTriplesResponse);
 }

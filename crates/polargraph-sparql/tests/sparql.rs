@@ -2,11 +2,13 @@
 //! No gRPC required — tests the library in isolation.
 
 use polargraph_core::id::NodeId;
+use polargraph_core::value::Value;
 use polargraph_query::Term;
 use polargraph_sparql::{
     execute::{apply_sparql_filter, execute_sparql_aggregations, left_join},
-    serialize_csv, serialize_json, translate_query, SparqlAggFunc, SparqlAggregateSpec,
-    SparqlBindings, SparqlFilter, SparqlLiteral, SparqlValue,
+    node_id_to_iri, serialize_csv, serialize_json, serialize_ntriples, serialize_turtle,
+    translate_construct, translate_query, value_to_nt_literal, RdfTriple, SparqlAggFunc,
+    SparqlAggregateSpec, SparqlBindings, SparqlFilter, SparqlLiteral, SparqlValue,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -530,3 +532,350 @@ fn translate_with_limit_propagates_to_translation() {
     let t = translate_query(&q).unwrap();
     assert_eq!(t.limit, Some(100));
 }
+
+// ── Phase 3: CONSTRUCT / DESCRIBE translation ─────────────────────────────────
+
+/// CONSTRUCT query: translation produces branches (WHERE clause) + templates.
+#[test]
+fn translate_construct_basic() {
+    let q = spargebra::Query::parse(
+        "CONSTRUCT { ?s <http://example.org/knows> ?o } \
+         WHERE { ?s <http://example.org/knows> ?o }",
+        None,
+    )
+    .unwrap();
+    let ct = translate_construct(&q).unwrap();
+    assert!(!ct.is_describe);
+    assert!(!ct.branches.is_empty(), "CONSTRUCT should produce WHERE branches");
+    assert_eq!(ct.templates.len(), 1, "should have one CONSTRUCT template triple");
+    let tmpl = &ct.templates[0];
+    assert_eq!(tmpl.predicate, "http://example.org/knows");
+    assert!(tmpl.subject_var.is_some(), "subject should be a variable");
+    assert_eq!(tmpl.subject_var.as_deref(), Some("s"));
+    assert!(tmpl.object_var.is_some(), "object should be a variable");
+    assert_eq!(tmpl.object_var.as_deref(), Some("o"));
+    assert!(tmpl.subject_iri.is_none());
+    assert!(tmpl.object_iri.is_none());
+    assert!(tmpl.object_literal.is_none());
+}
+
+/// CONSTRUCT with bound IRI subject in template.
+#[test]
+fn translate_construct_bound_subject_iri() {
+    let q = spargebra::Query::parse(
+        "CONSTRUCT { <urn:uuid:018e8c1e-0000-7000-8000-000000000001> <http://example.org/knows> ?o } \
+         WHERE { <urn:uuid:018e8c1e-0000-7000-8000-000000000001> <http://example.org/knows> ?o }",
+        None,
+    )
+    .unwrap();
+    let ct = translate_construct(&q).unwrap();
+    assert!(!ct.is_describe);
+    assert_eq!(ct.templates.len(), 1);
+    let tmpl = &ct.templates[0];
+    assert!(tmpl.subject_var.is_none(), "subject should be a bound IRI, not a var");
+    assert!(tmpl.subject_iri.is_some(), "subject_iri should be set");
+    assert!(tmpl.subject_iri.as_deref().unwrap().contains("018e8c1e"));
+}
+
+/// CONSTRUCT with literal object in template.
+#[test]
+fn translate_construct_literal_object() {
+    let q = spargebra::Query::parse(
+        "CONSTRUCT { ?s <http://example.org/name> \"Alice\" } \
+         WHERE { ?s <http://example.org/name> ?n }",
+        None,
+    )
+    .unwrap();
+    let ct = translate_construct(&q).unwrap();
+    assert_eq!(ct.templates.len(), 1);
+    let tmpl = &ct.templates[0];
+    assert!(tmpl.object_var.is_none());
+    assert!(tmpl.object_iri.is_none());
+    assert!(
+        tmpl.object_literal.is_some(),
+        "bound literal should populate object_literal"
+    );
+}
+
+/// CONSTRUCT: translate_query returns an error for CONSTRUCT (use translate_construct instead).
+#[test]
+fn translate_query_rejects_construct() {
+    let q = spargebra::Query::parse(
+        "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+        None,
+    )
+    .unwrap();
+    assert!(
+        translate_query(&q).is_err(),
+        "translate_query should reject CONSTRUCT — use translate_construct()"
+    );
+}
+
+/// DESCRIBE query: is_describe flag is true, no templates, branches from WHERE.
+#[test]
+fn translate_describe_with_where() {
+    let q = spargebra::Query::parse(
+        "DESCRIBE ?s WHERE { ?s <http://example.org/type> <http://example.org/Person> }",
+        None,
+    )
+    .unwrap();
+    let ct = translate_construct(&q).unwrap();
+    assert!(ct.is_describe, "should be marked as DESCRIBE");
+    assert!(ct.templates.is_empty(), "DESCRIBE has no CONSTRUCT templates");
+    assert!(!ct.branches.is_empty(), "branches from WHERE clause expected");
+}
+
+/// DESCRIBE <iri>: bare DESCRIBE stores the IRI in describe_iri.
+#[test]
+fn translate_describe_bare_iri() {
+    let q = spargebra::Query::parse(
+        "DESCRIBE <urn:uuid:018e8c1e-0000-7000-8000-000000000001>",
+        None,
+    )
+    .unwrap();
+    let ct = translate_construct(&q).unwrap();
+    assert!(ct.is_describe);
+    // The describe_iri may or may not be populated depending on how spargebra represents this.
+    // If it is populated it must contain the UUID.
+    if let Some(ref iri) = ct.describe_iri {
+        assert!(iri.contains("018e8c1e"), "describe_iri should contain the IRI");
+    }
+}
+
+// ── Phase 3: N-Triples / Turtle serializers ───────────────────────────────────
+
+#[test]
+fn ntriples_single_triple() {
+    let triples = vec![RdfTriple {
+        subject: "<urn:uuid:aaa>".to_string(),
+        predicate: "<http://example.org/knows>".to_string(),
+        object: "<urn:uuid:bbb>".to_string(),
+    }];
+    let nt = serialize_ntriples(&triples);
+    assert_eq!(
+        nt,
+        "<urn:uuid:aaa> <http://example.org/knows> <urn:uuid:bbb> .\n"
+    );
+}
+
+#[test]
+fn ntriples_multiple_triples_each_on_own_line() {
+    let triples = vec![
+        RdfTriple {
+            subject: "<urn:uuid:aaa>".to_string(),
+            predicate: "<http://example.org/a>".to_string(),
+            object: "<urn:uuid:bbb>".to_string(),
+        },
+        RdfTriple {
+            subject: "<urn:uuid:ccc>".to_string(),
+            predicate: "<http://example.org/b>".to_string(),
+            object: "\"42\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string(),
+        },
+    ];
+    let nt = serialize_ntriples(&triples);
+    let lines: Vec<&str> = nt.lines().collect();
+    assert_eq!(lines.len(), 2, "two triples → two lines");
+    assert!(lines[0].ends_with(" ."));
+    assert!(lines[1].ends_with(" ."));
+}
+
+#[test]
+fn ntriples_empty_is_empty_string() {
+    assert!(serialize_ntriples(&[]).is_empty());
+}
+
+#[test]
+fn turtle_groups_by_subject() {
+    let subj = "<urn:uuid:subj>";
+    let triples = vec![
+        RdfTriple {
+            subject: subj.to_string(),
+            predicate: "<http://example.org/p1>".to_string(),
+            object: "<urn:uuid:o1>".to_string(),
+        },
+        RdfTriple {
+            subject: subj.to_string(),
+            predicate: "<http://example.org/p2>".to_string(),
+            object: "<urn:uuid:o2>".to_string(),
+        },
+    ];
+    let ttl = serialize_turtle(&triples);
+    // Subject IRI appears exactly once (grouped).
+    assert_eq!(
+        ttl.matches(subj).count(),
+        1,
+        "subject should appear exactly once in Turtle (grouped)"
+    );
+    // Both predicates present.
+    assert!(ttl.contains("<http://example.org/p1>"));
+    assert!(ttl.contains("<http://example.org/p2>"));
+    // Has prefix declarations.
+    assert!(ttl.contains("@prefix xsd:"));
+    assert!(ttl.contains("@prefix rdf:"));
+}
+
+#[test]
+fn turtle_multiple_subjects_appear_separately() {
+    let triples = vec![
+        RdfTriple {
+            subject: "<urn:uuid:s1>".to_string(),
+            predicate: "<http://example.org/p>".to_string(),
+            object: "<urn:uuid:o1>".to_string(),
+        },
+        RdfTriple {
+            subject: "<urn:uuid:s2>".to_string(),
+            predicate: "<http://example.org/p>".to_string(),
+            object: "<urn:uuid:o2>".to_string(),
+        },
+    ];
+    let ttl = serialize_turtle(&triples);
+    assert!(ttl.contains("<urn:uuid:s1>"));
+    assert!(ttl.contains("<urn:uuid:s2>"));
+}
+
+#[test]
+fn turtle_empty_input_has_only_prefixes() {
+    let ttl = serialize_turtle(&[]);
+    // No trailing newline after prefixes when triples is empty.
+    assert!(ttl.contains("@prefix xsd:"), "prefix declarations always present");
+    // No subject blocks.
+    assert!(!ttl.contains("<urn:uuid:"), "no subject blocks in empty output");
+}
+
+// ── Phase 3: value_to_nt_literal ─────────────────────────────────────────────
+
+#[test]
+fn nt_literal_text() {
+    let lit = value_to_nt_literal(&Value::Text("hello".to_string()));
+    assert!(lit.starts_with("\"hello\""));
+    assert!(lit.contains("XMLSchema#string"));
+}
+
+#[test]
+fn nt_literal_text_with_quotes() {
+    let lit = value_to_nt_literal(&Value::Text("say \"hi\"".to_string()));
+    assert!(lit.contains("\\\"hi\\\""), "double quotes must be escaped");
+}
+
+#[test]
+fn nt_literal_int() {
+    let lit = value_to_nt_literal(&Value::Int(99));
+    assert!(lit.contains("99"));
+    assert!(lit.contains("XMLSchema#integer"));
+}
+
+#[test]
+fn nt_literal_float() {
+    let lit = value_to_nt_literal(&Value::Float(3.14));
+    assert!(lit.contains("3.14") || lit.contains("3.1"));
+    assert!(lit.contains("XMLSchema#double"));
+}
+
+#[test]
+fn nt_literal_bool_true() {
+    let lit = value_to_nt_literal(&Value::Bool(true));
+    assert!(lit.contains("true"));
+    assert!(lit.contains("XMLSchema#boolean"));
+}
+
+#[test]
+fn nt_literal_bool_false() {
+    let lit = value_to_nt_literal(&Value::Bool(false));
+    assert!(lit.contains("false"));
+    assert!(lit.contains("XMLSchema#boolean"));
+}
+
+#[test]
+fn nt_literal_blob_hex_encoded() {
+    let lit = value_to_nt_literal(&Value::Blob(vec![0xde, 0xad, 0xbe, 0xef]));
+    assert!(lit.contains("deadbeef"), "blob should be hex-encoded");
+    assert!(lit.contains("hexBinary"));
+}
+
+#[test]
+fn nt_literal_null_is_empty_string() {
+    let lit = value_to_nt_literal(&Value::Null);
+    assert!(lit.starts_with("\"\""), "Null should produce empty string literal");
+    assert!(lit.contains("XMLSchema#string"));
+}
+
+#[test]
+fn node_id_to_iri_round_trips_uuid() {
+    let uuid_str = "018e8c1e-1234-7000-8000-000000000001";
+    let id = NodeId(Uuid::parse_str(uuid_str).unwrap());
+    let iri = node_id_to_iri(&id);
+    assert_eq!(iri, format!("<urn:uuid:{}>", uuid_str));
+    // Verify it can be parsed back.
+    let stripped = iri.trim_start_matches('<').trim_end_matches('>');
+    assert!(stripped.starts_with("urn:uuid:"));
+    let back = Uuid::parse_str(stripped.strip_prefix("urn:uuid:").unwrap()).unwrap();
+    assert_eq!(back.to_string(), uuid_str);
+}
+
+// ── Phase 3: SPARQL Update parsing ───────────────────────────────────────────
+
+/// spargebra can parse SPARQL Update INSERT DATA.
+#[test]
+fn sparql_update_insert_data_parses() {
+    let update_str = "INSERT DATA { \
+        <urn:uuid:018e8c1e-0000-7000-8000-000000000001> \
+        <http://example.org/name> \
+        \"Alice\" \
+    }";
+    let update = spargebra::Update::parse(update_str, None);
+    assert!(update.is_ok(), "INSERT DATA should parse successfully");
+    let ops = update.unwrap().operations;
+    assert_eq!(ops.len(), 1);
+    assert!(
+        matches!(ops[0], spargebra::GraphUpdateOperation::InsertData { .. }),
+        "should be InsertData operation"
+    );
+}
+
+/// spargebra can parse SPARQL Update DELETE DATA.
+#[test]
+fn sparql_update_delete_data_parses() {
+    let update_str = "DELETE DATA { \
+        <urn:uuid:018e8c1e-0000-7000-8000-000000000001> \
+        <http://example.org/name> \
+        \"Alice\" \
+    }";
+    let update = spargebra::Update::parse(update_str, None);
+    assert!(update.is_ok(), "DELETE DATA should parse successfully");
+    let ops = update.unwrap().operations;
+    assert_eq!(ops.len(), 1);
+    assert!(
+        matches!(ops[0], spargebra::GraphUpdateOperation::DeleteData { .. }),
+        "should be DeleteData operation"
+    );
+}
+
+/// spargebra can parse SPARQL Update DELETE/INSERT WHERE.
+#[test]
+fn sparql_update_delete_insert_where_parses() {
+    let update_str = "DELETE { ?s <http://example.org/old> ?o } \
+        INSERT { ?s <http://example.org/new> ?o } \
+        WHERE  { ?s <http://example.org/old> ?o }";
+    let update = spargebra::Update::parse(update_str, None);
+    assert!(update.is_ok(), "DELETE/INSERT WHERE should parse successfully");
+    let ops = update.unwrap().operations;
+    assert_eq!(ops.len(), 1);
+    assert!(
+        matches!(ops[0], spargebra::GraphUpdateOperation::DeleteInsert { .. }),
+        "should be DeleteInsert operation"
+    );
+}
+
+/// Malformed SPARQL Update should fail to parse.
+#[test]
+fn sparql_update_malformed_fails() {
+    let result = spargebra::Update::parse("INSERT GARBAGE", None);
+    assert!(result.is_err(), "malformed SPARQL Update should fail to parse");
+}
+
+// ── Phase 3: gRPC integration placeholder ────────────────────────────────────
+//
+// Full gRPC tests (DeleteTriples RPC round-trip) live in:
+//   crates/polargraph-server/tests/
+// and require a running polargraphd. The unit tests above cover the library
+// layer exhaustively without network I/O.

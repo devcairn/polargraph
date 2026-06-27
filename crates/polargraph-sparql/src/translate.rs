@@ -166,7 +166,7 @@ pub fn translate_query(query: &spargebra::Query) -> Result<SparqlTranslation, Sp
         }
         spargebra::Query::Construct { .. } | spargebra::Query::Describe { .. } => {
             return Err(SparqlError::Unsupported(
-                "CONSTRUCT/DESCRIBE not supported in Phase 1".to_string(),
+                "CONSTRUCT/DESCRIBE: use translate_construct() instead of translate_query()".to_string(),
             ));
         }
     }
@@ -182,7 +182,11 @@ pub fn translate_query(query: &spargebra::Query) -> Result<SparqlTranslation, Sp
 
 // ── Internal algebra walker ───────────────────────────────────────────────────
 
-fn translate_pattern(
+/// Translate a [`GraphPattern`] into a list of [`Branch`]es.
+///
+/// This is the internal algebra walker exposed as `pub(crate)` for use from
+/// `translate_construct` and the public `translate_pattern_pub` shim.
+pub(crate) fn translate_pattern(
     pattern: &GraphPattern,
     counter: &mut usize,
     translation: &mut SparqlTranslation,
@@ -817,4 +821,180 @@ fn translate_one_or_more(
     });
 
     Ok(())
+}
+
+// ── Public algebra walker shim ────────────────────────────────────────────────
+
+/// Public entry point for translating a [`GraphPattern`] (the WHERE clause).
+///
+/// Used by callers outside this crate that need to translate an arbitrary
+/// `GraphPattern` (e.g. the WHERE clause of a SPARQL Update `DeleteInsert`
+/// operation). Returns a flat list of [`Branch`]es.
+pub fn translate_pattern_pub(
+    pattern: &GraphPattern,
+    counter: &mut usize,
+    translation: &mut SparqlTranslation,
+) -> Result<Vec<Branch>, SparqlError> {
+    translate_pattern(pattern, counter, translation)
+}
+
+// ── CONSTRUCT / DESCRIBE types ────────────────────────────────────────────────
+
+/// A single template triple from a CONSTRUCT clause.
+///
+/// Each field is `Some(bound_value)` or `Some(var_name)` depending on whether
+/// the SPARQL term was a bound IRI/literal or a variable.
+#[derive(Debug, Clone)]
+pub struct ConstructTemplate {
+    /// Variable name for the subject (when subject is `?var`).
+    pub subject_var: Option<String>,
+    /// Bound IRI string for the subject (when subject is `<iri>`).
+    pub subject_iri: Option<String>,
+    /// Predicate IRI (always bound in a CONSTRUCT template).
+    pub predicate: String,
+    /// Variable name for the object (when object is `?var` and it binds a NodeId).
+    pub object_var: Option<String>,
+    /// Bound IRI string for the object (when object is `<iri>`).
+    pub object_iri: Option<String>,
+    /// Bound literal for the object (when object is a literal value).
+    pub object_literal: Option<SparqlLiteral>,
+}
+
+/// Output of translating a CONSTRUCT or DESCRIBE query.
+#[derive(Debug, Default)]
+pub struct ConstructTranslation {
+    /// WHERE clause branches (same structure as [`SparqlTranslation::branches`]).
+    pub branches: Vec<Branch>,
+    /// Template triples from the CONSTRUCT clause (empty for DESCRIBE).
+    pub templates: Vec<ConstructTemplate>,
+    /// When `Some(iri)`, this is a DESCRIBE for a single named IRI.
+    /// When `None`, the caller should inspect `branches` results and describe
+    /// all bound NodeId values found there.
+    pub describe_iri: Option<String>,
+    /// True when this is a DESCRIBE query (vs. CONSTRUCT).
+    pub is_describe: bool,
+}
+
+// ── translate_construct entry point ──────────────────────────────────────────
+
+/// Translate a SPARQL CONSTRUCT or DESCRIBE query.
+///
+/// Returns a [`ConstructTranslation`] whose `branches` hold the WHERE-clause
+/// patterns and whose `templates` hold the CONSTRUCT triple templates.
+///
+/// For DESCRIBE queries, `templates` is empty and the caller must:
+/// 1. Execute the WHERE patterns to get bindings.
+/// 2. For each bound NodeId value, fetch all triples with that subject.
+///
+/// Returns [`SparqlError::TranslationError`] if called on a SELECT/ASK query.
+pub fn translate_construct(
+    query: &spargebra::Query,
+) -> Result<ConstructTranslation, SparqlError> {
+    match query {
+        spargebra::Query::Construct { template, pattern, .. } => {
+            let mut dummy = SparqlTranslation::default();
+            let mut counter = 0usize;
+            let branches = translate_pattern(pattern, &mut counter, &mut dummy)?;
+            let mut templates = Vec::new();
+            for tp in template {
+                templates.push(translate_construct_triple(tp)?);
+            }
+            Ok(ConstructTranslation {
+                branches,
+                templates,
+                describe_iri: None,
+                is_describe: false,
+            })
+        }
+
+        spargebra::Query::Describe { dataset, pattern, .. } => {
+            let mut dummy = SparqlTranslation::default();
+            let mut counter = 0usize;
+            let branches = translate_pattern(pattern, &mut counter, &mut dummy)?;
+
+            // Check whether this is a bare DESCRIBE <iri> (no WHERE bindings).
+            // spargebra puts the IRIs being described into `dataset.default`.
+            let describe_iri = dataset
+                .as_ref()
+                .and_then(|ds| ds.default.first())
+                .map(|n: &spargebra::term::NamedNode| n.as_str().to_string());
+
+            Ok(ConstructTranslation {
+                branches,
+                templates: vec![],
+                describe_iri,
+                is_describe: true,
+            })
+        }
+
+        _ => Err(SparqlError::TranslationError(
+            "translate_construct called on a non-CONSTRUCT/DESCRIBE query".to_string(),
+        )),
+    }
+}
+
+// ── CONSTRUCT triple template helpers ────────────────────────────────────────
+
+fn translate_construct_triple(
+    tp: &spargebra::term::TriplePattern,
+) -> Result<ConstructTemplate, SparqlError> {
+    let (subject_var, subject_iri) = term_pattern_to_var_or_iri(&tp.subject)?;
+
+    let predicate = match &tp.predicate {
+        NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
+        NamedNodePattern::Variable(_) => {
+            return Err(SparqlError::Unsupported(
+                "variable predicate in CONSTRUCT template not supported".to_string(),
+            ))
+        }
+    };
+
+    let (object_var, object_iri, object_literal) =
+        term_pattern_to_var_iri_or_lit(&tp.object)?;
+
+    Ok(ConstructTemplate {
+        subject_var,
+        subject_iri,
+        predicate,
+        object_var,
+        object_iri,
+        object_literal,
+    })
+}
+
+fn term_pattern_to_var_or_iri(
+    tp: &TermPattern,
+) -> Result<(Option<String>, Option<String>), SparqlError> {
+    match tp {
+        TermPattern::Variable(v) => Ok((Some(v.as_str().to_string()), None)),
+        TermPattern::NamedNode(n) => Ok((None, Some(n.as_str().to_string()))),
+        TermPattern::BlankNode(b) => {
+            // Blank nodes in CONSTRUCT subjects treated as variables.
+            Ok((Some(format!("_bn_{}", b.as_str())), None))
+        }
+        TermPattern::Literal(_) => Err(SparqlError::Unsupported(
+            "literal in CONSTRUCT subject position not supported".to_string(),
+        )),
+        TermPattern::Triple(_) => Err(SparqlError::Unsupported(
+            "quoted triple in CONSTRUCT subject position not supported".to_string(),
+        )),
+    }
+}
+
+type VarIriLit = (Option<String>, Option<String>, Option<SparqlLiteral>);
+
+fn term_pattern_to_var_iri_or_lit(
+    tp: &TermPattern,
+) -> Result<VarIriLit, SparqlError> {
+    match tp {
+        TermPattern::Variable(v) => Ok((Some(v.as_str().to_string()), None, None)),
+        TermPattern::NamedNode(n) => Ok((None, Some(n.as_str().to_string()), None)),
+        TermPattern::Literal(l) => Ok((None, None, Some(sparql_literal_to_value(l)))),
+        TermPattern::BlankNode(b) => {
+            Ok((Some(format!("_bn_{}", b.as_str())), None, None))
+        }
+        TermPattern::Triple(_) => Err(SparqlError::Unsupported(
+            "quoted triple in CONSTRUCT object position not supported".to_string(),
+        )),
+    }
 }

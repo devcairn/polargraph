@@ -57,6 +57,7 @@ use crate::{
         ValidateEdgeRequest, ValidateEdgeResponse,
         ValidateNodeRequest, ValidateNodeResponse,
         VectorSearchResult, VectorSeedQueryRequest, VectorSeedQueryResponse,
+        DeleteTriplesRequest, DeleteTriplesResponse,
     },
 };
 use dashmap::DashMap;
@@ -2866,6 +2867,97 @@ impl PolarGraphService for PolarGraphServer {
             .collect();
 
         Ok(Response::new(GetPropertyHistoryResponse { versions: proto_versions }))
+    }
+
+    async fn delete_triples(
+        &self,
+        request: Request<DeleteTriplesRequest>,
+    ) -> Result<Response<DeleteTriplesResponse>, Status> {
+        self.check_not_replica()?;
+        let req = request.into_inner();
+
+        let vt_end_ts = if req.vt_end != 0 {
+            polargraph_core::temporal::Timestamp(req.vt_end)
+        } else {
+            polargraph_core::temporal::Timestamp::now()
+        };
+        let pred_filter: Option<String> = if req.predicate.is_empty() {
+            None
+        } else {
+            Some(req.predicate.clone())
+        };
+        let mut deleted_count: u64 = 0;
+
+        for id_bytes in &req.subject_ids {
+            let subject = NodeId(
+                uuid::Uuid::from_slice(id_bytes)
+                    .map_err(|_| Status::invalid_argument("subject_ids must be 16-byte UUIDs"))?,
+            );
+
+            let triples = if let Some(ref pred) = pred_filter {
+                self.store
+                    .scan_by_subject_predicate(&subject, pred)
+                    .map_err(storage_err_to_status)?
+            } else {
+                self.store
+                    .scan_by_subject(&subject)
+                    .map_err(storage_err_to_status)?
+            };
+
+            let mut tx = self.store.begin();
+            for triple in triples {
+                match &triple {
+                    Triple::Relation {
+                        subject: s,
+                        predicate: p,
+                        object: o,
+                        edge_id,
+                        temporal,
+                    } => {
+                        if temporal.vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME {
+                            tx.insert(Triple::Relation {
+                                subject: *s,
+                                predicate: p.clone(),
+                                object: *o,
+                                edge_id: *edge_id,
+                                temporal: polargraph_core::temporal::BiTemporalRange {
+                                    vt_start: temporal.vt_start,
+                                    vt_end: vt_end_ts,
+                                    tt: polargraph_core::temporal::Timestamp::now(),
+                                },
+                            });
+                            deleted_count += 1;
+                        }
+                    }
+                    Triple::Property {
+                        subject: s,
+                        predicate: p,
+                        value: v,
+                        temporal,
+                    } => {
+                        if temporal.vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME {
+                            tx.insert(Triple::Property {
+                                subject: *s,
+                                predicate: p.clone(),
+                                value: v.clone(),
+                                temporal: polargraph_core::temporal::BiTemporalRange {
+                                    vt_start: temporal.vt_start,
+                                    vt_end: vt_end_ts,
+                                    tt: polargraph_core::temporal::Timestamp::now(),
+                                },
+                            });
+                            deleted_count += 1;
+                        }
+                    }
+                    // EdgeProperty / EdgeRelation — not soft-deleted here.
+                    _ => {}
+                }
+            }
+            tx.commit().map_err(storage_err_to_status)?;
+        }
+
+        info!("DeleteTriples: deleted_count={}", deleted_count);
+        Ok(Response::new(DeleteTriplesResponse { deleted_count }))
     }
 }
 

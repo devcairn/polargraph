@@ -9,6 +9,7 @@
 pub mod execute;
 pub mod protocol;
 pub mod response;
+pub mod serialize;
 pub mod translate;
 
 pub use protocol::negotiate_format;
@@ -16,8 +17,12 @@ pub use response::{
     node_bindings_to_sparql, serialize_csv, serialize_json, ResponseFormat, SparqlBindings,
     SparqlValue,
 };
+pub use serialize::{
+    node_id_to_iri, serialize_ntriples, serialize_turtle, value_to_nt_literal, RdfTriple,
+};
 pub use translate::{
-    translate_query, Branch, EdgeAnnotationStep, SparqlAggFunc, SparqlAggregateSpec, SparqlFilter,
+    translate_construct, translate_pattern_pub, translate_query, Branch, ConstructTemplate,
+    ConstructTranslation, EdgeAnnotationStep, SparqlAggFunc, SparqlAggregateSpec, SparqlFilter,
     SparqlLiteral, SparqlTranslation,
 };
 
