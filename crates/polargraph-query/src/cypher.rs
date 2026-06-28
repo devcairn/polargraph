@@ -3262,7 +3262,7 @@ mod tests {
         let a = NodeId::new();
         let b = NodeId::new();
         let c = NodeId::new();
-        let snap = commit(&store, vec![
+        commit(&store, vec![
             rel_triple(a, "edge", b),
             rel_triple(b, "edge", c),
         ]);

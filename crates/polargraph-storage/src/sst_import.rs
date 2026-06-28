@@ -150,7 +150,7 @@ impl SstImporter {
 
         // Sort each CF's entries; dedup on key (same triple in same batch).
         for buf in [&mut spo_buf, &mut sop_buf, &mut pso_buf, &mut pos_buf, &mut osp_buf, &mut ops_buf] {
-            buf.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            buf.sort_unstable_by_key(|a| a.0);
             buf.dedup_by_key(|item| item.0);
         }
 

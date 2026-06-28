@@ -74,7 +74,6 @@ mod tests {
         value::Value,
         view::{EdgePresentation, View},
     };
-    use std::collections::HashSet;
 
     fn temporal() -> BiTemporalRange {
         BiTemporalRange::assert_now(Timestamp::now())

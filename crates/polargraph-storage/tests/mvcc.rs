@@ -138,7 +138,7 @@ fn snapshot_read_inside_tx_sees_only_committed_data() {
     // Commit one triple first.
     let mut setup_tx = store.begin();
     setup_tx.insert(relation(alice, "knows", bob));
-    let setup_ts = setup_tx.commit().unwrap();
+    let _setup_ts = setup_tx.commit().unwrap();
 
     // Begin a new tx and read — should see the committed triple.
     let tx = store.begin();
@@ -419,13 +419,11 @@ fn data_from_before_reopen_visible_after_reopen() {
     let dir = TempDir::new().unwrap();
     let alice = NodeId::new();
     let bob = NodeId::new();
-    let commit_ts;
-
     {
         let store = TripleStore::open(dir.path()).unwrap();
         let mut tx = store.begin();
         tx.insert(relation(alice, "knows", bob));
-        commit_ts = tx.commit().unwrap();
+        tx.commit().unwrap();
     }
 
     {

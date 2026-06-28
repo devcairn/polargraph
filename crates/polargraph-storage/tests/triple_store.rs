@@ -240,7 +240,7 @@ fn insert_and_scan_property(value: Value) -> Value {
     assert_eq!(triples.len(), 1);
     match triples.into_iter().next().unwrap() {
         Triple::Property { value: v, .. } => v,
-        other => panic!("expected Property, got relation"),
+        _other => panic!("expected Property, got relation"),
     }
 }
 
