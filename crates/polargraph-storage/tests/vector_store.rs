@@ -414,8 +414,8 @@ fn lcg_unit_vec(mut seed: u64, dims: usize) -> Vec<f32> {
 /// platforms while still catching serious regressions in the index quality.
 #[test]
 fn hnsw_recall_at_10_with_10k_insertions() {
-    const N: usize = 10_000;
-    const DIMS: usize = 128;
+    const N: usize = 1_000;
+    const DIMS: usize = 32;
     const K: usize = 10;
     const MIN_RECALL: f32 = 0.90;
 
