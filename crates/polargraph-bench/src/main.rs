@@ -1,18 +1,23 @@
 //! polargraph-bench — end-to-end benchmark scenarios for PolarGraph DB Engine.
 //!
 //! Usage:
-//!   polargraph-bench write           # insert throughput
-//!   polargraph-bench read            # point-query latency
-//!   polargraph-bench mixed           # concurrent reads + writes
-//!   polargraph-bench recovery        # store re-open time (no server needed)
-//!   polargraph-bench filtered-search # ANN latency + recall
+//!   polargraph-bench write           --addr <url>   # insert throughput
+//!   polargraph-bench read            --addr <url>   # point-query latency
+//!   polargraph-bench mixed           --addr <url>   # concurrent reads + writes
+//!   polargraph-bench recovery                       # store re-open time (no server)
+//!   polargraph-bench filtered-search --addr <url>  # ANN latency + recall
+//!   polargraph-bench vector-near-graph              # ANN + graph join (no server)
+//!   polargraph-bench bsbm                           # BSBM 12-query suite (no server)
 //!
 //! The write / read / mixed / filtered-search scenarios require a running
 //! polargraphd instance (default: http://localhost:50051).
-//! The recovery scenario talks directly to RocksDB — no server needed.
+//! The recovery / vector-near-graph / bsbm scenarios talk directly to
+//! RocksDB — no server needed.
+
+mod bsbm;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use hdrhistogram::Histogram;
 use std::{
     collections::{HashMap, HashSet},
@@ -41,41 +46,83 @@ use polargraph_server::proto::{
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
-#[command(name = "polargraph-bench", about = "PolarGraph DB benchmark runner (use --scenario <name>)")]
-struct Args {
-    /// Scenario to run
-    #[arg(long, value_enum)]
-    scenario: Scenario,
+#[command(name = "polargraph-bench", about = "PolarGraph DB benchmark runner")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
 
-    /// gRPC server address (not used for `recovery`)
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Insert throughput — requires a running polargraphd
+    Write(GrpcArgs),
+    /// Point-query latency — requires a running polargraphd
+    Read(GrpcArgs),
+    /// Concurrent reads + writes — requires a running polargraphd
+    Mixed(GrpcArgs),
+    /// Store re-open time — no server needed
+    Recovery(RecoveryArgs),
+    /// ANN latency + recall — requires a running polargraphd
+    FilteredSearch(FilteredSearchArgs),
+    /// ANN + graph join in-process — no server needed
+    VectorNearGraph,
+    /// BSBM 12-query e-commerce suite — no server needed
+    Bsbm(BsbmArgs),
+}
+
+#[derive(Args, Debug)]
+struct GrpcArgs {
+    /// gRPC server address
     #[arg(long, default_value = "http://localhost:50051")]
     addr: String,
-
     /// Number of nodes to insert / query
     #[arg(long, default_value_t = 10_000)]
     nodes: usize,
-
     /// Relation edges added per node (write / mixed)
     #[arg(long, default_value_t = 4)]
     edges_per_node: usize,
-
-    /// Vector dimensionality (filtered-search)
+    /// Vector dimensionality
     #[arg(long, default_value_t = 128)]
     vector_dims: usize,
-
     /// Concurrent workers (mixed scenario)
     #[arg(long, default_value_t = 4)]
     concurrency: usize,
 }
 
-#[derive(clap::ValueEnum, Clone, Debug)]
-enum Scenario {
-    Write,
-    Read,
-    Mixed,
-    Recovery,
-    FilteredSearch,
-    VectorNearGraph,
+#[derive(Args, Debug)]
+struct RecoveryArgs {
+    /// Number of triples to write before timing re-open
+    #[arg(long, default_value_t = 10_000)]
+    nodes: usize,
+}
+
+#[derive(Args, Debug)]
+struct FilteredSearchArgs {
+    /// gRPC server address
+    #[arg(long, default_value = "http://localhost:50051")]
+    addr: String,
+    /// Number of nodes with vectors
+    #[arg(long, default_value_t = 10_000)]
+    nodes: usize,
+    /// Vector dimensionality
+    #[arg(long, default_value_t = 128)]
+    vector_dims: usize,
+}
+
+#[derive(Args, Debug)]
+struct BsbmArgs {
+    /// RocksDB data directory (uses a temp dir if omitted)
+    #[arg(long)]
+    data_dir: Option<std::path::PathBuf>,
+    /// Dataset scale factor N (products = N×100, offers = N×50, …)
+    #[arg(long, default_value_t = 1)]
+    scale_factor: usize,
+    /// Warmup runs per query (discarded from statistics)
+    #[arg(long, default_value_t = 10)]
+    warmup_runs: usize,
+    /// Measurement runs per query
+    #[arg(long, default_value_t = 100)]
+    measure_runs: usize,
 }
 
 // ── node ID helpers ───────────────────────────────────────────────────────────
@@ -94,7 +141,6 @@ fn proto_node_id_ref(bytes: &[u8]) -> ProtoNodeId {
 
 // ── vector helpers ────────────────────────────────────────────────────────────
 
-/// xorshift64 — produces unit-normalised f32 vectors without external crates.
 fn xorshift64(s: &mut u64) -> u64 {
     let mut x = *s;
     x ^= x << 13;
@@ -180,20 +226,18 @@ fn print_latency(label: &str, h: &LatencyUs) {
 
 // ── scenario: write ───────────────────────────────────────────────────────────
 
-async fn run_write(mut client: PolarGraphServiceClient<Channel>, args: &Args) -> Result<()> {
+async fn run_write(mut client: PolarGraphServiceClient<Channel>, args: &GrpcArgs) -> Result<()> {
     let n = args.nodes;
     let e = args.edges_per_node;
     const BATCH: usize = 100;
 
     println!("\n[write] inserting {n} nodes, {e} edges/node, batch={BATCH}");
 
-    // Generate all node IDs upfront so we can wire edges deterministically.
     let node_ids: Vec<Vec<u8>> = (0..n).map(|_| new_node_id_bytes()).collect();
 
     let mut prop_hist = LatencyUs::new();
     let mut edge_hist = LatencyUs::new();
 
-    // --- property triples (type + name) ---
     let wall = Instant::now();
     for chunk in node_ids.chunks(BATCH) {
         let triples: Vec<ProtoTriple> = chunk
@@ -214,7 +258,6 @@ async fn run_write(mut client: PolarGraphServiceClient<Channel>, args: &Args) ->
     }
     let prop_wall = wall.elapsed();
 
-    // --- relation triples (ring topology) ---
     let wall = Instant::now();
     for chunk_start in (0..n).step_by(BATCH) {
         let chunk_end = (chunk_start + BATCH).min(n);
@@ -256,7 +299,7 @@ async fn run_write(mut client: PolarGraphServiceClient<Channel>, args: &Args) ->
 
 // ── scenario: read ────────────────────────────────────────────────────────────
 
-async fn run_read(mut client: PolarGraphServiceClient<Channel>, args: &Args) -> Result<()> {
+async fn run_read(mut client: PolarGraphServiceClient<Channel>, args: &GrpcArgs) -> Result<()> {
     let n = args.nodes;
     const BATCH: usize = 100;
 
@@ -264,7 +307,6 @@ async fn run_read(mut client: PolarGraphServiceClient<Channel>, args: &Args) -> 
 
     let node_ids: Vec<Vec<u8>> = (0..n).map(|_| new_node_id_bytes()).collect();
 
-    // Pre-populate
     for chunk in node_ids.chunks(BATCH) {
         let triples: Vec<ProtoTriple> = chunk
             .iter()
@@ -276,7 +318,6 @@ async fn run_read(mut client: PolarGraphServiceClient<Channel>, args: &Args) -> 
             .context("pre-populate")?;
     }
 
-    // Query each node by bound subject, any predicate → any object
     let mut hist = LatencyUs::new();
     let wall = Instant::now();
     for id in &node_ids {
@@ -285,7 +326,7 @@ async fn run_read(mut client: PolarGraphServiceClient<Channel>, args: &Args) -> 
                 subject: Some(Term {
                     kind: Some(proto::term::Kind::Bound(proto_node_id_ref(id))),
                 }),
-                predicate: String::new(), // any
+                predicate: String::new(),
                 object: Some(Term {
                     kind: Some(proto::term::Kind::Var("x".into())),
                 }),
@@ -312,14 +353,13 @@ async fn run_read(mut client: PolarGraphServiceClient<Channel>, args: &Args) -> 
 
 // ── scenario: mixed ───────────────────────────────────────────────────────────
 
-async fn run_mixed(client: PolarGraphServiceClient<Channel>, args: &Args) -> Result<()> {
+async fn run_mixed(client: PolarGraphServiceClient<Channel>, args: &GrpcArgs) -> Result<()> {
     let n = args.nodes;
     let c = args.concurrency;
     const OPS_PER_WORKER: usize = 500;
 
     println!("\n[mixed] {c} workers × {OPS_PER_WORKER} ops (80% read / 20% write)");
 
-    // Pre-populate a read corpus.
     let corpus: Vec<Vec<u8>> = {
         let mut cl = client.clone();
         let ids: Vec<Vec<u8>> = (0..n).map(|_| new_node_id_bytes()).collect();
@@ -353,7 +393,6 @@ async fn run_mixed(client: PolarGraphServiceClient<Channel>, args: &Args) -> Res
 
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            // 80% reads
             if op_idx % 5 != 0 {
                 let id = &corpus[op_idx % corpus.len()];
                 let req = QueryRequest {
@@ -412,7 +451,7 @@ async fn run_mixed(client: PolarGraphServiceClient<Channel>, args: &Args) -> Res
 
 // ── scenario: recovery ────────────────────────────────────────────────────────
 
-async fn run_recovery(args: &Args) -> Result<()> {
+async fn run_recovery(args: &RecoveryArgs) -> Result<()> {
     use polargraph_core::{
         id::NodeId,
         temporal::{BiTemporalRange, Timestamp},
@@ -426,7 +465,6 @@ async fn run_recovery(args: &Args) -> Result<()> {
 
     let dir = tempfile::tempdir().context("tempdir")?;
 
-    // Populate store
     {
         let store = TripleStore::open(dir.path()).context("open for population")?;
         let mut inserted = 0;
@@ -447,9 +485,7 @@ async fn run_recovery(args: &Args) -> Result<()> {
         }
         info!("wrote {n} triples, closing store");
     }
-    // Store is dropped here — all data is flushed to RocksDB.
 
-    // Time 5 re-opens and report mean.
     const RUNS: usize = 5;
     let mut times_ms = Vec::with_capacity(RUNS);
     for _ in 0..RUNS {
@@ -475,18 +511,20 @@ async fn run_recovery(args: &Args) -> Result<()> {
 
 // ── scenario: filtered-search ─────────────────────────────────────────────────
 
-async fn run_filtered_search(mut client: PolarGraphServiceClient<Channel>, args: &Args) -> Result<()> {
+async fn run_filtered_search(
+    mut client: PolarGraphServiceClient<Channel>,
+    args: &FilteredSearchArgs,
+) -> Result<()> {
     let n = args.nodes;
     let dims = args.vector_dims;
     const K: usize = 10;
-    const Q: usize = 50; // number of query vectors to evaluate
+    const Q: usize = 50;
     const BATCH: usize = 200;
     const SPACE: &str = "BenchVec";
     const TYPE_NAME: &str = "BenchNode";
 
     println!("\n[filtered-search] {n} nodes, {dims}-dim vectors, k={K}, {Q} queries");
 
-    // Register BenchNode type with a vector space.
     client
         .register_node_type(RegisterNodeTypeRequest {
             definition: Some(ProtoNodeTypeDef {
@@ -504,7 +542,6 @@ async fn run_filtered_search(mut client: PolarGraphServiceClient<Channel>, args:
         .await
         .context("register node type")?;
 
-    // Insert nodes (__type property) and their vectors.
     let mut seed = 0x1234_5678_u64;
     let mut node_ids: Vec<Vec<u8>> = Vec::with_capacity(n);
     let mut stored_vecs: Vec<Vec<f32>> = Vec::with_capacity(n);
@@ -512,7 +549,6 @@ async fn run_filtered_search(mut client: PolarGraphServiceClient<Channel>, args:
     for chunk_start in (0..n).step_by(BATCH) {
         let chunk_end = (chunk_start + BATCH).min(n);
 
-        // Property triples
         let mut triples = Vec::new();
         for _ in chunk_start..chunk_end {
             let id = new_node_id_bytes();
@@ -526,7 +562,6 @@ async fn run_filtered_search(mut client: PolarGraphServiceClient<Channel>, args:
             .await
             .context("insert nodes")?;
 
-        // Vectors
         let items: Vec<VectorItem> = node_ids[chunk_start..chunk_end]
             .iter()
             .zip(&stored_vecs[chunk_start..chunk_end])
@@ -548,14 +583,12 @@ async fn run_filtered_search(mut client: PolarGraphServiceClient<Channel>, args:
         }
     }
 
-    // Run filtered ANN queries and compute recall.
     let mut lat = LatencyUs::new();
     let mut total_recall = 0.0f64;
 
     for q in 0..Q {
         let query = make_vec(&mut seed, dims);
 
-        // Brute-force top-K over all stored vectors (unit vecs → cosine = dot).
         let mut bf_scores: Vec<(usize, f32)> = stored_vecs
             .iter()
             .enumerate()
@@ -571,7 +604,6 @@ async fn run_filtered_search(mut client: PolarGraphServiceClient<Channel>, args:
             .map(|(i, _)| node_ids[*i].clone())
             .collect();
 
-        // ANN via SearchVectorFiltered(NodeTypeFilter)
         let t0 = Instant::now();
         let resp: SearchVectorFilteredResponse = client
             .search_vector_filtered(SearchVectorFilteredRequest {
@@ -650,7 +682,6 @@ async fn run_vector_near_graph() -> Result<()> {
         let mut seed = 0xDEAD_BEEF_u64.wrapping_add(n as u64);
         let node_ids: Vec<NodeId> = (0..n).map(|_| NodeId::new()).collect();
 
-        // Batch-insert nodes: __type triple + vector
         const TRI_BATCH: usize = 500;
         let type_pred = Predicate::new("__type");
         let cites_pred = Predicate::new("cites");
@@ -667,7 +698,6 @@ async fn run_vector_near_graph() -> Result<()> {
             }
             tx.commit().context("commit type triples")?;
 
-            // Insert vectors
             let items: Vec<(NodeId, Vec<f32>)> = chunk
                 .iter()
                 .map(|&id| (id, make_vec(&mut seed, DIMS)))
@@ -676,13 +706,12 @@ async fn run_vector_near_graph() -> Result<()> {
                 .batch_insert_vectors(SPACE, &items, StorageMode::Memory);
         }
 
-        // Insert :cites edges (each node cites 5 random others)
         for chunk_start in (0..n).step_by(TRI_BATCH) {
             let chunk_end = (chunk_start + TRI_BATCH).min(n);
             let mut tx = store.begin();
             for i in chunk_start..chunk_end {
                 for j in 1..=CITES_PER_NODE {
-                    let obj = (i + j * 7 + 3) % n; // deterministic spread
+                    let obj = (i + j * 7 + 3) % n;
                     tx.insert(Triple::Relation {
                         subject: node_ids[i],
                         predicate: cites_pred.clone(),
@@ -697,11 +726,9 @@ async fn run_vector_near_graph() -> Result<()> {
 
         println!("done");
 
-        // Take a snapshot for all queries
         let snap_ts = store.begin().read_ts;
         let snapshot = store.snapshot(snap_ts);
 
-        // Build the query: (?a, "cites", ?b) — subject is pre-seeded
         let query = Query::new().pattern(
             VarPattern::new()
                 .subject(Term::var("a"))
@@ -715,17 +742,14 @@ async fn run_vector_near_graph() -> Result<()> {
             let mut total_hist = LatencyUs::new();
 
             for iter in 0..ITERS {
-                // Fresh query vector each iteration
                 let qvec = make_vec(&mut seed.wrapping_add(iter as u64 * 31), DIMS);
 
                 let t_total = Instant::now();
 
-                // ANN search
                 let t_ann = Instant::now();
                 let ann_results = store.search_vector_ef(SPACE, &qvec, k, EF);
                 ann_hist.record(t_ann.elapsed());
 
-                // Build seed bindings: one per ANN result, binding var "a"
                 let seed_bindings: Vec<HashMap<String, NodeId>> = ann_results
                     .iter()
                     .map(|(node_id, _)| {
@@ -735,7 +759,6 @@ async fn run_vector_near_graph() -> Result<()> {
                     })
                     .collect();
 
-                // Graph join
                 let t_graph = Instant::now();
                 let _results =
                     execute_query_seeded(&query, &snapshot, seed_bindings, None, None)
@@ -763,11 +786,29 @@ async fn run_vector_near_graph() -> Result<()> {
     Ok(())
 }
 
+// ── scenario: bsbm ───────────────────────────────────────────────────────────
+
+async fn run_bsbm_scenario(args: &BsbmArgs) -> Result<()> {
+    use polargraph_storage::TripleStore;
+
+    let _tmpdir;
+    let data_path: std::path::PathBuf = if let Some(ref p) = args.data_dir {
+        p.clone()
+    } else {
+        _tmpdir = tempfile::tempdir().context("tempdir for bsbm")?;
+        _tmpdir.path().to_path_buf()
+    };
+
+    let store = TripleStore::open(&data_path).context("open store for bsbm")?;
+    bsbm::run_bsbm(&store, args.scale_factor, args.warmup_runs, args.measure_runs);
+    Ok(())
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let cli = Cli::parse();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -776,27 +817,39 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    println!("polargraph-bench  scenario={:?}  nodes={}  dims={}  concurrency={}",
-        args.scenario, args.nodes, args.vector_dims, args.concurrency);
-
-    match &args.scenario {
-        Scenario::Recovery => {
-            run_recovery(&args).await?;
+    match &cli.command {
+        Command::Recovery(args) => {
+            run_recovery(args).await?;
         }
-        Scenario::VectorNearGraph => {
+        Command::VectorNearGraph => {
             run_vector_near_graph().await?;
         }
-        scenario => {
+        Command::Bsbm(args) => {
+            run_bsbm_scenario(args).await?;
+        }
+        Command::Write(args) => {
             let client = PolarGraphServiceClient::connect(args.addr.clone())
                 .await
                 .with_context(|| format!("connecting to {}", args.addr))?;
-            match scenario {
-                Scenario::Write => run_write(client, &args).await?,
-                Scenario::Read => run_read(client, &args).await?,
-                Scenario::Mixed => run_mixed(client, &args).await?,
-                Scenario::FilteredSearch => run_filtered_search(client, &args).await?,
-                Scenario::Recovery | Scenario::VectorNearGraph => unreachable!(),
-            }
+            run_write(client, args).await?;
+        }
+        Command::Read(args) => {
+            let client = PolarGraphServiceClient::connect(args.addr.clone())
+                .await
+                .with_context(|| format!("connecting to {}", args.addr))?;
+            run_read(client, args).await?;
+        }
+        Command::Mixed(args) => {
+            let client = PolarGraphServiceClient::connect(args.addr.clone())
+                .await
+                .with_context(|| format!("connecting to {}", args.addr))?;
+            run_mixed(client, args).await?;
+        }
+        Command::FilteredSearch(args) => {
+            let client = PolarGraphServiceClient::connect(args.addr.clone())
+                .await
+                .with_context(|| format!("connecting to {}", args.addr))?;
+            run_filtered_search(client, args).await?;
         }
     }
 
