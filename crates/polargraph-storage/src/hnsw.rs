@@ -62,16 +62,22 @@ pub const DEFAULT_EF_CONSTRUCTION: usize = 200;
 struct Far(f32, NodeId);
 
 impl PartialEq for Far {
-    fn eq(&self, other: &Self) -> bool { self.0.to_bits() == other.0.to_bits() && self.1 == other.1 }
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits() && self.1 == other.1
+    }
 }
 impl Eq for Far {}
 impl PartialOrd for Far {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for Far {
     fn cmp(&self, other: &Self) -> Ordering {
         // Larger distance = higher priority (max-heap).
-        self.0.partial_cmp(&other.0).unwrap_or(Ordering::Equal)
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(Ordering::Equal)
             .then_with(|| self.1.cmp(&other.1))
     }
 }
@@ -81,16 +87,23 @@ impl Ord for Far {
 struct Near(f32, NodeId);
 
 impl PartialEq for Near {
-    fn eq(&self, other: &Self) -> bool { self.0.to_bits() == other.0.to_bits() && self.1 == other.1 }
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits() && self.1 == other.1
+    }
 }
 impl Eq for Near {}
 impl PartialOrd for Near {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for Near {
     fn cmp(&self, other: &Self) -> Ordering {
         // Smaller distance = higher priority (reverse for min-heap via BinaryHeap).
-        other.0.partial_cmp(&self.0).unwrap_or(Ordering::Equal)
+        other
+            .0
+            .partial_cmp(&self.0)
+            .unwrap_or(Ordering::Equal)
             .then_with(|| other.1.cmp(&self.1))
     }
 }
@@ -138,7 +151,14 @@ impl MmapState {
         file.write_all(&(dims as u32).to_le_bytes())?;
         file.write_all(&0u64.to_le_bytes())?;
         file.flush()?;
-        Ok(Self { dims, count: 0, id_to_index: HashMap::new(), file, path, mmap: None })
+        Ok(Self {
+            dims,
+            count: 0,
+            id_to_index: HashMap::new(),
+            file,
+            path,
+            mmap: None,
+        })
     }
 
     /// Open an existing mmap file. Reads dims and count from the header.
@@ -157,7 +177,7 @@ impl MmapState {
         file.seek(SeekFrom::Start(0))?;
         let mut header = [0u8; 12];
         file.read_exact(&mut header)?;
-        let dims  = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+        let dims = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
         let count = u64::from_le_bytes(header[4..12].try_into().unwrap()) as usize;
 
         let mmap = if file_len > Self::HEADER {
@@ -166,7 +186,14 @@ impl MmapState {
             None
         };
 
-        Ok(Self { dims, count, id_to_index: HashMap::new(), file, path, mmap })
+        Ok(Self {
+            dims,
+            count,
+            id_to_index: HashMap::new(),
+            file,
+            path,
+            mmap,
+        })
     }
 
     /// Register a known `(NodeId, dense_index)` pair during index load.
@@ -191,9 +218,8 @@ impl MmapState {
 
         // Write vector bytes at the assigned offset.
         let byte_start = Self::HEADER + idx * self.dims * 4;
-        let vector_bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(vector.as_ptr() as *const u8, vector.len() * 4)
-        };
+        let vector_bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(vector.as_ptr() as *const u8, vector.len() * 4) };
         mmap[byte_start..byte_start + vector_bytes.len()].copy_from_slice(vector_bytes);
 
         // Update count in header.
@@ -219,15 +245,12 @@ impl MmapState {
         let &idx = self.id_to_index.get(&id)?;
         let mmap = self.mmap.as_ref()?;
         let byte_start = Self::HEADER + idx * self.dims * 4;
-        let byte_end   = byte_start + self.dims * 4;
+        let byte_end = byte_start + self.dims * 4;
         if byte_end > mmap.len() {
             return None;
         }
         Some(unsafe {
-            std::slice::from_raw_parts(
-                mmap[byte_start..byte_end].as_ptr() as *const f32,
-                self.dims,
-            )
+            std::slice::from_raw_parts(mmap[byte_start..byte_end].as_ptr() as *const f32, self.dims)
         })
     }
 
@@ -316,12 +339,14 @@ impl HnswIndex {
     pub fn new_mmap_with_state(state: MmapState) -> Self {
         let path = state.path.clone();
         let mut idx = Self::with_params(DEFAULT_M, DEFAULT_M_MAX0, DEFAULT_EF_CONSTRUCTION);
-        idx.mmap_path  = Some(path);
+        idx.mmap_path = Some(path);
         idx.mmap_state = Some(state);
         idx
     }
 
-    pub fn is_mmap(&self) -> bool { self.mmap_path.is_some() }
+    pub fn is_mmap(&self) -> bool {
+        self.mmap_path.is_some()
+    }
 
     // ── persistence helpers (called by store.rs) ──────────────────────────────
 
@@ -349,11 +374,22 @@ impl HnswIndex {
                 Vec::new() // vector lives in mmap, not in the node struct
             }
         };
-        self.nodes.insert(id, HnswNode { vector, max_layer, neighbors });
+        self.nodes.insert(
+            id,
+            HnswNode {
+                vector,
+                max_layer,
+                neighbors,
+            },
+        );
     }
 
-    pub fn len(&self) -> usize { self.nodes.len() }
-    pub fn is_empty(&self) -> bool { self.nodes.is_empty() }
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
 
     // ── public API ─────────────────────────────────────────────────────────────
 
@@ -365,7 +401,9 @@ impl HnswIndex {
             if self.mmap_state.is_none() {
                 let dims = vector.len();
                 match MmapState::create(path, dims) {
-                    Ok(ms) => { self.mmap_state = Some(ms); }
+                    Ok(ms) => {
+                        self.mmap_state = Some(ms);
+                    }
                     Err(e) => {
                         tracing::error!("failed to create mmap file: {e}; falling back to memory");
                         self.mmap_path = None; // degrade to memory mode
@@ -374,7 +412,9 @@ impl HnswIndex {
             }
             if let Some(ms) = &mut self.mmap_state {
                 if let Err(e) = ms.append(id, &vector) {
-                    tracing::error!("mmap append failed: {e}; falling back to memory for this node");
+                    tracing::error!(
+                        "mmap append failed: {e}; falling back to memory for this node"
+                    );
                     // Fall through to store vector in node struct as backup
                 }
             }
@@ -384,11 +424,22 @@ impl HnswIndex {
         let mut modified: Vec<NodeId> = Vec::new();
 
         // Store the node. In mmap mode, the vector field is empty.
-        let stored_vector = if self.is_mmap() { Vec::new() } else { vector.clone() };
+        let stored_vector = if self.is_mmap() {
+            Vec::new()
+        } else {
+            vector.clone()
+        };
 
         if self.entry_point.is_none() {
             let neighbors = (0..=level).map(|_| Vec::new()).collect();
-            self.nodes.insert(id, HnswNode { vector: stored_vector, max_layer: level, neighbors });
+            self.nodes.insert(
+                id,
+                HnswNode {
+                    vector: stored_vector,
+                    max_layer: level,
+                    neighbors,
+                },
+            );
             self.entry_point = Some(id);
             self.global_max_layer = level;
             modified.push(id);
@@ -399,33 +450,45 @@ impl HnswIndex {
 
         // ── Phase 1: greedy descent from top layer to level+1 ─────────────────
         let mut ep_dist = self.dist_to(ep, &vector);
-        let mut cur_ep  = ep;
+        let mut cur_ep = ep;
 
         for lc in (level + 1..=self.global_max_layer).rev() {
             let w = self.search_layer(&vector, cur_ep, 1, lc);
             if let Some(Far(d, nearest)) = w.into_sorted_vec().into_iter().next() {
-                if d < ep_dist { ep_dist = d; cur_ep = nearest; }
+                if d < ep_dist {
+                    ep_dist = d;
+                    cur_ep = nearest;
+                }
             }
         }
 
         // ── Phase 2: build connections from level down to 0 ───────────────────
-        self.nodes.insert(id, HnswNode {
-            vector: stored_vector,
-            max_layer: level,
-            neighbors: (0..=level).map(|_| Vec::new()).collect(),
-        });
+        self.nodes.insert(
+            id,
+            HnswNode {
+                vector: stored_vector,
+                max_layer: level,
+                neighbors: (0..=level).map(|_| Vec::new()).collect(),
+            },
+        );
 
         for lc in (0..=cmp::min(level, self.global_max_layer)).rev() {
             let w = self.search_layer(&vector, cur_ep, self.ef_construction, lc);
 
             let w_sorted = w.into_sorted_vec();
             if let Some(Far(d, nearest)) = w_sorted.first() {
-                if *d < ep_dist { ep_dist = *d; cur_ep = *nearest; }
+                if *d < ep_dist {
+                    ep_dist = *d;
+                    cur_ep = *nearest;
+                }
             }
 
             let m_at_layer = if lc == 0 { self.m_max0 } else { self.m };
             let neighbors_for_new: Vec<NodeId> = w_sorted
-                .iter().take(m_at_layer).map(|Far(_, nid)| *nid).collect();
+                .iter()
+                .take(m_at_layer)
+                .map(|Far(_, nid)| *nid)
+                .collect();
 
             self.nodes.get_mut(&id).unwrap().neighbors[lc] = neighbors_for_new.clone();
             modified.push(id);
@@ -482,9 +545,15 @@ impl HnswIndex {
         let mut scored: Vec<(NodeId, f32)> = allowed
             .iter()
             .filter_map(|&id| {
-                if !self.nodes.contains_key(&id) { return None; }
+                if !self.nodes.contains_key(&id) {
+                    return None;
+                }
                 let d = self.dist_to(id, query);
-                if d.is_infinite() { None } else { Some((id, 1.0 - d)) }
+                if d.is_infinite() {
+                    None
+                } else {
+                    Some((id, 1.0 - d))
+                }
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(cmp::Ordering::Equal));
@@ -501,16 +570,23 @@ impl HnswIndex {
             None => return vec![],
         };
 
-        let ef = if ef == 0 { cmp::max(self.ef_construction / 2, k) } else { ef };
+        let ef = if ef == 0 {
+            cmp::max(self.ef_construction / 2, k)
+        } else {
+            ef
+        };
 
-        let mut cur_ep   = ep;
+        let mut cur_ep = ep;
         let mut cur_dist = self.dist_to(ep, query);
 
         // Descend to layer 1.
         for lc in (1..=self.global_max_layer).rev() {
             let w = self.search_layer(query, cur_ep, 1, lc);
             if let Some(Far(d, nearest)) = w.into_sorted_vec().into_iter().next() {
-                if d < cur_dist { cur_dist = d; cur_ep = nearest; }
+                if d < cur_dist {
+                    cur_dist = d;
+                    cur_ep = nearest;
+                }
             }
         }
 
@@ -530,7 +606,8 @@ impl HnswIndex {
     /// replaced by the sentinel `0xFFFF_FFFF` followed by the dense index.
     pub fn serialize_node_for(&self, id: NodeId) -> Vec<u8> {
         if let Some(node) = self.nodes.get(&id) {
-            let mmap_index = self.mmap_state
+            let mmap_index = self
+                .mmap_state
                 .as_ref()
                 .and_then(|ms| ms.id_to_index.get(&id).copied());
             serialize_node(node, mmap_index)
@@ -546,12 +623,12 @@ impl HnswIndex {
         let vec: &[f32] = if let Some(ms) = &self.mmap_state {
             match ms.get_slice(id) {
                 Some(s) => s,
-                None    => return f32::INFINITY,
+                None => return f32::INFINITY,
             }
         } else {
             match self.nodes.get(&id) {
                 Some(n) => &n.vector,
-                None    => return f32::INFINITY,
+                None => return f32::INFINITY,
             }
         };
         cosine_distance(vec, query)
@@ -566,7 +643,10 @@ impl HnswIndex {
         if let Some(ms) = &self.mmap_state {
             ms.get_owned(id).unwrap_or_default()
         } else {
-            self.nodes.get(&id).map(|n| n.vector.clone()).unwrap_or_default()
+            self.nodes
+                .get(&id)
+                .map(|n| n.vector.clone())
+                .unwrap_or_default()
         }
     }
 
@@ -578,9 +658,9 @@ impl HnswIndex {
         ef: usize,
         layer: usize,
     ) -> BinaryHeap<Far> {
-        let mut visited:    HashSet<NodeId>   = HashSet::new();
-        let mut candidates: BinaryHeap<Near>  = BinaryHeap::new();
-        let mut found:      BinaryHeap<Far>   = BinaryHeap::new();
+        let mut visited: HashSet<NodeId> = HashSet::new();
+        let mut candidates: BinaryHeap<Near> = BinaryHeap::new();
+        let mut found: BinaryHeap<Far> = BinaryHeap::new();
 
         let d_entry = self.dist_to(entry, query);
         visited.insert(entry);
@@ -589,7 +669,9 @@ impl HnswIndex {
 
         while let Some(Near(d_c, c)) = candidates.pop() {
             let d_worst = found.peek().map(|Far(d, _)| *d).unwrap_or(f32::INFINITY);
-            if d_c > d_worst { break; }
+            if d_c > d_worst {
+                break;
+            }
 
             let neighbors = match self.nodes.get(&c) {
                 Some(n) if layer <= n.max_layer => &n.neighbors[layer],
@@ -597,14 +679,18 @@ impl HnswIndex {
             };
 
             for &e in neighbors {
-                if visited.contains(&e) { continue; }
+                if visited.contains(&e) {
+                    continue;
+                }
                 visited.insert(e);
-                let d_e     = self.dist_to(e, query);
+                let d_e = self.dist_to(e, query);
                 let d_worst = found.peek().map(|Far(d, _)| *d).unwrap_or(f32::INFINITY);
                 if d_e < d_worst || found.len() < ef {
                     candidates.push(Near(d_e, e));
                     found.push(Far(d_e, e));
-                    if found.len() > ef { found.pop(); }
+                    if found.len() > ef {
+                        found.pop();
+                    }
                 }
             }
         }
@@ -613,7 +699,12 @@ impl HnswIndex {
     }
 
     /// Select the `m` nearest neighbors from a candidate list by distance to `query`.
-    fn select_neighbors_by_dist(&self, query: &[f32], candidates: &[NodeId], m: usize) -> Vec<NodeId> {
+    fn select_neighbors_by_dist(
+        &self,
+        query: &[f32],
+        candidates: &[NodeId],
+        m: usize,
+    ) -> Vec<NodeId> {
         let mut scored: Vec<(f32, NodeId)> = candidates
             .iter()
             .map(|&id| (self.dist_to(id, query), id))
@@ -622,13 +713,12 @@ impl HnswIndex {
         scored.into_iter().take(m).map(|(_, id)| id).collect()
     }
 
-
     /// Generate a random layer using the HNSW exponential distribution.
     fn random_level(&mut self) -> usize {
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 7;
         self.rng ^= self.rng << 17;
-        let f  = (self.rng as f64) / (u64::MAX as f64);
+        let f = (self.rng as f64) / (u64::MAX as f64);
         let ml = 1.0 / (self.m as f64).ln();
         ((-f.ln()) * ml).floor() as usize
     }
@@ -638,22 +728,26 @@ impl HnswIndex {
 
 /// Cosine distance ∈ [0, 2]. Zero = identical direction, 2 = opposite.
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-    if a.is_empty() || b.is_empty() || a.len() != b.len() { return 1.0; }
-    let dot:   f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    if a.is_empty() || b.is_empty() || a.len() != b.len() {
+        return 1.0;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if mag_a == 0.0 || mag_b == 0.0 { return 1.0; }
+    if mag_a == 0.0 || mag_b == 0.0 {
+        return 1.0;
+    }
     (1.0 - (dot / (mag_a * mag_b))).clamp(0.0, 2.0)
 }
 
 // ── Serialisation ─────────────────────────────────────────────────────────────
 
 /// Suffix appended to a space name to form the RocksDB entry-point key.
-const EP_SUFFIX:    &[u8] = b"/__ep";
+const EP_SUFFIX: &[u8] = b"/__ep";
 /// Sub-prefix inside a space for per-node records.
-const NODE_INFIX:   &[u8] = b"/n/";
+const NODE_INFIX: &[u8] = b"/n/";
 /// Sentinel stored in the `dim` field of a mmap-mode node record.
-const MMAP_SENTINEL: u32  = u32::MAX;
+const MMAP_SENTINEL: u32 = u32::MAX;
 
 /// RocksDB key for a space's entry-point record: `<space>/__ep`.
 pub fn ep_key_for_space(space: &str) -> Vec<u8> {
@@ -696,7 +790,7 @@ pub fn deserialize_entry_point(bytes: &[u8]) -> Result<(NodeId, usize), StorageE
     if bytes.len() < 20 {
         return Err(StorageError::KeyDecode("ep record too short".into()));
     }
-    let id        = NodeId(uuid::Uuid::from_bytes(bytes[..16].try_into().unwrap()));
+    let id = NodeId(uuid::Uuid::from_bytes(bytes[..16].try_into().unwrap()));
     let max_layer = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
     Ok((id, max_layer))
 }
@@ -745,23 +839,27 @@ pub fn serialize_node(node: &HnswNode, dense_index: Option<usize>) -> Vec<u8> {
 ///
 /// Returns `(NodeVector, max_layer, neighbors)` where `NodeVector` is either
 /// `Data(vec)` (memory mode) or `MmapIndex(idx)` (mmap mode).
-pub fn deserialize_node(bytes: &[u8]) -> Result<(NodeVector, usize, Vec<Vec<NodeId>>), StorageError> {
+pub fn deserialize_node(
+    bytes: &[u8],
+) -> Result<(NodeVector, usize, Vec<Vec<NodeId>>), StorageError> {
     if bytes.len() < 8 {
         return Err(StorageError::KeyDecode("hnsw node record too short".into()));
     }
-    let max_layer       = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let max_layer = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let dim_or_sentinel = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
 
     let (node_vector, neighbor_cursor) = if dim_or_sentinel == MMAP_SENTINEL {
         // Mmap mode: bytes[8..12] = dense index.
         if bytes.len() < 12 {
-            return Err(StorageError::KeyDecode("hnsw mmap node record too short".into()));
+            return Err(StorageError::KeyDecode(
+                "hnsw mmap node record too short".into(),
+            ));
         }
         let idx = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         (NodeVector::MmapIndex(idx), 12)
     } else {
         // Memory mode: read float vector.
-        let dim      = dim_or_sentinel as usize;
+        let dim = dim_or_sentinel as usize;
         let float_end = 8 + dim * 4;
         if bytes.len() < float_end {
             return Err(StorageError::KeyDecode("hnsw node vector truncated".into()));
@@ -774,11 +872,13 @@ pub fn deserialize_node(bytes: &[u8]) -> Result<(NodeVector, usize, Vec<Vec<Node
         (NodeVector::Data(vector), float_end)
     };
 
-    let mut cursor    = neighbor_cursor;
+    let mut cursor = neighbor_cursor;
     let mut neighbors = Vec::with_capacity(max_layer + 1);
     for _ in 0..=max_layer {
         if cursor + 4 > bytes.len() {
-            return Err(StorageError::KeyDecode("hnsw neighbor count truncated".into()));
+            return Err(StorageError::KeyDecode(
+                "hnsw neighbor count truncated".into(),
+            ));
         }
         let n = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
         cursor += 4;
@@ -787,7 +887,9 @@ pub fn deserialize_node(bytes: &[u8]) -> Result<(NodeVector, usize, Vec<Vec<Node
             if cursor + 16 > bytes.len() {
                 return Err(StorageError::KeyDecode("hnsw neighbor id truncated".into()));
             }
-            let id = NodeId(uuid::Uuid::from_bytes(bytes[cursor..cursor + 16].try_into().unwrap()));
+            let id = NodeId(uuid::Uuid::from_bytes(
+                bytes[cursor..cursor + 16].try_into().unwrap(),
+            ));
             cursor += 16;
             nbrs.push(id);
         }
@@ -805,7 +907,9 @@ mod tests {
     use polargraph_core::id::NodeId;
     use uuid::Uuid;
 
-    fn make_id(seed: u8) -> NodeId { NodeId(Uuid::from_bytes([seed; 16])) }
+    fn make_id(seed: u8) -> NodeId {
+        NodeId(Uuid::from_bytes([seed; 16]))
+    }
 
     fn unit_vec(dim: usize, hot: usize) -> Vec<f32> {
         let mut v = vec![0.0_f32; dim];
@@ -886,7 +990,11 @@ mod tests {
 
     #[test]
     fn node_zero_dim_round_trips() {
-        let node = HnswNode { vector: vec![], max_layer: 0, neighbors: vec![vec![]] };
+        let node = HnswNode {
+            vector: vec![],
+            max_layer: 0,
+            neighbors: vec![vec![]],
+        };
         let bytes = serialize_node(&node, None);
         let (nv, max_layer, nbrs) = deserialize_node(&bytes).unwrap();
         match nv {
@@ -919,9 +1027,9 @@ mod tests {
     fn nearest_neighbor_is_correct() {
         let mut idx = HnswIndex::new();
         let near_id = make_id(1);
-        let far_id  = make_id(2);
+        let far_id = make_id(2);
         idx.insert(near_id, vec![1.0_f32, 0.0, 0.0]);
-        idx.insert(far_id,  vec![0.0_f32, 0.0, 1.0]);
+        idx.insert(far_id, vec![0.0_f32, 0.0, 1.0]);
         let results = idx.search(&[1.0, 0.0, 0.0], 1, 10);
         assert_eq!(results[0].0, near_id);
     }
@@ -929,9 +1037,12 @@ mod tests {
     #[test]
     fn search_in_set_returns_correct_order() {
         let mut idx = HnswIndex::new();
-        let a = make_id(1); idx.insert(a, vec![1.0_f32, 0.0]);
-        let b = make_id(2); idx.insert(b, vec![0.9_f32, 0.1]);
-        let c = make_id(3); idx.insert(c, vec![0.0_f32, 1.0]);
+        let a = make_id(1);
+        idx.insert(a, vec![1.0_f32, 0.0]);
+        let b = make_id(2);
+        idx.insert(b, vec![0.9_f32, 0.1]);
+        let c = make_id(3);
+        idx.insert(c, vec![0.0_f32, 1.0]);
         let results = idx.search_in_set(&[1.0, 0.0], 2, &[a, b, c]);
         assert_eq!(results[0].0, a);
         assert_eq!(results[1].0, b);
@@ -941,7 +1052,7 @@ mod tests {
 
     #[test]
     fn mmap_state_create_and_read() {
-        let dir  = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.vecs");
         let mut ms = MmapState::create(path, 4).unwrap();
 
@@ -958,7 +1069,7 @@ mod tests {
 
     #[test]
     fn mmap_state_file_size_matches_layout() {
-        let dir  = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("size.vecs");
         let mut ms = MmapState::create(path.clone(), 3).unwrap();
         let id = make_id(5);
@@ -971,7 +1082,7 @@ mod tests {
 
     #[test]
     fn mmap_state_open_reads_header() {
-        let dir  = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("open.vecs");
         {
             let mut ms = MmapState::create(path.clone(), 2).unwrap();
@@ -979,7 +1090,7 @@ mod tests {
             ms.append(make_id(2), &[0.0, 1.0]).unwrap();
         }
         let ms = MmapState::open(path).unwrap();
-        assert_eq!(ms.dims,  2);
+        assert_eq!(ms.dims, 2);
         assert_eq!(ms.count, 2);
     }
 
@@ -987,14 +1098,14 @@ mod tests {
 
     #[test]
     fn mmap_index_insert_and_search() {
-        let dir  = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("idx.vecs");
         let mut idx = HnswIndex::new_mmap(path);
 
         let id_near = make_id(1);
-        let id_far  = make_id(2);
+        let id_far = make_id(2);
         idx.insert(id_near, vec![1.0_f32, 0.0, 0.0]);
-        idx.insert(id_far,  vec![0.0_f32, 0.0, 1.0]);
+        idx.insert(id_far, vec![0.0_f32, 0.0, 1.0]);
 
         let results = idx.search(&[1.0, 0.0, 0.0], 1, 10);
         assert_eq!(results.len(), 1);
@@ -1004,24 +1115,35 @@ mod tests {
     #[test]
     fn mmap_index_recall_matches_memory() {
         // Insert identical vectors into both modes and check that recall is the same.
-        let dir  = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("recall.vecs");
 
-        let mut mem_idx  = HnswIndex::new();
+        let mut mem_idx = HnswIndex::new();
         let mut mmap_idx = HnswIndex::new_mmap(path);
 
         let query = vec![1.0_f32, 0.0, 0.0, 0.0];
 
         for i in 0..20u8 {
             let id = make_id(i);
-            let v  = unit_vec(4, i as usize);
+            let v = unit_vec(4, i as usize);
             mem_idx.insert(id, v.clone());
             mmap_idx.insert(id, v);
         }
 
-        let mem_ids:  Vec<NodeId> = mem_idx.search(&query,  5, 20).into_iter().map(|(id, _)| id).collect();
-        let mmap_ids: Vec<NodeId> = mmap_idx.search(&query, 5, 20).into_iter().map(|(id, _)| id).collect();
+        let mem_ids: Vec<NodeId> = mem_idx
+            .search(&query, 5, 20)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let mmap_ids: Vec<NodeId> = mmap_idx
+            .search(&query, 5, 20)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
 
-        assert_eq!(mem_ids, mmap_ids, "mmap search must return the same results as in-memory");
+        assert_eq!(
+            mem_ids, mmap_ids,
+            "mmap search must return the same results as in-memory"
+        );
     }
 }

@@ -6,15 +6,14 @@
 #![allow(clippy::result_large_err)]
 
 use crate::proto::{
-    self,
-    edge_annotation::Value as AnnotationValueProto,
-    triple::Kind as TripleKind,
-    term::Kind as TermKind,
-    value::Kind as ValueKind,
+    self, edge_annotation::Value as AnnotationValueProto, term::Kind as TermKind,
+    triple::Kind as TripleKind, value::Kind as ValueKind,
 };
 use polargraph_core::{
     id::{EdgeId, NodeId},
-    schema::{Cardinality, EdgeTypeDef, FieldDef, FieldKind, NodeTypeDef, StorageMode, VectorSpaceDef},
+    schema::{
+        Cardinality, EdgeTypeDef, FieldDef, FieldKind, NodeTypeDef, StorageMode, VectorSpaceDef,
+    },
     temporal::{BiTemporalRange, Timestamp},
     triple::{Predicate, Triple},
     value::Value,
@@ -36,7 +35,9 @@ pub fn node_id_from_proto(proto: &proto::NodeId) -> Result<NodeId, Status> {
 }
 
 pub fn node_id_to_proto(id: NodeId) -> proto::NodeId {
-    proto::NodeId { bytes: id.as_bytes().to_vec() }
+    proto::NodeId {
+        bytes: id.as_bytes().to_vec(),
+    }
 }
 
 // ── Value ─────────────────────────────────────────────────────────────────────
@@ -45,7 +46,7 @@ pub fn value_from_proto(proto: &proto::Value) -> Result<Value, Status> {
     match &proto.kind {
         Some(ValueKind::NullVal(_)) | None => Ok(Value::Null),
         Some(ValueKind::BoolVal(b)) => Ok(Value::Bool(*b)),
-        Some(ValueKind::IntVal(i))  => Ok(Value::Int(*i)),
+        Some(ValueKind::IntVal(i)) => Ok(Value::Int(*i)),
         Some(ValueKind::FloatVal(f)) => Ok(Value::Float(*f)),
         Some(ValueKind::TextVal(s)) => Ok(Value::Text(s.clone())),
         Some(ValueKind::BlobVal(b)) => Ok(Value::Blob(b.clone())),
@@ -55,12 +56,12 @@ pub fn value_from_proto(proto: &proto::Value) -> Result<Value, Status> {
 
 pub fn value_to_proto(v: &Value) -> proto::Value {
     let kind = match v {
-        Value::Null       => ValueKind::NullVal(true),
-        Value::Bool(b)    => ValueKind::BoolVal(*b),
-        Value::Int(i)     => ValueKind::IntVal(*i),
-        Value::Float(f)   => ValueKind::FloatVal(*f),
-        Value::Text(s)    => ValueKind::TextVal(s.clone()),
-        Value::Blob(b)    => ValueKind::BlobVal(b.clone()),
+        Value::Null => ValueKind::NullVal(true),
+        Value::Bool(b) => ValueKind::BoolVal(*b),
+        Value::Int(i) => ValueKind::IntVal(*i),
+        Value::Float(f) => ValueKind::FloatVal(*f),
+        Value::Text(s) => ValueKind::TextVal(s.clone()),
+        Value::Blob(b) => ValueKind::BlobVal(b.clone()),
         Value::Vector(fs) => ValueKind::VecVal(proto::FloatArray { values: fs.clone() }),
     };
     proto::Value { kind: Some(kind) }
@@ -71,7 +72,11 @@ pub fn value_to_proto(v: &Value) -> proto::Value {
 pub fn temporal_from_proto(vt_start: i64, vt_end: i64) -> BiTemporalRange {
     BiTemporalRange {
         vt_start: Timestamp(vt_start),
-        vt_end: if vt_end == 0 { Timestamp::END_OF_TIME } else { Timestamp(vt_end) },
+        vt_end: if vt_end == 0 {
+            Timestamp::END_OF_TIME
+        } else {
+            Timestamp(vt_end)
+        },
         tt: Timestamp::now(), // filled in by the transaction layer at commit
     }
 }
@@ -99,13 +104,19 @@ pub fn triples_from_proto(proto: &proto::Triple) -> Result<(Vec<Triple>, Option<
     match &proto.kind {
         Some(TripleKind::Relation(r)) => {
             let subject = node_id_from_proto(
-                r.subject.as_ref().ok_or_else(|| Status::invalid_argument("relation missing subject"))?,
+                r.subject
+                    .as_ref()
+                    .ok_or_else(|| Status::invalid_argument("relation missing subject"))?,
             )?;
             let object = node_id_from_proto(
-                r.object.as_ref().ok_or_else(|| Status::invalid_argument("relation missing object"))?,
+                r.object
+                    .as_ref()
+                    .ok_or_else(|| Status::invalid_argument("relation missing object"))?,
             )?;
             if r.predicate.is_empty() {
-                return Err(Status::invalid_argument("relation predicate must not be empty"));
+                return Err(Status::invalid_argument(
+                    "relation predicate must not be empty",
+                ));
             }
             let edge_id = EdgeId::new();
             let temporal = temporal_from_proto(r.vt_start, r.vt_end);
@@ -121,10 +132,14 @@ pub fn triples_from_proto(proto: &proto::Triple) -> Result<(Vec<Triple>, Option<
             let mut triples = vec![relation];
             for ep in &r.properties {
                 if ep.name.is_empty() {
-                    return Err(Status::invalid_argument("edge property name must not be empty"));
+                    return Err(Status::invalid_argument(
+                        "edge property name must not be empty",
+                    ));
                 }
                 let value = value_from_proto(
-                    ep.value.as_ref().ok_or_else(|| Status::invalid_argument("edge property missing value"))?,
+                    ep.value
+                        .as_ref()
+                        .ok_or_else(|| Status::invalid_argument("edge property missing value"))?,
                 )?;
                 triples.push(Triple::Property {
                     subject: NodeId(edge_id.0),
@@ -137,20 +152,29 @@ pub fn triples_from_proto(proto: &proto::Triple) -> Result<(Vec<Triple>, Option<
         }
         Some(TripleKind::Property(p)) => {
             let subject = node_id_from_proto(
-                p.subject.as_ref().ok_or_else(|| Status::invalid_argument("property missing subject"))?,
+                p.subject
+                    .as_ref()
+                    .ok_or_else(|| Status::invalid_argument("property missing subject"))?,
             )?;
             if p.predicate.is_empty() {
-                return Err(Status::invalid_argument("property predicate must not be empty"));
+                return Err(Status::invalid_argument(
+                    "property predicate must not be empty",
+                ));
             }
             let value = value_from_proto(
-                p.value.as_ref().ok_or_else(|| Status::invalid_argument("property missing value"))?,
+                p.value
+                    .as_ref()
+                    .ok_or_else(|| Status::invalid_argument("property missing value"))?,
             )?;
-            Ok((vec![Triple::Property {
-                subject,
-                predicate: Predicate::new(p.predicate.clone()),
-                value,
-                temporal: temporal_from_proto(p.vt_start, p.vt_end),
-            }], None))
+            Ok((
+                vec![Triple::Property {
+                    subject,
+                    predicate: Predicate::new(p.predicate.clone()),
+                    value,
+                    temporal: temporal_from_proto(p.vt_start, p.vt_end),
+                }],
+                None,
+            ))
         }
         None => Err(Status::invalid_argument("triple has no kind set")),
     }
@@ -174,15 +198,26 @@ pub fn term_from_proto(proto: &proto::Term) -> Result<Term, Status> {
 pub fn var_pattern_from_proto(proto: &proto::VarPattern) -> Result<VarPattern, Status> {
     let subject = match &proto.subject {
         Some(t) => term_from_proto(t)?,
-        None    => Term::Any,
+        None => Term::Any,
     };
     let object = match &proto.object {
         Some(t) => term_from_proto(t)?,
-        None    => Term::Any,
+        None => Term::Any,
     };
-    let predicate = if proto.predicate.is_empty() { None } else { Some(proto.predicate.clone()) };
+    let predicate = if proto.predicate.is_empty() {
+        None
+    } else {
+        Some(proto.predicate.clone())
+    };
 
-    Ok(VarPattern { subject, predicate, predicate_var: None, object, edge_var: None, max_hops: None })
+    Ok(VarPattern {
+        subject,
+        predicate,
+        predicate_var: None,
+        object,
+        edge_var: None,
+        max_hops: None,
+    })
 }
 
 // ── Bindings ──────────────────────────────────────────────────────────────────
@@ -216,8 +251,14 @@ pub fn cypher_binding_to_proto(
     val_keys: &std::collections::HashMap<String, Value>,
 ) -> proto::CypherBinding {
     proto::CypherBinding {
-        nodes: node_keys.iter().map(|(k, &id)| (k.clone(), node_id_to_proto(id))).collect(),
-        values: val_keys.iter().map(|(k, v)| (k.clone(), value_to_proto(v))).collect(),
+        nodes: node_keys
+            .iter()
+            .map(|(k, &id)| (k.clone(), node_id_to_proto(id)))
+            .collect(),
+        values: val_keys
+            .iter()
+            .map(|(k, v)| (k.clone(), value_to_proto(v)))
+            .collect(),
     }
 }
 
@@ -225,13 +266,19 @@ pub fn cypher_binding_to_proto(
 
 pub fn rule_from_proto(proto: &proto::DatalogRule) -> Result<Rule, Status> {
     if proto.head_predicate.is_empty() {
-        return Err(Status::invalid_argument("rule head_predicate must not be empty"));
+        return Err(Status::invalid_argument(
+            "rule head_predicate must not be empty",
+        ));
     }
     if proto.head_subject_var.is_empty() {
-        return Err(Status::invalid_argument("rule head_subject_var must not be empty"));
+        return Err(Status::invalid_argument(
+            "rule head_subject_var must not be empty",
+        ));
     }
     if proto.head_object_var.is_empty() {
-        return Err(Status::invalid_argument("rule head_object_var must not be empty"));
+        return Err(Status::invalid_argument(
+            "rule head_object_var must not be empty",
+        ));
     }
     let body = proto
         .body
@@ -242,30 +289,33 @@ pub fn rule_from_proto(proto: &proto::DatalogRule) -> Result<Rule, Status> {
         proto.head_predicate.clone(),
         proto.head_subject_var.clone(),
         proto.head_object_var.clone(),
-    ).with_body(body))
+    )
+    .with_body(body))
 }
 
 // ── Node type schema ──────────────────────────────────────────────────────────
 
 pub fn field_kind_from_str(s: &str) -> Result<FieldKind, Status> {
     match s {
-        "bool"   => Ok(FieldKind::Bool),
-        "int"    => Ok(FieldKind::Int),
-        "float"  => Ok(FieldKind::Float),
-        "text"   => Ok(FieldKind::Text),
-        "blob"   => Ok(FieldKind::Blob),
+        "bool" => Ok(FieldKind::Bool),
+        "int" => Ok(FieldKind::Int),
+        "float" => Ok(FieldKind::Float),
+        "text" => Ok(FieldKind::Text),
+        "blob" => Ok(FieldKind::Blob),
         "vector" => Ok(FieldKind::Vector),
-        other    => Err(Status::invalid_argument(format!("unknown field kind '{other}'"))),
+        other => Err(Status::invalid_argument(format!(
+            "unknown field kind '{other}'"
+        ))),
     }
 }
 
 pub fn field_kind_to_str(k: FieldKind) -> &'static str {
     match k {
-        FieldKind::Bool   => "bool",
-        FieldKind::Int    => "int",
-        FieldKind::Float  => "float",
-        FieldKind::Text   => "text",
-        FieldKind::Blob   => "blob",
+        FieldKind::Bool => "bool",
+        FieldKind::Int => "int",
+        FieldKind::Float => "float",
+        FieldKind::Text => "text",
+        FieldKind::Blob => "blob",
         FieldKind::Vector => "vector",
     }
 }
@@ -273,23 +323,29 @@ pub fn field_kind_to_str(k: FieldKind) -> &'static str {
 pub fn storage_mode_from_str(s: &str) -> StorageMode {
     match s.to_ascii_lowercase().as_str() {
         "mmap" => StorageMode::Mmap,
-        _      => StorageMode::Memory,
+        _ => StorageMode::Memory,
     }
 }
 
 pub fn storage_mode_to_str(mode: StorageMode) -> &'static str {
     match mode {
         StorageMode::Memory => "memory",
-        StorageMode::Mmap   => "mmap",
+        StorageMode::Mmap => "mmap",
     }
 }
 
-pub fn vector_space_def_from_proto(proto: &proto::VectorSpaceDef) -> Result<VectorSpaceDef, Status> {
+pub fn vector_space_def_from_proto(
+    proto: &proto::VectorSpaceDef,
+) -> Result<VectorSpaceDef, Status> {
     if proto.space_name.is_empty() {
-        return Err(Status::invalid_argument("vector_space.space_name must not be empty"));
+        return Err(Status::invalid_argument(
+            "vector_space.space_name must not be empty",
+        ));
     }
     if proto.dimensions == 0 {
-        return Err(Status::invalid_argument("vector_space.dimensions must be > 0"));
+        return Err(Status::invalid_argument(
+            "vector_space.dimensions must be > 0",
+        ));
     }
     let mut def = VectorSpaceDef::new(proto.space_name.clone(), proto.dimensions);
     if !proto.embedding_model.is_empty() {
@@ -303,10 +359,10 @@ pub fn vector_space_def_from_proto(proto: &proto::VectorSpaceDef) -> Result<Vect
 
 pub fn vector_space_def_to_proto(def: &VectorSpaceDef) -> proto::VectorSpaceDef {
     proto::VectorSpaceDef {
-        space_name:     def.space_name.clone(),
-        dimensions:     def.dimensions,
+        space_name: def.space_name.clone(),
+        dimensions: def.dimensions,
         embedding_model: def.embedding_model.clone().unwrap_or_default(),
-        storage_mode:   storage_mode_to_str(def.storage_mode).to_string(),
+        storage_mode: storage_mode_to_str(def.storage_mode).to_string(),
     }
 }
 
@@ -407,12 +463,24 @@ pub fn edge_type_def_from_proto(proto: &proto::EdgeTypeDef) -> Result<EdgeTypeDe
         .collect::<Result<Vec<_>, _>>()?;
 
     let cardinality = cardinality_from_str(&proto.cardinality)?;
-    let inverse_of = if proto.inverse_of.is_empty() { None } else { Some(proto.inverse_of.clone()) };
+    let inverse_of = if proto.inverse_of.is_empty() {
+        None
+    } else {
+        Some(proto.inverse_of.clone())
+    };
 
     Ok(EdgeTypeDef {
         predicate: proto.predicate.clone(),
-        domain: if proto.domain.is_empty() { None } else { Some(proto.domain.clone()) },
-        range:  if proto.range.is_empty()  { None } else { Some(proto.range.clone())  },
+        domain: if proto.domain.is_empty() {
+            None
+        } else {
+            Some(proto.domain.clone())
+        },
+        range: if proto.range.is_empty() {
+            None
+        } else {
+            Some(proto.range.clone())
+        },
         fields,
         cardinality,
         inverse_of,
@@ -421,11 +489,11 @@ pub fn edge_type_def_from_proto(proto: &proto::EdgeTypeDef) -> Result<EdgeTypeDe
 
 pub fn edge_type_def_to_proto(def: &EdgeTypeDef) -> proto::EdgeTypeDef {
     proto::EdgeTypeDef {
-        predicate:   def.predicate.clone(),
-        domain:      def.domain.clone().unwrap_or_default(),
-        range:       def.range.clone().unwrap_or_default(),
+        predicate: def.predicate.clone(),
+        domain: def.domain.clone().unwrap_or_default(),
+        range: def.range.clone().unwrap_or_default(),
         cardinality: cardinality_to_str(def.cardinality).to_string(),
-        inverse_of:  def.inverse_of.clone().unwrap_or_default(),
+        inverse_of: def.inverse_of.clone().unwrap_or_default(),
         fields: def
             .fields
             .iter()
@@ -443,9 +511,7 @@ pub fn edge_type_def_to_proto(def: &EdgeTypeDef) -> proto::EdgeTypeDef {
 /// Convert a proto `EdgeAnnotation` to a Rust `Triple` (EdgeProperty or EdgeRelation).
 ///
 /// Returns the triple ready to be buffered into a `Transaction`.
-pub fn edge_annotation_from_proto(
-    proto: &proto::EdgeAnnotation,
-) -> Result<Triple, Status> {
+pub fn edge_annotation_from_proto(proto: &proto::EdgeAnnotation) -> Result<Triple, Status> {
     let edge_bytes: [u8; 16] = proto
         .edge_id
         .as_slice()
@@ -454,25 +520,38 @@ pub fn edge_annotation_from_proto(
     let edge = EdgeId(uuid::Uuid::from_bytes(edge_bytes));
 
     if proto.predicate.is_empty() {
-        return Err(Status::invalid_argument("edge annotation predicate must not be empty"));
+        return Err(Status::invalid_argument(
+            "edge annotation predicate must not be empty",
+        ));
     }
     let predicate = Predicate::new(proto.predicate.clone());
     let temporal = BiTemporalRange::assert_now(Timestamp::now());
 
     match &proto.value {
         Some(AnnotationValueProto::NodeId(bytes)) => {
-            let node_bytes: [u8; 16] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| Status::invalid_argument("annotation node_id must be exactly 16 bytes"))?;
+            let node_bytes: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+                Status::invalid_argument("annotation node_id must be exactly 16 bytes")
+            })?;
             let object = NodeId(uuid::Uuid::from_bytes(node_bytes));
-            Ok(Triple::EdgeRelation { edge, predicate, object, temporal })
+            Ok(Triple::EdgeRelation {
+                edge,
+                predicate,
+                object,
+                temporal,
+            })
         }
         Some(AnnotationValueProto::Scalar(v)) => {
             let value = value_from_proto(v)?;
-            Ok(Triple::EdgeProperty { edge, predicate, value, temporal })
+            Ok(Triple::EdgeProperty {
+                edge,
+                predicate,
+                value,
+                temporal,
+            })
         }
-        None => Err(Status::invalid_argument("edge annotation must have a value (scalar or node_id)")),
+        None => Err(Status::invalid_argument(
+            "edge annotation must have a value (scalar or node_id)",
+        )),
     }
 }
 
@@ -484,9 +563,7 @@ pub fn edge_annotation_to_proto(
     edge_id_bytes: Vec<u8>,
 ) -> proto::EdgeAnnotation {
     let value = match &annotation.value {
-        EdgeAnnotationValue::Scalar(v) => {
-            AnnotationValueProto::Scalar(value_to_proto(v))
-        }
+        EdgeAnnotationValue::Scalar(v) => AnnotationValueProto::Scalar(value_to_proto(v)),
         EdgeAnnotationValue::Node(node_id) => {
             AnnotationValueProto::NodeId(node_id.as_bytes().to_vec())
         }
@@ -506,7 +583,9 @@ mod tests {
     use polargraph_core::id::NodeId;
 
     fn sample_node_id() -> NodeId {
-        NodeId(Uuid::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]))
+        NodeId(Uuid::from_bytes([
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+        ]))
     }
 
     #[test]
@@ -519,7 +598,9 @@ mod tests {
 
     #[test]
     fn node_id_wrong_length_errors() {
-        let bad = proto::NodeId { bytes: vec![0u8; 15] };
+        let bad = proto::NodeId {
+            bytes: vec![0u8; 15],
+        };
         assert!(node_id_from_proto(&bad).is_err());
     }
 
@@ -557,7 +638,9 @@ mod tests {
 
     #[test]
     fn term_var_round_trips() {
-        let proto = proto::Term { kind: Some(TermKind::Var("manager".into())) };
+        let proto = proto::Term {
+            kind: Some(TermKind::Var("manager".into())),
+        };
         match term_from_proto(&proto).unwrap() {
             Term::Var(name) => assert_eq!(name, "manager"),
             other => panic!("expected Var, got {other:?}"),
@@ -572,7 +655,9 @@ mod tests {
 
     #[test]
     fn empty_var_name_errors() {
-        let proto = proto::Term { kind: Some(TermKind::Var(String::new())) };
+        let proto = proto::Term {
+            kind: Some(TermKind::Var(String::new())),
+        };
         assert!(term_from_proto(&proto).is_err());
     }
 

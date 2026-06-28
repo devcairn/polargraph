@@ -1,7 +1,7 @@
 //! Integration tests for the HNSW vector index wired into TripleStore.
 
 use polargraph_core::id::NodeId;
-use polargraph_core::schema::{NodeTypeDef, FieldDef, FieldKind, StorageMode, VectorSpaceDef};
+use polargraph_core::schema::{FieldDef, FieldKind, NodeTypeDef, StorageMode, VectorSpaceDef};
 use polargraph_storage::{NodeTypeRegistry, TripleStore};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -28,7 +28,9 @@ fn unit_vec(dim: usize, hot: usize) -> Vec<f32> {
 fn insert_and_search_single_vector() {
     let (store, _dir) = open_store();
     let id = node(1);
-    store.insert_vector("default", id, vec![1.0, 0.0, 0.0], StorageMode::Memory).unwrap();
+    store
+        .insert_vector("default", id, vec![1.0, 0.0, 0.0], StorageMode::Memory)
+        .unwrap();
     let results = store.search_vector("default", vec![1.0, 0.0, 0.0], 1);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, id);
@@ -54,7 +56,9 @@ fn nearest_neighbor_is_most_similar() {
     let (store, _dir) = open_store();
     let ids: Vec<NodeId> = (1u8..=8).map(node).collect();
     for (i, &id) in ids.iter().enumerate() {
-        store.insert_vector("default", id, unit_vec(8, i), StorageMode::Memory).unwrap();
+        store
+            .insert_vector("default", id, unit_vec(8, i), StorageMode::Memory)
+            .unwrap();
     }
     let results = store.search_vector("default", unit_vec(8, 5), 1);
     assert_eq!(results[0].0, ids[5]);
@@ -65,7 +69,9 @@ fn top_k_results_are_ordered_by_similarity() {
     let (store, _dir) = open_store();
     let ids: Vec<NodeId> = (1u8..=5).map(node).collect();
     for (i, &id) in ids.iter().enumerate() {
-        store.insert_vector("default", id, unit_vec(5, i), StorageMode::Memory).unwrap();
+        store
+            .insert_vector("default", id, unit_vec(5, i), StorageMode::Memory)
+            .unwrap();
     }
     let results = store.search_vector("default", unit_vec(5, 0), 5);
     assert_eq!(results[0].0, ids[0]);
@@ -79,8 +85,12 @@ fn named_spaces_are_independent() {
     let (store, _dir) = open_store();
     let id_a = node(1);
     let id_b = node(2);
-    store.insert_vector("space_a", id_a, unit_vec(4, 0), StorageMode::Memory).unwrap();
-    store.insert_vector("space_b", id_b, unit_vec(4, 1), StorageMode::Memory).unwrap();
+    store
+        .insert_vector("space_a", id_a, unit_vec(4, 0), StorageMode::Memory)
+        .unwrap();
+    store
+        .insert_vector("space_b", id_b, unit_vec(4, 1), StorageMode::Memory)
+        .unwrap();
 
     // space_a does not contain id_b
     let res_a = store.search_vector("space_a", unit_vec(4, 0), 5);
@@ -101,8 +111,12 @@ fn named_spaces_persist_across_reopen() {
 
     {
         let store = TripleStore::open(dir.path()).unwrap();
-        store.insert_vector("space_a", id_a, unit_vec(4, 0), StorageMode::Memory).unwrap();
-        store.insert_vector("space_b", id_b, unit_vec(4, 1), StorageMode::Memory).unwrap();
+        store
+            .insert_vector("space_a", id_a, unit_vec(4, 0), StorageMode::Memory)
+            .unwrap();
+        store
+            .insert_vector("space_b", id_b, unit_vec(4, 1), StorageMode::Memory)
+            .unwrap();
     }
 
     let store2 = TripleStore::open(dir.path()).unwrap();
@@ -125,7 +139,9 @@ fn vector_index_persists_across_reopen() {
     {
         let store = TripleStore::open(dir.path()).unwrap();
         for (i, &id) in ids.iter().enumerate() {
-            store.insert_vector("default", id, unit_vec(4, i), StorageMode::Memory).unwrap();
+            store
+                .insert_vector("default", id, unit_vec(4, i), StorageMode::Memory)
+                .unwrap();
         }
     }
 
@@ -141,11 +157,17 @@ fn vector_index_persists_across_reopen() {
 fn insert_vector_twice_updates_index() {
     let (store, _dir) = open_store();
     let id = node(1);
-    store.insert_vector("default", id, unit_vec(2, 0), StorageMode::Memory).unwrap();
-    store.insert_vector("default", id, unit_vec(2, 1), StorageMode::Memory).unwrap();
+    store
+        .insert_vector("default", id, unit_vec(2, 0), StorageMode::Memory)
+        .unwrap();
+    store
+        .insert_vector("default", id, unit_vec(2, 1), StorageMode::Memory)
+        .unwrap();
 
     let id2 = node(2);
-    store.insert_vector("default", id2, unit_vec(2, 0), StorageMode::Memory).unwrap();
+    store
+        .insert_vector("default", id2, unit_vec(2, 0), StorageMode::Memory)
+        .unwrap();
 
     let results = store.search_vector("default", unit_vec(2, 1), 1);
     assert_eq!(results[0].0, id);
@@ -158,7 +180,9 @@ fn search_in_set_returns_only_allowed_nodes() {
     let (store, _dir) = open_store();
     let ids: Vec<NodeId> = (1u8..=6).map(node).collect();
     for (i, &id) in ids.iter().enumerate() {
-        store.insert_vector("default", id, unit_vec(6, i), StorageMode::Memory).unwrap();
+        store
+            .insert_vector("default", id, unit_vec(6, i), StorageMode::Memory)
+            .unwrap();
     }
 
     // Best match for dim 0 is ids[0], but only ids[1..=3] are allowed.
@@ -179,7 +203,9 @@ fn search_in_set_on_unknown_space_returns_empty() {
 #[test]
 fn search_in_set_skips_nodes_not_in_index() {
     let (store, _dir) = open_store();
-    store.insert_vector("default", node(1), unit_vec(4, 0), StorageMode::Memory).unwrap();
+    store
+        .insert_vector("default", node(1), unit_vec(4, 0), StorageMode::Memory)
+        .unwrap();
     // node(2) was never inserted
     let allowed = vec![node(1), node(2)];
     let results = store.search_vector_in_set("default", &unit_vec(4, 0), 5, &allowed);
@@ -220,9 +246,8 @@ fn batch_insert_empty_is_noop() {
 #[test]
 fn node_type_with_vector_space_persists() {
     let dir = TempDir::new().unwrap();
-    let def = NodeTypeDef::new("Widget", vec![
-        FieldDef::required("name", FieldKind::Text),
-    ]).with_vector_space(VectorSpaceDef::new("widget_space", 4));
+    let def = NodeTypeDef::new("Widget", vec![FieldDef::required("name", FieldKind::Text)])
+        .with_vector_space(VectorSpaceDef::new("widget_space", 4));
 
     {
         let store = TripleStore::open(dir.path()).unwrap();
@@ -248,7 +273,10 @@ fn get_space_def_returns_registered_space() {
 
     let found = reg.get_space_def("my_space").unwrap();
     assert_eq!(found.dimensions, 128);
-    assert_eq!(found.embedding_model.as_deref(), Some("text-embedding-3-small"));
+    assert_eq!(
+        found.embedding_model.as_deref(),
+        Some("text-embedding-3-small")
+    );
 }
 
 #[test]
@@ -294,20 +322,24 @@ fn mmap_recall_matches_in_memory() {
         })
         .collect();
 
-    let dir_mem  = TempDir::new().unwrap();
+    let dir_mem = TempDir::new().unwrap();
     let dir_mmap = TempDir::new().unwrap();
 
-    let store_mem  = TripleStore::open(dir_mem.path()).unwrap();
+    let store_mem = TripleStore::open(dir_mem.path()).unwrap();
     let store_mmap = TripleStore::open(dir_mmap.path()).unwrap();
 
     for (i, &id) in ids.iter().enumerate() {
-        store_mem.insert_vector("s", id, vecs[i].clone(), StorageMode::Memory).unwrap();
-        store_mmap.insert_vector("s", id, vecs[i].clone(), StorageMode::Mmap).unwrap();
+        store_mem
+            .insert_vector("s", id, vecs[i].clone(), StorageMode::Memory)
+            .unwrap();
+        store_mmap
+            .insert_vector("s", id, vecs[i].clone(), StorageMode::Mmap)
+            .unwrap();
     }
 
     let query = vecs[17].clone();
     let k = 5;
-    let res_mem  = store_mem.search_vector("s", query.clone(), k);
+    let res_mem = store_mem.search_vector("s", query.clone(), k);
     let res_mmap = store_mmap.search_vector("s", query, k);
 
     assert_eq!(res_mem.len(), res_mmap.len());

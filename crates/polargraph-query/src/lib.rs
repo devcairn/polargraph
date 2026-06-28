@@ -32,7 +32,7 @@ pub use datalog::{
 pub use eval::{evaluate, evaluate_annotations, evaluate_with_registry};
 pub use explain::{explain_query, ExplainPlan, ExplainStep};
 pub use planner::{
-    choose_annotation_index, choose_index, AnnotationIndexChoice, AnnotationPattern,
-    IndexChoice, Pattern, SchemaHints,
+    choose_annotation_index, choose_index, AnnotationIndexChoice, AnnotationPattern, IndexChoice,
+    Pattern, SchemaHints,
 };
 pub use projection::{apply_view, ProjectedTriple};

@@ -62,12 +62,18 @@ fn old_triples_deleted_by_tx_age() {
     assert_eq!(triples.len(), 1, "triple should exist before retention");
 
     // Run retention: tx_age = 1 second → anything written more than 1 s ago is deleted.
-    let policy = RetentionPolicy { tx_age_secs: 1, vt_lookback_secs: None };
+    let policy = RetentionPolicy {
+        tx_age_secs: 1,
+        vt_lookback_secs: None,
+    };
     let mgr = CompactionManager::new(store.clone());
     let stats = mgr.run_retention(&policy).unwrap();
 
     // 6 CFs × 1 triple each = 6 entries scanned and deleted.
-    assert_eq!(stats.triples_deleted, 6, "all 6 CF copies should be deleted");
+    assert_eq!(
+        stats.triples_deleted, 6,
+        "all 6 CF copies should be deleted"
+    );
     assert!(stats.triples_scanned >= 6);
 
     // Triple is gone.
@@ -81,10 +87,15 @@ fn recent_triples_survive_tx_age_retention() {
     let s = node();
 
     // Insert at current time (normal path).
-    store.insert(&prop(s, "label", "current", i64::MAX)).unwrap();
+    store
+        .insert(&prop(s, "label", "current", i64::MAX))
+        .unwrap();
 
     // Run retention: tx_age = 1 second. The triple was just inserted → survives.
-    let policy = RetentionPolicy { tx_age_secs: 1, vt_lookback_secs: None };
+    let policy = RetentionPolicy {
+        tx_age_secs: 1,
+        vt_lookback_secs: None,
+    };
     let mgr = CompactionManager::new(store.clone());
     let stats = mgr.run_retention(&policy).unwrap();
 
@@ -153,7 +164,10 @@ fn retention_ignores_meta_cf() {
     let t = prop(s, "my_pred", "val", i64::MAX);
     store.insert_at_ts(&t, Timestamp(1)).unwrap();
 
-    let policy = RetentionPolicy { tx_age_secs: 0, vt_lookback_secs: None };
+    let policy = RetentionPolicy {
+        tx_age_secs: 0,
+        vt_lookback_secs: None,
+    };
     let mgr = CompactionManager::new(store.clone());
     mgr.run_retention(&policy).unwrap();
 
@@ -172,10 +186,17 @@ fn mixed_old_and_new_triples() {
     let ancient_tt = Timestamp(1);
     let current_tt = Timestamp(now);
 
-    store.insert_at_ts(&prop(old_subject, "label", "old", i64::MAX), ancient_tt).unwrap();
-    store.insert_at_ts(&prop(new_subject, "label", "new", i64::MAX), current_tt).unwrap();
+    store
+        .insert_at_ts(&prop(old_subject, "label", "old", i64::MAX), ancient_tt)
+        .unwrap();
+    store
+        .insert_at_ts(&prop(new_subject, "label", "new", i64::MAX), current_tt)
+        .unwrap();
 
-    let policy = RetentionPolicy { tx_age_secs: 1, vt_lookback_secs: None };
+    let policy = RetentionPolicy {
+        tx_age_secs: 1,
+        vt_lookback_secs: None,
+    };
     let mgr = CompactionManager::new(store.clone());
     let stats = mgr.run_retention(&policy).unwrap();
 

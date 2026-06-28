@@ -7,67 +7,46 @@ use crate::{
     auth::KeyStore,
     convert,
     proto::{
-        polar_graph_service_server::PolarGraphService,
-        search_vector_filtered_request::Filter,
-        vector_seed_query_request::Filter as SeedFilter,
-        grant_access_request::Target as GrantTarget,
-        revoke_access_request::Target as RevokeTarget,
-        AddApiKeyRequest, AddApiKeyResponse,
-        AddUserToGroupRequest, AddUserToGroupResponse,
-        BackupInfo as ProtoBackupInfo,
-        BatchInsertError, BatchInsertVectorsRequest, BatchInsertVectorsResponse,
-        BeginTransactionRequest, BeginTransactionResponse,
-        CommitTransactionRequest, CommitTransactionResponse,
-        CreateBackupRequest, CreateBackupResponse,
-        AppliedMigrationInfo,
-        CypherBinding, CypherQueryRequest, CypherQueryResponse, CypherWriteRequest, CypherWriteResponse,
-        ExplainResponse, PlanNode,
-        GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse,
-        GetPropertyHistoryRequest, GetPropertyHistoryResponse, PropertyVersion,
-        GetEdgeTypeRequest, GetEdgeTypeResponse,
-        GetNodeTypeRequest, GetNodeTypeResponse,
-        GetUserAccessRequest, GetUserAccessResponse,
-        GrantAccessRequest, GrantAccessResponse,
-        InsertRequest, InsertResponse, InsertVectorRequest, InsertVectorResponse,
-        ListApiKeysRequest, ListApiKeysResponse,
-        ListBackupsRequest, ListBackupsResponse,
-        ListEdgeTypesRequest, ListEdgeTypesResponse,
-        ListNodeTypesRequest, ListNodeTypesResponse,
-        ListPredicatesBetweenRequest, ListPredicatesBetweenResponse,
-        OntologyViolation,
-        ValidateOntologyRequest, ValidateOntologyResponse,
-        MigrateRequest, MigrateResponse, MigrationStatusRequest, MigrationStatusResponse,
-        PurgeOldBackupsRequest, PurgeOldBackupsResponse,
-        QueryRequest, QueryResponse, QueryStreamChunk, ReachableRequest, ReachableResponse,
-        RegisterEdgeTypeRequest, RegisterEdgeTypeResponse,
-        RegisterNodeTypeRequest, RegisterNodeTypeResponse,
-        ReplicaStatusRequest, ReplicaStatusResponse,
-        RevokeAccessRequest, RevokeAccessResponse,
-        RevokeApiKeyRequest, RevokeApiKeyResponse,
-        RollbackTransactionRequest, RollbackTransactionResponse,
-        RunRetentionRequest, RunRetentionResponse,
-        ScoredBinding,
-        SearchVectorFilteredRequest, SearchVectorFilteredResponse,
-        SearchVectorInSetRequest, SearchVectorInSetResponse,
-        SearchVectorRequest, SearchVectorResponse,
-        ShowIndexesRequest, ShowIndexesResponse,
-        ShowStatsRequest, ShowStatsResponse,
-        ColumnFamilyInfo, VectorSpaceInfo,
-        StreamWalRequest, WalEntry,
-        ValidateEdgeRequest, ValidateEdgeResponse,
-        ValidateNodeRequest, ValidateNodeResponse,
-        VectorSearchResult, VectorSeedQueryRequest, VectorSeedQueryResponse,
-        DeleteTriplesRequest, DeleteTriplesResponse,
-        RunMaterializationRequest, RunMaterializationResponse,
-        GetEdgeIdsByTripleRequest, GetEdgeIdsByTripleResponse,
+        grant_access_request::Target as GrantTarget, polar_graph_service_server::PolarGraphService,
+        revoke_access_request::Target as RevokeTarget, search_vector_filtered_request::Filter,
+        vector_seed_query_request::Filter as SeedFilter, AddApiKeyRequest, AddApiKeyResponse,
+        AddUserToGroupRequest, AddUserToGroupResponse, AppliedMigrationInfo,
+        BackupInfo as ProtoBackupInfo, BatchInsertError, BatchInsertVectorsRequest,
+        BatchInsertVectorsResponse, BeginTransactionRequest, BeginTransactionResponse,
+        ColumnFamilyInfo, CommitTransactionRequest, CommitTransactionResponse, CreateBackupRequest,
+        CreateBackupResponse, CypherBinding, CypherQueryRequest, CypherQueryResponse,
+        CypherWriteRequest, CypherWriteResponse, DeleteTriplesRequest, DeleteTriplesResponse,
+        ExplainResponse, GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse,
+        GetEdgeIdsByTripleRequest, GetEdgeIdsByTripleResponse, GetEdgeTypeRequest,
+        GetEdgeTypeResponse, GetNodeTypeRequest, GetNodeTypeResponse, GetPropertyHistoryRequest,
+        GetPropertyHistoryResponse, GetUserAccessRequest, GetUserAccessResponse,
+        GrantAccessRequest, GrantAccessResponse, InsertRequest, InsertResponse,
+        InsertVectorRequest, InsertVectorResponse, ListApiKeysRequest, ListApiKeysResponse,
+        ListBackupsRequest, ListBackupsResponse, ListEdgeTypesRequest, ListEdgeTypesResponse,
+        ListNodeTypesRequest, ListNodeTypesResponse, ListPredicatesBetweenRequest,
+        ListPredicatesBetweenResponse, MigrateRequest, MigrateResponse, MigrationStatusRequest,
+        MigrationStatusResponse, OntologyViolation, PlanNode, PropertyVersion,
+        PurgeOldBackupsRequest, PurgeOldBackupsResponse, QueryRequest, QueryResponse,
+        QueryStreamChunk, ReachableRequest, ReachableResponse, RegisterEdgeTypeRequest,
+        RegisterEdgeTypeResponse, RegisterNodeTypeRequest, RegisterNodeTypeResponse,
+        ReplicaStatusRequest, ReplicaStatusResponse, RevokeAccessRequest, RevokeAccessResponse,
+        RevokeApiKeyRequest, RevokeApiKeyResponse, RollbackTransactionRequest,
+        RollbackTransactionResponse, RunMaterializationRequest, RunMaterializationResponse,
+        RunRetentionRequest, RunRetentionResponse, ScoredBinding, SearchVectorFilteredRequest,
+        SearchVectorFilteredResponse, SearchVectorInSetRequest, SearchVectorInSetResponse,
+        SearchVectorRequest, SearchVectorResponse, ShowIndexesRequest, ShowIndexesResponse,
+        ShowStatsRequest, ShowStatsResponse, StreamWalRequest, ValidateEdgeRequest,
+        ValidateEdgeResponse, ValidateNodeRequest, ValidateNodeResponse, ValidateOntologyRequest,
+        ValidateOntologyResponse, VectorSearchResult, VectorSeedQueryRequest,
+        VectorSeedQueryResponse, VectorSpaceInfo, WalEntry,
     },
 };
 use dashmap::DashMap;
 use polargraph_core::{
     id::{EdgeId, NodeId},
     schema::{
-        RetentionPolicy, StorageMode,
-        BUILTIN_HAS_ACCESS_PRED, BUILTIN_HAS_ACCESS_TYPE_PRED, BUILTIN_MEMBER_OF_PRED,
+        RetentionPolicy, StorageMode, BUILTIN_HAS_ACCESS_PRED, BUILTIN_HAS_ACCESS_TYPE_PRED,
+        BUILTIN_MEMBER_OF_PRED,
     },
     triple::Triple,
     value::Value,
@@ -78,9 +57,11 @@ use polargraph_query::datalog::{
     QueryError,
 };
 use polargraph_query::explain::explain_query;
-use polargraph_storage::{BackupManager, CompactionManager, EdgeTypeRegistry, MigrationRunner, NodeTypeRegistry, StorageError, Transaction, TripleStore, WalStreamer, MIGRATIONS};
 use polargraph_storage::owl_rl;
-use uuid;
+use polargraph_storage::{
+    BackupManager, CompactionManager, EdgeTypeRegistry, MigrationRunner, NodeTypeRegistry,
+    StorageError, Transaction, TripleStore, WalStreamer, MIGRATIONS,
+};
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -95,6 +76,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, warn};
+use uuid;
 
 // ── Open-transaction state ────────────────────────────────────────────────────
 
@@ -295,8 +277,9 @@ impl PolarGraphServer {
     ) -> Result<std::collections::HashMap<String, polargraph_core::value::Value>, Status> {
         raw.iter()
             .map(|(k, v)| {
-                let val: polargraph_core::value::Value = serde_json::from_str(v)
-                    .map_err(|e| Status::invalid_argument(format!("invalid param '{}': {}", k, e)))?;
+                let val: polargraph_core::value::Value = serde_json::from_str(v).map_err(|e| {
+                    Status::invalid_argument(format!("invalid param '{}': {}", k, e))
+                })?;
                 Ok((k.clone(), val))
             })
             .collect()
@@ -433,12 +416,19 @@ impl PolarGraphServer {
 
     /// Scan existing `__type` triples and build the initial cache.
     /// Called once at startup; O(N) in the number of typed nodes.
-    fn build_type_cache(store: &TripleStore) -> Result<HashMap<String, HashSet<NodeId>>, StorageError> {
+    fn build_type_cache(
+        store: &TripleStore,
+    ) -> Result<HashMap<String, HashSet<NodeId>>, StorageError> {
         let snapshot = store.snapshot(store.begin().read_ts);
         let triples = snapshot.scan_by_predicate("__type")?;
         let mut cache: HashMap<String, HashSet<NodeId>> = HashMap::new();
         for triple in triples {
-            if let Triple::Property { subject, value: Value::Text(type_name), .. } = triple {
+            if let Triple::Property {
+                subject,
+                value: Value::Text(type_name),
+                ..
+            } = triple
+            {
                 cache.entry(type_name).or_default().insert(subject);
             }
         }
@@ -463,7 +453,13 @@ impl PolarGraphServer {
         // 1. group_id → list of user node IDs (only currently-valid MEMBER_OF triples).
         let mut group_to_users: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         for triple in store.scan_by_predicate(BUILTIN_MEMBER_OF_PRED)? {
-            if let Triple::Relation { subject: user_id, object: group_id, temporal, .. } = triple {
+            if let Triple::Relation {
+                subject: user_id,
+                object: group_id,
+                temporal,
+                ..
+            } = triple
+            {
                 if temporal.vt_end == end_of_time {
                     group_to_users.entry(group_id).or_default().push(user_id);
                 }
@@ -473,7 +469,13 @@ impl PolarGraphServer {
         // 2. group_id → set of directly-granted node IDs (only currently-valid HAS_ACCESS triples).
         let mut group_to_nodes: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
         for triple in store.scan_by_predicate(BUILTIN_HAS_ACCESS_PRED)? {
-            if let Triple::Relation { subject: group_id, object: node_id, temporal, .. } = triple {
+            if let Triple::Relation {
+                subject: group_id,
+                object: node_id,
+                temporal,
+                ..
+            } = triple
+            {
                 if temporal.vt_end == end_of_time {
                     group_to_nodes.entry(group_id).or_default().insert(node_id);
                 }
@@ -483,7 +485,13 @@ impl PolarGraphServer {
         // 3. group_id → set of type-level grants (only currently-valid HAS_ACCESS_TYPE triples).
         let mut group_to_types: HashMap<NodeId, Vec<String>> = HashMap::new();
         for triple in store.scan_by_predicate(BUILTIN_HAS_ACCESS_TYPE_PRED)? {
-            if let Triple::Property { subject: group_id, value: Value::Text(type_name), temporal, .. } = triple {
+            if let Triple::Property {
+                subject: group_id,
+                value: Value::Text(type_name),
+                temporal,
+                ..
+            } = triple
+            {
                 if temporal.vt_end == end_of_time {
                     group_to_types.entry(group_id).or_default().push(type_name);
                 }
@@ -494,10 +502,8 @@ impl PolarGraphServer {
         let mut cache: HashMap<String, HashSet<NodeId>> = HashMap::new();
         for (group_id, users) in &group_to_users {
             // Direct node grants for this group.
-            let direct_nodes: HashSet<NodeId> = group_to_nodes
-                .get(group_id)
-                .cloned()
-                .unwrap_or_default();
+            let direct_nodes: HashSet<NodeId> =
+                group_to_nodes.get(group_id).cloned().unwrap_or_default();
 
             // Type-expanded nodes for this group.
             let mut type_nodes: HashSet<NodeId> = HashSet::new();
@@ -536,8 +542,7 @@ impl PolarGraphServer {
                 true
             }
             Triple::Property { predicate, .. }
-                if predicate.0 == BUILTIN_HAS_ACCESS_TYPE_PRED
-                    || predicate.0 == "__type" =>
+                if predicate.0 == BUILTIN_HAS_ACCESS_TYPE_PRED || predicate.0 == "__type" =>
             {
                 true
             }
@@ -549,9 +554,8 @@ impl PolarGraphServer {
         }
 
         // Rebuild the full access cache using the current type cache snapshot.
-        let type_cache_snapshot: HashMap<String, HashSet<NodeId>> = {
-            self.type_cache.read().unwrap().clone()
-        };
+        let type_cache_snapshot: HashMap<String, HashSet<NodeId>> =
+            { self.type_cache.read().unwrap().clone() };
 
         match Self::build_access_cache(&self.store, &type_cache_snapshot) {
             Ok(new_cache) => {
@@ -599,11 +603,12 @@ impl PolarGraphServer {
         let updates: Vec<(NodeId, String)> = triples
             .iter()
             .filter_map(|t| match t {
-                Triple::Property { subject, predicate, value: Value::Text(type_name), .. }
-                    if predicate.0 == "__type" =>
-                {
-                    Some((*subject, type_name.clone()))
-                }
+                Triple::Property {
+                    subject,
+                    predicate,
+                    value: Value::Text(type_name),
+                    ..
+                } if predicate.0 == "__type" => Some((*subject, type_name.clone())),
                 _ => None,
             })
             .collect();
@@ -634,7 +639,11 @@ fn meta_user_id(metadata: &tonic::metadata::MetadataMap) -> String {
 /// Resolve the effective user identity: prefer the explicit proto field over
 /// the metadata header.  Returns an empty string when neither is set.
 fn resolve_user_id(field: &str, from_meta: &str) -> String {
-    if !field.is_empty() { field.to_string() } else { from_meta.to_string() }
+    if !field.is_empty() {
+        field.to_string()
+    } else {
+        from_meta.to_string()
+    }
 }
 
 /// Filter a set of Datalog `Bindings` rows to only those where every bound
@@ -666,7 +675,9 @@ impl PolarGraphService for PolarGraphServer {
         let req = request.into_inner();
 
         if req.triples.is_empty() && req.edge_annotations.is_empty() {
-            return Err(Status::invalid_argument("insert request must contain at least one triple or edge annotation"));
+            return Err(Status::invalid_argument(
+                "insert request must contain at least one triple or edge annotation",
+            ));
         }
 
         // Convert proto triples → core triples, collecting EdgeIds for relations.
@@ -686,26 +697,39 @@ impl PolarGraphService for PolarGraphServer {
             all_triples.push(triple);
         }
 
-        debug!("insert: {} triple(s) ({} relation(s), {} annotation(s))", all_triples.len(), edge_ids.len(), req.edge_annotations.len());
+        debug!(
+            "insert: {} triple(s) ({} relation(s), {} annotation(s))",
+            all_triples.len(),
+            edge_ids.len(),
+            req.edge_annotations.len()
+        );
 
         // If a tx_id is provided, buffer into the open transaction without committing.
         if !req.tx_id.is_empty() {
-            let entry = self
-                .tx_map
-                .get(&req.tx_id)
-                .ok_or_else(|| Status::not_found(format!("unknown or expired transaction: {}", req.tx_id)))?;
+            let entry = self.tx_map.get(&req.tx_id).ok_or_else(|| {
+                Status::not_found(format!("unknown or expired transaction: {}", req.tx_id))
+            })?;
             let mut guard = entry.lock().await;
             for triple in &all_triples {
                 guard.tx.insert(triple.clone());
             }
             guard.last_used = Instant::now();
             debug!(tx_id = %req.tx_id, "buffered {} triple(s) into open transaction", all_triples.len());
-            return Ok(Response::new(InsertResponse { commit_ts: 0, edge_ids }));
+            return Ok(Response::new(InsertResponse {
+                commit_ts: 0,
+                edge_ids,
+            }));
         }
 
         // Cardinality pre-check: scan committed state before inserting.
         for triple in &all_triples {
-            if let Triple::Relation { subject, predicate, object, .. } = triple {
+            if let Triple::Relation {
+                subject,
+                predicate,
+                object,
+                ..
+            } = triple
+            {
                 self.edge_registry
                     .validate_cardinality(predicate.0.as_str(), *subject, *object, &self.store)
                     .map_err(|e| Status::failed_precondition(e.message))?;
@@ -726,7 +750,10 @@ impl PolarGraphService for PolarGraphServer {
 
         metrics::gauge!("polargraph_triples_total").increment(all_triples.len() as f64);
 
-        Ok(Response::new(InsertResponse { commit_ts: commit_ts.0, edge_ids }))
+        Ok(Response::new(InsertResponse {
+            commit_ts: commit_ts.0,
+            edge_ids,
+        }))
     }
 
     /// Execute a conjunctive query and return all satisfying bindings.
@@ -739,7 +766,9 @@ impl PolarGraphService for PolarGraphServer {
         let user_id = resolve_user_id(&req.user_id, &meta_uid);
 
         if req.patterns.is_empty() {
-            return Err(Status::invalid_argument("query must contain at least one pattern"));
+            return Err(Status::invalid_argument(
+                "query must contain at least one pattern",
+            ));
         }
 
         // Convert proto VarPatterns → datalog VarPatterns.
@@ -759,11 +788,16 @@ impl PolarGraphService for PolarGraphServer {
 
         // Resolve snapshot timestamp:
         // as_of_tx_time takes priority over snapshot_ts; 0 on either = latest.
-        let tx_ts = if req.as_of_tx_time != 0 { req.as_of_tx_time } else { req.snapshot_ts };
+        let tx_ts = if req.as_of_tx_time != 0 {
+            req.as_of_tx_time
+        } else {
+            req.snapshot_ts
+        };
         let mut snapshot = if tx_ts == 0 {
             self.store.snapshot(self.store.begin().read_ts)
         } else {
-            self.store.snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+            self.store
+                .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
         };
 
         // Apply valid-time filter when requested.
@@ -773,11 +807,15 @@ impl PolarGraphService for PolarGraphServer {
 
         debug!(
             "query: {} pattern(s) at tx_ts={} vt_as_of={:?}",
-            query.patterns.len(), snapshot.ts.0, snapshot.vt_as_of
+            query.patterns.len(),
+            snapshot.ts.0,
+            snapshot.vt_as_of
         );
 
         // Convert optional Datalog rules.
-        let rules: Vec<_> = req.rules.iter()
+        let rules: Vec<_> = req
+            .rules
+            .iter()
             .map(convert::rule_from_proto)
             .collect::<Result<_, _>>()?;
 
@@ -786,10 +824,9 @@ impl PolarGraphService for PolarGraphServer {
         // When tx_id is set, use the transaction's snapshot (read_ts) and overlay
         // pending write-buffer triples for write-your-own-reads.
         let results = if !req.tx_id.is_empty() {
-            let entry = self
-                .tx_map
-                .get(&req.tx_id)
-                .ok_or_else(|| Status::not_found(format!("unknown or expired transaction: {}", req.tx_id)))?;
+            let entry = self.tx_map.get(&req.tx_id).ok_or_else(|| {
+                Status::not_found(format!("unknown or expired transaction: {}", req.tx_id))
+            })?;
             let mut guard = entry.lock().await;
             guard.last_used = Instant::now();
             let tx_snapshot = self.store.snapshot(guard.tx.read_ts);
@@ -797,21 +834,37 @@ impl PolarGraphService for PolarGraphServer {
             let pending: Vec<Triple> = guard.tx.pending_triples().to_vec();
             drop(guard);
             drop(entry);
-            execute_query_with_pending(&query, &tx_snapshot, &pending, self.make_deadline(), Some(&self.edge_registry))
-                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+            execute_query_with_pending(
+                &query,
+                &tx_snapshot,
+                &pending,
+                self.make_deadline(),
+                Some(&self.edge_registry),
+            )
+            .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
         } else if rules.is_empty() {
             // Fast path: pure conjunctive query against base facts only.
-            execute_query(&query, &snapshot, self.make_deadline(), Some(&self.edge_registry))
-                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+            execute_query(
+                &query,
+                &snapshot,
+                self.make_deadline(),
+                Some(&self.edge_registry),
+            )
+            .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
         } else {
             // Recursive path: run rules to fixed point, then evaluate patterns
             // against the combined base + derived fact set.
-            let derived: DerivedFacts = execute_recursive(&[], &rules, &snapshot, self.make_deadline())
-                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
+            let derived: DerivedFacts =
+                execute_recursive(&[], &rules, &snapshot, self.make_deadline())
+                    .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
             execute_query_hybrid(&query, &snapshot, &derived, self.make_deadline())
                 .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
         };
-        self.check_slow_query("Query", t0.elapsed(), &format!("patterns={pattern_count} rules={}", rules.len()));
+        self.check_slow_query(
+            "Query",
+            t0.elapsed(),
+            &format!("patterns={pattern_count} rules={}", rules.len()),
+        );
 
         // Apply access-control filter when a user_id is set.
         let allowed = self.get_access_filter(&user_id);
@@ -830,38 +883,52 @@ impl PolarGraphService for PolarGraphServer {
         let req = request.into_inner();
 
         let node_id = convert::node_id_from_proto(
-            req.node_id.as_ref().ok_or_else(|| Status::invalid_argument("node_id is required"))?,
+            req.node_id
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("node_id is required"))?,
         )?;
 
         if req.vector.is_empty() {
             return Err(Status::invalid_argument("vector must not be empty"));
         }
 
-        let space = if req.space.is_empty() { "default" } else { &req.space };
+        let space = if req.space.is_empty() {
+            "default"
+        } else {
+            &req.space
+        };
 
         // Dimension validation against registered space def.
         if let Some(vs) = self.registry.get_space_def(space) {
             if req.vector.len() != vs.dimensions as usize {
                 return Err(Status::invalid_argument(format!(
                     "space '{}' expects {} dimensions, got {}",
-                    space, vs.dimensions, req.vector.len()
+                    space,
+                    vs.dimensions,
+                    req.vector.len()
                 )));
             }
         }
 
-        let mode = self.registry
+        let mode = self
+            .registry
             .get_space_def(space)
             .map(|vs| vs.storage_mode)
             .unwrap_or(StorageMode::Memory);
 
-        debug!("insert_vector: space={} node={} dim={} mode={:?}", space, node_id, req.vector.len(), mode);
+        debug!(
+            "insert_vector: space={} node={} dim={} mode={:?}",
+            space,
+            node_id,
+            req.vector.len(),
+            mode
+        );
 
         self.store
             .insert_vector(space, node_id, req.vector, mode)
             .map_err(storage_err_to_status)?;
 
-        metrics::gauge!("polargraph_vector_spaces_total")
-            .set(self.store.hnsw_space_count() as f64);
+        metrics::gauge!("polargraph_vector_spaces_total").set(self.store.hnsw_space_count() as f64);
 
         Ok(Response::new(InsertVectorResponse {}))
     }
@@ -877,10 +944,22 @@ impl PolarGraphService for PolarGraphServer {
             return Err(Status::invalid_argument("query vector must not be empty"));
         }
         let k = if req.k == 0 { 10 } else { req.k as usize };
-        let space = if req.space.is_empty() { "default" } else { &req.space };
-        let ef = if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize };
+        let space = if req.space.is_empty() {
+            "default"
+        } else {
+            &req.space
+        };
+        let ef = if req.ef > 0 {
+            req.ef as usize
+        } else {
+            self.default_vector_ef as usize
+        };
 
-        debug!("search_vector: space={} dim={} k={k} ef={ef}", space, req.query.len());
+        debug!(
+            "search_vector: space={} dim={} k={k} ef={ef}",
+            space,
+            req.query.len()
+        );
 
         let hits = self.store.search_vector_ef(space, &req.query, k, ef);
         let results = hits
@@ -907,8 +986,16 @@ impl PolarGraphService for PolarGraphServer {
             return Err(Status::invalid_argument("query vector must not be empty"));
         }
         let k = if req.k == 0 { 10 } else { req.k as usize };
-        let space = if req.space.is_empty() { "default" } else { &req.space };
-        let ef = if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize };
+        let space = if req.space.is_empty() {
+            "default"
+        } else {
+            &req.space
+        };
+        let ef = if req.ef > 0 {
+            req.ef as usize
+        } else {
+            self.default_vector_ef as usize
+        };
 
         // Access filter (may be None when user_id is not set).
         let access_allowed = self.get_access_filter(&user_id);
@@ -948,7 +1035,9 @@ impl PolarGraphService for PolarGraphServer {
             // ── ReachabilityFilter: graph traversal, unchanged ────────────────
             Some(Filter::ReachabilityFilter(f)) => {
                 let from = convert::node_id_from_proto(
-                    f.from_node.as_ref().ok_or_else(|| Status::invalid_argument("from_node is required"))?,
+                    f.from_node
+                        .as_ref()
+                        .ok_or_else(|| Status::invalid_argument("from_node is required"))?,
                 )?;
 
                 let snapshot = self.store.snapshot(self.store.begin().read_ts);
@@ -956,7 +1045,13 @@ impl PolarGraphService for PolarGraphServer {
                 let reach_allowed: HashSet<NodeId> = if f.max_hops == 0 {
                     reachable_from(from, &f.predicate, &snapshot, deadline)
                 } else {
-                    reachable_from_hops(from, &f.predicate, &snapshot, f.max_hops as usize, deadline)
+                    reachable_from_hops(
+                        from,
+                        &f.predicate,
+                        &snapshot,
+                        f.max_hops as usize,
+                        deadline,
+                    )
                 }
                 .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
 
@@ -990,16 +1085,27 @@ impl PolarGraphService for PolarGraphServer {
             return Err(Status::invalid_argument("query vector must not be empty"));
         }
         let k = if req.k == 0 { 10 } else { req.k as usize };
-        let space = if req.space.is_empty() { "default" } else { &req.space };
+        let space = if req.space.is_empty() {
+            "default"
+        } else {
+            &req.space
+        };
 
-        let allowed: Vec<polargraph_core::NodeId> = req.node_ids
+        let allowed: Vec<polargraph_core::NodeId> = req
+            .node_ids
             .iter()
             .map(convert::node_id_from_proto)
             .collect::<Result<_, _>>()?;
 
-        debug!("search_vector_in_set: space={} set_size={} k={k}", space, allowed.len());
+        debug!(
+            "search_vector_in_set: space={} set_size={} k={k}",
+            space,
+            allowed.len()
+        );
 
-        let hits = self.store.search_vector_in_set(space, &req.query, k, &allowed);
+        let hits = self
+            .store
+            .search_vector_in_set(space, &req.query, k, &allowed);
         let results = hits
             .into_iter()
             .map(|(id, score)| VectorSearchResult {
@@ -1019,12 +1125,20 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let req = request.into_inner();
 
-        let space = if req.space.is_empty() { "default".to_string() } else { req.space.clone() };
+        let space = if req.space.is_empty() {
+            "default".to_string()
+        } else {
+            req.space.clone()
+        };
 
         // Dimension check against registered space def.
-        let expected_dims = self.registry.get_space_def(&space).map(|vs| vs.dimensions as usize);
+        let expected_dims = self
+            .registry
+            .get_space_def(&space)
+            .map(|vs| vs.dimensions as usize);
 
-        let mut items: Vec<(polargraph_core::NodeId, Vec<f32>)> = Vec::with_capacity(req.items.len());
+        let mut items: Vec<(polargraph_core::NodeId, Vec<f32>)> =
+            Vec::with_capacity(req.items.len());
         let mut pre_errors: Vec<BatchInsertError> = Vec::new();
 
         for (i, item) in req.items.iter().enumerate() {
@@ -1051,7 +1165,9 @@ impl PolarGraphService for PolarGraphServer {
                         index: i as u32,
                         message: format!(
                             "space '{}' expects {} dimensions, got {}",
-                            space, dims, item.vector.len()
+                            space,
+                            dims,
+                            item.vector.len()
                         ),
                     });
                     continue;
@@ -1067,17 +1183,26 @@ impl PolarGraphService for PolarGraphServer {
             }));
         }
 
-        let mode = self.registry
+        let mode = self
+            .registry
             .get_space_def(&space)
             .map(|vs| vs.storage_mode)
             .unwrap_or(StorageMode::Memory);
 
-        debug!("batch_insert_vectors: space={} count={} mode={:?}", space, items.len(), mode);
+        debug!(
+            "batch_insert_vectors: space={} count={} mode={:?}",
+            space,
+            items.len(),
+            mode
+        );
 
         let (count, errs) = self.store.batch_insert_vectors(&space, &items, mode);
         let errors = errs
             .into_iter()
-            .map(|(i, e)| BatchInsertError { index: i as u32, message: e.to_string() })
+            .map(|(i, e)| BatchInsertError {
+                index: i as u32,
+                message: e.to_string(),
+            })
             .collect();
 
         Ok(Response::new(BatchInsertVectorsResponse {
@@ -1094,7 +1219,9 @@ impl PolarGraphService for PolarGraphServer {
         let req = request.into_inner();
 
         let start = convert::node_id_from_proto(
-            req.start.as_ref().ok_or_else(|| Status::invalid_argument("start node_id is required"))?,
+            req.start
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("start node_id is required"))?,
         )?;
 
         if req.predicate.is_empty() {
@@ -1113,7 +1240,13 @@ impl PolarGraphService for PolarGraphServer {
         let reachable_set = if req.max_hops == 0 {
             reachable_from(start, &req.predicate, &snapshot, deadline)
         } else {
-            reachable_from_hops(start, &req.predicate, &snapshot, req.max_hops as usize, deadline)
+            reachable_from_hops(
+                start,
+                &req.predicate,
+                &snapshot,
+                req.max_hops as usize,
+                deadline,
+            )
         }
         .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
         self.check_slow_query(
@@ -1137,12 +1270,16 @@ impl PolarGraphService for PolarGraphServer {
     ) -> Result<Response<RegisterNodeTypeResponse>, Status> {
         self.check_not_replica()?;
         let req = request.into_inner();
-        let def_proto = req.definition.ok_or_else(|| Status::invalid_argument("definition is required"))?;
+        let def_proto = req
+            .definition
+            .ok_or_else(|| Status::invalid_argument("definition is required"))?;
         let def = convert::node_type_def_from_proto(&def_proto)?;
 
         debug!("register_node_type: type={}", def.type_name);
 
-        self.registry.register_type(def).map_err(storage_err_to_status)?;
+        self.registry
+            .register_type(def)
+            .map_err(storage_err_to_status)?;
         Ok(Response::new(RegisterNodeTypeResponse {}))
     }
 
@@ -1156,7 +1293,11 @@ impl PolarGraphService for PolarGraphServer {
             return Err(Status::invalid_argument("type_name must not be empty"));
         }
 
-        let definition = self.registry.get_type(&req.type_name).as_ref().map(convert::node_type_def_to_proto);
+        let definition = self
+            .registry
+            .get_type(&req.type_name)
+            .as_ref()
+            .map(convert::node_type_def_to_proto);
         Ok(Response::new(GetNodeTypeResponse { definition }))
     }
 
@@ -1165,7 +1306,12 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         _request: Request<ListNodeTypesRequest>,
     ) -> Result<Response<ListNodeTypesResponse>, Status> {
-        let definitions = self.registry.list_types().iter().map(convert::node_type_def_to_proto).collect();
+        let definitions = self
+            .registry
+            .list_types()
+            .iter()
+            .map(convert::node_type_def_to_proto)
+            .collect();
         Ok(Response::new(ListNodeTypesResponse { definitions }))
     }
 
@@ -1179,13 +1325,17 @@ impl PolarGraphService for PolarGraphServer {
             return Err(Status::invalid_argument("type_name must not be empty"));
         }
 
-        let props = req.properties
+        let props = req
+            .properties
             .iter()
             .map(|(k, v)| convert::value_from_proto(v).map(|val| (k.clone(), val)))
             .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
 
         match self.registry.validate_properties(&req.type_name, &props) {
-            Ok(()) => Ok(Response::new(ValidateNodeResponse { valid: true, errors: vec![] })),
+            Ok(()) => Ok(Response::new(ValidateNodeResponse {
+                valid: true,
+                errors: vec![],
+            })),
             Err(errs) => Ok(Response::new(ValidateNodeResponse {
                 valid: false,
                 errors: errs.iter().map(|e| e.message.clone()).collect(),
@@ -1200,12 +1350,16 @@ impl PolarGraphService for PolarGraphServer {
     ) -> Result<Response<RegisterEdgeTypeResponse>, Status> {
         self.check_not_replica()?;
         let req = request.into_inner();
-        let def_proto = req.definition.ok_or_else(|| Status::invalid_argument("definition is required"))?;
+        let def_proto = req
+            .definition
+            .ok_or_else(|| Status::invalid_argument("definition is required"))?;
         let def = convert::edge_type_def_from_proto(&def_proto)?;
 
         debug!("register_edge_type: predicate={}", def.predicate);
 
-        self.edge_registry.register_edge_type(def).map_err(storage_err_to_status)?;
+        self.edge_registry
+            .register_edge_type(def)
+            .map_err(storage_err_to_status)?;
         Ok(Response::new(RegisterEdgeTypeResponse {}))
     }
 
@@ -1219,7 +1373,11 @@ impl PolarGraphService for PolarGraphServer {
             return Err(Status::invalid_argument("predicate must not be empty"));
         }
 
-        let definition = self.edge_registry.get_edge_type(&req.predicate).as_ref().map(convert::edge_type_def_to_proto);
+        let definition = self
+            .edge_registry
+            .get_edge_type(&req.predicate)
+            .as_ref()
+            .map(convert::edge_type_def_to_proto);
         Ok(Response::new(GetEdgeTypeResponse { definition }))
     }
 
@@ -1228,7 +1386,12 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         _request: Request<ListEdgeTypesRequest>,
     ) -> Result<Response<ListEdgeTypesResponse>, Status> {
-        let definitions = self.edge_registry.list_edge_types().iter().map(convert::edge_type_def_to_proto).collect();
+        let definitions = self
+            .edge_registry
+            .list_edge_types()
+            .iter()
+            .map(convert::edge_type_def_to_proto)
+            .collect();
         Ok(Response::new(ListEdgeTypesResponse { definitions }))
     }
 
@@ -1242,16 +1405,31 @@ impl PolarGraphService for PolarGraphServer {
             return Err(Status::invalid_argument("predicate must not be empty"));
         }
 
-        let props = req.properties
+        let props = req
+            .properties
             .iter()
             .map(|(k, v)| convert::value_from_proto(v).map(|val| (k.clone(), val)))
             .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
 
-        let subject_type = if req.subject_type.is_empty() { None } else { Some(req.subject_type.as_str()) };
-        let object_type  = if req.object_type.is_empty()  { None } else { Some(req.object_type.as_str()) };
+        let subject_type = if req.subject_type.is_empty() {
+            None
+        } else {
+            Some(req.subject_type.as_str())
+        };
+        let object_type = if req.object_type.is_empty() {
+            None
+        } else {
+            Some(req.object_type.as_str())
+        };
 
-        match self.edge_registry.validate_edge(&req.predicate, subject_type, object_type, &props) {
-            Ok(()) => Ok(Response::new(ValidateEdgeResponse { valid: true, errors: vec![] })),
+        match self
+            .edge_registry
+            .validate_edge(&req.predicate, subject_type, object_type, &props)
+        {
+            Ok(()) => Ok(Response::new(ValidateEdgeResponse {
+                valid: true,
+                errors: vec![],
+            })),
             Err(errs) => Ok(Response::new(ValidateEdgeResponse {
                 valid: false,
                 errors: errs.iter().map(|e| e.message.clone()).collect(),
@@ -1266,10 +1444,14 @@ impl PolarGraphService for PolarGraphServer {
     ) -> Result<Response<ListPredicatesBetweenResponse>, Status> {
         let req = request.into_inner();
         if req.domain_type.is_empty() || req.range_type.is_empty() {
-            return Err(Status::invalid_argument("domain_type and range_type must not be empty"));
+            return Err(Status::invalid_argument(
+                "domain_type and range_type must not be empty",
+            ));
         }
 
-        let predicates = self.edge_registry.list_predicates_between(&req.domain_type, &req.range_type);
+        let predicates = self
+            .edge_registry
+            .list_predicates_between(&req.domain_type, &req.range_type);
         Ok(Response::new(ListPredicatesBetweenResponse { predicates }))
     }
 
@@ -1294,16 +1476,25 @@ impl PolarGraphService for PolarGraphServer {
                 Err(_) => continue,
             };
             // Collect relation triples only.
-            let relations: Vec<_> = triples.iter().filter_map(|t| {
-                if let Triple::Relation { subject, object, .. } = t {
-                    Some((*subject, *object))
-                } else {
-                    None
-                }
-            }).collect();
+            let relations: Vec<_> = triples
+                .iter()
+                .filter_map(|t| {
+                    if let Triple::Relation {
+                        subject, object, ..
+                    } = t
+                    {
+                        Some((*subject, *object))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
             // For OneToMany/OneToOne: each subject appears at most once.
-            if matches!(def.cardinality, Cardinality::OneToMany | Cardinality::OneToOne) {
+            if matches!(
+                def.cardinality,
+                Cardinality::OneToMany | Cardinality::OneToOne
+            ) {
                 let mut subjects: HashMap<NodeId, usize> = HashMap::new();
                 for (subj, _) in &relations {
                     *subjects.entry(*subj).or_insert(0) += 1;
@@ -1323,7 +1514,10 @@ impl PolarGraphService for PolarGraphServer {
             }
 
             // For ManyToOne/OneToOne: each object appears at most once.
-            if matches!(def.cardinality, Cardinality::ManyToOne | Cardinality::OneToOne) {
+            if matches!(
+                def.cardinality,
+                Cardinality::ManyToOne | Cardinality::OneToOne
+            ) {
                 let mut objects: HashMap<NodeId, usize> = HashMap::new();
                 for (_, obj) in &relations {
                     *objects.entry(*obj).or_insert(0) += 1;
@@ -1352,14 +1546,20 @@ impl PolarGraphService for PolarGraphServer {
                 Err(_) => continue,
             };
             for triple in &triples {
-                let Triple::Relation { subject, object, .. } = triple else { continue };
+                let Triple::Relation {
+                    subject, object, ..
+                } = triple
+                else {
+                    continue;
+                };
                 // Check if (object, inv, subject) exists.
-                let inv_triples = self.store
+                let inv_triples = self
+                    .store
                     .scan_by_subject_predicate(object, inv)
                     .unwrap_or_default();
-                let found = inv_triples.iter().any(|t| {
-                    matches!(t, Triple::Relation { object: o, .. } if *o == *subject)
-                });
+                let found = inv_triples
+                    .iter()
+                    .any(|t| matches!(t, Triple::Relation { object: o, .. } if *o == *subject));
                 if !found {
                     violations.push(OntologyViolation {
                         violation_type: "inverse".into(),
@@ -1390,7 +1590,10 @@ impl PolarGraphService for PolarGraphServer {
         }
 
         let valid = violations.is_empty();
-        Ok(Response::new(ValidateOntologyResponse { valid, violations }))
+        Ok(Response::new(ValidateOntologyResponse {
+            valid,
+            violations,
+        }))
     }
 
     /// ANN vector search seeded into a conjunctive Datalog graph query.
@@ -1410,8 +1613,16 @@ impl PolarGraphService for PolarGraphServer {
         }
 
         let k = if req.k == 0 { 10 } else { req.k as usize };
-        let space = if req.space.is_empty() { "default" } else { &req.space };
-        let ef = if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize };
+        let space = if req.space.is_empty() {
+            "default"
+        } else {
+            &req.space
+        };
+        let ef = if req.ef > 0 {
+            req.ef as usize
+        } else {
+            self.default_vector_ef as usize
+        };
         let seed_var = req.seed_variable.clone();
 
         debug!(
@@ -1465,8 +1676,7 @@ impl PolarGraphService for PolarGraphServer {
         }
 
         // Step 2: build score map and seed bindings.
-        let score_map: HashMap<NodeId, f32> =
-            ann_hits.iter().map(|&(id, s)| (id, s)).collect();
+        let score_map: HashMap<NodeId, f32> = ann_hits.iter().map(|&(id, s)| (id, s)).collect();
 
         let initial: Vec<Bindings> = ann_hits
             .iter()
@@ -1497,8 +1707,14 @@ impl PolarGraphService for PolarGraphServer {
         }
 
         let t0 = Instant::now();
-        let results = execute_query_seeded(&query, &snapshot, initial, self.make_deadline(), Some(&self.edge_registry))
-            .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
+        let results = execute_query_seeded(
+            &query,
+            &snapshot,
+            initial,
+            self.make_deadline(),
+            Some(&self.edge_registry),
+        )
+        .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
         self.check_slow_query(
             "VectorSeedQuery",
             t0.elapsed(),
@@ -1539,9 +1755,16 @@ impl PolarGraphService for PolarGraphServer {
         _request: Request<CreateBackupRequest>,
     ) -> Result<Response<CreateBackupResponse>, Status> {
         self.check_not_replica()?;
-        let mgr = self.backup_manager.as_ref().ok_or_else(backup_not_configured)?;
+        let mgr = self
+            .backup_manager
+            .as_ref()
+            .ok_or_else(backup_not_configured)?;
         let info = mgr.create_backup().map_err(storage_err_to_status)?;
-        info!(backup_id = info.backup_id, size_bytes = info.size_bytes, "backup created");
+        info!(
+            backup_id = info.backup_id,
+            size_bytes = info.size_bytes,
+            "backup created"
+        );
         metrics::gauge!("polargraph_backup_last_size_bytes").set(info.size_bytes as f64);
         Ok(Response::new(CreateBackupResponse {
             backup_id: info.backup_id,
@@ -1555,7 +1778,10 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         _request: Request<ListBackupsRequest>,
     ) -> Result<Response<ListBackupsResponse>, Status> {
-        let mgr = self.backup_manager.as_ref().ok_or_else(backup_not_configured)?;
+        let mgr = self
+            .backup_manager
+            .as_ref()
+            .ok_or_else(backup_not_configured)?;
         let backups = mgr
             .list_backups()
             .map_err(storage_err_to_status)?
@@ -1575,9 +1801,14 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<PurgeOldBackupsRequest>,
     ) -> Result<Response<PurgeOldBackupsResponse>, Status> {
-        let mgr = self.backup_manager.as_ref().ok_or_else(backup_not_configured)?;
+        let mgr = self
+            .backup_manager
+            .as_ref()
+            .ok_or_else(backup_not_configured)?;
         let keep_n = request.into_inner().keep_n;
-        let deleted_count = mgr.purge_old_backups(keep_n).map_err(storage_err_to_status)?;
+        let deleted_count = mgr
+            .purge_old_backups(keep_n)
+            .map_err(storage_err_to_status)?;
         info!(keep_n, deleted_count, "old backups purged");
         Ok(Response::new(PurgeOldBackupsResponse { deleted_count }))
     }
@@ -1655,7 +1886,9 @@ impl PolarGraphService for PolarGraphServer {
         let req = request.into_inner();
 
         if req.patterns.is_empty() {
-            return Err(Status::invalid_argument("query must contain at least one pattern"));
+            return Err(Status::invalid_argument(
+                "query must contain at least one pattern",
+            ));
         }
 
         let patterns: Vec<_> = req
@@ -1712,7 +1945,11 @@ impl PolarGraphService for PolarGraphServer {
             let summary = if pending.is_empty() {
                 "database is up to date (dry run)".to_string()
             } else {
-                format!("would apply {} migration(s): {:?} (dry run)", pending.len(), pending)
+                format!(
+                    "would apply {} migration(s): {:?} (dry run)",
+                    pending.len(),
+                    pending
+                )
             };
             return Ok(Response::new(MigrateResponse {
                 applied_versions: pending,
@@ -1730,7 +1967,11 @@ impl PolarGraphService for PolarGraphServer {
         let summary = if stats.applied.is_empty() {
             "database is already up to date".to_string()
         } else {
-            format!("applied {} migration(s): {:?}", stats.applied.len(), stats.applied)
+            format!(
+                "applied {} migration(s): {:?}",
+                stats.applied.len(),
+                stats.applied
+            )
         };
         Ok(Response::new(MigrateResponse {
             applied_versions: stats.applied,
@@ -1773,7 +2014,9 @@ impl PolarGraphService for PolarGraphServer {
         let user_id = resolve_user_id(&req.user_id, &meta_uid);
 
         if req.cypher.is_empty() {
-            return Err(Status::invalid_argument("cypher query string must not be empty"));
+            return Err(Status::invalid_argument(
+                "cypher query string must not be empty",
+            ));
         }
 
         // Reject write statements early — CypherWrite is the right RPC for those.
@@ -1800,11 +2043,14 @@ impl PolarGraphService for PolarGraphServer {
                 let plan = polargraph_query::cypher::compile(parsed);
                 // Evict oldest entry if cache is full (simple LRU-like drop).
                 if self.query_plan_cache.len() >= self.query_cache_size {
-                    if let Some(entry) = self.query_plan_cache.iter().next().map(|e| e.key().clone()) {
+                    if let Some(entry) =
+                        self.query_plan_cache.iter().next().map(|e| e.key().clone())
+                    {
                         self.query_plan_cache.remove(&entry);
                     }
                 }
-                self.query_plan_cache.insert(req.cypher.clone(), Arc::new(plan.clone()));
+                self.query_plan_cache
+                    .insert(req.cypher.clone(), Arc::new(plan.clone()));
                 plan
             }
         } else {
@@ -1833,11 +2079,16 @@ impl PolarGraphService for PolarGraphServer {
             guard.last_used = Instant::now();
             self.store.snapshot(guard.tx.read_ts)
         } else {
-            let tx_ts = if req.as_of_tx_time != 0 { req.as_of_tx_time } else { 0 };
+            let tx_ts = if req.as_of_tx_time != 0 {
+                req.as_of_tx_time
+            } else {
+                0
+            };
             if tx_ts == 0 {
                 self.store.snapshot(self.store.begin().read_ts)
             } else {
-                self.store.snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+                self.store
+                    .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
             }
         };
         if req.as_of_valid_time != 0 {
@@ -1856,9 +2107,15 @@ impl PolarGraphService for PolarGraphServer {
             }
             let space = &vn.space;
             let k = vn.k as usize;
-            let ef = vn.ef.map(|e| e as usize)
+            let ef = vn
+                .ef
+                .map(|e| e as usize)
                 .filter(|&e| e > 0)
-                .unwrap_or(if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize });
+                .unwrap_or(if req.ef > 0 {
+                    req.ef as usize
+                } else {
+                    self.default_vector_ef as usize
+                });
             let seed_var = vn.seed_variable.clone();
 
             let ann_hits = self
@@ -1879,12 +2136,23 @@ impl PolarGraphService for PolarGraphServer {
                         b
                     })
                     .collect();
-                execute_query_seeded(&compiled.query, &snapshot, initial, deadline, Some(&self.edge_registry))
-                    .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+                execute_query_seeded(
+                    &compiled.query,
+                    &snapshot,
+                    initial,
+                    deadline,
+                    Some(&self.edge_registry),
+                )
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
             }
         } else if compiled.rules.is_empty() {
-            execute_query(&compiled.query, &snapshot, deadline, Some(&self.edge_registry))
-                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+            execute_query(
+                &compiled.query,
+                &snapshot,
+                deadline,
+                Some(&self.edge_registry),
+            )
+            .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
         } else {
             let derived: DerivedFacts =
                 execute_recursive(&[], &compiled.rules, &snapshot, deadline)
@@ -1896,7 +2164,11 @@ impl PolarGraphService for PolarGraphServer {
         self.check_slow_query(
             "CypherQuery",
             t0.elapsed(),
-            &format!("patterns={} rules={}", compiled.query.patterns.len(), compiled.rules.len()),
+            &format!(
+                "patterns={} rules={}",
+                compiled.query.patterns.len(),
+                compiled.rules.len()
+            ),
         );
 
         // Apply access-control filter before other Cypher filters.
@@ -1904,19 +2176,28 @@ impl PolarGraphService for PolarGraphServer {
         let raw_results = filter_bindings(raw_results, access_allowed.as_ref());
 
         // Apply value filters (type constraints and WHERE clause checks).
-        let filtered =
-            polargraph_query::cypher::apply_value_filters(raw_results, &compiled.value_filters, &snapshot)
-                .map_err(storage_err_to_status)?;
+        let filtered = polargraph_query::cypher::apply_value_filters(
+            raw_results,
+            &compiled.value_filters,
+            &snapshot,
+        )
+        .map_err(storage_err_to_status)?;
 
         // Apply text filters (CONTAINS / STARTS WITH / =~).
-        let filtered =
-            polargraph_query::cypher::apply_text_filters(filtered, &compiled.text_filters, &snapshot)
-                .map_err(storage_err_to_status)?;
+        let filtered = polargraph_query::cypher::apply_text_filters(
+            filtered,
+            &compiled.text_filters,
+            &snapshot,
+        )
+        .map_err(storage_err_to_status)?;
 
         // Apply edge annotation filters (WHERE r.prop <op> val).
-        let filtered =
-            polargraph_query::cypher::apply_edge_annotation_filters(filtered, &compiled.edge_annotation_filters, &snapshot)
-                .map_err(storage_err_to_status)?;
+        let filtered = polargraph_query::cypher::apply_edge_annotation_filters(
+            filtered,
+            &compiled.edge_annotation_filters,
+            &snapshot,
+        )
+        .map_err(storage_err_to_status)?;
 
         // Apply aggregations, ORDER BY, SKIP, and LIMIT.
         let agg_rows = polargraph_query::aggregation::apply_aggregations(
@@ -1934,20 +2215,25 @@ impl PolarGraphService for PolarGraphServer {
             .iter()
             .map(|row| {
                 // Project group-key nodes to the declared return_vars (or all if unspecified).
-                let nodes = if compiled.return_vars.is_empty() && compiled.prop_projections.is_empty() {
-                    row.group_keys
-                        .iter()
-                        .map(|(k, &id)| (k.clone(), convert::node_id_to_proto(id)))
-                        .collect()
-                } else {
-                    compiled.return_vars
-                        .iter()
-                        .filter_map(|v| {
-                            row.group_keys.get(v).map(|&id| (v.clone(), convert::node_id_to_proto(id)))
-                        })
-                        .collect()
-                };
-                let mut values: HashMap<String, _> = row.agg_values
+                let nodes =
+                    if compiled.return_vars.is_empty() && compiled.prop_projections.is_empty() {
+                        row.group_keys
+                            .iter()
+                            .map(|(k, &id)| (k.clone(), convert::node_id_to_proto(id)))
+                            .collect()
+                    } else {
+                        compiled
+                            .return_vars
+                            .iter()
+                            .filter_map(|v| {
+                                row.group_keys
+                                    .get(v)
+                                    .map(|&id| (v.clone(), convert::node_id_to_proto(id)))
+                            })
+                            .collect()
+                    };
+                let mut values: HashMap<String, _> = row
+                    .agg_values
                     .iter()
                     .map(|(k, v)| (k.clone(), convert::value_to_proto(v)))
                     .collect();
@@ -1970,7 +2256,9 @@ impl PolarGraphService for PolarGraphServer {
                     if let Some(&node_id) = row.group_keys.get(var.as_str()) {
                         let edge_id = polargraph_core::id::EdgeId(node_id.0);
                         let key = format!("{}.{}", var, prop);
-                        if let Ok(Some(ann)) = self.store.get_edge_annotation(edge_id, prop, snapshot.ts) {
+                        if let Ok(Some(ann)) =
+                            self.store.get_edge_annotation(edge_id, prop, snapshot.ts)
+                        {
                             if let polargraph_storage::EdgeAnnotationValue::Scalar(v) = ann.value {
                                 values.insert(key, convert::value_to_proto(&v));
                             }
@@ -2018,7 +2306,9 @@ impl PolarGraphService for PolarGraphServer {
         let req = request.into_inner();
 
         if req.cypher.is_empty() {
-            return Err(Status::invalid_argument("cypher write string must not be empty"));
+            return Err(Status::invalid_argument(
+                "cypher write string must not be empty",
+            ));
         }
 
         let compiled = polargraph_query::cypher::parse_write(&req.cypher)
@@ -2036,50 +2326,64 @@ impl PolarGraphService for PolarGraphServer {
 
         // Helper closure to run the write ops given a mutable Transaction reference.
         // Returns the WriteResult without committing.
-        let execute_writes = |tx: &mut Transaction| -> Result<polargraph_query::cypher::WriteResult, Status> {
-            let snapshot = self.store.snapshot(tx.read_ts);
-            if let Some(ref mq) = compiled.match_query {
-                let raw = execute_query(&mq.query, &snapshot, None, None)
-                    .map_err(|e| Status::internal(format!("match query error: {e}")))?;
-                let rows = polargraph_query::cypher::apply_value_filters(raw, &mq.value_filters, &snapshot)
-                    .map_err(storage_err_to_status)?;
-                let rows = polargraph_query::cypher::apply_text_filters(rows, &mq.text_filters, &snapshot)
-                    .map_err(storage_err_to_status)?;
-                let mut all_ids: Vec<NodeId> = Vec::new();
-                let mut all_written: u64 = 0;
-                let mut all_deleted: u64 = 0;
-                for row in rows {
-                    let mut row_bindings = row;
-                    let r = polargraph_query::cypher::execute_write_ops(
-                        &compiled.writes, tx, &snapshot, &mut row_bindings,
+        let execute_writes =
+            |tx: &mut Transaction| -> Result<polargraph_query::cypher::WriteResult, Status> {
+                let snapshot = self.store.snapshot(tx.read_ts);
+                if let Some(ref mq) = compiled.match_query {
+                    let raw = execute_query(&mq.query, &snapshot, None, None)
+                        .map_err(|e| Status::internal(format!("match query error: {e}")))?;
+                    let rows = polargraph_query::cypher::apply_value_filters(
+                        raw,
+                        &mq.value_filters,
+                        &snapshot,
                     )
-                    .map_err(&map_write_err)?;
-                    all_ids.extend(r.created_ids);
-                    all_written += r.triples_written;
-                    all_deleted += r.triples_deleted;
+                    .map_err(storage_err_to_status)?;
+                    let rows = polargraph_query::cypher::apply_text_filters(
+                        rows,
+                        &mq.text_filters,
+                        &snapshot,
+                    )
+                    .map_err(storage_err_to_status)?;
+                    let mut all_ids: Vec<NodeId> = Vec::new();
+                    let mut all_written: u64 = 0;
+                    let mut all_deleted: u64 = 0;
+                    for row in rows {
+                        let mut row_bindings = row;
+                        let r = polargraph_query::cypher::execute_write_ops(
+                            &compiled.writes,
+                            tx,
+                            &snapshot,
+                            &mut row_bindings,
+                        )
+                        .map_err(&map_write_err)?;
+                        all_ids.extend(r.created_ids);
+                        all_written += r.triples_written;
+                        all_deleted += r.triples_deleted;
+                    }
+                    Ok(polargraph_query::cypher::WriteResult {
+                        created_ids: all_ids,
+                        triples_written: all_written,
+                        triples_deleted: all_deleted,
+                    })
+                } else {
+                    let mut bindings = HashMap::new();
+                    polargraph_query::cypher::execute_write_ops(
+                        &compiled.writes,
+                        tx,
+                        &snapshot,
+                        &mut bindings,
+                    )
+                    .map_err(map_write_err)
                 }
-                Ok(polargraph_query::cypher::WriteResult {
-                    created_ids: all_ids,
-                    triples_written: all_written,
-                    triples_deleted: all_deleted,
-                })
-            } else {
-                let mut bindings = HashMap::new();
-                polargraph_query::cypher::execute_write_ops(
-                    &compiled.writes, tx, &snapshot, &mut bindings,
-                )
-                .map_err(map_write_err)
-            }
-        };
+            };
 
         // If tx_id is set, buffer writes into the open transaction without committing.
         if !req.tx_id.is_empty() {
             // Clone the Arc before awaiting to avoid holding a DashMap shard lock.
             let open_arc = {
-                let entry = self
-                    .tx_map
-                    .get(&req.tx_id)
-                    .ok_or_else(|| Status::not_found(format!("unknown or expired transaction: {}", req.tx_id)))?;
+                let entry = self.tx_map.get(&req.tx_id).ok_or_else(|| {
+                    Status::not_found(format!("unknown or expired transaction: {}", req.tx_id))
+                })?;
                 Arc::clone(entry.value())
             };
             let mut guard = open_arc.lock().await;
@@ -2091,7 +2395,11 @@ impl PolarGraphService for PolarGraphServer {
                 result.created_ids.len(), result.triples_written, result.triples_deleted
             );
             return Ok(Response::new(CypherWriteResponse {
-                created_node_ids: result.created_ids.iter().map(|id| id.as_bytes().to_vec()).collect(),
+                created_node_ids: result
+                    .created_ids
+                    .iter()
+                    .map(|id| id.as_bytes().to_vec())
+                    .collect(),
                 triples_written: result.triples_written,
                 triples_deleted: result.triples_deleted,
             }));
@@ -2104,7 +2412,10 @@ impl PolarGraphService for PolarGraphServer {
         let commit_ts = tx.commit().map_err(storage_err_to_status)?;
         debug!(
             "cypher_write: created={} written={} deleted={} commit_ts={}",
-            result.created_ids.len(), result.triples_written, result.triples_deleted, commit_ts.0
+            result.created_ids.len(),
+            result.triples_written,
+            result.triples_deleted,
+            commit_ts.0
         );
 
         // Update the type cache for any newly created typed nodes.
@@ -2115,7 +2426,12 @@ impl PolarGraphService for PolarGraphServer {
             for node_id in &result.created_ids {
                 if let Ok(triples) = post_snap.scan_by_subject_predicate(node_id, "__type") {
                     for t in triples {
-                        if let Triple::Property { subject, value: Value::Text(type_name), .. } = t {
+                        if let Triple::Property {
+                            subject,
+                            value: Value::Text(type_name),
+                            ..
+                        } = t
+                        {
                             updates.push((subject, type_name));
                         }
                     }
@@ -2129,11 +2445,14 @@ impl PolarGraphService for PolarGraphServer {
             }
         }
 
-        metrics::gauge!("polargraph_triples_total")
-            .increment(result.triples_written as f64);
+        metrics::gauge!("polargraph_triples_total").increment(result.triples_written as f64);
 
         Ok(Response::new(CypherWriteResponse {
-            created_node_ids: result.created_ids.iter().map(|id| id.as_bytes().to_vec()).collect(),
+            created_node_ids: result
+                .created_ids
+                .iter()
+                .map(|id| id.as_bytes().to_vec())
+                .collect(),
             triples_written: result.triples_written,
             triples_deleted: result.triples_deleted,
         }))
@@ -2183,7 +2502,9 @@ impl PolarGraphService for PolarGraphServer {
         let req = request.into_inner();
 
         if req.patterns.is_empty() {
-            return Err(Status::invalid_argument("query must contain at least one pattern"));
+            return Err(Status::invalid_argument(
+                "query must contain at least one pattern",
+            ));
         }
 
         let patterns: Vec<_> = req
@@ -2198,31 +2519,48 @@ impl PolarGraphService for PolarGraphServer {
             query.patterns.push(p);
         }
 
-        let tx_ts = if req.as_of_tx_time != 0 { req.as_of_tx_time } else { req.snapshot_ts };
+        let tx_ts = if req.as_of_tx_time != 0 {
+            req.as_of_tx_time
+        } else {
+            req.snapshot_ts
+        };
         let mut snapshot = if tx_ts == 0 {
             self.store.snapshot(self.store.begin().read_ts)
         } else {
-            self.store.snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+            self.store
+                .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
         };
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
         }
 
-        let rules: Vec<_> = req.rules.iter()
+        let rules: Vec<_> = req
+            .rules
+            .iter()
             .map(convert::rule_from_proto)
             .collect::<Result<_, _>>()?;
 
         let t0 = Instant::now();
         let results = if rules.is_empty() {
-            execute_query(&query, &snapshot, self.make_deadline(), Some(&self.edge_registry))
-                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+            execute_query(
+                &query,
+                &snapshot,
+                self.make_deadline(),
+                Some(&self.edge_registry),
+            )
+            .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
         } else {
-            let derived: DerivedFacts = execute_recursive(&[], &rules, &snapshot, self.make_deadline())
-                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
+            let derived: DerivedFacts =
+                execute_recursive(&[], &rules, &snapshot, self.make_deadline())
+                    .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
             execute_query_hybrid(&query, &snapshot, &derived, self.make_deadline())
                 .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
         };
-        self.check_slow_query("QueryStream", t0.elapsed(), &format!("patterns={pattern_count} rules={}", rules.len()));
+        self.check_slow_query(
+            "QueryStream",
+            t0.elapsed(),
+            &format!("patterns={pattern_count} rules={}", rules.len()),
+        );
 
         let (tx, rx) = mpsc::channel::<Result<QueryStreamChunk, Status>>(4);
         tokio::spawn(async move {
@@ -2241,7 +2579,9 @@ impl PolarGraphService for PolarGraphServer {
         let req = request.into_inner();
 
         if req.cypher.is_empty() {
-            return Err(Status::invalid_argument("cypher query string must not be empty"));
+            return Err(Status::invalid_argument(
+                "cypher query string must not be empty",
+            ));
         }
 
         let params = Self::deserialize_params(&req.params)?;
@@ -2258,11 +2598,14 @@ impl PolarGraphService for PolarGraphServer {
                     .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
                 let plan = polargraph_query::cypher::compile(parsed);
                 if self.query_plan_cache.len() >= self.query_cache_size {
-                    if let Some(entry) = self.query_plan_cache.iter().next().map(|e| e.key().clone()) {
+                    if let Some(entry) =
+                        self.query_plan_cache.iter().next().map(|e| e.key().clone())
+                    {
                         self.query_plan_cache.remove(&entry);
                     }
                 }
-                self.query_plan_cache.insert(req.cypher.clone(), Arc::new(plan.clone()));
+                self.query_plan_cache
+                    .insert(req.cypher.clone(), Arc::new(plan.clone()));
                 plan
             }
         } else {
@@ -2277,11 +2620,16 @@ impl PolarGraphService for PolarGraphServer {
             .substitute_params(&params)
             .map_err(|e| Status::invalid_argument(format!("parameter error: {e}")))?;
 
-        let tx_ts = if req.as_of_tx_time != 0 { req.as_of_tx_time } else { 0 };
+        let tx_ts = if req.as_of_tx_time != 0 {
+            req.as_of_tx_time
+        } else {
+            0
+        };
         let mut snapshot = if tx_ts == 0 {
             self.store.snapshot(self.store.begin().read_ts)
         } else {
-            self.store.snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+            self.store
+                .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
         };
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
@@ -2298,9 +2646,15 @@ impl PolarGraphService for PolarGraphServer {
             }
             let space = &vn.space;
             let k = vn.k as usize;
-            let ef = vn.ef.map(|e| e as usize)
+            let ef = vn
+                .ef
+                .map(|e| e as usize)
                 .filter(|&e| e > 0)
-                .unwrap_or(if req.ef > 0 { req.ef as usize } else { self.default_vector_ef as usize });
+                .unwrap_or(if req.ef > 0 {
+                    req.ef as usize
+                } else {
+                    self.default_vector_ef as usize
+                });
             let seed_var = vn.seed_variable.clone();
             let ann_hits = self
                 .store
@@ -2319,12 +2673,23 @@ impl PolarGraphService for PolarGraphServer {
                         b
                     })
                     .collect();
-                execute_query_seeded(&compiled.query, &snapshot, initial, deadline, Some(&self.edge_registry))
-                    .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+                execute_query_seeded(
+                    &compiled.query,
+                    &snapshot,
+                    initial,
+                    deadline,
+                    Some(&self.edge_registry),
+                )
+                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
             }
         } else if compiled.rules.is_empty() {
-            execute_query(&compiled.query, &snapshot, deadline, Some(&self.edge_registry))
-                .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
+            execute_query(
+                &compiled.query,
+                &snapshot,
+                deadline,
+                Some(&self.edge_registry),
+            )
+            .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
         } else {
             let derived: DerivedFacts =
                 execute_recursive(&[], &compiled.rules, &snapshot, deadline)
@@ -2336,21 +2701,34 @@ impl PolarGraphService for PolarGraphServer {
         self.check_slow_query(
             "CypherQueryStream",
             t0.elapsed(),
-            &format!("patterns={} rules={}", compiled.query.patterns.len(), compiled.rules.len()),
+            &format!(
+                "patterns={} rules={}",
+                compiled.query.patterns.len(),
+                compiled.rules.len()
+            ),
         );
 
-        let filtered =
-            polargraph_query::cypher::apply_value_filters(raw_results, &compiled.value_filters, &snapshot)
-                .map_err(storage_err_to_status)?;
+        let filtered = polargraph_query::cypher::apply_value_filters(
+            raw_results,
+            &compiled.value_filters,
+            &snapshot,
+        )
+        .map_err(storage_err_to_status)?;
 
-        let filtered =
-            polargraph_query::cypher::apply_text_filters(filtered, &compiled.text_filters, &snapshot)
-                .map_err(storage_err_to_status)?;
+        let filtered = polargraph_query::cypher::apply_text_filters(
+            filtered,
+            &compiled.text_filters,
+            &snapshot,
+        )
+        .map_err(storage_err_to_status)?;
 
         // Apply edge annotation filters (WHERE r.prop <op> val).
-        let filtered =
-            polargraph_query::cypher::apply_edge_annotation_filters(filtered, &compiled.edge_annotation_filters, &snapshot)
-                .map_err(storage_err_to_status)?;
+        let filtered = polargraph_query::cypher::apply_edge_annotation_filters(
+            filtered,
+            &compiled.edge_annotation_filters,
+            &snapshot,
+        )
+        .map_err(storage_err_to_status)?;
 
         let limited: Vec<_> = match compiled.limit {
             Some(n) => filtered.into_iter().take(n).collect(),
@@ -2364,24 +2742,29 @@ impl PolarGraphService for PolarGraphServer {
         {
             limited
         } else {
-            limited.into_iter().map(|b| {
-                let mut out: polargraph_query::datalog::Bindings = compiled.return_vars.iter()
-                    .filter_map(|v| b.get(v).map(|&id| (v.clone(), id)))
-                    .collect();
-                // Edge ID projections: reuse the NodeId-aliased EdgeId bytes already in bindings.
-                for proj in &compiled.edge_id_projections {
-                    if let Some(&id) = b.get(proj.rel_var.as_str()) {
-                        out.insert(proj.output_key.clone(), id);
+            limited
+                .into_iter()
+                .map(|b| {
+                    let mut out: polargraph_query::datalog::Bindings = compiled
+                        .return_vars
+                        .iter()
+                        .filter_map(|v| b.get(v).map(|&id| (v.clone(), id)))
+                        .collect();
+                    // Edge ID projections: reuse the NodeId-aliased EdgeId bytes already in bindings.
+                    for proj in &compiled.edge_id_projections {
+                        if let Some(&id) = b.get(proj.rel_var.as_str()) {
+                            out.insert(proj.output_key.clone(), id);
+                        }
                     }
-                }
-                // Node ID projections: NodeId bytes are stored directly in bindings.
-                for proj in &compiled.node_id_projections {
-                    if let Some(&id) = b.get(proj.node_var.as_str()) {
-                        out.insert(proj.output_key.clone(), id);
+                    // Node ID projections: NodeId bytes are stored directly in bindings.
+                    for proj in &compiled.node_id_projections {
+                        if let Some(&id) = b.get(proj.node_var.as_str()) {
+                            out.insert(proj.output_key.clone(), id);
+                        }
                     }
-                }
-                out
-            }).collect()
+                    out
+                })
+                .collect()
         };
 
         let (tx, rx) = mpsc::channel::<Result<QueryStreamChunk, Status>>(4);
@@ -2419,21 +2802,33 @@ impl PolarGraphService for PolarGraphServer {
                     name,
                     dimensions,
                     node_count: node_count as u64,
-                    storage_mode: if is_mmap { "mmap".to_owned() } else { "memory".to_owned() },
+                    storage_mode: if is_mmap {
+                        "mmap".to_owned()
+                    } else {
+                        "memory".to_owned()
+                    },
                 }
             })
             .collect();
 
         let predicate_count = self.store.predicate_count();
 
-        Ok(Response::new(ShowIndexesResponse { column_families, vector_spaces, predicate_count }))
+        Ok(Response::new(ShowIndexesResponse {
+            column_families,
+            vector_spaces,
+            predicate_count,
+        }))
     }
 
     async fn show_stats(
         &self,
         _req: Request<ShowStatsRequest>,
     ) -> Result<Response<ShowStatsResponse>, Status> {
-        let mode = if self.store.is_replica() { "replica" } else { "primary" };
+        let mode = if self.store.is_replica() {
+            "replica"
+        } else {
+            "primary"
+        };
         Ok(Response::new(ShowStatsResponse {
             live_sst_files: self.store.db_live_sst_files(),
             total_sst_size_bytes: self.store.db_total_sst_size_bytes(),
@@ -2487,9 +2882,8 @@ impl PolarGraphService for PolarGraphServer {
 
         // Unwrap the Arc — succeeds because we removed it from the map and no
         // new reference can be obtained.
-        let inner = Arc::try_unwrap(open).map_err(|_| {
-            Status::internal("transaction is still in use by a concurrent RPC")
-        })?;
+        let inner = Arc::try_unwrap(open)
+            .map_err(|_| Status::internal("transaction is still in use by a concurrent RPC"))?;
         let open_tx = inner.into_inner();
         let triples_written = open_tx.tx.pending_triples().len() as u64;
 
@@ -2545,7 +2939,9 @@ impl PolarGraphService for PolarGraphServer {
             .map(|ann| convert::edge_annotation_to_proto(ann, req.edge_id.clone()))
             .collect();
 
-        Ok(Response::new(GetEdgeAnnotationsResponse { annotations: proto_annotations }))
+        Ok(Response::new(GetEdgeAnnotationsResponse {
+            annotations: proto_annotations,
+        }))
     }
 
     async fn get_edge_ids_by_triple(
@@ -2574,7 +2970,11 @@ impl PolarGraphService for PolarGraphServer {
         // Look up the predicate ID. If it doesn't exist, the triple can't exist.
         let pred_id = match self.store.lookup_predicate(predicate) {
             Some(id) => id,
-            None => return Ok(Response::new(GetEdgeIdsByTripleResponse { edge_ids: vec![] })),
+            None => {
+                return Ok(Response::new(GetEdgeIdsByTripleResponse {
+                    edge_ids: vec![],
+                }))
+            }
         };
 
         // Scan the SPO CF with prefix [subject:16][pred_id:4][object:16] to find
@@ -2674,7 +3074,10 @@ impl PolarGraphService for PolarGraphServer {
             })
             .collect();
         drop(keys);
-        Ok(Response::new(ListApiKeysResponse { key_prefixes, total_keys }))
+        Ok(Response::new(ListApiKeysResponse {
+            key_prefixes,
+            total_keys,
+        }))
     }
 
     // ── Graph-native access control ───────────────────────────────────────────
@@ -2687,16 +3090,22 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let req = request.into_inner();
 
-        let group_id = NodeId(uuid::Uuid::from_slice(&req.group_id)
-            .map_err(|_| Status::invalid_argument("group_id must be a 16-byte UUID"))?);
+        let group_id = NodeId(
+            uuid::Uuid::from_slice(&req.group_id)
+                .map_err(|_| Status::invalid_argument("group_id must be a 16-byte UUID"))?,
+        );
 
         let triple = match req.target {
             Some(GrantTarget::NodeId(bytes)) => {
-                let node_id = NodeId(uuid::Uuid::from_slice(&bytes)
-                    .map_err(|_| Status::invalid_argument("node_id must be a 16-byte UUID"))?);
+                let node_id = NodeId(
+                    uuid::Uuid::from_slice(&bytes)
+                        .map_err(|_| Status::invalid_argument("node_id must be a 16-byte UUID"))?,
+                );
                 Triple::Relation {
                     subject: group_id,
-                    predicate: polargraph_core::triple::Predicate(BUILTIN_HAS_ACCESS_PRED.to_string()),
+                    predicate: polargraph_core::triple::Predicate(
+                        BUILTIN_HAS_ACCESS_PRED.to_string(),
+                    ),
                     object: node_id,
                     edge_id: EdgeId::new(),
                     temporal: polargraph_core::temporal::BiTemporalRange {
@@ -2706,24 +3115,30 @@ impl PolarGraphService for PolarGraphServer {
                     },
                 }
             }
-            Some(GrantTarget::TypeName(type_name)) => {
-                Triple::Property {
-                    subject: group_id,
-                    predicate: polargraph_core::triple::Predicate(BUILTIN_HAS_ACCESS_TYPE_PRED.to_string()),
-                    value: Value::Text(type_name),
-                    temporal: polargraph_core::temporal::BiTemporalRange {
-                        vt_start: polargraph_core::temporal::Timestamp(0),
-                        vt_end: polargraph_core::temporal::Timestamp::END_OF_TIME,
-                        tt: polargraph_core::temporal::Timestamp::now(),
-                    },
-                }
+            Some(GrantTarget::TypeName(type_name)) => Triple::Property {
+                subject: group_id,
+                predicate: polargraph_core::triple::Predicate(
+                    BUILTIN_HAS_ACCESS_TYPE_PRED.to_string(),
+                ),
+                value: Value::Text(type_name),
+                temporal: polargraph_core::temporal::BiTemporalRange {
+                    vt_start: polargraph_core::temporal::Timestamp(0),
+                    vt_end: polargraph_core::temporal::Timestamp::END_OF_TIME,
+                    tt: polargraph_core::temporal::Timestamp::now(),
+                },
+            },
+            None => {
+                return Err(Status::invalid_argument(
+                    "target (node_id or type_name) must be set",
+                ))
             }
-            None => return Err(Status::invalid_argument("target (node_id or type_name) must be set")),
         };
 
         let all_triples = vec![triple];
         let mut tx = self.store.begin();
-        for t in &all_triples { tx.insert(t.clone()); }
+        for t in &all_triples {
+            tx.insert(t.clone());
+        }
         tx.commit().map_err(storage_err_to_status)?;
 
         self.update_access_cache_if_needed(&all_triples);
@@ -2739,26 +3154,39 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let req = request.into_inner();
 
-        let group_id = NodeId(uuid::Uuid::from_slice(&req.group_id)
-            .map_err(|_| Status::invalid_argument("group_id must be a 16-byte UUID"))?);
+        let group_id = NodeId(
+            uuid::Uuid::from_slice(&req.group_id)
+                .map_err(|_| Status::invalid_argument("group_id must be a 16-byte UUID"))?,
+        );
 
         let now_ts = polargraph_core::temporal::Timestamp::now();
 
         match req.target {
             Some(RevokeTarget::NodeId(bytes)) => {
-                let node_id = NodeId(uuid::Uuid::from_slice(&bytes)
-                    .map_err(|_| Status::invalid_argument("node_id must be a 16-byte UUID"))?);
+                let node_id = NodeId(
+                    uuid::Uuid::from_slice(&bytes)
+                        .map_err(|_| Status::invalid_argument("node_id must be a 16-byte UUID"))?,
+                );
                 // Find existing HAS_ACCESS triple and close its valid time.
-                let existing = self.store.scan_by_subject_predicate(&group_id, BUILTIN_HAS_ACCESS_PRED)
+                let existing = self
+                    .store
+                    .scan_by_subject_predicate(&group_id, BUILTIN_HAS_ACCESS_PRED)
                     .map_err(storage_err_to_status)?;
                 let mut tx = self.store.begin();
                 for t in existing {
-                    if let Triple::Relation { object, temporal, .. } = &t {
-                        if *object == node_id && temporal.vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME {
+                    if let Triple::Relation {
+                        object, temporal, ..
+                    } = &t
+                    {
+                        if *object == node_id
+                            && temporal.vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME
+                        {
                             // Insert a superseding triple that closes valid time.
                             tx.insert(Triple::Relation {
                                 subject: group_id,
-                                predicate: polargraph_core::triple::Predicate(BUILTIN_HAS_ACCESS_PRED.to_string()),
+                                predicate: polargraph_core::triple::Predicate(
+                                    BUILTIN_HAS_ACCESS_PRED.to_string(),
+                                ),
                                 object: node_id,
                                 edge_id: EdgeId::new(),
                                 temporal: polargraph_core::temporal::BiTemporalRange {
@@ -2773,15 +3201,26 @@ impl PolarGraphService for PolarGraphServer {
                 tx.commit().map_err(storage_err_to_status)?;
             }
             Some(RevokeTarget::TypeName(type_name)) => {
-                let existing = self.store.scan_by_subject_predicate(&group_id, BUILTIN_HAS_ACCESS_TYPE_PRED)
+                let existing = self
+                    .store
+                    .scan_by_subject_predicate(&group_id, BUILTIN_HAS_ACCESS_TYPE_PRED)
                     .map_err(storage_err_to_status)?;
                 let mut tx = self.store.begin();
                 for t in existing {
-                    if let Triple::Property { value: Value::Text(ref tn), temporal, .. } = t {
-                        if tn == &type_name && temporal.vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME {
+                    if let Triple::Property {
+                        value: Value::Text(ref tn),
+                        temporal,
+                        ..
+                    } = t
+                    {
+                        if tn == &type_name
+                            && temporal.vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME
+                        {
                             tx.insert(Triple::Property {
                                 subject: group_id,
-                                predicate: polargraph_core::triple::Predicate(BUILTIN_HAS_ACCESS_TYPE_PRED.to_string()),
+                                predicate: polargraph_core::triple::Predicate(
+                                    BUILTIN_HAS_ACCESS_TYPE_PRED.to_string(),
+                                ),
                                 value: Value::Text(type_name.clone()),
                                 temporal: polargraph_core::temporal::BiTemporalRange {
                                     vt_start: temporal.vt_start,
@@ -2794,14 +3233,22 @@ impl PolarGraphService for PolarGraphServer {
                 }
                 tx.commit().map_err(storage_err_to_status)?;
             }
-            None => return Err(Status::invalid_argument("target (node_id or type_name) must be set")),
+            None => {
+                return Err(Status::invalid_argument(
+                    "target (node_id or type_name) must be set",
+                ))
+            }
         }
 
         // Rebuild access cache since an access triple changed.
         let type_cache_snapshot = self.type_cache.read().unwrap().clone();
         match Self::build_access_cache(&self.store, &type_cache_snapshot) {
-            Ok(new_cache) => { *self.access_cache.write().unwrap() = new_cache; }
-            Err(e) => { warn!("failed to rebuild access cache after revoke: {e}"); }
+            Ok(new_cache) => {
+                *self.access_cache.write().unwrap() = new_cache;
+            }
+            Err(e) => {
+                warn!("failed to rebuild access cache after revoke: {e}");
+            }
         }
         info!("RevokeAccess: group={:?}", group_id);
         Ok(Response::new(RevokeAccessResponse {}))
@@ -2815,10 +3262,14 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let req = request.into_inner();
 
-        let user_id = NodeId(uuid::Uuid::from_slice(&req.user_id)
-            .map_err(|_| Status::invalid_argument("user_id must be a 16-byte UUID"))?);
-        let group_id = NodeId(uuid::Uuid::from_slice(&req.group_id)
-            .map_err(|_| Status::invalid_argument("group_id must be a 16-byte UUID"))?);
+        let user_id = NodeId(
+            uuid::Uuid::from_slice(&req.user_id)
+                .map_err(|_| Status::invalid_argument("user_id must be a 16-byte UUID"))?,
+        );
+        let group_id = NodeId(
+            uuid::Uuid::from_slice(&req.group_id)
+                .map_err(|_| Status::invalid_argument("group_id must be a 16-byte UUID"))?,
+        );
 
         let triple = Triple::Relation {
             subject: user_id,
@@ -2834,7 +3285,9 @@ impl PolarGraphService for PolarGraphServer {
 
         let all_triples = vec![triple];
         let mut tx = self.store.begin();
-        for t in &all_triples { tx.insert(t.clone()); }
+        for t in &all_triples {
+            tx.insert(t.clone());
+        }
         tx.commit().map_err(storage_err_to_status)?;
 
         self.update_access_cache_if_needed(&all_triples);
@@ -2849,29 +3302,42 @@ impl PolarGraphService for PolarGraphServer {
     ) -> Result<Response<GetUserAccessResponse>, Status> {
         let req = request.into_inner();
 
-        let user_id = NodeId(uuid::Uuid::from_slice(&req.user_id)
-            .map_err(|_| Status::invalid_argument("user_id must be a 16-byte UUID"))?);
+        let user_id = NodeId(
+            uuid::Uuid::from_slice(&req.user_id)
+                .map_err(|_| Status::invalid_argument("user_id must be a 16-byte UUID"))?,
+        );
         let user_key = user_id.to_string();
 
         // Get expanded node set from the cache.
         let node_ids: Vec<Vec<u8>> = {
             let cache = self.access_cache.read().unwrap();
-            cache.get(&user_key)
+            cache
+                .get(&user_key)
                 .map(|s| s.iter().map(|id| id.as_bytes().to_vec()).collect())
                 .unwrap_or_default()
         };
 
         // Compute type grants by live scan (group memberships × HAS_ACCESS_TYPE).
         let mut type_grants: Vec<String> = Vec::new();
-        let member_of = self.store.scan_by_subject_predicate(&user_id, BUILTIN_MEMBER_OF_PRED)
+        let member_of = self
+            .store
+            .scan_by_subject_predicate(&user_id, BUILTIN_MEMBER_OF_PRED)
             .map_err(storage_err_to_status)?;
         for t in &member_of {
-            if let Triple::Relation { object: group_id, .. } = t {
-                let type_triples = self.store
+            if let Triple::Relation {
+                object: group_id, ..
+            } = t
+            {
+                let type_triples = self
+                    .store
                     .scan_by_subject_predicate(group_id, BUILTIN_HAS_ACCESS_TYPE_PRED)
                     .map_err(storage_err_to_status)?;
                 for tt in type_triples {
-                    if let Triple::Property { value: Value::Text(type_name), .. } = tt {
+                    if let Triple::Property {
+                        value: Value::Text(type_name),
+                        ..
+                    } = tt
+                    {
                         if !type_grants.contains(&type_name) {
                             type_grants.push(type_name);
                         }
@@ -2880,7 +3346,10 @@ impl PolarGraphService for PolarGraphServer {
             }
         }
 
-        Ok(Response::new(GetUserAccessResponse { node_ids, type_grants }))
+        Ok(Response::new(GetUserAccessResponse {
+            node_ids,
+            type_grants,
+        }))
     }
 
     // ── Property history ──────────────────────────────────────────────────────
@@ -2905,13 +3374,18 @@ impl PolarGraphService for PolarGraphServer {
         let proto_versions = versions
             .into_iter()
             .map(|(value, tt)| {
-                let value_json = serde_json::to_string(&value)
-                    .unwrap_or_else(|_| "null".to_owned());
-                PropertyVersion { value_json, transaction_time: tt }
+                let value_json =
+                    serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned());
+                PropertyVersion {
+                    value_json,
+                    transaction_time: tt,
+                }
             })
             .collect();
 
-        Ok(Response::new(GetPropertyHistoryResponse { versions: proto_versions }))
+        Ok(Response::new(GetPropertyHistoryResponse {
+            versions: proto_versions,
+        }))
     }
 
     async fn delete_triples(
@@ -3029,7 +3503,8 @@ impl PolarGraphService for PolarGraphServer {
             iterations = stats.iterations,
             "OWL 2 RL materialization complete"
         );
-        metrics::gauge!("polargraph_materialization_derived_total").set(stats.derived_triples as f64);
+        metrics::gauge!("polargraph_materialization_derived_total")
+            .set(stats.derived_triples as f64);
 
         Ok(Response::new(RunMaterializationResponse {
             rules_fired: stats.rules_fired,
@@ -3048,7 +3523,13 @@ async fn send_result_chunks(
     tx: mpsc::Sender<Result<QueryStreamChunk, Status>>,
 ) {
     if results.is_empty() {
-        let _ = tx.send(Ok(QueryStreamChunk { results: vec![], chunk_index: 0, done: true })).await;
+        let _ = tx
+            .send(Ok(QueryStreamChunk {
+                results: vec![],
+                chunk_index: 0,
+                done: true,
+            }))
+            .await;
         return;
     }
     let total = results.len();
@@ -3070,23 +3551,18 @@ async fn send_result_chunks(
 // ── Error mapping ─────────────────────────────────────────────────────────────
 
 fn replica_not_writable() -> Status {
-    Status::failed_precondition(
-        "write operations are not supported on a read replica",
-    )
+    Status::failed_precondition("write operations are not supported on a read replica")
 }
 
 fn backup_not_configured() -> Status {
-    Status::failed_precondition(
-        "backup not configured: start polargraphd with --backup-dir <PATH>",
-    )
+    Status::failed_precondition("backup not configured: start polargraphd with --backup-dir <PATH>")
 }
 
 fn query_err_to_status(err: QueryError, timeout_ms: u64) -> Status {
     match err {
-        QueryError::Timeout => Status::deadline_exceeded(format!(
-            "query exceeded timeout of {}ms",
-            timeout_ms
-        )),
+        QueryError::Timeout => {
+            Status::deadline_exceeded(format!("query exceeded timeout of {}ms", timeout_ms))
+        }
         QueryError::Storage(se) => storage_err_to_status(se),
     }
 }

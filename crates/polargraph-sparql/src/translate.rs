@@ -26,7 +26,10 @@ pub enum SparqlAggFunc {
     /// `MAX(?var)` — maximum numeric value.
     Max(String),
     /// `GROUP_CONCAT(?var; SEPARATOR=sep)` — concatenate values.
-    GroupConcat { var: String, separator: Option<String> },
+    GroupConcat {
+        var: String,
+        separator: Option<String>,
+    },
     /// `SAMPLE(?var)` — return an arbitrary value from the group.
     Sample(String),
 }
@@ -194,7 +197,8 @@ pub fn translate_query(query: &spargebra::Query) -> Result<SparqlTranslation, Sp
         }
         spargebra::Query::Construct { .. } | spargebra::Query::Describe { .. } => {
             return Err(SparqlError::Unsupported(
-                "CONSTRUCT/DESCRIBE: use translate_construct() instead of translate_query()".to_string(),
+                "CONSTRUCT/DESCRIBE: use translate_construct() instead of translate_query()"
+                    .to_string(),
             ));
         }
     }
@@ -268,12 +272,24 @@ pub(crate) fn translate_pattern(
                     combined.rules.extend(rb.rules.clone());
                     combined.filters.extend(lb.filters.clone());
                     combined.filters.extend(rb.filters.clone());
-                    combined.edge_annotation_steps.extend(lb.edge_annotation_steps.clone());
-                    combined.edge_annotation_steps.extend(rb.edge_annotation_steps.clone());
-                    combined.edge_annotation_object_steps.extend(lb.edge_annotation_object_steps.clone());
-                    combined.edge_annotation_object_steps.extend(rb.edge_annotation_object_steps.clone());
-                    combined.optional_branches.extend(lb.optional_branches.clone());
-                    combined.optional_branches.extend(rb.optional_branches.clone());
+                    combined
+                        .edge_annotation_steps
+                        .extend(lb.edge_annotation_steps.clone());
+                    combined
+                        .edge_annotation_steps
+                        .extend(rb.edge_annotation_steps.clone());
+                    combined
+                        .edge_annotation_object_steps
+                        .extend(lb.edge_annotation_object_steps.clone());
+                    combined
+                        .edge_annotation_object_steps
+                        .extend(rb.edge_annotation_object_steps.clone());
+                    combined
+                        .optional_branches
+                        .extend(lb.optional_branches.clone());
+                    combined
+                        .optional_branches
+                        .extend(rb.optional_branches.clone());
                     // Named graph: prefer the most specific (non-None) graph_iri
                     combined.graph_iri = lb.graph_iri.clone().or_else(|| rb.graph_iri.clone());
                     merged.push(combined);
@@ -342,8 +358,7 @@ pub(crate) fn translate_pattern(
             aggregates,
         } => {
             let branches = translate_pattern(inner, counter, translation)?;
-            translation.group_by =
-                variables.iter().map(|v| v.as_str().to_string()).collect();
+            translation.group_by = variables.iter().map(|v| v.as_str().to_string()).collect();
             translation.aggregates = aggregates
                 .iter()
                 .map(|(alias_var, agg_expr)| translate_aggregate(alias_var, agg_expr))
@@ -400,9 +415,7 @@ pub(crate) fn translate_pattern(
         }
 
         // ── OrderBy (ignore ordering for Phase 1/2) ───────────────────────────
-        GraphPattern::OrderBy { inner, .. } => {
-            translate_pattern(inner, counter, translation)
-        }
+        GraphPattern::OrderBy { inner, .. } => translate_pattern(inner, counter, translation),
 
         // ── Extend (BIND / AS alias) ──────────────────────────────────────────
         //
@@ -559,7 +572,8 @@ fn translate_sparql_star_object(
         NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
         NamedNodePattern::Variable(_) => {
             return Err(SparqlError::Unsupported(
-                "variable annotation predicate in object-position SPARQL-star not supported".to_string(),
+                "variable annotation predicate in object-position SPARQL-star not supported"
+                    .to_string(),
             ))
         }
     };
@@ -590,9 +604,7 @@ pub(crate) fn translate_filter(expr: &Expression) -> Result<SparqlFilter, Sparql
 
         Expression::Equal(a, b) => {
             // Variable = Variable
-            if let (Expression::Variable(va), Expression::Variable(vb)) =
-                (a.as_ref(), b.as_ref())
-            {
+            if let (Expression::Variable(va), Expression::Variable(vb)) = (a.as_ref(), b.as_ref()) {
                 return Ok(SparqlFilter::VarEq(
                     va.as_str().to_string(),
                     vb.as_str().to_string(),
@@ -605,9 +617,7 @@ pub(crate) fn translate_filter(expr: &Expression) -> Result<SparqlFilter, Sparql
 
         Expression::SameTerm(a, b) => {
             // Treat sameTerm like equality for our purposes
-            if let (Expression::Variable(va), Expression::Variable(vb)) =
-                (a.as_ref(), b.as_ref())
-            {
+            if let (Expression::Variable(va), Expression::Variable(vb)) = (a.as_ref(), b.as_ref()) {
                 return Ok(SparqlFilter::VarEq(
                     va.as_str().to_string(),
                     vb.as_str().to_string(),
@@ -624,9 +634,7 @@ pub(crate) fn translate_filter(expr: &Expression) -> Result<SparqlFilter, Sparql
         Expression::GreaterOrEqual(a, b) => {
             translate_var_literal_comparison(a, b, SparqlFilter::GreaterOrEqual)
         }
-        Expression::Less(a, b) => {
-            translate_var_literal_comparison(a, b, SparqlFilter::LessThan)
-        }
+        Expression::Less(a, b) => translate_var_literal_comparison(a, b, SparqlFilter::LessThan),
         Expression::LessOrEqual(a, b) => {
             translate_var_literal_comparison(a, b, SparqlFilter::LessOrEqual)
         }
@@ -761,7 +769,10 @@ fn translate_aggregate(
             }
         }
     };
-    Ok(SparqlAggregateSpec { alias: alias_str, func })
+    Ok(SparqlAggregateSpec {
+        alias: alias_str,
+        func,
+    })
 }
 
 fn extract_var_from_expr(expr: &Expression) -> Result<String, SparqlError> {
@@ -857,19 +868,20 @@ fn translate_one_or_more(
     let z = format!("_tc_z{}", *counter);
     *counter += 1;
 
-    branch.rules.push(
-        Rule::new(&tc_name, &x, &y).with_body(vec![VarPattern {
+    branch
+        .rules
+        .push(Rule::new(&tc_name, &x, &y).with_body(vec![VarPattern {
             subject: Term::Var(x.clone()),
             predicate: Some(base_pred.clone()),
             object: Term::Var(y.clone()),
             edge_var: None,
             max_hops: None,
             predicate_var: None,
-        }]),
-    );
+        }]));
 
-    branch.rules.push(
-        Rule::new(&tc_name, &x, &z).with_body(vec![
+    branch
+        .rules
+        .push(Rule::new(&tc_name, &x, &z).with_body(vec![
             VarPattern {
                 subject: Term::Var(x.clone()),
                 predicate: Some(tc_name.clone()),
@@ -886,8 +898,7 @@ fn translate_one_or_more(
                 max_hops: None,
                 predicate_var: None,
             },
-        ]),
-    );
+        ]));
 
     branch.patterns.push(VarPattern {
         subject,
@@ -968,11 +979,11 @@ pub struct ConstructTranslation {
 /// 2. For each bound NodeId value, fetch all triples with that subject.
 ///
 /// Returns [`SparqlError::TranslationError`] if called on a SELECT/ASK query.
-pub fn translate_construct(
-    query: &spargebra::Query,
-) -> Result<ConstructTranslation, SparqlError> {
+pub fn translate_construct(query: &spargebra::Query) -> Result<ConstructTranslation, SparqlError> {
     match query {
-        spargebra::Query::Construct { template, pattern, .. } => {
+        spargebra::Query::Construct {
+            template, pattern, ..
+        } => {
             let mut dummy = SparqlTranslation::default();
             let mut counter = 0usize;
             let branches = translate_pattern(pattern, &mut counter, &mut dummy)?;
@@ -988,7 +999,9 @@ pub fn translate_construct(
             })
         }
 
-        spargebra::Query::Describe { dataset, pattern, .. } => {
+        spargebra::Query::Describe {
+            dataset, pattern, ..
+        } => {
             let mut dummy = SparqlTranslation::default();
             let mut counter = 0usize;
             let branches = translate_pattern(pattern, &mut counter, &mut dummy)?;
@@ -1029,7 +1042,8 @@ fn translate_construct_triple(
     };
 
     // Gap 3: subject may be a quoted triple <<s p o>> (SPARQL-star CONSTRUCT template).
-    let (subject_var, subject_iri, subject_quoted) = if let TermPattern::Triple(inner) = &tp.subject {
+    let (subject_var, subject_iri, subject_quoted) = if let TermPattern::Triple(inner) = &tp.subject
+    {
         let inner_tmpl = translate_construct_triple(inner)?;
         (None, None, Some(Box::new(inner_tmpl)))
     } else {
@@ -1037,8 +1051,7 @@ fn translate_construct_triple(
         (sv, si, None)
     };
 
-    let (object_var, object_iri, object_literal) =
-        term_pattern_to_var_iri_or_lit(&tp.object)?;
+    let (object_var, object_iri, object_literal) = term_pattern_to_var_iri_or_lit(&tp.object)?;
 
     Ok(ConstructTemplate {
         subject_var,
@@ -1071,16 +1084,12 @@ fn term_pattern_to_var_or_iri(
 
 type VarIriLit = (Option<String>, Option<String>, Option<SparqlLiteral>);
 
-fn term_pattern_to_var_iri_or_lit(
-    tp: &TermPattern,
-) -> Result<VarIriLit, SparqlError> {
+fn term_pattern_to_var_iri_or_lit(tp: &TermPattern) -> Result<VarIriLit, SparqlError> {
     match tp {
         TermPattern::Variable(v) => Ok((Some(v.as_str().to_string()), None, None)),
         TermPattern::NamedNode(n) => Ok((None, Some(n.as_str().to_string()), None)),
         TermPattern::Literal(l) => Ok((None, None, Some(sparql_literal_to_value(l)))),
-        TermPattern::BlankNode(b) => {
-            Ok((Some(format!("_bn_{}", b.as_str())), None, None))
-        }
+        TermPattern::BlankNode(b) => Ok((Some(format!("_bn_{}", b.as_str())), None, None)),
         // Quoted triple in object position — not valid in standard CONSTRUCT templates;
         // treat as wildcard (yields no binding) rather than hard error.
         TermPattern::Triple(_) => Ok((None, None, None)),

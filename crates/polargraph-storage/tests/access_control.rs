@@ -6,9 +6,7 @@
 
 use polargraph_core::{
     id::{EdgeId, NodeId},
-    schema::{
-        BUILTIN_HAS_ACCESS_PRED, BUILTIN_HAS_ACCESS_TYPE_PRED, BUILTIN_MEMBER_OF_PRED,
-    },
+    schema::{BUILTIN_HAS_ACCESS_PRED, BUILTIN_HAS_ACCESS_TYPE_PRED, BUILTIN_MEMBER_OF_PRED},
     temporal::{BiTemporalRange, Timestamp},
     triple::{Predicate, Triple},
     value::Value,
@@ -69,7 +67,9 @@ fn member_of_relation_round_trips() {
 
     assert_eq!(results.len(), 1, "expected exactly one MEMBER_OF triple");
     match &results[0] {
-        Triple::Relation { subject, object, .. } => {
+        Triple::Relation {
+            subject, object, ..
+        } => {
             assert_eq!(*subject, user);
             assert_eq!(*object, group);
         }
@@ -93,7 +93,9 @@ fn has_access_relation_round_trips() {
 
     assert_eq!(results.len(), 1, "expected exactly one HAS_ACCESS triple");
     match &results[0] {
-        Triple::Relation { subject, object, .. } => {
+        Triple::Relation {
+            subject, object, ..
+        } => {
             assert_eq!(*subject, group);
             assert_eq!(*object, node);
         }
@@ -122,9 +124,17 @@ fn has_access_type_property_round_trips() {
         .scan_by_subject_predicate(&group, BUILTIN_HAS_ACCESS_TYPE_PRED)
         .unwrap();
 
-    assert_eq!(results.len(), 1, "expected exactly one HAS_ACCESS_TYPE triple");
+    assert_eq!(
+        results.len(),
+        1,
+        "expected exactly one HAS_ACCESS_TYPE triple"
+    );
     match &results[0] {
-        Triple::Property { subject, value: Value::Text(tn), .. } => {
+        Triple::Property {
+            subject,
+            value: Value::Text(tn),
+            ..
+        } => {
             assert_eq!(*subject, group);
             assert_eq!(*tn, type_name);
         }

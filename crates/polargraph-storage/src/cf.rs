@@ -39,4 +39,6 @@ pub const PEA: &str = "pea";
 /// Derived triples are kept separate from base data and can be wiped and rebuilt cleanly.
 pub const DRV: &str = "drv";
 
-pub const ALL: &[&str] = &[SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, EPA, EPO, PEA, DRV];
+pub const ALL: &[&str] = &[
+    SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, EPA, EPO, PEA, DRV,
+];

@@ -17,10 +17,10 @@ fn edge(seed: u128) -> EdgeId {
 
 fn make_relation(i: u64) -> Triple {
     Triple::Relation {
-        subject:   node(i as u128),
+        subject: node(i as u128),
         predicate: Predicate::new("knows"),
-        object:    node((i as u128) | (1 << 64)),
-        edge_id:   edge((i as u128) | (2 << 64)),
+        object: node((i as u128) | (1 << 64)),
+        edge_id: edge((i as u128) | (2 << 64)),
         temporal: BiTemporalRange {
             vt_start: Timestamp(0),
             vt_end: Timestamp::END_OF_TIME,
@@ -31,9 +31,9 @@ fn make_relation(i: u64) -> Triple {
 
 fn make_property(i: u64) -> Triple {
     Triple::Property {
-        subject:   node(i as u128),
+        subject: node(i as u128),
         predicate: Predicate::new("label"),
-        value:     Value::Text(format!("node-{i}")),
+        value: Value::Text(format!("node-{i}")),
         temporal: BiTemporalRange {
             vt_start: Timestamp(0),
             vt_end: Timestamp::END_OF_TIME,
@@ -45,7 +45,7 @@ fn make_property(i: u64) -> Triple {
 #[test]
 fn import_10k_relation_triples_queryable() {
     let data_dir = TempDir::new().unwrap();
-    let sst_dir  = TempDir::new().unwrap();
+    let sst_dir = TempDir::new().unwrap();
 
     let store = TripleStore::open(data_dir.path()).unwrap();
     let mut importer = SstImporter::new(sst_dir.path()).unwrap();
@@ -58,13 +58,17 @@ fn import_10k_relation_triples_queryable() {
     assert_eq!(stats.triples_imported, 10_000);
 
     let all = store.scan_all().unwrap();
-    assert_eq!(all.len(), 10_000, "all 10k imported triples should be visible");
+    assert_eq!(
+        all.len(),
+        10_000,
+        "all 10k imported triples should be visible"
+    );
 }
 
 #[test]
 fn import_zero_triples_returns_zero_stats() {
     let data_dir = TempDir::new().unwrap();
-    let sst_dir  = TempDir::new().unwrap();
+    let sst_dir = TempDir::new().unwrap();
 
     let store = TripleStore::open(data_dir.path()).unwrap();
     let importer = SstImporter::new(sst_dir.path()).unwrap();
@@ -77,7 +81,7 @@ fn import_zero_triples_returns_zero_stats() {
 #[test]
 fn import_property_triples_queryable() {
     let data_dir = TempDir::new().unwrap();
-    let sst_dir  = TempDir::new().unwrap();
+    let sst_dir = TempDir::new().unwrap();
 
     let store = TripleStore::open(data_dir.path()).unwrap();
     let mut importer = SstImporter::new(sst_dir.path()).unwrap();
@@ -96,7 +100,7 @@ fn import_property_triples_queryable() {
 #[test]
 fn import_mixed_triples_queryable_by_subject() {
     let data_dir = TempDir::new().unwrap();
-    let sst_dir  = TempDir::new().unwrap();
+    let sst_dir = TempDir::new().unwrap();
 
     let store = TripleStore::open(data_dir.path()).unwrap();
     let mut importer = SstImporter::new(sst_dir.path()).unwrap();
@@ -158,13 +162,17 @@ fn import_two_batches_both_visible() {
     }
 
     let all = store.scan_all().unwrap();
-    assert_eq!(all.len(), 1_000, "both batches should be visible after sequential imports");
+    assert_eq!(
+        all.len(),
+        1_000,
+        "both batches should be visible after sequential imports"
+    );
 }
 
 #[test]
 fn import_then_normal_insert_both_visible() {
     let data_dir = TempDir::new().unwrap();
-    let sst_dir  = TempDir::new().unwrap();
+    let sst_dir = TempDir::new().unwrap();
 
     let store = TripleStore::open(data_dir.path()).unwrap();
 
@@ -177,10 +185,10 @@ fn import_then_normal_insert_both_visible() {
 
     // Add one more triple via the normal MVCC path
     let extra = Triple::Relation {
-        subject:   node(9999),
+        subject: node(9999),
         predicate: Predicate::new("knows"),
-        object:    node(8888),
-        edge_id:   edge(7777),
+        object: node(8888),
+        edge_id: edge(7777),
         temporal: BiTemporalRange {
             vt_start: Timestamp(0),
             vt_end: Timestamp::END_OF_TIME,

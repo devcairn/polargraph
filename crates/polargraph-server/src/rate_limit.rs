@@ -96,7 +96,11 @@ impl<S> Layer<S> for RateLimitLayer {
     type Service = RateLimitService<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        RateLimitService { inner, max_rps: self.max_rps, state: Arc::clone(&self.state) }
+        RateLimitService {
+            inner,
+            max_rps: self.max_rps,
+            state: Arc::clone(&self.state),
+        }
     }
 }
 
@@ -152,15 +156,17 @@ where
             }
 
             let allowed = {
-                let mut bucket = state.buckets.entry(client_ip).or_insert_with(|| TokenBucket {
-                    tokens: max_rps as f64,
-                    last_refill: Instant::now(),
-                });
+                let mut bucket = state
+                    .buckets
+                    .entry(client_ip)
+                    .or_insert_with(|| TokenBucket {
+                        tokens: max_rps as f64,
+                        last_refill: Instant::now(),
+                    });
 
                 let now = Instant::now();
                 let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
-                bucket.tokens =
-                    (bucket.tokens + elapsed * max_rps as f64).min(max_rps as f64);
+                bucket.tokens = (bucket.tokens + elapsed * max_rps as f64).min(max_rps as f64);
                 bucket.last_refill = now;
 
                 if bucket.tokens >= 1.0 {
@@ -195,7 +201,10 @@ fn extract_client_ip<B>(req: &Request<B>) -> IpAddr {
     }
 
     // Direct TCP peer from tonic's connection extension.
-    if let Some(info) = req.extensions().get::<tonic::transport::server::TcpConnectInfo>() {
+    if let Some(info) = req
+        .extensions()
+        .get::<tonic::transport::server::TcpConnectInfo>()
+    {
         if let Some(addr) = info.remote_addr() {
             return addr.ip();
         }
@@ -243,7 +252,10 @@ mod tests {
         for _ in 0..max_rps {
             assert!(consume_bucket(&state, ip, max_rps), "should be allowed");
         }
-        assert!(!consume_bucket(&state, ip, max_rps), "should be rejected after quota exhausted");
+        assert!(
+            !consume_bucket(&state, ip, max_rps),
+            "should be rejected after quota exhausted"
+        );
     }
 
     #[test]
@@ -257,11 +269,17 @@ mod tests {
         for _ in 0..max_rps {
             assert!(consume_bucket(&state, ip_a, max_rps));
         }
-        assert!(!consume_bucket(&state, ip_a, max_rps), "A should be exhausted");
+        assert!(
+            !consume_bucket(&state, ip_a, max_rps),
+            "A should be exhausted"
+        );
 
         // B is independent — should still have full quota.
         for _ in 0..max_rps {
-            assert!(consume_bucket(&state, ip_b, max_rps), "B should still be allowed");
+            assert!(
+                consume_bucket(&state, ip_b, max_rps),
+                "B should still be allowed"
+            );
         }
     }
 
@@ -289,6 +307,9 @@ mod tests {
         }
 
         // After simulated refill, one token should be available again.
-        assert!(consume_bucket(&state, ip, max_rps), "should be refilled after 1s");
+        assert!(
+            consume_bucket(&state, ip, max_rps),
+            "should be refilled after 1s"
+        );
     }
 }

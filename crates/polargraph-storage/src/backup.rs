@@ -87,7 +87,8 @@ impl BackupManager {
     pub fn create_backup(&self) -> Result<BackupInfo, StorageError> {
         let mut guard = self.engine.lock().unwrap();
         // flush=true so in-flight memtable writes are captured.
-        self.store.with_db(|db| guard.0.create_new_backup_flush(db, true))?;
+        self.store
+            .with_db(|db| guard.0.create_new_backup_flush(db, true))?;
         guard
             .0
             .get_backup_info()
@@ -100,7 +101,12 @@ impl BackupManager {
     /// List all backups with their ID, timestamp, size, and file count.
     pub fn list_backups(&self) -> Result<Vec<BackupInfo>, StorageError> {
         let guard = self.engine.lock().unwrap();
-        Ok(guard.0.get_backup_info().into_iter().map(BackupInfo::from).collect())
+        Ok(guard
+            .0
+            .get_backup_info()
+            .into_iter()
+            .map(BackupInfo::from)
+            .collect())
     }
 
     /// Restore backup `backup_id` into `restore_dir`.
@@ -110,12 +116,18 @@ impl BackupManager {
     /// with `--data-dir <restore_dir>`.
     ///
     /// `restore_dir` is created if it does not already exist.
-    pub fn restore_from_backup(&self, backup_id: u32, restore_dir: &Path) -> Result<(), StorageError> {
+    pub fn restore_from_backup(
+        &self,
+        backup_id: u32,
+        restore_dir: &Path,
+    ) -> Result<(), StorageError> {
         std::fs::create_dir_all(restore_dir)?;
         let mut guard = self.engine.lock().unwrap();
         let opts = RestoreOptions::default();
         // db_dir == wal_dir: RocksDB default places WAL in the data directory.
-        guard.0.restore_from_backup(restore_dir, restore_dir, &opts, backup_id)?;
+        guard
+            .0
+            .restore_from_backup(restore_dir, restore_dir, &opts, backup_id)?;
         Ok(())
     }
 
@@ -196,11 +208,15 @@ mod tests {
         let info = mgr.create_backup().unwrap();
 
         let restore_dir = TempDir::new().unwrap();
-        mgr.restore_from_backup(info.backup_id, restore_dir.path()).unwrap();
+        mgr.restore_from_backup(info.backup_id, restore_dir.path())
+            .unwrap();
 
         // The restored directory must be non-empty and openable as a TripleStore.
         let entries: Vec<_> = std::fs::read_dir(restore_dir.path()).unwrap().collect();
-        assert!(!entries.is_empty(), "restore dir should contain RocksDB files");
+        assert!(
+            !entries.is_empty(),
+            "restore dir should contain RocksDB files"
+        );
 
         let restored = TripleStore::open(restore_dir.path()).unwrap();
         // A fresh store has no triples — just check the store opens without error.

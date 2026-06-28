@@ -91,7 +91,10 @@ pub fn apply_aggregations(
     if specs.is_empty() {
         let mut rows: Vec<AggregatedRow> = bindings
             .into_iter()
-            .map(|b| AggregatedRow { group_keys: b, agg_values: HashMap::new() })
+            .map(|b| AggregatedRow {
+                group_keys: b,
+                agg_values: HashMap::new(),
+            })
             .collect();
         apply_order_skip_limit(&mut rows, order_by, skip, limit);
         return rows;
@@ -126,7 +129,10 @@ pub fn apply_aggregations(
                 .iter()
                 .map(|spec| (spec.alias.clone(), compute_agg(&spec.func, group, snapshot)))
                 .collect();
-            AggregatedRow { group_keys: group_keys_map, agg_values }
+            AggregatedRow {
+                group_keys: group_keys_map,
+                agg_values,
+            }
         })
         .collect();
 
@@ -157,7 +163,10 @@ fn compute_agg(func: &AggFunc, group: &[Bindings], snapshot: Option<&Snapshot>) 
     match func {
         AggFunc::CountStar => Value::Int(group.len() as i64),
         AggFunc::Count(var) => {
-            let n = group.iter().filter(|b| b.contains_key(var.as_str())).count();
+            let n = group
+                .iter()
+                .filter(|b| b.contains_key(var.as_str()))
+                .count();
             Value::Int(n as i64)
         }
         AggFunc::Collect(var) => {
@@ -219,8 +228,14 @@ fn extract_numeric_values(
                 .ok()
                 .and_then(|triples| {
                     triples.into_iter().find_map(|t| match t {
-                        Triple::Property { value: Value::Float(f), .. } => Some(f),
-                        Triple::Property { value: Value::Int(i), .. } => Some(i as f64),
+                        Triple::Property {
+                            value: Value::Float(f),
+                            ..
+                        } => Some(f),
+                        Triple::Property {
+                            value: Value::Int(i),
+                            ..
+                        } => Some(i as f64),
                         _ => None,
                     })
                 })
@@ -248,7 +263,11 @@ fn apply_order_skip_limit(
                 let va = get_sort_key(a, &spec.key);
                 let vb = get_sort_key(b, &spec.key);
                 let ord = compare_values(&va, &vb);
-                let ord = if spec.direction == SortDir::Desc { ord.reverse() } else { ord };
+                let ord = if spec.direction == SortDir::Desc {
+                    ord.reverse()
+                } else {
+                    ord
+                };
                 if ord != std::cmp::Ordering::Equal {
                     return ord;
                 }
@@ -321,15 +340,25 @@ mod tests {
             make_bindings(&[("a", bob)]),
         ];
 
-        let specs = vec![AggregationSpec { func: AggFunc::CountStar, alias: "n".into() }];
-        let mut rows = apply_aggregations(bindings, &["a".to_string()], &specs, &[], None, None, None);
+        let specs = vec![AggregationSpec {
+            func: AggFunc::CountStar,
+            alias: "n".into(),
+        }];
+        let mut rows =
+            apply_aggregations(bindings, &["a".to_string()], &specs, &[], None, None, None);
 
         // Two groups: alice (count=2) and bob (count=1)
         assert_eq!(rows.len(), 2);
         rows.sort_by_key(|r| *r.group_keys.get("a").unwrap() == alice);
 
-        let alice_row = rows.iter().find(|r| r.group_keys.get("a") == Some(&alice)).unwrap();
-        let bob_row   = rows.iter().find(|r| r.group_keys.get("a") == Some(&bob)).unwrap();
+        let alice_row = rows
+            .iter()
+            .find(|r| r.group_keys.get("a") == Some(&alice))
+            .unwrap();
+        let bob_row = rows
+            .iter()
+            .find(|r| r.group_keys.get("a") == Some(&bob))
+            .unwrap();
         assert_eq!(alice_row.agg_values.get("n"), Some(&Value::Int(2)));
         assert_eq!(bob_row.agg_values.get("n"), Some(&Value::Int(1)));
     }
@@ -340,7 +369,10 @@ mod tests {
         let bindings: Vec<Bindings> = ids.iter().map(|&id| make_bindings(&[("a", id)])).collect();
 
         // group_keys is empty → all 5 rows are in the same universal group → one row with count=5
-        let specs = vec![AggregationSpec { func: AggFunc::CountStar, alias: "n".into() }];
+        let specs = vec![AggregationSpec {
+            func: AggFunc::CountStar,
+            alias: "n".into(),
+        }];
         let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].agg_values.get("n"), Some(&Value::Int(5)));
@@ -359,7 +391,10 @@ mod tests {
             make_bindings(&[("a", alice), ("b", carol)]),
         ];
 
-        let specs = vec![AggregationSpec { func: AggFunc::Collect("b".into()), alias: "bs".into() }];
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Collect("b".into()),
+            alias: "bs".into(),
+        }];
         let rows = apply_aggregations(bindings, &["a".to_string()], &specs, &[], None, None, None);
 
         assert_eq!(rows.len(), 1);
@@ -389,7 +424,10 @@ mod tests {
             make_bindings(&[("a", alice)]), // `b` absent
         ];
 
-        let specs = vec![AggregationSpec { func: AggFunc::Count("b".into()), alias: "n".into() }];
+        let specs = vec![AggregationSpec {
+            func: AggFunc::Count("b".into()),
+            alias: "n".into(),
+        }];
         let rows = apply_aggregations(bindings, &["a".to_string()], &specs, &[], None, None, None);
 
         assert_eq!(rows.len(), 1);
@@ -403,16 +441,43 @@ mod tests {
         let ids: Vec<NodeId> = (0..3).map(|_| NodeId::new()).collect();
         // Groups: id[0]→3 rows, id[1]→1 row, id[2]→2 rows
         let mut bindings = Vec::new();
-        for _ in 0..3 { bindings.push(make_bindings(&[("a", ids[0])])); }
-        for _ in 0..1 { bindings.push(make_bindings(&[("a", ids[1])])); }
-        for _ in 0..2 { bindings.push(make_bindings(&[("a", ids[2])])); }
+        for _ in 0..3 {
+            bindings.push(make_bindings(&[("a", ids[0])]));
+        }
+        for _ in 0..1 {
+            bindings.push(make_bindings(&[("a", ids[1])]));
+        }
+        for _ in 0..2 {
+            bindings.push(make_bindings(&[("a", ids[2])]));
+        }
 
-        let specs = vec![AggregationSpec { func: AggFunc::CountStar, alias: "n".into() }];
-        let order_by = vec![OrderSpec { key: "n".into(), direction: SortDir::Asc }];
-        let rows = apply_aggregations(bindings, &["a".to_string()], &specs, &order_by, None, None, None);
+        let specs = vec![AggregationSpec {
+            func: AggFunc::CountStar,
+            alias: "n".into(),
+        }];
+        let order_by = vec![OrderSpec {
+            key: "n".into(),
+            direction: SortDir::Asc,
+        }];
+        let rows = apply_aggregations(
+            bindings,
+            &["a".to_string()],
+            &specs,
+            &order_by,
+            None,
+            None,
+            None,
+        );
 
-        let counts: Vec<i64> = rows.iter()
-            .map(|r| if let Some(Value::Int(n)) = r.agg_values.get("n") { *n } else { 0 })
+        let counts: Vec<i64> = rows
+            .iter()
+            .map(|r| {
+                if let Some(Value::Int(n)) = r.agg_values.get("n") {
+                    *n
+                } else {
+                    0
+                }
+            })
             .collect();
         assert_eq!(counts, vec![1, 2, 3]);
     }
@@ -421,16 +486,43 @@ mod tests {
     fn order_by_desc_on_aggregate() {
         let ids: Vec<NodeId> = (0..3).map(|_| NodeId::new()).collect();
         let mut bindings = Vec::new();
-        for _ in 0..3 { bindings.push(make_bindings(&[("a", ids[0])])); }
-        for _ in 0..1 { bindings.push(make_bindings(&[("a", ids[1])])); }
-        for _ in 0..2 { bindings.push(make_bindings(&[("a", ids[2])])); }
+        for _ in 0..3 {
+            bindings.push(make_bindings(&[("a", ids[0])]));
+        }
+        for _ in 0..1 {
+            bindings.push(make_bindings(&[("a", ids[1])]));
+        }
+        for _ in 0..2 {
+            bindings.push(make_bindings(&[("a", ids[2])]));
+        }
 
-        let specs = vec![AggregationSpec { func: AggFunc::CountStar, alias: "n".into() }];
-        let order_by = vec![OrderSpec { key: "n".into(), direction: SortDir::Desc }];
-        let rows = apply_aggregations(bindings, &["a".to_string()], &specs, &order_by, None, None, None);
+        let specs = vec![AggregationSpec {
+            func: AggFunc::CountStar,
+            alias: "n".into(),
+        }];
+        let order_by = vec![OrderSpec {
+            key: "n".into(),
+            direction: SortDir::Desc,
+        }];
+        let rows = apply_aggregations(
+            bindings,
+            &["a".to_string()],
+            &specs,
+            &order_by,
+            None,
+            None,
+            None,
+        );
 
-        let counts: Vec<i64> = rows.iter()
-            .map(|r| if let Some(Value::Int(n)) = r.agg_values.get("n") { *n } else { 0 })
+        let counts: Vec<i64> = rows
+            .iter()
+            .map(|r| {
+                if let Some(Value::Int(n)) = r.agg_values.get("n") {
+                    *n
+                } else {
+                    0
+                }
+            })
             .collect();
         assert_eq!(counts, vec![3, 2, 1]);
     }
@@ -500,7 +592,9 @@ mod tests {
 
     fn commit_snap(store: &TripleStore, triples: Vec<Triple>) -> polargraph_storage::Snapshot {
         let mut tx = store.begin();
-        for t in triples { tx.insert(t); }
+        for t in triples {
+            tx.insert(t);
+        }
         let ts = tx.commit().unwrap();
         store.snapshot(ts)
     }
@@ -511,18 +605,24 @@ mod tests {
         let n1 = NodeId::new();
         let n2 = NodeId::new();
         let n3 = NodeId::new();
-        let snap = commit_snap(&store, vec![
-            float_prop(n1, "score", 1.0),
-            float_prop(n2, "score", 2.5),
-            float_prop(n3, "score", 3.5),
-        ]);
+        let snap = commit_snap(
+            &store,
+            vec![
+                float_prop(n1, "score", 1.0),
+                float_prop(n2, "score", 2.5),
+                float_prop(n3, "score", 3.5),
+            ],
+        );
         let bindings = vec![
             make_bindings(&[("n", n1)]),
             make_bindings(&[("n", n2)]),
             make_bindings(&[("n", n3)]),
         ];
         let specs = vec![AggregationSpec {
-            func: AggFunc::Sum { var: "n".into(), prop: "score".into() },
+            func: AggFunc::Sum {
+                var: "n".into(),
+                prop: "score".into(),
+            },
             alias: "total".into(),
         }];
         let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, Some(&snap));
@@ -538,7 +638,10 @@ mod tests {
         let (store, _dir) = open_store();
         let snap = commit_snap(&store, vec![]);
         let specs = vec![AggregationSpec {
-            func: AggFunc::Sum { var: "n".into(), prop: "score".into() },
+            func: AggFunc::Sum {
+                var: "n".into(),
+                prop: "score".into(),
+            },
             alias: "total".into(),
         }];
         let rows = apply_aggregations(vec![], &[], &specs, &[], None, None, Some(&snap));
@@ -550,7 +653,10 @@ mod tests {
         let n1 = NodeId::new();
         let bindings = vec![make_bindings(&[("n", n1)])];
         let specs = vec![AggregationSpec {
-            func: AggFunc::Sum { var: "n".into(), prop: "score".into() },
+            func: AggFunc::Sum {
+                var: "n".into(),
+                prop: "score".into(),
+            },
             alias: "total".into(),
         }];
         let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, None);
@@ -563,16 +669,16 @@ mod tests {
         let (store, _dir) = open_store();
         let n1 = NodeId::new();
         let n2 = NodeId::new();
-        let snap = commit_snap(&store, vec![
-            float_prop(n1, "conf", 0.4),
-            float_prop(n2, "conf", 0.8),
-        ]);
-        let bindings = vec![
-            make_bindings(&[("n", n1)]),
-            make_bindings(&[("n", n2)]),
-        ];
+        let snap = commit_snap(
+            &store,
+            vec![float_prop(n1, "conf", 0.4), float_prop(n2, "conf", 0.8)],
+        );
+        let bindings = vec![make_bindings(&[("n", n1)]), make_bindings(&[("n", n2)])];
         let specs = vec![AggregationSpec {
-            func: AggFunc::Avg { var: "n".into(), prop: "conf".into() },
+            func: AggFunc::Avg {
+                var: "n".into(),
+                prop: "conf".into(),
+            },
             alias: "mean".into(),
         }];
         let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, Some(&snap));
@@ -588,7 +694,10 @@ mod tests {
         let (store, _dir) = open_store();
         let snap = commit_snap(&store, vec![]);
         let specs = vec![AggregationSpec {
-            func: AggFunc::Avg { var: "n".into(), prop: "conf".into() },
+            func: AggFunc::Avg {
+                var: "n".into(),
+                prop: "conf".into(),
+            },
             alias: "mean".into(),
         }];
         let rows = apply_aggregations(vec![], &[], &specs, &[], None, None, Some(&snap));
@@ -602,7 +711,10 @@ mod tests {
         let snap = commit_snap(&store, vec![]); // no properties at all
         let bindings = vec![make_bindings(&[("n", n1)])];
         let specs = vec![AggregationSpec {
-            func: AggFunc::Avg { var: "n".into(), prop: "conf".into() },
+            func: AggFunc::Avg {
+                var: "n".into(),
+                prop: "conf".into(),
+            },
             alias: "mean".into(),
         }];
         let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, Some(&snap));
@@ -616,18 +728,24 @@ mod tests {
         let n1 = NodeId::new();
         let n2 = NodeId::new();
         let n3 = NodeId::new();
-        let snap = commit_snap(&store, vec![
-            float_prop(n1, "v", 5.0),
-            float_prop(n2, "v", 2.0),
-            float_prop(n3, "v", 8.0),
-        ]);
+        let snap = commit_snap(
+            &store,
+            vec![
+                float_prop(n1, "v", 5.0),
+                float_prop(n2, "v", 2.0),
+                float_prop(n3, "v", 8.0),
+            ],
+        );
         let bindings = vec![
             make_bindings(&[("n", n1)]),
             make_bindings(&[("n", n2)]),
             make_bindings(&[("n", n3)]),
         ];
         let specs = vec![AggregationSpec {
-            func: AggFunc::Min { var: "n".into(), prop: "v".into() },
+            func: AggFunc::Min {
+                var: "n".into(),
+                prop: "v".into(),
+            },
             alias: "lo".into(),
         }];
         let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, Some(&snap));
@@ -643,7 +761,10 @@ mod tests {
         let (store, _dir) = open_store();
         let snap = commit_snap(&store, vec![]);
         let specs = vec![AggregationSpec {
-            func: AggFunc::Min { var: "n".into(), prop: "v".into() },
+            func: AggFunc::Min {
+                var: "n".into(),
+                prop: "v".into(),
+            },
             alias: "lo".into(),
         }];
         let rows = apply_aggregations(vec![], &[], &specs, &[], None, None, Some(&snap));
@@ -655,7 +776,10 @@ mod tests {
         let n1 = NodeId::new();
         let bindings = vec![make_bindings(&[("n", n1)])];
         let specs = vec![AggregationSpec {
-            func: AggFunc::Min { var: "n".into(), prop: "v".into() },
+            func: AggFunc::Min {
+                var: "n".into(),
+                prop: "v".into(),
+            },
             alias: "lo".into(),
         }];
         let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, None);
@@ -669,18 +793,24 @@ mod tests {
         let n1 = NodeId::new();
         let n2 = NodeId::new();
         let n3 = NodeId::new();
-        let snap = commit_snap(&store, vec![
-            float_prop(n1, "v", 5.0),
-            float_prop(n2, "v", 2.0),
-            float_prop(n3, "v", 8.0),
-        ]);
+        let snap = commit_snap(
+            &store,
+            vec![
+                float_prop(n1, "v", 5.0),
+                float_prop(n2, "v", 2.0),
+                float_prop(n3, "v", 8.0),
+            ],
+        );
         let bindings = vec![
             make_bindings(&[("n", n1)]),
             make_bindings(&[("n", n2)]),
             make_bindings(&[("n", n3)]),
         ];
         let specs = vec![AggregationSpec {
-            func: AggFunc::Max { var: "n".into(), prop: "v".into() },
+            func: AggFunc::Max {
+                var: "n".into(),
+                prop: "v".into(),
+            },
             alias: "hi".into(),
         }];
         let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, Some(&snap));
@@ -696,7 +826,10 @@ mod tests {
         let (store, _dir) = open_store();
         let snap = commit_snap(&store, vec![]);
         let specs = vec![AggregationSpec {
-            func: AggFunc::Max { var: "n".into(), prop: "v".into() },
+            func: AggFunc::Max {
+                var: "n".into(),
+                prop: "v".into(),
+            },
             alias: "hi".into(),
         }];
         let rows = apply_aggregations(vec![], &[], &specs, &[], None, None, Some(&snap));
@@ -708,7 +841,10 @@ mod tests {
         let n1 = NodeId::new();
         let bindings = vec![make_bindings(&[("n", n1)])];
         let specs = vec![AggregationSpec {
-            func: AggFunc::Max { var: "n".into(), prop: "v".into() },
+            func: AggFunc::Max {
+                var: "n".into(),
+                prop: "v".into(),
+            },
             alias: "hi".into(),
         }];
         let rows = apply_aggregations(bindings, &[], &specs, &[], None, None, None);

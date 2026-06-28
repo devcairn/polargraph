@@ -11,13 +11,13 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
+use polargraph_core::id::NodeId;
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::info;
 use uuid::Uuid;
-use polargraph_core::id::NodeId;
 
 #[allow(clippy::enum_variant_names)]
 mod proto {
@@ -29,10 +29,17 @@ use proto::polar_graph_service_client::PolarGraphServiceClient;
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
-#[command(name = "polargraph-rest", about = "HTTP/JSON REST gateway for PolarGraph")]
+#[command(
+    name = "polargraph-rest",
+    about = "HTTP/JSON REST gateway for PolarGraph"
+)]
 struct Args {
     /// gRPC address of the upstream polargraphd server.
-    #[arg(long, env = "POLARGRAPH_UPSTREAM", default_value = "http://localhost:50051")]
+    #[arg(
+        long,
+        env = "POLARGRAPH_UPSTREAM",
+        default_value = "http://localhost:50051"
+    )]
     upstream: String,
 
     /// Address to bind the REST HTTP server.
@@ -56,10 +63,7 @@ struct AuthInterceptor {
 }
 
 impl tonic::service::Interceptor for AuthInterceptor {
-    fn call(
-        &mut self,
-        mut req: tonic::Request<()>,
-    ) -> Result<tonic::Request<()>, tonic::Status> {
+    fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
         if let Some(t) = &self.token {
             let val: MetadataValue<tonic::metadata::Ascii> =
                 format!("Bearer {}", t).parse().map_err(|_| {
@@ -108,9 +112,9 @@ struct AppState {
 /// ```
 #[derive(Deserialize)]
 struct RuleJson {
-    head_predicate:   String,
+    head_predicate: String,
     head_subject_var: String,
-    head_object_var:  String,
+    head_object_var: String,
     /// Body patterns in the same `"?s :pred ?o"` format as query patterns.
     body: Vec<String>,
 }
@@ -140,15 +144,15 @@ struct QueryBody {
 /// `{"blob_val":"<base64>"}`, or `{"vec_val":{"values":[...]}}`.
 #[derive(Deserialize)]
 struct EdgePropertyJson {
-    name:  String,
+    name: String,
     value: serde_json::Value,
 }
 
 #[derive(Deserialize)]
 struct InsertBody {
-    subject:   String,
+    subject: String,
     predicate: String,
-    object:    String,
+    object: String,
     /// Optional properties stored on the edge (accessible via the returned edge_id).
     #[serde(default)]
     properties: Vec<EdgePropertyJson>,
@@ -242,9 +246,9 @@ fn rule_to_proto(rule: &RuleJson) -> Result<proto::DatalogRule, String> {
         .map(|p| parse_pattern(p))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(proto::DatalogRule {
-        head_predicate:   rule.head_predicate.clone(),
+        head_predicate: rule.head_predicate.clone(),
         head_subject_var: rule.head_subject_var.clone(),
-        head_object_var:  rule.head_object_var.clone(),
+        head_object_var: rule.head_object_var.clone(),
         body,
     })
 }
@@ -263,17 +267,31 @@ fn edge_property_to_proto(ep: &EdgePropertyJson) -> Result<proto::EdgeProperty, 
         // blob_val is a JSON array of integers 0–255.
         let bytes = arr
             .iter()
-            .map(|b| b.as_u64().and_then(|n| u8::try_from(n).ok())
-                .ok_or_else(|| format!("blob_val elements must be integers 0–255 for property {:?}", ep.name)))
+            .map(|b| {
+                b.as_u64()
+                    .and_then(|n| u8::try_from(n).ok())
+                    .ok_or_else(|| {
+                        format!(
+                            "blob_val elements must be integers 0–255 for property {:?}",
+                            ep.name
+                        )
+                    })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         proto::value::Kind::BlobVal(bytes)
-    } else if let Some(arr) = ep.value.get("vec_val")
+    } else if let Some(arr) = ep
+        .value
+        .get("vec_val")
         .and_then(|v| v.get("values"))
         .and_then(|v| v.as_array())
     {
         let values = arr
             .iter()
-            .map(|f| f.as_f64().map(|x| x as f32).ok_or_else(|| "vec_val elements must be numbers".to_string()))
+            .map(|f| {
+                f.as_f64()
+                    .map(|x| x as f32)
+                    .ok_or_else(|| "vec_val elements must be numbers".to_string())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         proto::value::Kind::VecVal(proto::FloatArray { values })
     } else if ep.value.get("null_val").is_some() || ep.value.is_null() {
@@ -285,7 +303,7 @@ fn edge_property_to_proto(ep: &EdgePropertyJson) -> Result<proto::EdgeProperty, 
         ));
     };
     Ok(proto::EdgeProperty {
-        name:  ep.name.clone(),
+        name: ep.name.clone(),
         value: Some(proto::Value { kind: Some(kind) }),
     })
 }
@@ -361,7 +379,9 @@ fn json_to_proto_value(v: &serde_json::Value) -> proto::Value {
 
 fn uuid_string_to_node_id(s: &str) -> Result<proto::NodeId, String> {
     Uuid::parse_str(s)
-        .map(|u| proto::NodeId { bytes: u.as_bytes().to_vec() })
+        .map(|u| proto::NodeId {
+            bytes: u.as_bytes().to_vec(),
+        })
         .map_err(|_| format!("invalid UUID: {:?}", s))
 }
 
@@ -371,7 +391,11 @@ fn parse_patterns(raw: &[String]) -> Result<Vec<proto::VarPattern>, Response> {
         .map(|p| parse_pattern(p))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response()
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
         })
 }
 
@@ -387,17 +411,32 @@ async fn handle_query(
         Err(e) => return e,
     };
 
-    let rules: Vec<proto::DatalogRule> = match body.rules.iter()
+    let rules: Vec<proto::DatalogRule> = match body
+        .rules
+        .iter()
         .map(rule_to_proto)
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
 
     // Resolve user_id: prefer JSON body field, fall back to X-User-Id header.
-    let user_id = body.user_id.clone()
-        .or_else(|| headers.get("x-user-id").and_then(|v| v.to_str().ok()).map(str::to_string))
+    let user_id = body
+        .user_id
+        .clone()
+        .or_else(|| {
+            headers
+                .get("x-user-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        })
         .unwrap_or_default();
 
     let req = proto::QueryRequest {
@@ -442,24 +481,38 @@ async fn handle_insert(
     let subject = match uuid_string_to_node_id(&body.subject) {
         Ok(n) => n,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
                 .into_response()
         }
     };
     let object = match uuid_string_to_node_id(&body.object) {
         Ok(n) => n,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
                 .into_response()
         }
     };
 
-    let properties: Vec<proto::EdgeProperty> = match body.properties.iter()
+    let properties: Vec<proto::EdgeProperty> = match body
+        .properties
+        .iter()
         .map(edge_property_to_proto)
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(p) => p,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
 
     let triple = proto::Triple {
@@ -485,12 +538,10 @@ async fn handle_insert(
         Ok(r) => {
             let inner = r.into_inner();
             // Return the edge_id UUID so clients can query edge properties later.
-            let edge_id = inner.edge_ids.first()
-                .filter(|b| b.len() == 16)
-                .map(|b| {
-                    let arr: [u8; 16] = b[..16].try_into().unwrap_or([0u8; 16]);
-                    Uuid::from_bytes(arr).to_string()
-                });
+            let edge_id = inner.edge_ids.first().filter(|b| b.len() == 16).map(|b| {
+                let arr: [u8; 16] = b[..16].try_into().unwrap_or([0u8; 16]);
+                Uuid::from_bytes(arr).to_string()
+            });
             Json(serde_json::json!({ "ok": true, "tx_time": inner.commit_ts, "edge_id": edge_id }))
                 .into_response()
         }
@@ -511,24 +562,38 @@ async fn handle_triples(
 ) -> Response {
     let subject_term = match &params.subject {
         Some(s) => match uuid_string_to_node_id(s) {
-            Ok(nid) => proto::Term { kind: Some(proto::term::Kind::Bound(nid)) },
+            Ok(nid) => proto::Term {
+                kind: Some(proto::term::Kind::Bound(nid)),
+            },
             Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
                     .into_response()
             }
         },
-        None => proto::Term { kind: Some(proto::term::Kind::Var("__s".to_string())) },
+        None => proto::Term {
+            kind: Some(proto::term::Kind::Var("__s".to_string())),
+        },
     };
 
     let object_term = match &params.object {
         Some(o) => match uuid_string_to_node_id(o) {
-            Ok(nid) => proto::Term { kind: Some(proto::term::Kind::Bound(nid)) },
+            Ok(nid) => proto::Term {
+                kind: Some(proto::term::Kind::Bound(nid)),
+            },
             Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
                     .into_response()
             }
         },
-        None => proto::Term { kind: Some(proto::term::Kind::Var("__o".to_string())) },
+        None => proto::Term {
+            kind: Some(proto::term::Kind::Var("__o".to_string())),
+        },
     };
 
     let predicate_filter = params.predicate.clone().unwrap_or_default();
@@ -556,15 +621,19 @@ async fn handle_triples(
         .bindings
         .into_iter()
         .map(|b| TripleJson {
-            subject: params
-                .subject
-                .clone()
-                .unwrap_or_else(|| b.vars.get("__s").map(node_id_to_uuid_string).unwrap_or_default()),
+            subject: params.subject.clone().unwrap_or_else(|| {
+                b.vars
+                    .get("__s")
+                    .map(node_id_to_uuid_string)
+                    .unwrap_or_default()
+            }),
             predicate: predicate_filter.clone(),
-            object: params
-                .object
-                .clone()
-                .unwrap_or_else(|| b.vars.get("__o").map(node_id_to_uuid_string).unwrap_or_default()),
+            object: params.object.clone().unwrap_or_else(|| {
+                b.vars
+                    .get("__o")
+                    .map(node_id_to_uuid_string)
+                    .unwrap_or_default()
+            }),
         })
         .collect();
 
@@ -591,10 +660,12 @@ async fn handle_vector_search(
                 .into_inner()
                 .results
                 .into_iter()
-                .map(|vr| serde_json::json!({
-                    "id": vr.node_id.as_ref().map(node_id_to_uuid_string).unwrap_or_default(),
-                    "score": vr.similarity,
-                }))
+                .map(|vr| {
+                    serde_json::json!({
+                        "id": vr.node_id.as_ref().map(node_id_to_uuid_string).unwrap_or_default(),
+                        "score": vr.similarity,
+                    })
+                })
                 .collect();
             Json(serde_json::json!({ "results": results })).into_response()
         }
@@ -612,7 +683,11 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> Response {
     {
         Ok(r) => {
             let inner = r.into_inner();
-            let mode = if inner.is_replica { "replica" } else { "primary" };
+            let mode = if inner.is_replica {
+                "replica"
+            } else {
+                "primary"
+            };
             Json(serde_json::json!({ "status": "ok", "mode": mode })).into_response()
         }
         Err(e) => grpc_error(e),
@@ -660,8 +735,15 @@ async fn handle_cypher(
     headers: axum::http::HeaderMap,
     Json(body): Json<CypherBody>,
 ) -> Response {
-    let user_id = body.user_id.clone()
-        .or_else(|| headers.get("x-user-id").and_then(|v| v.to_str().ok()).map(str::to_string))
+    let user_id = body
+        .user_id
+        .clone()
+        .or_else(|| {
+            headers
+                .get("x-user-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        })
         .unwrap_or_default();
 
     let req = proto::CypherQueryRequest {
@@ -747,12 +829,20 @@ async fn handle_query_stream(
         Err(e) => return e,
     };
 
-    let rules: Vec<proto::DatalogRule> = match body.rules.iter()
+    let rules: Vec<proto::DatalogRule> = match body
+        .rules
+        .iter()
         .map(rule_to_proto)
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
 
     let req = proto::QueryRequest {
@@ -853,12 +943,20 @@ async fn handle_explain(
     };
 
     // Rules are forwarded so the explain output reflects the full query shape.
-    let rules: Vec<proto::DatalogRule> = match body.rules.iter()
+    let rules: Vec<proto::DatalogRule> = match body
+        .rules
+        .iter()
         .map(rule_to_proto)
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
 
     let req = proto::QueryRequest {
@@ -877,14 +975,15 @@ async fn handle_explain(
             let nodes: Vec<serde_json::Value> = er
                 .nodes
                 .into_iter()
-                .map(|n| serde_json::json!({
-                    "node_type": n.node_type,
-                    "description": n.description,
-                    "index_used": n.index_used,
-                }))
+                .map(|n| {
+                    serde_json::json!({
+                        "node_type": n.node_type,
+                        "description": n.description,
+                        "index_used": n.index_used,
+                    })
+                })
                 .collect();
-            Json(serde_json::json!({ "plan_text": er.plan_text, "nodes": nodes }))
-                .into_response()
+            Json(serde_json::json!({ "plan_text": er.plan_text, "nodes": nodes })).into_response()
         }
         Err(e) => grpc_error(e),
     }
@@ -894,29 +993,41 @@ async fn handle_explain(
 
 async fn handle_indexes(State(state): State<Arc<AppState>>) -> Response {
     let mut client = state.client.clone();
-    match client.show_indexes(tonic::Request::new(proto::ShowIndexesRequest {})).await {
+    match client
+        .show_indexes(tonic::Request::new(proto::ShowIndexesRequest {}))
+        .await
+    {
         Ok(r) => {
             let resp = r.into_inner();
-            let cfs: Vec<serde_json::Value> = resp.column_families.into_iter().map(|cf| {
-                serde_json::json!({
-                    "name": cf.name,
-                    "approx_key_count": cf.approx_key_count,
-                    "approx_size_bytes": cf.approx_size_bytes,
+            let cfs: Vec<serde_json::Value> = resp
+                .column_families
+                .into_iter()
+                .map(|cf| {
+                    serde_json::json!({
+                        "name": cf.name,
+                        "approx_key_count": cf.approx_key_count,
+                        "approx_size_bytes": cf.approx_size_bytes,
+                    })
                 })
-            }).collect();
-            let spaces: Vec<serde_json::Value> = resp.vector_spaces.into_iter().map(|vs| {
-                serde_json::json!({
-                    "name": vs.name,
-                    "dimensions": vs.dimensions,
-                    "node_count": vs.node_count,
-                    "storage_mode": vs.storage_mode,
+                .collect();
+            let spaces: Vec<serde_json::Value> = resp
+                .vector_spaces
+                .into_iter()
+                .map(|vs| {
+                    serde_json::json!({
+                        "name": vs.name,
+                        "dimensions": vs.dimensions,
+                        "node_count": vs.node_count,
+                        "storage_mode": vs.storage_mode,
+                    })
                 })
-            }).collect();
+                .collect();
             Json(serde_json::json!({
                 "column_families": cfs,
                 "vector_spaces": spaces,
                 "predicate_count": resp.predicate_count,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => grpc_error(e),
     }
@@ -926,7 +1037,10 @@ async fn handle_indexes(State(state): State<Arc<AppState>>) -> Response {
 
 async fn handle_tx_begin(State(state): State<Arc<AppState>>) -> Response {
     let mut client = state.client.clone();
-    match client.begin_transaction(tonic::Request::new(proto::BeginTransactionRequest {})).await {
+    match client
+        .begin_transaction(tonic::Request::new(proto::BeginTransactionRequest {}))
+        .await
+    {
         Ok(r) => Json(serde_json::json!({ "tx_id": r.into_inner().tx_id })).into_response(),
         Err(e) => grpc_error(e),
     }
@@ -979,10 +1093,10 @@ async fn handle_tx_rollback(
 /// present.
 #[derive(Deserialize)]
 struct EdgeAnnotationBody {
-    edge_id:   String,
+    edge_id: String,
     predicate: String,
-    node_id:   Option<String>,
-    scalar:    Option<serde_json::Value>,
+    node_id: Option<String>,
+    scalar: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -999,13 +1113,13 @@ async fn handle_insert_edge_annotations(
         // Parse edge_id
         let edge_uuid = match Uuid::parse_str(&a.edge_id) {
             Ok(u) => u,
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": format!("invalid edge_id UUID: {}", a.edge_id) })),
-                )
-                    .into_response()
-            }
+            Err(_) => return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({ "error": format!("invalid edge_id UUID: {}", a.edge_id) }),
+                ),
+            )
+                .into_response(),
         };
         let edge_bytes = edge_uuid.as_bytes().to_vec();
 
@@ -1020,7 +1134,9 @@ async fn handle_insert_edge_annotations(
                         .into_response()
                 }
             };
-            Some(proto::edge_annotation::Value::NodeId(node_uuid.as_bytes().to_vec()))
+            Some(proto::edge_annotation::Value::NodeId(
+                node_uuid.as_bytes().to_vec(),
+            ))
         } else if let Some(scalar_val) = a.scalar {
             let v = json_to_proto_value(&scalar_val);
             Some(proto::edge_annotation::Value::Scalar(v))
@@ -1048,8 +1164,7 @@ async fn handle_insert_edge_annotations(
     match client.insert(tonic::Request::new(req)).await {
         Ok(r) => {
             let inner = r.into_inner();
-            Json(serde_json::json!({ "ok": true, "commit_ts": inner.commit_ts }))
-                .into_response()
+            Json(serde_json::json!({ "ok": true, "commit_ts": inner.commit_ts })).into_response()
         }
         Err(e) => grpc_error(e),
     }
@@ -1061,16 +1176,15 @@ async fn handle_get_edge_annotations(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(edge_id): axum::extract::Path<String>,
 ) -> Response {
-    let edge_uuid = match Uuid::parse_str(&edge_id) {
-        Ok(u) => u,
-        Err(_) => {
-            return (
+    let edge_uuid =
+        match Uuid::parse_str(&edge_id) {
+            Ok(u) => u,
+            Err(_) => return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": format!("invalid edge_id UUID: {}", edge_id) })),
             )
-                .into_response()
-        }
-    };
+                .into_response(),
+        };
 
     let req = proto::GetEdgeAnnotationsRequest {
         edge_id: edge_uuid.as_bytes().to_vec(),
@@ -1121,13 +1235,13 @@ async fn handle_property_history(
 ) -> Response {
     let subject_uuid = match Uuid::parse_str(&params.subject) {
         Ok(u) => u,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": format!("invalid subject UUID: {}", params.subject) })),
-            )
-                .into_response()
-        }
+        Err(_) => return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({ "error": format!("invalid subject UUID: {}", params.subject) }),
+            ),
+        )
+            .into_response(),
     };
 
     let req = proto::GetPropertyHistoryRequest {
@@ -1176,21 +1290,40 @@ async fn handle_grant_access(
 ) -> Response {
     let group_id = match uuid_string_to_node_id(&body.group_id) {
         Ok(n) => n.bytes,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
 
     let target = if let Some(ref nid_str) = body.node_id {
         match uuid_string_to_node_id(nid_str) {
             Ok(n) => proto::grant_access_request::Target::NodeId(n.bytes),
-            Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response()
+            }
         }
     } else if let Some(ref tn) = body.type_name {
         proto::grant_access_request::Target::TypeName(tn.clone())
     } else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "node_id or type_name must be set" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "node_id or type_name must be set" })),
+        )
+            .into_response();
     };
 
-    let req = proto::GrantAccessRequest { group_id, target: Some(target) };
+    let req = proto::GrantAccessRequest {
+        group_id,
+        target: Some(target),
+    };
     let mut client = state.client.clone();
     match client.grant_access(tonic::Request::new(req)).await {
         Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
@@ -1213,21 +1346,40 @@ async fn handle_revoke_access(
 ) -> Response {
     let group_id = match uuid_string_to_node_id(&body.group_id) {
         Ok(n) => n.bytes,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
 
     let target = if let Some(ref nid_str) = body.node_id {
         match uuid_string_to_node_id(nid_str) {
             Ok(n) => proto::revoke_access_request::Target::NodeId(n.bytes),
-            Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response()
+            }
         }
     } else if let Some(ref tn) = body.type_name {
         proto::revoke_access_request::Target::TypeName(tn.clone())
     } else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "node_id or type_name must be set" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "node_id or type_name must be set" })),
+        )
+            .into_response();
     };
 
-    let req = proto::RevokeAccessRequest { group_id, target: Some(target) };
+    let req = proto::RevokeAccessRequest {
+        group_id,
+        target: Some(target),
+    };
     let mut client = state.client.clone();
     match client.revoke_access(tonic::Request::new(req)).await {
         Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
@@ -1249,11 +1401,23 @@ async fn handle_add_user_to_group(
 ) -> Response {
     let user_id = match uuid_string_to_node_id(&body.user_id) {
         Ok(n) => n.bytes,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
     let group_id = match uuid_string_to_node_id(&body.group_id) {
         Ok(n) => n.bytes,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
 
     let req = proto::AddUserToGroupRequest { user_id, group_id };
@@ -1272,7 +1436,13 @@ async fn handle_get_user_access(
 ) -> Response {
     let user_id = match uuid_string_to_node_id(&user_id_str) {
         Ok(n) => n.bytes,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
 
     let req = proto::GetUserAccessRequest { user_id };
@@ -1280,7 +1450,8 @@ async fn handle_get_user_access(
     match client.get_user_access(tonic::Request::new(req)).await {
         Ok(r) => {
             let inner = r.into_inner();
-            let node_ids: Vec<String> = inner.node_ids
+            let node_ids: Vec<String> = inner
+                .node_ids
                 .iter()
                 .filter(|b| b.len() == 16)
                 .map(|b| {
@@ -1291,7 +1462,8 @@ async fn handle_get_user_access(
             Json(serde_json::json!({
                 "node_ids": node_ids,
                 "type_grants": inner.type_grants,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => grpc_error(e),
     }
@@ -1405,7 +1577,10 @@ async fn resolve_edge_ids(
         predicate: predicate.to_string(),
         object_id: object_bytes,
     };
-    match client.get_edge_ids_by_triple(tonic::Request::new(req)).await {
+    match client
+        .get_edge_ids_by_triple(tonic::Request::new(req))
+        .await
+    {
         Ok(r) => r.into_inner().edge_ids,
         Err(_) => vec![],
     }
@@ -1443,7 +1618,9 @@ async fn execute_annotation_steps(
                     polargraph_query::Term::Var(v) => {
                         if let Some(SparqlValue::Uri(id)) = b.get(v.as_str()) {
                             id.0.as_bytes().to_vec()
-                        } else { continue; }
+                        } else {
+                            continue;
+                        }
                     }
                     _ => continue,
                 };
@@ -1452,18 +1629,15 @@ async fn execute_annotation_steps(
                     polargraph_query::Term::Var(v) => {
                         if let Some(SparqlValue::Uri(id)) = b.get(v.as_str()) {
                             id.0.as_bytes().to_vec()
-                        } else { continue; }
+                        } else {
+                            continue;
+                        }
                     }
                     _ => continue,
                 };
 
-                let edge_ids = resolve_edge_ids(
-                    client,
-                    subj_bytes,
-                    &step.edge_predicate,
-                    obj_bytes,
-                )
-                .await;
+                let edge_ids =
+                    resolve_edge_ids(client, subj_bytes, &step.edge_predicate, obj_bytes).await;
 
                 for edge_id_bytes in &edge_ids {
                     let ann_req = proto::GetEdgeAnnotationsRequest {
@@ -1539,7 +1713,9 @@ async fn execute_annotation_object_steps(
                     polargraph_query::Term::Var(v) => {
                         if let Some(SparqlValue::Uri(id)) = b.get(v.as_str()) {
                             id.0.as_bytes().to_vec()
-                        } else { continue; }
+                        } else {
+                            continue;
+                        }
                     }
                     _ => continue,
                 };
@@ -1548,18 +1724,15 @@ async fn execute_annotation_object_steps(
                     polargraph_query::Term::Var(v) => {
                         if let Some(SparqlValue::Uri(id)) = b.get(v.as_str()) {
                             id.0.as_bytes().to_vec()
-                        } else { continue; }
+                        } else {
+                            continue;
+                        }
                     }
                     _ => continue,
                 };
 
-                let edge_ids = resolve_edge_ids(
-                    client,
-                    subj_bytes,
-                    &step.edge_predicate,
-                    obj_bytes,
-                )
-                .await;
+                let edge_ids =
+                    resolve_edge_ids(client, subj_bytes, &step.edge_predicate, obj_bytes).await;
 
                 for edge_id_bytes in &edge_ids {
                     let ann_req = proto::GetEdgeAnnotationsRequest {
@@ -1600,8 +1773,8 @@ async fn execute_sparql_query(
     headers: axum::http::HeaderMap,
     query_string: String,
 ) -> Response {
-    use polargraph_sparql::{translate_query, SparqlBindings, SparqlError, SparqlValue};
     use polargraph_sparql::response::ResponseFormat;
+    use polargraph_sparql::{translate_query, SparqlBindings, SparqlError, SparqlValue};
 
     // 1. Parse
     let parsed = match spargebra::Query::parse(&query_string, None) {
@@ -1732,8 +1905,7 @@ async fn execute_sparql_query(
                     }
                 })
                 .collect();
-            branch_bindings =
-                polargraph_sparql::execute::left_join(branch_bindings, right, None);
+            branch_bindings = polargraph_sparql::execute::left_join(branch_bindings, right, None);
         }
 
         // 3b. Execute SPARQL-star subject-position annotation steps.
@@ -2054,7 +2226,10 @@ async fn execute_sparql_construct(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let (content_type, body) = if accept.contains("application/n-triples") {
-        ("application/n-triples", serialize_ntriples_star(&rdf_triples))
+        (
+            "application/n-triples",
+            serialize_ntriples_star(&rdf_triples),
+        )
     } else {
         ("text/turtle", serialize_turtle_star(&rdf_triples))
     };
@@ -2070,7 +2245,9 @@ fn substitute_construct_template(
     tmpl: &polargraph_sparql::ConstructTemplate,
     binding: &polargraph_sparql::SparqlBindings,
 ) -> Option<polargraph_sparql::RdfStarTriple> {
-    use polargraph_sparql::{node_id_to_iri, RdfStarSubject, RdfStarTriple, SparqlLiteral, SparqlValue};
+    use polargraph_sparql::{
+        node_id_to_iri, RdfStarSubject, RdfStarTriple, SparqlLiteral, SparqlValue,
+    };
 
     // Gap 3: subject may be a quoted triple.
     let star_subject = if let Some(ref inner) = tmpl.subject_quoted {
@@ -2133,7 +2310,11 @@ fn substitute_construct_template(
         return None;
     };
 
-    Some(RdfStarTriple { subject: star_subject, predicate, object })
+    Some(RdfStarTriple {
+        subject: star_subject,
+        predicate,
+        object,
+    })
 }
 
 // ── POST /sparql/update ───────────────────────────────────────────────────────
@@ -2226,7 +2407,9 @@ async fn handle_sparql_update(
                                             predicate: gq.predicate.as_str().to_string(),
                                             vt_end: 0,
                                         };
-                                        if let Ok(r) = client.delete_triples(tonic::Request::new(req)).await {
+                                        if let Ok(r) =
+                                            client.delete_triples(tonic::Request::new(req)).await
+                                        {
                                             deleted += r.into_inner().deleted_count;
                                         }
                                     }
@@ -2268,11 +2451,14 @@ async fn handle_sparql_update(
                 // INSERT/DELETE WHERE: evaluate WHERE clause, then apply templates.
                 let mut dummy = polargraph_sparql::SparqlTranslation::default();
                 let mut counter = 0usize;
-                let branches =
-                    match polargraph_sparql::translate_pattern_pub(&pattern, &mut counter, &mut dummy) {
-                        Ok(b) => b,
-                        Err(_) => continue,
-                    };
+                let branches = match polargraph_sparql::translate_pattern_pub(
+                    &pattern,
+                    &mut counter,
+                    &mut dummy,
+                ) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
 
                 // Collect bindings from WHERE clause.
                 let mut where_bindings: Vec<polargraph_sparql::SparqlBindings> = Vec::new();
@@ -2284,7 +2470,11 @@ async fn handle_sparql_update(
                     if patterns.is_empty() && rules.is_empty() {
                         continue;
                     }
-                    let req = proto::QueryRequest { patterns, rules, ..Default::default() };
+                    let req = proto::QueryRequest {
+                        patterns,
+                        rules,
+                        ..Default::default()
+                    };
                     let mut client = state.client.clone();
                     if let Ok(resp) = client.query(tonic::Request::new(req)).await {
                         for pb in resp.into_inner().bindings {
@@ -2310,9 +2500,7 @@ async fn handle_sparql_update(
                 // GroundTermPattern (variable or bound IRI) and predicate as NamedNodePattern.
                 for gqp in &delete {
                     for binding in &where_bindings {
-                        if let Some(subj_id) =
-                            resolve_ground_term_subject(&gqp.subject, binding)
-                        {
+                        if let Some(subj_id) = resolve_ground_term_subject(&gqp.subject, binding) {
                             let pred = match &gqp.predicate {
                                 spargebra::term::NamedNodePattern::NamedNode(n) => {
                                     n.as_str().to_string()
@@ -2328,9 +2516,7 @@ async fn handle_sparql_update(
                                 predicate: pred,
                                 vt_end: 0,
                             };
-                            if let Ok(r) =
-                                client.delete_triples(tonic::Request::new(req)).await
-                            {
+                            if let Ok(r) = client.delete_triples(tonic::Request::new(req)).await {
                                 deleted += r.into_inner().deleted_count;
                             }
                         }
@@ -2394,7 +2580,10 @@ async fn handle_delete_triples(
     let subject_ids = match subject_ids {
         Ok(ids) => ids,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
                 .into_response()
         }
     };
@@ -2538,9 +2727,13 @@ fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Tr
             let obj_id = uuid::Uuid::parse_str(obj_iri.strip_prefix("urn:uuid:")?).ok()?;
             Some(proto::Triple {
                 kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
-                    subject: Some(proto::NodeId { bytes: subj_id.as_bytes().to_vec() }),
+                    subject: Some(proto::NodeId {
+                        bytes: subj_id.as_bytes().to_vec(),
+                    }),
                     predicate,
-                    object: Some(proto::NodeId { bytes: obj_id.as_bytes().to_vec() }),
+                    object: Some(proto::NodeId {
+                        bytes: obj_id.as_bytes().to_vec(),
+                    }),
                     vt_start: 0,
                     vt_end: i64::MAX,
                     properties: vec![],
@@ -2551,7 +2744,9 @@ fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Tr
             let val = sparql_literal_to_proto_value(lit)?;
             Some(proto::Triple {
                 kind: Some(proto::triple::Kind::Property(proto::PropertyTriple {
-                    subject: Some(proto::NodeId { bytes: subj_id.as_bytes().to_vec() }),
+                    subject: Some(proto::NodeId {
+                        bytes: subj_id.as_bytes().to_vec(),
+                    }),
                     predicate,
                     value: Some(val),
                     vt_start: 0,
@@ -2641,35 +2836,43 @@ fn resolve_quad_pattern_to_proto(
             let obj_id = uuid::Uuid::parse_str(iri.strip_prefix("urn:uuid:")?).ok()?;
             Some(proto::Triple {
                 kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
-                    subject: Some(proto::NodeId { bytes: subj_id.0.as_bytes().to_vec() }),
+                    subject: Some(proto::NodeId {
+                        bytes: subj_id.0.as_bytes().to_vec(),
+                    }),
                     predicate,
-                    object: Some(proto::NodeId { bytes: obj_id.as_bytes().to_vec() }),
+                    object: Some(proto::NodeId {
+                        bytes: obj_id.as_bytes().to_vec(),
+                    }),
                     vt_start: 0,
                     vt_end: i64::MAX,
                     properties: vec![],
                 })),
             })
         }
-        TermPattern::Variable(v) => {
-            match binding.get(v.as_str()) {
-                Some(SparqlValue::Uri(obj_id)) => Some(proto::Triple {
-                    kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
-                        subject: Some(proto::NodeId { bytes: subj_id.0.as_bytes().to_vec() }),
-                        predicate,
-                        object: Some(proto::NodeId { bytes: obj_id.0.as_bytes().to_vec() }),
-                        vt_start: 0,
-                        vt_end: i64::MAX,
-                        properties: vec![],
-                    })),
-                }),
-                _ => None,
-            }
-        }
+        TermPattern::Variable(v) => match binding.get(v.as_str()) {
+            Some(SparqlValue::Uri(obj_id)) => Some(proto::Triple {
+                kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
+                    subject: Some(proto::NodeId {
+                        bytes: subj_id.0.as_bytes().to_vec(),
+                    }),
+                    predicate,
+                    object: Some(proto::NodeId {
+                        bytes: obj_id.0.as_bytes().to_vec(),
+                    }),
+                    vt_start: 0,
+                    vt_end: i64::MAX,
+                    properties: vec![],
+                })),
+            }),
+            _ => None,
+        },
         TermPattern::Literal(lit) => {
             let val = sparql_literal_to_proto_value(lit)?;
             Some(proto::Triple {
                 kind: Some(proto::triple::Kind::Property(proto::PropertyTriple {
-                    subject: Some(proto::NodeId { bytes: subj_id.0.as_bytes().to_vec() }),
+                    subject: Some(proto::NodeId {
+                        bytes: subj_id.0.as_bytes().to_vec(),
+                    }),
                     predicate,
                     value: Some(val),
                     vt_start: 0,
@@ -2687,7 +2890,9 @@ fn resolve_quad_pattern_to_proto(
 
 /// Convert a PolarGraph [`polargraph_core::id::NodeId`] to proto bytes.
 fn pg_node_id_to_proto(id: polargraph_core::id::NodeId) -> proto::NodeId {
-    proto::NodeId { bytes: id.0.as_bytes().to_vec() }
+    proto::NodeId {
+        bytes: id.0.as_bytes().to_vec(),
+    }
 }
 
 /// Convert a polargraph_core Value to a proto Value.
@@ -2709,10 +2914,8 @@ fn pg_value_to_proto(v: &polargraph_core::value::Value) -> proto::Value {
 /// Convert a batch of [`polargraph_sparql::ImportedTriple`] objects to `proto::Triple` objects.
 ///
 /// Each Relation becomes one `proto::Triple::Relation`; each Literal becomes a Property.
-fn imported_triples_to_proto(
-    triples: &[polargraph_sparql::ImportedTriple],
-) -> Vec<proto::Triple> {
-    use polargraph_sparql::{uri_to_node_id, bnode_to_node_id, ImportedObject};
+fn imported_triples_to_proto(triples: &[polargraph_sparql::ImportedTriple]) -> Vec<proto::Triple> {
+    use polargraph_sparql::{bnode_to_node_id, uri_to_node_id, ImportedObject};
 
     triples
         .iter()
@@ -2811,7 +3014,10 @@ async fn handle_import_rdf(
         match parse_ntriples(&body) {
             Ok(t) => t,
             Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
                     .into_response()
             }
         }
@@ -2819,7 +3025,10 @@ async fn handle_import_rdf(
         match parse_turtle(&body) {
             Ok(t) => t,
             Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
                     .into_response()
             }
         }
@@ -2837,7 +3046,10 @@ async fn handle_import_rdf(
         match parse_jsonld(text) {
             Ok(t) => t,
             Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
                     .into_response()
             }
         }
@@ -2895,7 +3107,7 @@ struct ExportJsonLdBody {
     /// must be known; variable-predicate scan is not yet supported via gRPC).
     #[serde(default)]
     predicates: Vec<String>,
-        /// Optional view/namespace label (informational, not yet enforced).
+    /// Optional view/namespace label (informational, not yet enforced).
     #[serde(default)]
     #[allow(dead_code)]
     view_id: Option<String>,
@@ -2914,9 +3126,7 @@ async fn export_jsonld_for(
     subjects: Vec<String>,
     predicates: Vec<String>,
 ) -> Response {
-    use polargraph_sparql::{
-        node_id_to_iri, serialize_jsonld, uri_to_node_id, RdfTriple,
-    };
+    use polargraph_sparql::{node_id_to_iri, serialize_jsonld, uri_to_node_id, RdfTriple};
 
     if subjects.is_empty() {
         let empty = serialize_jsonld(&[]);
@@ -2961,7 +3171,8 @@ async fn export_jsonld_for(
                     if let Some(obj_val) = pb.vars.get("_o") {
                         if obj_val.bytes.len() == 16 {
                             if let Ok(arr) = obj_val.bytes[..16].try_into() {
-                                let obj_id = polargraph_core::id::NodeId(uuid::Uuid::from_bytes(arr));
+                                let obj_id =
+                                    polargraph_core::id::NodeId(uuid::Uuid::from_bytes(arr));
                                 all_rdf.push(RdfTriple {
                                     subject: subject_iri_str.clone(),
                                     predicate: "<urn:polargraph:unknownPredicate>".to_string(),
@@ -3017,11 +3228,11 @@ async fn export_jsonld_for(
                         for branch in &translation.branches {
                             let patterns: Vec<proto::VarPattern> =
                                 branch.patterns.iter().map(sparql_varpat_to_proto).collect();
-                            let prop_req =
-                                proto::QueryRequest { patterns, ..Default::default() };
-                            if let Ok(resp) =
-                                client.query(tonic::Request::new(prop_req)).await
-                            {
+                            let prop_req = proto::QueryRequest {
+                                patterns,
+                                ..Default::default()
+                            };
+                            if let Ok(resp) = client.query(tonic::Request::new(prop_req)).await {
                                 for pb in resp.into_inner().bindings {
                                     // Node bindings only — property values come via
                                     // annotation steps (not in scope here).
@@ -3096,9 +3307,7 @@ async fn handle_export_subgraph(
     headers: axum::http::HeaderMap,
     QueryParams(params): QueryParams<ExportSubgraphParams>,
 ) -> Response {
-    use polargraph_sparql::{
-        node_id_to_iri, serialize_ntriples, serialize_turtle, RdfTriple,
-    };
+    use polargraph_sparql::{node_id_to_iri, serialize_ntriples, serialize_turtle, RdfTriple};
 
     let subject_uuids: Vec<uuid::Uuid> = params
         .subjects
@@ -3179,7 +3388,10 @@ async fn handle_export_subgraph(
                     predicate: pred.clone(),
                     object_id: vec![],
                 };
-                if let Ok(resp) = client.get_edge_ids_by_triple(tonic::Request::new(req2)).await {
+                if let Ok(resp) = client
+                    .get_edge_ids_by_triple(tonic::Request::new(req2))
+                    .await
+                {
                     for edge_id_bytes in resp.into_inner().edge_ids {
                         if edge_id_bytes.len() == 16 {
                             if let Ok(arr) = edge_id_bytes[..16].try_into() {
@@ -3190,15 +3402,16 @@ async fn handle_export_subgraph(
                                 let ann_req = proto::GetEdgeAnnotationsRequest {
                                     edge_id: edge_id_bytes.clone(),
                                 };
-                                if let Ok(ann_resp) =
-                                    client.get_edge_annotations(tonic::Request::new(ann_req)).await
+                                if let Ok(ann_resp) = client
+                                    .get_edge_annotations(tonic::Request::new(ann_req))
+                                    .await
                                 {
                                     for ann in ann_resp.into_inner().annotations {
                                         let pred_iri = format!("<{}>", ann.predicate);
                                         let obj_str = match ann.value {
-                                            Some(proto::edge_annotation::Value::NodeId(
-                                                bytes,
-                                            )) if bytes.len() == 16 => {
+                                            Some(proto::edge_annotation::Value::NodeId(bytes))
+                                                if bytes.len() == 16 =>
+                                            {
                                                 if let Ok(a) = bytes[..16].try_into() {
                                                     let nid = polargraph_core::id::NodeId(
                                                         uuid::Uuid::from_bytes(a),
@@ -3299,17 +3512,21 @@ async fn handle_schema_rdf_get(State(state): State<Arc<AppState>>) -> Response {
 
     let mut client = state.client.clone();
 
-    let node_types_resp =
-        match client.list_node_types(tonic::Request::new(proto::ListNodeTypesRequest {})).await {
-            Ok(r) => r.into_inner(),
-            Err(e) => return grpc_error(e),
-        };
+    let node_types_resp = match client
+        .list_node_types(tonic::Request::new(proto::ListNodeTypesRequest {}))
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(e) => return grpc_error(e),
+    };
 
-    let edge_types_resp =
-        match client.list_edge_types(tonic::Request::new(proto::ListEdgeTypesRequest {})).await {
-            Ok(r) => r.into_inner(),
-            Err(e) => return grpc_error(e),
-        };
+    let edge_types_resp = match client
+        .list_edge_types(tonic::Request::new(proto::ListEdgeTypesRequest {}))
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(e) => return grpc_error(e),
+    };
 
     let schema_nodes: Vec<SchemaNodeType> = node_types_resp
         .definitions
@@ -3319,7 +3536,11 @@ async fn handle_schema_rdf_get(State(state): State<Arc<AppState>>) -> Response {
             fields: nt
                 .fields
                 .into_iter()
-                .map(|f| SchemaField { name: f.field_name, kind: f.kind, required: f.required })
+                .map(|f| SchemaField {
+                    name: f.field_name,
+                    kind: f.kind,
+                    required: f.required,
+                })
                 .collect(),
             parent_types: nt.parent_types,
         })
@@ -3335,7 +3556,11 @@ async fn handle_schema_rdf_get(State(state): State<Arc<AppState>>) -> Response {
             fields: et
                 .fields
                 .into_iter()
-                .map(|f| SchemaField { name: f.field_name, kind: f.kind, required: f.required })
+                .map(|f| SchemaField {
+                    name: f.field_name,
+                    kind: f.kind,
+                    required: f.required,
+                })
                 .collect(),
         })
         .collect();
@@ -3362,7 +3587,10 @@ async fn handle_schema_rdf_post(
     let (schema_nodes, schema_edges) = match parse_schema_rdf(&body) {
         Ok(pair) => pair,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
                 .into_response()
         }
     };
@@ -3431,7 +3659,10 @@ async fn handle_schema_rdf_post(
 
 async fn handle_stats(State(state): State<Arc<AppState>>) -> Response {
     let mut client = state.client.clone();
-    match client.show_stats(tonic::Request::new(proto::ShowStatsRequest {})).await {
+    match client
+        .show_stats(tonic::Request::new(proto::ShowStatsRequest {}))
+        .await
+    {
         Ok(r) => {
             let s = r.into_inner();
             Json(serde_json::json!({
@@ -3442,7 +3673,8 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Response {
                 "predicate_intern_count": s.predicate_intern_count,
                 "open_transaction_count": s.open_transaction_count,
                 "mode": s.mode,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => grpc_error(e),
     }
@@ -3456,8 +3688,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -3472,8 +3703,12 @@ async fn main() -> anyhow::Result<()> {
     };
     let channel = endpoint.connect_lazy();
 
-    let client =
-        PolarGraphServiceClient::with_interceptor(channel, AuthInterceptor { token: args.api_key });
+    let client = PolarGraphServiceClient::with_interceptor(
+        channel,
+        AuthInterceptor {
+            token: args.api_key,
+        },
+    );
 
     let state = Arc::new(AppState { client });
 
@@ -3494,7 +3729,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/tx/commit", post(handle_tx_commit))
         .route("/tx/rollback", post(handle_tx_rollback))
         .route("/edge-annotations", post(handle_insert_edge_annotations))
-        .route("/edge-annotations/:edge_id", get(handle_get_edge_annotations))
+        .route(
+            "/edge-annotations/:edge_id",
+            get(handle_get_edge_annotations),
+        )
         .route("/property-history", get(handle_property_history))
         .route("/access/grant", post(handle_grant_access))
         .route("/access/revoke", post(handle_revoke_access))
@@ -3506,13 +3744,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/materialize", post(handle_materialize))
         .route("/import/rdf", post(handle_import_rdf))
         .route("/import/subgraph", post(handle_import_subgraph))
-        .route("/export/jsonld", get(handle_export_jsonld_get).post(handle_export_jsonld_post))
+        .route(
+            "/export/jsonld",
+            get(handle_export_jsonld_get).post(handle_export_jsonld_post),
+        )
         .route("/export/subgraph", get(handle_export_subgraph))
-        .route("/schema/rdf", get(handle_schema_rdf_get).post(handle_schema_rdf_post))
+        .route(
+            "/schema/rdf",
+            get(handle_schema_rdf_get).post(handle_schema_rdf_post),
+        )
         .with_state(state);
 
     info!(addr = %args.listen, upstream = %args.upstream, "polargraph-rest listening");
-    axum::Server::bind(&args.listen).serve(app.into_make_service()).await?;
+    axum::Server::bind(&args.listen)
+        .serve(app.into_make_service())
+        .await?;
 
     Ok(())
 }
@@ -3584,11 +3830,26 @@ mod tests {
     fn grpc_status_code_mappings() {
         use tonic::Code;
         assert_eq!(grpc_to_http_status(Code::NotFound), StatusCode::NOT_FOUND);
-        assert_eq!(grpc_to_http_status(Code::Unauthenticated), StatusCode::UNAUTHORIZED);
-        assert_eq!(grpc_to_http_status(Code::PermissionDenied), StatusCode::FORBIDDEN);
-        assert_eq!(grpc_to_http_status(Code::DeadlineExceeded), StatusCode::REQUEST_TIMEOUT);
-        assert_eq!(grpc_to_http_status(Code::InvalidArgument), StatusCode::BAD_REQUEST);
-        assert_eq!(grpc_to_http_status(Code::Internal), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            grpc_to_http_status(Code::Unauthenticated),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            grpc_to_http_status(Code::PermissionDenied),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            grpc_to_http_status(Code::DeadlineExceeded),
+            StatusCode::REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            grpc_to_http_status(Code::InvalidArgument),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            grpc_to_http_status(Code::Internal),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     /// attach_user_id sets the x-polargraph-user-id metadata header for a
@@ -3598,7 +3859,8 @@ mod tests {
         let req = tonic::Request::new(());
         let req = attach_user_id(req, "alice-uuid-123");
         assert_eq!(
-            req.metadata().get("x-polargraph-user-id")
+            req.metadata()
+                .get("x-polargraph-user-id")
                 .map(|v| v.to_str().unwrap()),
             Some("alice-uuid-123"),
             "metadata header should be set for non-empty user_id"

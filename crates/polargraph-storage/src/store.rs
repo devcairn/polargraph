@@ -91,7 +91,9 @@ pub(crate) fn encode_epo_value(temporal: &BiTemporalRange) -> [u8; 16] {
 pub enum StoreMode {
     Primary,
     /// gRPC address of the primary (e.g. `"http://192.168.1.10:50051"`).
-    Replica { primary_address: String },
+    Replica {
+        primary_address: String,
+    },
 }
 
 type DB = DBWithThreadMode<MultiThreaded>;
@@ -287,7 +289,9 @@ impl TripleStore {
         *self.inner.fwd.write().unwrap() = fwd;
         *self.inner.rev.write().unwrap() = rev;
         *self.inner.next_pred_id.write().unwrap() = next_pred_id;
-        self.inner.oracle.advance_to(polargraph_core::temporal::Timestamp(oracle_ts));
+        self.inner
+            .oracle
+            .advance_to(polargraph_core::temporal::Timestamp(oracle_ts));
 
         Ok(())
     }
@@ -315,9 +319,7 @@ impl TripleStore {
     }
 
     fn read_only_err() -> StorageError {
-        StorageError::ReadOnly(
-            "write operations are not supported on a read replica".to_string(),
-        )
+        StorageError::ReadOnly("write operations are not supported on a read replica".to_string())
     }
 
     /// Provides read access to the underlying RocksDB instance.
@@ -351,7 +353,9 @@ impl TripleStore {
                 .map_err(|e| StorageError::KeyDecode(e.to_string()))?
                 .to_owned();
             if v.len() != 4 {
-                return Err(StorageError::KeyDecode(format!("bad predicate value for {name}")));
+                return Err(StorageError::KeyDecode(format!(
+                    "bad predicate value for {name}"
+                )));
             }
             let id = u32::from_be_bytes(v[..4].try_into().unwrap());
             fwd.insert(name.clone(), id);
@@ -397,7 +401,7 @@ impl TripleStore {
         let mut spaces: HashMap<String, HnswIndex> = HashMap::new();
         for (space, ep_id, ep_layer) in ep_data {
             let vecs_path = vectors_dir.join(format!("{space}.vecs"));
-            let is_mmap   = vecs_path.exists();
+            let is_mmap = vecs_path.exists();
 
             let mut idx = if is_mmap {
                 let mmap_state = MmapState::open(vecs_path)?;
@@ -408,7 +412,7 @@ impl TripleStore {
             idx.load_entry_point(ep_id, ep_layer);
 
             let node_prefix = hnsw::node_prefix_for_space(&space);
-            let id_start    = node_prefix.len();
+            let id_start = node_prefix.len();
 
             let iter = db.iterator_cf(
                 &hnsw_cf,
@@ -416,8 +420,12 @@ impl TripleStore {
             );
             for item in iter {
                 let (key, value) = item?;
-                if !key.starts_with(&node_prefix) { break; }
-                if key.len() < id_start + 16      { continue; }
+                if !key.starts_with(&node_prefix) {
+                    break;
+                }
+                if key.len() < id_start + 16 {
+                    continue;
+                }
                 let id = NodeId(uuid::Uuid::from_bytes(
                     key[id_start..id_start + 16].try_into().unwrap(),
                 ));
@@ -484,15 +492,19 @@ impl TripleStore {
             return Err(Self::read_only_err());
         }
         let mut spaces = self.inner.hnsw_spaces.write().unwrap();
-        let idx = spaces.entry(space.to_string()).or_insert_with(|| {
-            match mode {
+        let idx = spaces
+            .entry(space.to_string())
+            .or_insert_with(|| match mode {
                 StorageMode::Mmap => {
-                    let path = self.inner.data_dir.join("vectors").join(format!("{space}.vecs"));
+                    let path = self
+                        .inner
+                        .data_dir
+                        .join("vectors")
+                        .join(format!("{space}.vecs"));
                     HnswIndex::new_mmap(path)
                 }
                 StorageMode::Memory => HnswIndex::new(),
-            }
-        });
+            });
         let modified = idx.insert(node_id, vector);
 
         let hnsw_cf = self.cf_handle(cf::HNSW)?;
@@ -590,17 +602,21 @@ impl TripleStore {
         };
 
         let mut spaces = self.inner.hnsw_spaces.write().unwrap();
-        let idx = spaces.entry(space.to_string()).or_insert_with(|| {
-            match mode {
+        let idx = spaces
+            .entry(space.to_string())
+            .or_insert_with(|| match mode {
                 StorageMode::Mmap => {
-                    let path = self.inner.data_dir.join("vectors").join(format!("{space}.vecs"));
+                    let path = self
+                        .inner
+                        .data_dir
+                        .join("vectors")
+                        .join(format!("{space}.vecs"));
                     HnswIndex::new_mmap(path)
                 }
                 StorageMode::Memory => HnswIndex::new(),
-            }
-        });
+            });
 
-        let mut batch    = WriteBatch::default();
+        let mut batch = WriteBatch::default();
         let mut inserted = 0usize;
         let mut errors: Vec<(usize, StorageError)> = Vec::new();
 
@@ -734,7 +750,10 @@ impl TripleStore {
 
     /// Sum of SST file sizes (bytes) across all column families.
     pub fn db_total_sst_size_bytes(&self) -> u64 {
-        cf::ALL.iter().map(|name| self.cf_approx_size_bytes(name)).sum()
+        cf::ALL
+            .iter()
+            .map(|name| self.cf_approx_size_bytes(name))
+            .sum()
     }
 
     /// Sum of active memtable sizes (bytes) across all column families.
@@ -1002,7 +1021,11 @@ impl TripleStore {
         prefix: &[u8],
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
-        decode_key: impl Fn(&[u8], &[u8]) -> Result<(NodeId, PredId, NodeId, Timestamp, Vec<u8>), StorageError>,
+        decode_key: impl Fn(
+            &[u8],
+            &[u8],
+        )
+            -> Result<(NodeId, PredId, NodeId, Timestamp, Vec<u8>), StorageError>,
     ) -> Result<Vec<Triple>, StorageError> {
         let cf = self.cf_handle(cf_name)?;
         let iter = self
@@ -1032,8 +1055,7 @@ impl TripleStore {
                 }
             }
 
-            let (subject, pred_id, object, tt, value_bytes) =
-                decode_key(&key, &value)?;
+            let (subject, pred_id, object, tt, value_bytes) = decode_key(&key, &value)?;
 
             // Skip uncommitted-at-snapshot entries.
             if tt > snapshot_ts {
@@ -1058,7 +1080,9 @@ impl TripleStore {
                 }
             }
 
-            let slot = latest.entry((subject, pred_id, object)).or_insert((Timestamp(i64::MIN), vec![]));
+            let slot = latest
+                .entry((subject, pred_id, object))
+                .or_insert((Timestamp(i64::MIN), vec![]));
             if tt > slot.0 {
                 *slot = (tt, value_bytes);
             }
@@ -1085,12 +1109,36 @@ impl TripleStore {
         tt: Timestamp,
         value: &[u8],
     ) -> Result<(), StorageError> {
-        batch.put_cf(&self.cf_handle(cf::SPO)?, keys::encode_spo(&s, p, &o, tt), value);
-        batch.put_cf(&self.cf_handle(cf::SOP)?, keys::encode_sop(&s, &o, p, tt), value);
-        batch.put_cf(&self.cf_handle(cf::PSO)?, keys::encode_pso(p, &s, &o, tt), value);
-        batch.put_cf(&self.cf_handle(cf::POS)?, keys::encode_pos(p, &o, &s, tt), value);
-        batch.put_cf(&self.cf_handle(cf::OSP)?, keys::encode_osp(&o, &s, p, tt), value);
-        batch.put_cf(&self.cf_handle(cf::OPS)?, keys::encode_ops(&o, p, &s, tt), value);
+        batch.put_cf(
+            &self.cf_handle(cf::SPO)?,
+            keys::encode_spo(&s, p, &o, tt),
+            value,
+        );
+        batch.put_cf(
+            &self.cf_handle(cf::SOP)?,
+            keys::encode_sop(&s, &o, p, tt),
+            value,
+        );
+        batch.put_cf(
+            &self.cf_handle(cf::PSO)?,
+            keys::encode_pso(p, &s, &o, tt),
+            value,
+        );
+        batch.put_cf(
+            &self.cf_handle(cf::POS)?,
+            keys::encode_pos(p, &o, &s, tt),
+            value,
+        );
+        batch.put_cf(
+            &self.cf_handle(cf::OSP)?,
+            keys::encode_osp(&o, &s, p, tt),
+            value,
+        );
+        batch.put_cf(
+            &self.cf_handle(cf::OPS)?,
+            keys::encode_ops(&o, p, &s, tt),
+            value,
+        );
         Ok(())
     }
 
@@ -1126,8 +1174,16 @@ impl TripleStore {
         tt: Timestamp,
         value_bytes: &[u8],
     ) -> Result<(), StorageError> {
-        batch.put_cf(&self.cf_handle(cf::EPA)?, keys::encode_epa_key(&edge, pred_id, tt), value_bytes);
-        batch.put_cf(&self.cf_handle(cf::PEA)?, keys::encode_pea_key(pred_id, &edge, tt), value_bytes);
+        batch.put_cf(
+            &self.cf_handle(cf::EPA)?,
+            keys::encode_epa_key(&edge, pred_id, tt),
+            value_bytes,
+        );
+        batch.put_cf(
+            &self.cf_handle(cf::PEA)?,
+            keys::encode_pea_key(pred_id, &edge, tt),
+            value_bytes,
+        );
         Ok(())
     }
 
@@ -1144,7 +1200,11 @@ impl TripleStore {
         tt: Timestamp,
         value_bytes: &[u8],
     ) -> Result<(), StorageError> {
-        batch.put_cf(&self.cf_handle(cf::PEA)?, keys::encode_pea_key(pred_id, &edge, tt), value_bytes);
+        batch.put_cf(
+            &self.cf_handle(cf::PEA)?,
+            keys::encode_pea_key(pred_id, &edge, tt),
+            value_bytes,
+        );
         Ok(())
     }
 
@@ -1160,7 +1220,11 @@ impl TripleStore {
         tt: Timestamp,
         value_bytes: &[u8],
     ) -> Result<(), StorageError> {
-        batch.put_cf(&self.cf_handle(cf::EPO)?, keys::encode_epo_key(&edge, pred_id, &object, tt), value_bytes);
+        batch.put_cf(
+            &self.cf_handle(cf::EPO)?,
+            keys::encode_epo_key(&edge, pred_id, &object, tt),
+            value_bytes,
+        );
         Ok(())
     }
 
@@ -1182,16 +1246,25 @@ impl TripleStore {
         {
             let cf = self.cf_handle(cf::EPA)?;
             let prefix = keys::epa_prefix_edge(&edge);
-            let iter = self.inner.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+            let iter = self
+                .inner
+                .db
+                .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
 
             // Map: pred_id → (tt, value_bytes)
             let mut latest: HashMap<keys::PredId, (Timestamp, Vec<u8>)> = HashMap::new();
             for item in iter {
                 let (key, value) = item?;
-                if !key.starts_with(&prefix) { break; }
+                if !key.starts_with(&prefix) {
+                    break;
+                }
                 let dk = keys::decode_epa_key(&key)?;
-                if dk.tt > snapshot_ts { continue; }
-                let slot = latest.entry(dk.pred_id).or_insert((Timestamp(i64::MIN), vec![]));
+                if dk.tt > snapshot_ts {
+                    continue;
+                }
+                let slot = latest
+                    .entry(dk.pred_id)
+                    .or_insert((Timestamp(i64::MIN), vec![]));
                 if dk.tt > slot.0 {
                     *slot = (dk.tt, value.to_vec());
                 }
@@ -1215,16 +1288,25 @@ impl TripleStore {
         {
             let cf = self.cf_handle(cf::EPO)?;
             let prefix = keys::epo_prefix_edge(&edge);
-            let iter = self.inner.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+            let iter = self
+                .inner
+                .db
+                .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
 
             // Map: (pred_id, obj_id) → tt
             let mut latest: HashMap<(keys::PredId, NodeId), Timestamp> = HashMap::new();
             for item in iter {
                 let (key, _value) = item?;
-                if !key.starts_with(&prefix) { break; }
+                if !key.starts_with(&prefix) {
+                    break;
+                }
                 let dk = keys::decode_epo_key(&key)?;
-                if dk.tt > snapshot_ts { continue; }
-                let slot = latest.entry((dk.pred_id, dk.object)).or_insert(Timestamp(i64::MIN));
+                if dk.tt > snapshot_ts {
+                    continue;
+                }
+                let slot = latest
+                    .entry((dk.pred_id, dk.object))
+                    .or_insert(Timestamp(i64::MIN));
                 if dk.tt > *slot {
                     *slot = dk.tt;
                 }
@@ -1263,13 +1345,20 @@ impl TripleStore {
         {
             let cf = self.cf_handle(cf::EPA)?;
             let prefix = keys::epa_prefix_edge_pred(&edge, pred_id);
-            let iter = self.inner.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+            let iter = self
+                .inner
+                .db
+                .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
             let mut best: Option<(Timestamp, Vec<u8>)> = None;
             for item in iter {
                 let (key, value) = item?;
-                if !key.starts_with(&prefix) { break; }
+                if !key.starts_with(&prefix) {
+                    break;
+                }
                 let dk = keys::decode_epa_key(&key)?;
-                if dk.tt > snapshot_ts { continue; }
+                if dk.tt > snapshot_ts {
+                    continue;
+                }
                 match &best {
                     Some((bt, _)) if dk.tt <= *bt => {}
                     _ => best = Some((dk.tt, value.to_vec())),
@@ -1290,14 +1379,23 @@ impl TripleStore {
         {
             let cf = self.cf_handle(cf::EPO)?;
             let prefix = keys::epa_prefix_edge_pred(&edge, pred_id); // same first 20 bytes
-            let iter = self.inner.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+            let iter = self
+                .inner
+                .db
+                .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
             let mut best: Option<(Timestamp, NodeId)> = None;
             for item in iter {
                 let (key, _) = item?;
-                if !key.starts_with(&prefix) { break; }
-                if key.len() != 44 { continue; }
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                if key.len() != 44 {
+                    continue;
+                }
                 let dk = keys::decode_epo_key(&key)?;
-                if dk.tt > snapshot_ts { continue; }
+                if dk.tt > snapshot_ts {
+                    continue;
+                }
                 match &best {
                     Some((bt, _)) if dk.tt <= *bt => {}
                     _ => best = Some((dk.tt, dk.object)),
@@ -1330,16 +1428,25 @@ impl TripleStore {
 
         let cf = self.cf_handle(cf::PEA)?;
         let prefix = keys::pea_prefix_pred(pred_id);
-        let iter = self.inner.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+        let iter = self
+            .inner
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
 
         // Deduplicate by edge_id: keep highest tt ≤ snapshot_ts.
         let mut latest: HashMap<EdgeId, (Timestamp, Vec<u8>)> = HashMap::new();
         for item in iter {
             let (key, value) = item?;
-            if !key.starts_with(&prefix) { break; }
+            if !key.starts_with(&prefix) {
+                break;
+            }
             let dk = keys::decode_pea_key(&key)?;
-            if dk.tt > snapshot_ts { continue; }
-            let slot = latest.entry(dk.edge_id).or_insert((Timestamp(i64::MIN), vec![]));
+            if dk.tt > snapshot_ts {
+                continue;
+            }
+            let slot = latest
+                .entry(dk.edge_id)
+                .or_insert((Timestamp(i64::MIN), vec![]));
             if dk.tt > slot.0 {
                 *slot = (dk.tt, value.to_vec());
             }
@@ -1461,11 +1568,16 @@ impl TripleStore {
             Ok(cf) => cf,
             Err(_) => return vec![],
         };
-        let iter = self.inner.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+        let iter = self
+            .inner
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
         let mut candidates = Vec::new();
         for item in iter {
             let Ok((key, _)) = item else { break };
-            if !key.starts_with(&prefix) { break; }
+            if !key.starts_with(&prefix) {
+                break;
+            }
             if let Ok(node_id) = keys::decode_tri_subject(&key) {
                 candidates.push(node_id);
             }
@@ -1514,9 +1626,14 @@ impl TripleStore {
         let query_lower = query.to_lowercase();
         let mut result = Vec::new();
         for node_id in candidates {
-            let triples = self.scan_by_subject_predicate_at(&node_id, predicate, snapshot_ts, vt_as_of)?;
+            let triples =
+                self.scan_by_subject_predicate_at(&node_id, predicate, snapshot_ts, vt_as_of)?;
             let confirmed = triples.iter().any(|t| {
-                if let Triple::Property { value: Value::Text(text), .. } = t {
+                if let Triple::Property {
+                    value: Value::Text(text),
+                    ..
+                } = t
+                {
                     text.to_lowercase().contains(&query_lower)
                 } else {
                     false
@@ -1561,13 +1678,24 @@ impl TripleStore {
         }
         let mut batch = WriteBatch::default();
         match triple {
-            Triple::Relation { subject, predicate, object, edge_id, temporal } => {
+            Triple::Relation {
+                subject,
+                predicate,
+                object,
+                edge_id,
+                temporal,
+            } => {
                 let temporal_stamped = BiTemporalRange { tt, ..*temporal };
                 let value_bytes = codec::encode_relation(edge_id, &temporal_stamped);
                 let p = self.intern_predicate(&predicate.0)?;
                 self.batch_triple(&mut batch, *subject, p, *object, tt, &value_bytes)?;
             }
-            Triple::Property { subject, predicate, value, temporal } => {
+            Triple::Property {
+                subject,
+                predicate,
+                value,
+                temporal,
+            } => {
                 let temporal_stamped = BiTemporalRange { tt, ..*temporal };
                 let value_bytes = codec::encode_property(value, &temporal_stamped)?;
                 let sentinel = NodeId(uuid::Uuid::from_bytes(keys::PROPERTY_SENTINEL));
@@ -1578,13 +1706,23 @@ impl TripleStore {
                     self.batch_text_trigrams(&mut batch, subject, p, text)?;
                 }
             }
-            Triple::EdgeProperty { edge, predicate, value, temporal } => {
+            Triple::EdgeProperty {
+                edge,
+                predicate,
+                value,
+                temporal,
+            } => {
                 let temporal_stamped = BiTemporalRange { tt, ..*temporal };
                 let value_bytes = codec::encode_property(value, &temporal_stamped)?;
                 let p = self.intern_predicate(&predicate.0)?;
                 self.batch_epa(&mut batch, *edge, p, tt, &value_bytes)?;
             }
-            Triple::EdgeRelation { edge, predicate, object, temporal } => {
+            Triple::EdgeRelation {
+                edge,
+                predicate,
+                object,
+                temporal,
+            } => {
                 let temporal_stamped = BiTemporalRange { tt, ..*temporal };
                 let epo_val = encode_epo_value(&temporal_stamped);
                 let p = self.intern_predicate(&predicate.0)?;
@@ -1605,7 +1743,9 @@ impl TripleStore {
             return Err(Self::read_only_err());
         }
         let cf = self.cf_handle(cf_name)?;
-        self.inner.db.compact_range_cf(&cf, None::<&[u8]>, None::<&[u8]>);
+        self.inner
+            .db
+            .compact_range_cf(&cf, None::<&[u8]>, None::<&[u8]>);
         Ok(())
     }
 
@@ -1648,7 +1788,10 @@ impl TripleStore {
     /// with a timestamp of `Timestamp::now()` so that subsequent `scan_derived()`
     /// calls see it. Deduplication (same S,P,O already in DRV) is left to the
     /// caller — the materializer builds its own in-memory dedup set.
-    pub fn insert_derived_batch(&self, facts: &[(NodeId, PredId, NodeId)]) -> Result<(), StorageError> {
+    pub fn insert_derived_batch(
+        &self,
+        facts: &[(NodeId, PredId, NodeId)],
+    ) -> Result<(), StorageError> {
         if self.is_replica() {
             return Err(Self::read_only_err());
         }
@@ -1662,7 +1805,11 @@ impl TripleStore {
         let value_bytes = codec::encode_relation(&edge_id, &temporal);
         let mut batch = WriteBatch::default();
         for &(subject, pred_id, object) in facts {
-            batch.put_cf(&drv_cf, keys::encode_spo(&subject, pred_id, &object, tt), &value_bytes);
+            batch.put_cf(
+                &drv_cf,
+                keys::encode_spo(&subject, pred_id, &object, tt),
+                &value_bytes,
+            );
         }
         self.inner.db.write(batch)?;
         self.inner.oracle.advance_to(tt);
@@ -1678,7 +1825,10 @@ impl TripleStore {
             return Err(Self::read_only_err());
         }
         let drv_cf = self.cf_handle(cf::DRV)?;
-        let iter = self.inner.db.iterator_cf(&drv_cf, rocksdb::IteratorMode::Start);
+        let iter = self
+            .inner
+            .db
+            .iterator_cf(&drv_cf, rocksdb::IteratorMode::Start);
         let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
         for item in iter {
             let (k, _) = item?;
@@ -1729,13 +1879,30 @@ impl TripleStore {
 
         let decoded = codec::decode_value(value_bytes)?;
         let triple = match decoded {
-            DecodedValue::Relation { edge_id, mut temporal } => {
+            DecodedValue::Relation {
+                edge_id,
+                mut temporal,
+            } => {
                 temporal.tt = tt;
-                Triple::Relation { subject, predicate, object, edge_id, temporal }
+                Triple::Relation {
+                    subject,
+                    predicate,
+                    object,
+                    edge_id,
+                    temporal,
+                }
             }
-            DecodedValue::Property { value, mut temporal } => {
+            DecodedValue::Property {
+                value,
+                mut temporal,
+            } => {
                 temporal.tt = tt;
-                Triple::Property { subject, predicate, value, temporal }
+                Triple::Property {
+                    subject,
+                    predicate,
+                    value,
+                    temporal,
+                }
             }
         };
         Ok(triple)

@@ -3,41 +3,44 @@
 //! Most tests call service methods directly (no live server socket) for speed.
 //! The replica tests require real TCP sockets and a live gRPC server.
 
+use axum;
+use polargraph_core::temporal::Timestamp;
 use polargraph_server::{
     auth::ApiKeyLayer,
     proto::{
         polar_graph_service_client::PolarGraphServiceClient,
         polar_graph_service_server::{PolarGraphService, PolarGraphServiceServer},
+        search_vector_filtered_request::Filter,
         term::Kind as TermKind,
         triple::Kind as TripleKind,
         value::Kind as ValueKind,
-        search_vector_filtered_request::Filter,
         vector_seed_query_request::Filter as SeedFilter,
-        BatchInsertVectorsRequest, BeginTransactionRequest, CommitTransactionRequest, RollbackTransactionRequest,
-        CreateBackupRequest, CypherQueryRequest, CypherWriteRequest, EdgeTypeDef, FieldDef,
-        GetEdgeTypeRequest, GetNodeTypeRequest, InsertRequest, InsertVectorRequest,
-        ListBackupsRequest, ListEdgeTypesRequest, ListNodeTypesRequest,
-        ListPredicatesBetweenRequest, MigrateRequest, MigrationStatusRequest, NodeId,
-        AddUserToGroupRequest, GrantAccessRequest, GetUserAccessRequest, RevokeAccessRequest,
-        NodeTypeDef, NodeTypeFilter,
-        PropertyTriple, PurgeOldBackupsRequest, QueryRequest, ReachableRequest,
-        RegisterEdgeTypeRequest, RegisterNodeTypeRequest, RelationTriple,
-        ReplicaStatusRequest, RunRetentionRequest, StreamWalRequest,
-        SearchVectorFilteredRequest, SearchVectorInSetRequest, SearchVectorRequest,
-        Term, Triple, ValidateEdgeRequest, ValidateNodeRequest, ValidateOntologyRequest,
-        Value, VarPattern, VectorItem, VectorSeedQueryRequest, VectorSpaceDef,
+        AddUserToGroupRequest, BatchInsertVectorsRequest, BeginTransactionRequest,
+        CommitTransactionRequest, CreateBackupRequest, CypherQueryRequest, CypherWriteRequest,
+        EdgeTypeDef, FieldDef, GetEdgeTypeRequest, GetNodeTypeRequest, GetUserAccessRequest,
+        GrantAccessRequest, InsertRequest, InsertVectorRequest, ListBackupsRequest,
+        ListEdgeTypesRequest, ListNodeTypesRequest, ListPredicatesBetweenRequest, MigrateRequest,
+        MigrationStatusRequest, NodeId, NodeTypeDef, NodeTypeFilter, PropertyTriple,
+        PurgeOldBackupsRequest, QueryRequest, ReachableRequest, RegisterEdgeTypeRequest,
+        RegisterNodeTypeRequest, RelationTriple, ReplicaStatusRequest, RevokeAccessRequest,
+        RollbackTransactionRequest, RunRetentionRequest, SearchVectorFilteredRequest,
+        SearchVectorInSetRequest, SearchVectorRequest, StreamWalRequest, Term, Triple,
+        ValidateEdgeRequest, ValidateNodeRequest, ValidateOntologyRequest, Value, VarPattern,
+        VectorItem, VectorSeedQueryRequest, VectorSpaceDef,
     },
     service::PolarGraphServer,
     wal_client,
 };
-use tokio_stream::StreamExt as _;
-use polargraph_core::temporal::Timestamp;
 use polargraph_storage::TripleStore;
-use std::{net::SocketAddr, sync::{Arc, RwLock}, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 use tempfile::TempDir;
+use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Request};
-use axum;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -49,15 +52,21 @@ fn open() -> (PolarGraphServer, TempDir) {
 
 fn new_node() -> (polargraph_core::id::NodeId, NodeId) {
     let core = polargraph_core::id::NodeId::new();
-    let proto = NodeId { bytes: core.as_bytes().to_vec() };
+    let proto = NodeId {
+        bytes: core.as_bytes().to_vec(),
+    };
     (core, proto)
 }
 
 fn bound(id: &NodeId) -> Term {
-    Term { kind: Some(TermKind::Bound(id.clone())) }
+    Term {
+        kind: Some(TermKind::Bound(id.clone())),
+    }
 }
 fn var(name: &str) -> Term {
-    Term { kind: Some(TermKind::Var(name.into())) }
+    Term {
+        kind: Some(TermKind::Var(name.into())),
+    }
 }
 fn any() -> Term {
     Term { kind: None }
@@ -81,7 +90,9 @@ fn text_prop(subject: NodeId, predicate: &str, text: &str) -> Triple {
         kind: Some(TripleKind::Property(PropertyTriple {
             subject: Some(subject),
             predicate: predicate.into(),
-            value: Some(Value { kind: Some(ValueKind::TextVal(text.into())) }),
+            value: Some(Value {
+                kind: Some(ValueKind::TextVal(text.into())),
+            }),
             vt_start: 0,
             vt_end: 0,
         })),
@@ -89,7 +100,11 @@ fn text_prop(subject: NodeId, predicate: &str, text: &str) -> Triple {
 }
 
 fn pattern(sub: Term, pred: &str, obj: Term) -> VarPattern {
-    VarPattern { subject: Some(sub), predicate: pred.into(), object: Some(obj) }
+    VarPattern {
+        subject: Some(sub),
+        predicate: pred.into(),
+        object: Some(obj),
+    }
 }
 
 // ── Insert tests ──────────────────────────────────────────────────────────────
@@ -98,10 +113,13 @@ fn pattern(sub: Term, pred: &str, obj: Term) -> VarPattern {
 async fn insert_single_relation_returns_positive_commit_ts() {
     let (svc, _dir) = open();
     let (_, alice) = new_node();
-    let (_, bob)   = new_node();
+    let (_, bob) = new_node();
 
     let resp = svc
-        .insert(Request::new(InsertRequest { triples: vec![rel(alice, "knows", bob)], ..Default::default() }))
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(alice, "knows", bob)],
+            ..Default::default()
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -113,7 +131,7 @@ async fn insert_single_relation_returns_positive_commit_ts() {
 async fn insert_batch_all_triples_committed() {
     let (svc, _dir) = open();
     let (_, alice) = new_node();
-    let (_, bob)   = new_node();
+    let (_, bob) = new_node();
     let (_, carol) = new_node();
 
     let ts = svc
@@ -122,7 +140,8 @@ async fn insert_batch_all_triples_committed() {
                 rel(alice.clone(), "knows", bob.clone()),
                 rel(alice.clone(), "knows", carol.clone()),
                 text_prop(alice.clone(), "name", "Alice"),
-            ], ..Default::default()
+            ],
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -147,7 +166,10 @@ async fn insert_batch_all_triples_committed() {
 async fn insert_empty_returns_invalid_argument() {
     let (svc, _dir) = open();
     let err = svc
-        .insert(Request::new(InsertRequest { triples: vec![], ..Default::default() }))
+        .insert(Request::new(InsertRequest {
+            triples: vec![],
+            ..Default::default()
+        }))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -158,15 +180,23 @@ async fn insert_bad_node_id_length_returns_invalid_argument() {
     let (svc, _dir) = open();
     let bad = Triple {
         kind: Some(TripleKind::Relation(RelationTriple {
-            subject:   Some(NodeId { bytes: vec![0u8; 15] }), // wrong
+            subject: Some(NodeId {
+                bytes: vec![0u8; 15],
+            }), // wrong
             predicate: "knows".into(),
-            object:    Some(NodeId { bytes: vec![0u8; 16] }),
-            vt_start: 0, vt_end: 0,
+            object: Some(NodeId {
+                bytes: vec![0u8; 16],
+            }),
+            vt_start: 0,
+            vt_end: 0,
             properties: vec![],
         })),
     };
     let err = svc
-        .insert(Request::new(InsertRequest { triples: vec![bad], ..Default::default() }))
+        .insert(Request::new(InsertRequest {
+            triples: vec![bad],
+            ..Default::default()
+        }))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -179,7 +209,10 @@ async fn insert_empty_predicate_returns_invalid_argument() {
     let (_, b) = new_node();
     let bad = rel(a, "", b); // empty predicate
     let err = svc
-        .insert(Request::new(InsertRequest { triples: vec![bad], ..Default::default() }))
+        .insert(Request::new(InsertRequest {
+            triples: vec![bad],
+            ..Default::default()
+        }))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -191,7 +224,11 @@ async fn insert_empty_predicate_returns_invalid_argument() {
 async fn query_empty_patterns_returns_invalid_argument() {
     let (svc, _dir) = open();
     let err = svc
-        .query(Request::new(QueryRequest { patterns: vec![], snapshot_ts: 0, ..Default::default() }))
+        .query(Request::new(QueryRequest {
+            patterns: vec![],
+            snapshot_ts: 0,
+            ..Default::default()
+        }))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -200,7 +237,7 @@ async fn query_empty_patterns_returns_invalid_argument() {
 #[tokio::test]
 async fn query_with_object_variable_binds_objects() {
     let (svc, _dir) = open();
-    let (_, alice)      = new_node();
+    let (_, alice) = new_node();
     let (core_bob, bob) = new_node();
     let (core_carol, carol) = new_node();
 
@@ -209,9 +246,13 @@ async fn query_with_object_variable_binds_objects() {
             triples: vec![
                 rel(alice.clone(), "knows", bob),
                 rel(alice.clone(), "knows", carol),
-            ], ..Default::default()
+            ],
+            ..Default::default()
         }))
-        .await.unwrap().into_inner().commit_ts;
+        .await
+        .unwrap()
+        .into_inner()
+        .commit_ts;
 
     let resp = svc
         .query(Request::new(QueryRequest {
@@ -219,10 +260,14 @@ async fn query_with_object_variable_binds_objects() {
             snapshot_ts: ts,
             ..Default::default()
         }))
-        .await.unwrap().into_inner();
+        .await
+        .unwrap()
+        .into_inner();
 
     assert_eq!(resp.bindings.len(), 2);
-    let bound_ids: Vec<Vec<u8>> = resp.bindings.iter()
+    let bound_ids: Vec<Vec<u8>> = resp
+        .bindings
+        .iter()
         .filter_map(|b| b.vars.get("who").map(|n| n.bytes.clone()))
         .collect();
     assert!(bound_ids.contains(&core_bob.as_bytes().to_vec()));
@@ -233,15 +278,25 @@ async fn query_with_object_variable_binds_objects() {
 async fn query_snapshot_at_old_ts_excludes_later_writes() {
     let (svc, _dir) = open();
     let (_, alice) = new_node();
-    let (_, bob)   = new_node();
+    let (_, bob) = new_node();
     let (_, carol) = new_node();
 
     let ts1 = svc
-        .insert(Request::new(InsertRequest { triples: vec![rel(alice.clone(), "knows", bob)], ..Default::default() }))
-        .await.unwrap().into_inner().commit_ts;
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(alice.clone(), "knows", bob)],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .commit_ts;
 
-    svc.insert(Request::new(InsertRequest { triples: vec![rel(alice.clone(), "knows", carol)], ..Default::default() }))
-        .await.unwrap();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(alice.clone(), "knows", carol)],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
 
     // Snapshot at ts1 should only see the first insert.
     let resp = svc
@@ -250,19 +305,29 @@ async fn query_snapshot_at_old_ts_excludes_later_writes() {
             snapshot_ts: ts1,
             ..Default::default()
         }))
-        .await.unwrap().into_inner();
+        .await
+        .unwrap()
+        .into_inner();
 
-    assert_eq!(resp.bindings.len(), 1, "snapshot must not see writes after ts1");
+    assert_eq!(
+        resp.bindings.len(),
+        1,
+        "snapshot must not see writes after ts1"
+    );
 }
 
 #[tokio::test]
 async fn query_at_ts_zero_sees_latest() {
     let (svc, _dir) = open();
     let (_, alice) = new_node();
-    let (_, bob)   = new_node();
+    let (_, bob) = new_node();
 
-    svc.insert(Request::new(InsertRequest { triples: vec![rel(alice.clone(), "knows", bob)], ..Default::default() }))
-        .await.unwrap();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(alice.clone(), "knows", bob)],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
 
     // ts=0 means "latest"
     let resp = svc
@@ -271,7 +336,9 @@ async fn query_at_ts_zero_sees_latest() {
             snapshot_ts: 0,
             ..Default::default()
         }))
-        .await.unwrap().into_inner();
+        .await
+        .unwrap()
+        .into_inner();
 
     assert_eq!(resp.bindings.len(), 1);
 }
@@ -280,17 +347,21 @@ async fn query_at_ts_zero_sees_latest() {
 async fn two_pattern_join_via_service() {
     let (svc, _dir) = open();
     let (_, alice) = new_node();
-    let (_, bob)   = new_node();
-    let (_, mgr)   = new_node();
+    let (_, bob) = new_node();
+    let (_, mgr) = new_node();
 
     let ts = svc
         .insert(Request::new(InsertRequest {
             triples: vec![
                 rel(alice.clone(), "reports-to", mgr.clone()),
-                rel(bob.clone(),   "reports-to", mgr.clone()),
-            ], ..Default::default()
+                rel(bob.clone(), "reports-to", mgr.clone()),
+            ],
+            ..Default::default()
         }))
-        .await.unwrap().into_inner().commit_ts;
+        .await
+        .unwrap()
+        .into_inner()
+        .commit_ts;
 
     let resp = svc
         .query(Request::new(QueryRequest {
@@ -301,7 +372,9 @@ async fn two_pattern_join_via_service() {
             snapshot_ts: ts,
             ..Default::default()
         }))
-        .await.unwrap().into_inner();
+        .await
+        .unwrap()
+        .into_inner();
 
     assert_eq!(resp.bindings.len(), 2); // alice + bob
 }
@@ -317,7 +390,9 @@ async fn query_no_match_returns_empty_bindings() {
             snapshot_ts: 0,
             ..Default::default()
         }))
-        .await.unwrap().into_inner();
+        .await
+        .unwrap()
+        .into_inner();
 
     assert!(resp.bindings.is_empty());
 }
@@ -343,7 +418,11 @@ async fn insert_vector_empty_vector_returns_invalid_argument() {
     let (svc, _dir) = open();
     let (_, id) = new_node();
     let err = svc
-        .insert_vector(Request::new(InsertVectorRequest { node_id: Some(id), vector: vec![], space: String::new() }))
+        .insert_vector(Request::new(InsertVectorRequest {
+            node_id: Some(id),
+            vector: vec![],
+            space: String::new(),
+        }))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -353,7 +432,12 @@ async fn insert_vector_empty_vector_returns_invalid_argument() {
 async fn search_vector_empty_query_returns_invalid_argument() {
     let (svc, _dir) = open();
     let err = svc
-        .search_vector(Request::new(SearchVectorRequest { query: vec![], k: 5, space: String::new(), ef: 0 }))
+        .search_vector(Request::new(SearchVectorRequest {
+            query: vec![],
+            k: 5,
+            space: String::new(),
+            ef: 0,
+        }))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -472,7 +556,10 @@ async fn search_vector_respects_ef() {
         .unwrap()
         .into_inner();
 
-    assert!(!resp.results.is_empty(), "ef=1 per-request override should still return a result");
+    assert!(
+        !resp.results.is_empty(),
+        "ef=1 per-request override should still return a result"
+    );
 }
 
 #[tokio::test]
@@ -483,14 +570,29 @@ async fn commit_ts_increments_across_inserts() {
     let (_, c) = new_node();
 
     let ts1 = svc
-        .insert(Request::new(InsertRequest { triples: vec![rel(a.clone(), "k", b)], ..Default::default() }))
-        .await.unwrap().into_inner().commit_ts;
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(a.clone(), "k", b)],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .commit_ts;
 
     let ts2 = svc
-        .insert(Request::new(InsertRequest { triples: vec![rel(a, "k", c)], ..Default::default() }))
-        .await.unwrap().into_inner().commit_ts;
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(a, "k", c)],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .commit_ts;
 
-    assert!(ts2 > ts1, "commit timestamps must be monotonically increasing");
+    assert!(
+        ts2 > ts1,
+        "commit timestamps must be monotonically increasing"
+    );
 }
 
 // ── Reachable tests ───────────────────────────────────────────────────────────
@@ -501,16 +603,17 @@ async fn reachable_linear_chain() {
     let (svc, _dir) = open();
     let nodes: Vec<_> = (0..4).map(|_| new_node()).collect();
     let (core_a, proto_a) = &nodes[0];
-    let (core_b, _)       = &nodes[1];
-    let (core_c, _)       = &nodes[2];
-    let (core_d, _)       = &nodes[3];
+    let (core_b, _) = &nodes[1];
+    let (core_c, _) = &nodes[2];
+    let (core_d, _) = &nodes[3];
 
     svc.insert(Request::new(InsertRequest {
         triples: vec![
             rel(nodes[0].1.clone(), "follows", nodes[1].1.clone()),
             rel(nodes[1].1.clone(), "follows", nodes[2].1.clone()),
             rel(nodes[2].1.clone(), "follows", nodes[3].1.clone()),
-        ], ..Default::default()
+        ],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -530,7 +633,10 @@ async fn reachable_linear_chain() {
     assert!(ids.contains(&core_b.as_bytes().to_vec()));
     assert!(ids.contains(&core_c.as_bytes().to_vec()));
     assert!(ids.contains(&core_d.as_bytes().to_vec()));
-    assert!(!ids.contains(&core_a.as_bytes().to_vec()), "start node must not appear");
+    assert!(
+        !ids.contains(&core_a.as_bytes().to_vec()),
+        "start node must not appear"
+    );
 }
 
 /// Diamond: A → B, A → C, B → D, C → D. All three non-A nodes reachable, D not duplicated.
@@ -548,7 +654,8 @@ async fn reachable_diamond_graph() {
             rel(nodes[0].1.clone(), "edge", nodes[2].1.clone()), // A→C
             rel(nodes[1].1.clone(), "edge", nodes[3].1.clone()), // B→D
             rel(nodes[2].1.clone(), "edge", nodes[3].1.clone()), // C→D
-        ], ..Default::default()
+        ],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -583,7 +690,8 @@ async fn reachable_cycle_terminates() {
             rel(nodes[0].1.clone(), "link", nodes[1].1.clone()),
             rel(nodes[1].1.clone(), "link", nodes[2].1.clone()),
             rel(nodes[2].1.clone(), "link", nodes[0].1.clone()),
-        ], ..Default::default()
+        ],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -617,7 +725,8 @@ async fn reachable_max_hops_limits_depth() {
         triples: vec![
             rel(nodes[0].1.clone(), "hop", nodes[1].1.clone()), // A→B (1 hop)
             rel(nodes[1].1.clone(), "hop", nodes[2].1.clone()), // B→C (2 hops)
-        ], ..Default::default()
+        ],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -635,7 +744,10 @@ async fn reachable_max_hops_limits_depth() {
     let ids: Vec<Vec<u8>> = resp.node_ids.iter().map(|n| n.bytes.clone()).collect();
     assert_eq!(ids.len(), 1, "only B within 1 hop");
     assert!(ids.contains(&core_b.as_bytes().to_vec()));
-    assert!(!ids.contains(&core_c.as_bytes().to_vec()), "C is 2 hops away");
+    assert!(
+        !ids.contains(&core_c.as_bytes().to_vec()),
+        "C is 2 hops away"
+    );
 }
 
 /// Isolated node has no reachable neighbours.
@@ -694,8 +806,16 @@ fn person_type_def() -> NodeTypeDef {
     NodeTypeDef {
         type_name: "Person".into(),
         fields: vec![
-            FieldDef { field_name: "name".into(), kind: "text".into(), required: true },
-            FieldDef { field_name: "age".into(),  kind: "int".into(),  required: false },
+            FieldDef {
+                field_name: "name".into(),
+                kind: "text".into(),
+                required: true,
+            },
+            FieldDef {
+                field_name: "age".into(),
+                kind: "int".into(),
+                required: false,
+            },
         ],
         vector_space: None,
         parent_types: vec![],
@@ -713,7 +833,9 @@ async fn register_and_get_node_type() {
     .unwrap();
 
     let resp = svc
-        .get_node_type(Request::new(GetNodeTypeRequest { type_name: "Person".into() }))
+        .get_node_type(Request::new(GetNodeTypeRequest {
+            type_name: "Person".into(),
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -728,7 +850,9 @@ async fn get_unknown_type_returns_empty_definition() {
     let (svc, _dir) = open();
 
     let resp = svc
-        .get_node_type(Request::new(GetNodeTypeRequest { type_name: "Ghost".into() }))
+        .get_node_type(Request::new(GetNodeTypeRequest {
+            type_name: "Ghost".into(),
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -749,7 +873,11 @@ async fn list_node_types_returns_all_registered() {
     svc.register_node_type(Request::new(RegisterNodeTypeRequest {
         definition: Some(NodeTypeDef {
             type_name: "Project".into(),
-            fields: vec![FieldDef { field_name: "title".into(), kind: "text".into(), required: true }],
+            fields: vec![FieldDef {
+                field_name: "title".into(),
+                kind: "text".into(),
+                required: true,
+            }],
             vector_space: None,
             parent_types: vec![],
         }),
@@ -764,7 +892,11 @@ async fn list_node_types_returns_all_registered() {
         .into_inner();
 
     assert_eq!(resp.definitions.len(), 2);
-    let mut names: Vec<_> = resp.definitions.iter().map(|d| d.type_name.clone()).collect();
+    let mut names: Vec<_> = resp
+        .definitions
+        .iter()
+        .map(|d| d.type_name.clone())
+        .collect();
     names.sort();
     assert_eq!(names, vec!["Person", "Project"]);
 }
@@ -783,8 +915,18 @@ async fn validate_node_valid_properties() {
         .validate_node(Request::new(ValidateNodeRequest {
             type_name: "Person".into(),
             properties: std::collections::HashMap::from([
-                ("name".to_string(), Value { kind: Some(ValueKind::TextVal("Alice".into())) }),
-                ("age".to_string(),  Value { kind: Some(ValueKind::IntVal(30)) }),
+                (
+                    "name".to_string(),
+                    Value {
+                        kind: Some(ValueKind::TextVal("Alice".into())),
+                    },
+                ),
+                (
+                    "age".to_string(),
+                    Value {
+                        kind: Some(ValueKind::IntVal(30)),
+                    },
+                ),
             ]),
         }))
         .await
@@ -809,9 +951,12 @@ async fn validate_node_missing_required_field() {
     let resp = svc
         .validate_node(Request::new(ValidateNodeRequest {
             type_name: "Person".into(),
-            properties: std::collections::HashMap::from([
-                ("age".to_string(), Value { kind: Some(ValueKind::IntVal(30)) }),
-            ]),
+            properties: std::collections::HashMap::from([(
+                "age".to_string(),
+                Value {
+                    kind: Some(ValueKind::IntVal(30)),
+                },
+            )]),
         }))
         .await
         .unwrap()
@@ -836,9 +981,12 @@ async fn validate_node_wrong_value_kind() {
     let resp = svc
         .validate_node(Request::new(ValidateNodeRequest {
             type_name: "Person".into(),
-            properties: std::collections::HashMap::from([
-                ("name".to_string(), Value { kind: Some(ValueKind::IntVal(99)) }),
-            ]),
+            properties: std::collections::HashMap::from([(
+                "name".to_string(),
+                Value {
+                    kind: Some(ValueKind::IntVal(99)),
+                },
+            )]),
         }))
         .await
         .unwrap()
@@ -883,9 +1031,11 @@ fn works_at_edge_def() -> EdgeTypeDef {
         predicate: "works_at".into(),
         domain: "Person".into(),
         range: "Company".into(),
-        fields: vec![
-            FieldDef { field_name: "since".into(), kind: "int".into(), required: true },
-        ],
+        fields: vec![FieldDef {
+            field_name: "since".into(),
+            kind: "int".into(),
+            required: true,
+        }],
         cardinality: String::new(),
         inverse_of: String::new(),
     }
@@ -902,7 +1052,9 @@ async fn register_and_get_edge_type() {
     .unwrap();
 
     let resp = svc
-        .get_edge_type(Request::new(GetEdgeTypeRequest { predicate: "works_at".into() }))
+        .get_edge_type(Request::new(GetEdgeTypeRequest {
+            predicate: "works_at".into(),
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -919,7 +1071,9 @@ async fn get_unknown_edge_type_returns_empty() {
     let (svc, _dir) = open();
 
     let resp = svc
-        .get_edge_type(Request::new(GetEdgeTypeRequest { predicate: "phantom".into() }))
+        .get_edge_type(Request::new(GetEdgeTypeRequest {
+            predicate: "phantom".into(),
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -957,7 +1111,11 @@ async fn list_edge_types_returns_all_registered() {
         .into_inner();
 
     assert_eq!(resp.definitions.len(), 2);
-    let mut names: Vec<_> = resp.definitions.iter().map(|d| d.predicate.clone()).collect();
+    let mut names: Vec<_> = resp
+        .definitions
+        .iter()
+        .map(|d| d.predicate.clone())
+        .collect();
     names.sort();
     assert_eq!(names, vec!["knows", "works_at"]);
 }
@@ -977,9 +1135,12 @@ async fn validate_edge_valid() {
             predicate: "works_at".into(),
             subject_type: "Person".into(),
             object_type: "Company".into(),
-            properties: std::collections::HashMap::from([
-                ("since".to_string(), Value { kind: Some(ValueKind::IntVal(2020)) }),
-            ]),
+            properties: std::collections::HashMap::from([(
+                "since".to_string(),
+                Value {
+                    kind: Some(ValueKind::IntVal(2020)),
+                },
+            )]),
         }))
         .await
         .unwrap()
@@ -1003,9 +1164,12 @@ async fn validate_edge_domain_mismatch() {
             predicate: "works_at".into(),
             subject_type: "Robot".into(),
             object_type: "Company".into(),
-            properties: std::collections::HashMap::from([
-                ("since".to_string(), Value { kind: Some(ValueKind::IntVal(2020)) }),
-            ]),
+            properties: std::collections::HashMap::from([(
+                "since".to_string(),
+                Value {
+                    kind: Some(ValueKind::IntVal(2020)),
+                },
+            )]),
         }))
         .await
         .unwrap()
@@ -1031,9 +1195,12 @@ async fn validate_edge_range_mismatch() {
             predicate: "works_at".into(),
             subject_type: "Person".into(),
             object_type: "Project".into(),
-            properties: std::collections::HashMap::from([
-                ("since".to_string(), Value { kind: Some(ValueKind::IntVal(2020)) }),
-            ]),
+            properties: std::collections::HashMap::from([(
+                "since".to_string(),
+                Value {
+                    kind: Some(ValueKind::IntVal(2020)),
+                },
+            )]),
         }))
         .await
         .unwrap()
@@ -1088,7 +1255,12 @@ async fn validate_edge_wrong_prop_type() {
             object_type: "Company".into(),
             properties: std::collections::HashMap::from([
                 // "since" should be int, not text
-                ("since".to_string(), Value { kind: Some(ValueKind::TextVal("2020".into())) }),
+                (
+                    "since".to_string(),
+                    Value {
+                        kind: Some(ValueKind::TextVal("2020".into())),
+                    },
+                ),
             ]),
         }))
         .await
@@ -1115,7 +1287,10 @@ async fn validate_edge_unknown_predicate_is_valid() {
         .unwrap()
         .into_inner();
 
-    assert!(resp.valid, "unregistered predicate should be treated as valid (open-world)");
+    assert!(
+        resp.valid,
+        "unregistered predicate should be treated as valid (open-world)"
+    );
 }
 
 #[tokio::test]
@@ -1231,14 +1406,18 @@ async fn register_node_type_with_vector_space_round_trips() {
         }),
     };
 
-    svc.register_node_type(Request::new(polargraph_server::proto::RegisterNodeTypeRequest {
-        definition: Some(def.clone()),
-    }))
+    svc.register_node_type(Request::new(
+        polargraph_server::proto::RegisterNodeTypeRequest {
+            definition: Some(def.clone()),
+        },
+    ))
     .await
     .unwrap();
 
     let resp = svc
-        .get_node_type(Request::new(GetNodeTypeRequest { type_name: "Article".into() }))
+        .get_node_type(Request::new(GetNodeTypeRequest {
+            type_name: "Article".into(),
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -1255,19 +1434,21 @@ async fn insert_vector_dimension_mismatch_rejected() {
     let (svc, _dir) = open();
 
     // Register a node type with a vector space expecting 3 dimensions.
-    svc.register_node_type(Request::new(polargraph_server::proto::RegisterNodeTypeRequest {
-        definition: Some(NodeTypeDef {
-            type_name: "Thing".into(),
-            fields: vec![],
-            parent_types: vec![],
-            vector_space: Some(VectorSpaceDef {
-                space_name: "thing_space".into(),
-                dimensions: 3,
-                embedding_model: String::new(),
-                storage_mode: String::new(),
+    svc.register_node_type(Request::new(
+        polargraph_server::proto::RegisterNodeTypeRequest {
+            definition: Some(NodeTypeDef {
+                type_name: "Thing".into(),
+                fields: vec![],
+                parent_types: vec![],
+                vector_space: Some(VectorSpaceDef {
+                    space_name: "thing_space".into(),
+                    dimensions: 3,
+                    embedding_model: String::new(),
+                    storage_mode: String::new(),
+                }),
             }),
-        }),
-    }))
+        },
+    ))
     .await
     .unwrap();
 
@@ -1275,7 +1456,7 @@ async fn insert_vector_dimension_mismatch_rejected() {
     let err = svc
         .insert_vector(Request::new(InsertVectorRequest {
             node_id: Some(id),
-            vector: vec![1.0, 0.0],  // 2 dims, not 3
+            vector: vec![1.0, 0.0], // 2 dims, not 3
             space: "thing_space".into(),
         }))
         .await
@@ -1296,9 +1477,18 @@ async fn batch_insert_vectors_inserts_all() {
         .batch_insert_vectors(Request::new(BatchInsertVectorsRequest {
             space: "default".into(),
             items: vec![
-                VectorItem { node_id: Some(id1.clone()), vector: vec![1.0, 0.0, 0.0] },
-                VectorItem { node_id: Some(id2), vector: vec![0.0, 1.0, 0.0] },
-                VectorItem { node_id: Some(id3), vector: vec![0.0, 0.0, 1.0] },
+                VectorItem {
+                    node_id: Some(id1.clone()),
+                    vector: vec![1.0, 0.0, 0.0],
+                },
+                VectorItem {
+                    node_id: Some(id2),
+                    vector: vec![0.0, 1.0, 0.0],
+                },
+                VectorItem {
+                    node_id: Some(id3),
+                    vector: vec![0.0, 0.0, 1.0],
+                },
             ],
         }))
         .await
@@ -1326,19 +1516,21 @@ async fn batch_insert_vectors_inserts_all() {
 async fn batch_insert_vectors_rejects_dimension_mismatch() {
     let (svc, _dir) = open();
 
-    svc.register_node_type(Request::new(polargraph_server::proto::RegisterNodeTypeRequest {
-        definition: Some(NodeTypeDef {
-            type_name: "Doc".into(),
-            fields: vec![],
-            parent_types: vec![],
-            vector_space: Some(VectorSpaceDef {
-                space_name: "doc_space".into(),
-                dimensions: 3,
-                embedding_model: String::new(),
-                storage_mode: String::new(),
+    svc.register_node_type(Request::new(
+        polargraph_server::proto::RegisterNodeTypeRequest {
+            definition: Some(NodeTypeDef {
+                type_name: "Doc".into(),
+                fields: vec![],
+                parent_types: vec![],
+                vector_space: Some(VectorSpaceDef {
+                    space_name: "doc_space".into(),
+                    dimensions: 3,
+                    embedding_model: String::new(),
+                    storage_mode: String::new(),
+                }),
             }),
-        }),
-    }))
+        },
+    ))
     .await
     .unwrap();
 
@@ -1346,7 +1538,10 @@ async fn batch_insert_vectors_rejects_dimension_mismatch() {
     let resp = svc
         .batch_insert_vectors(Request::new(BatchInsertVectorsRequest {
             space: "doc_space".into(),
-            items: vec![VectorItem { node_id: Some(id), vector: vec![1.0, 0.0] }], // wrong dim
+            items: vec![VectorItem {
+                node_id: Some(id),
+                vector: vec![1.0, 0.0],
+            }], // wrong dim
         }))
         .await
         .unwrap()
@@ -1393,7 +1588,10 @@ async fn search_vector_in_set_limits_to_allowed() {
         .into_inner();
 
     assert_eq!(resp.results.len(), 2);
-    assert!(resp.results.iter().all(|r| r.node_id.as_ref().unwrap().bytes != id1.bytes));
+    assert!(resp
+        .results
+        .iter()
+        .all(|r| r.node_id.as_ref().unwrap().bytes != id1.bytes));
 }
 
 #[tokio::test]
@@ -1435,7 +1633,7 @@ async fn search_vector_filtered_by_node_type_returns_only_matching_nodes() {
     let (svc, _dir) = open();
     let (core_a, proto_a) = new_node();
     let (core_b, proto_b) = new_node();
-    let (_, proto_c)      = new_node();
+    let (_, proto_c) = new_node();
 
     // Tag A and B as "Widget"; C gets no type.
     for (id, type_name) in [
@@ -1444,7 +1642,8 @@ async fn search_vector_filtered_by_node_type_returns_only_matching_nodes() {
         (proto_c.clone(), "Other"),
     ] {
         svc.insert(Request::new(InsertRequest {
-            triples: vec![text_prop(id, "__type", type_name)], ..Default::default()
+            triples: vec![text_prop(id, "__type", type_name)],
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -1470,7 +1669,9 @@ async fn search_vector_filtered_by_node_type_returns_only_matching_nodes() {
             space: "default".into(),
             query: vec![1.0, 0.0, 0.0],
             k: 5,
-            filter: Some(Filter::NodeTypeFilter(NodeTypeFilter { type_name: "Widget".into() })),
+            filter: Some(Filter::NodeTypeFilter(NodeTypeFilter {
+                type_name: "Widget".into(),
+            })),
             ef: 0,
             user_id: String::new(),
         }))
@@ -1479,7 +1680,11 @@ async fn search_vector_filtered_by_node_type_returns_only_matching_nodes() {
         .into_inner();
 
     // Only A and B should appear; C is "Other".
-    let ids: Vec<Vec<u8>> = resp.results.iter().map(|r| r.node_id.as_ref().unwrap().bytes.clone()).collect();
+    let ids: Vec<Vec<u8>> = resp
+        .results
+        .iter()
+        .map(|r| r.node_id.as_ref().unwrap().bytes.clone())
+        .collect();
     assert!(ids.contains(&core_a.as_bytes().to_vec()));
     assert!(ids.contains(&core_b.as_bytes().to_vec()));
     assert!(!ids.iter().any(|b| *b == proto_c.bytes));
@@ -1513,7 +1718,8 @@ async fn vector_seed_query_binds_seeds_to_graph_patterns() {
         triples: vec![
             rel(proto_a.clone(), "follows", proto_b.clone()),
             rel(proto_a.clone(), "follows", proto_c.clone()),
-        ], ..Default::default()
+        ],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -1534,7 +1740,8 @@ async fn vector_seed_query_binds_seeds_to_graph_patterns() {
             patterns: vec![pattern(var("n"), "follows", var("friend"))],
             snapshot_ts: 0,
             filter: None,
-            ef: 0, ..Default::default()
+            ef: 0,
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -1550,10 +1757,15 @@ async fn vector_seed_query_binds_seeds_to_graph_patterns() {
     }
 
     // The "friend" variables should include both B and C.
-    let friend_ids: Vec<Vec<u8>> = resp.bindings.iter()
+    let friend_ids: Vec<Vec<u8>> = resp
+        .bindings
+        .iter()
         .map(|row| row.vars["friend"].bytes.clone())
         .collect();
-    assert!(friend_ids.contains(&core_b.as_bytes().to_vec()), "B should be a friend of A");
+    assert!(
+        friend_ids.contains(&core_b.as_bytes().to_vec()),
+        "B should be a friend of A"
+    );
 }
 
 #[tokio::test]
@@ -1565,7 +1777,8 @@ async fn vector_seed_query_with_node_type_filter() {
 
     // Mark proto_typed as "TypedNode".
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop(proto_typed.clone(), "__type", "TypedNode")], ..Default::default()
+        triples: vec![text_prop(proto_typed.clone(), "__type", "TypedNode")],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -1583,7 +1796,8 @@ async fn vector_seed_query_with_node_type_filter() {
             patterns: vec![],
             snapshot_ts: 0,
             filter: Some(SeedFilter::NodeTypeFilter(NodeTypeFilter {
-                type_name: "TypedNode".into(), ..Default::default()
+                type_name: "TypedNode".into(),
+                ..Default::default()
             })),
             ef: 0,
             user_id: String::new(),
@@ -1593,8 +1807,15 @@ async fn vector_seed_query_with_node_type_filter() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.bindings.len(), 1, "only the typed node should be returned");
-    assert_eq!(resp.bindings[0].vars["n"].bytes, core_typed.as_bytes().to_vec());
+    assert_eq!(
+        resp.bindings.len(),
+        1,
+        "only the typed node should be returned"
+    );
+    assert_eq!(
+        resp.bindings[0].vars["n"].bytes,
+        core_typed.as_bytes().to_vec()
+    );
 }
 
 #[tokio::test]
@@ -1616,7 +1837,8 @@ async fn vector_seed_query_empty_patterns_returns_seed_bindings() {
             patterns: vec![],
             snapshot_ts: 0,
             filter: None,
-            ef: 0, ..Default::default()
+            ef: 0,
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -1624,7 +1846,9 @@ async fn vector_seed_query_empty_patterns_returns_seed_bindings() {
 
     assert_eq!(resp.bindings.len(), 2);
 
-    let result_ids: Vec<Vec<u8>> = resp.bindings.iter()
+    let result_ids: Vec<Vec<u8>> = resp
+        .bindings
+        .iter()
         .map(|b| b.vars["n"].bytes.clone())
         .collect();
     assert!(result_ids.contains(&core_a.as_bytes().to_vec()));
@@ -1632,7 +1856,11 @@ async fn vector_seed_query_empty_patterns_returns_seed_bindings() {
 
     // All scores must be in [-1, 1].
     for row in &resp.bindings {
-        assert!(row.score >= -1.0 && row.score <= 1.0, "score out of range: {}", row.score);
+        assert!(
+            row.score >= -1.0 && row.score <= 1.0,
+            "score out of range: {}",
+            row.score
+        );
     }
 }
 
@@ -1655,7 +1883,8 @@ async fn vector_seed_query_seeds_with_no_edges_return_no_rows() {
             patterns: vec![pattern(var("n"), "knows", var("friend"))],
             snapshot_ts: 0,
             filter: None,
-            ef: 0, ..Default::default()
+            ef: 0,
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -1671,19 +1900,21 @@ async fn mmap_storage_mode_insert_and_search() {
     // Register a node type with storage_mode = "mmap", insert vectors, search.
     let (svc, _dir) = open();
 
-    svc.register_node_type(Request::new(polargraph_server::proto::RegisterNodeTypeRequest {
-        definition: Some(NodeTypeDef {
-            type_name: "MmapDoc".into(),
-            fields: vec![],
-            parent_types: vec![],
-            vector_space: Some(VectorSpaceDef {
-                space_name: "mmap_space".into(),
-                dimensions: 3,
-                embedding_model: String::new(),
-                storage_mode: "mmap".into(),
+    svc.register_node_type(Request::new(
+        polargraph_server::proto::RegisterNodeTypeRequest {
+            definition: Some(NodeTypeDef {
+                type_name: "MmapDoc".into(),
+                fields: vec![],
+                parent_types: vec![],
+                vector_space: Some(VectorSpaceDef {
+                    space_name: "mmap_space".into(),
+                    dimensions: 3,
+                    embedding_model: String::new(),
+                    storage_mode: "mmap".into(),
+                }),
             }),
-        }),
-    }))
+        },
+    ))
     .await
     .unwrap();
 
@@ -1728,24 +1959,28 @@ async fn mmap_storage_mode_round_trips_in_node_type() {
     // storage_mode field survives register → get round-trip.
     let (svc, _dir) = open();
 
-    svc.register_node_type(Request::new(polargraph_server::proto::RegisterNodeTypeRequest {
-        definition: Some(NodeTypeDef {
-            type_name: "MmapNode".into(),
-            fields: vec![],
-            parent_types: vec![],
-            vector_space: Some(VectorSpaceDef {
-                space_name: "mm_space".into(),
-                dimensions: 8,
-                embedding_model: String::new(),
-                storage_mode: "mmap".into(),
+    svc.register_node_type(Request::new(
+        polargraph_server::proto::RegisterNodeTypeRequest {
+            definition: Some(NodeTypeDef {
+                type_name: "MmapNode".into(),
+                fields: vec![],
+                parent_types: vec![],
+                vector_space: Some(VectorSpaceDef {
+                    space_name: "mm_space".into(),
+                    dimensions: 8,
+                    embedding_model: String::new(),
+                    storage_mode: "mmap".into(),
+                }),
             }),
-        }),
-    }))
+        },
+    ))
     .await
     .unwrap();
 
     let resp = svc
-        .get_node_type(Request::new(GetNodeTypeRequest { type_name: "MmapNode".into() }))
+        .get_node_type(Request::new(GetNodeTypeRequest {
+            type_name: "MmapNode".into(),
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -1768,14 +2003,20 @@ fn open_with_backup() -> (PolarGraphServer, TempDir, TempDir) {
 #[tokio::test]
 async fn backup_create_unconfigured_returns_precondition() {
     let (svc, _dir) = open();
-    let err = svc.create_backup(Request::new(CreateBackupRequest {})).await.unwrap_err();
+    let err = svc
+        .create_backup(Request::new(CreateBackupRequest {}))
+        .await
+        .unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
 }
 
 #[tokio::test]
 async fn backup_list_unconfigured_returns_precondition() {
     let (svc, _dir) = open();
-    let err = svc.list_backups(Request::new(ListBackupsRequest {})).await.unwrap_err();
+    let err = svc
+        .list_backups(Request::new(ListBackupsRequest {}))
+        .await
+        .unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
 }
 
@@ -1816,9 +2057,15 @@ async fn backup_create_and_list() {
 async fn backup_purge_removes_old_backups() {
     let (svc, _data, _backup) = open_with_backup();
 
-    svc.create_backup(Request::new(CreateBackupRequest {})).await.unwrap();
-    svc.create_backup(Request::new(CreateBackupRequest {})).await.unwrap();
-    svc.create_backup(Request::new(CreateBackupRequest {})).await.unwrap();
+    svc.create_backup(Request::new(CreateBackupRequest {}))
+        .await
+        .unwrap();
+    svc.create_backup(Request::new(CreateBackupRequest {}))
+        .await
+        .unwrap();
+    svc.create_backup(Request::new(CreateBackupRequest {}))
+        .await
+        .unwrap();
 
     let resp = svc
         .purge_old_backups(Request::new(PurgeOldBackupsRequest { keep_n: 1 }))
@@ -1844,7 +2091,8 @@ async fn run_retention_deletes_old_triples() {
 
     // Insert a triple via the normal path (recent tt).
     let insert_req = InsertRequest {
-        triples: vec![text_prop(proto_s.clone(), "label", "hello")], ..Default::default()
+        triples: vec![text_prop(proto_s.clone(), "label", "hello")],
+        ..Default::default()
     };
     svc.insert(Request::new(insert_req)).await.unwrap();
 
@@ -1883,7 +2131,8 @@ async fn run_retention_recent_triple_survives() {
     let (_, proto_s) = new_node();
 
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop(proto_s, "label", "current")], ..Default::default()
+        triples: vec![text_prop(proto_s, "label", "current")],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -1916,11 +2165,13 @@ async fn run_retention_zero_vt_lookback_disables_vt_check() {
         value: polargraph_core::value::Value::Text("expired_vt".into()),
         temporal: polargraph_core::temporal::BiTemporalRange {
             vt_start: Timestamp(0),
-            vt_end: Timestamp(1),  // expired long ago
+            vt_end: Timestamp(1), // expired long ago
             tt: Timestamp(0),
         },
     };
-    svc.store().insert_at_ts(&triple, Timestamp(now_us)).unwrap();
+    svc.store()
+        .insert_at_ts(&triple, Timestamp(now_us))
+        .unwrap();
 
     // vt_lookback_secs = 0 means disabled → triple survives (tx is recent).
     let resp = svc
@@ -1937,7 +2188,13 @@ async fn run_retention_zero_vt_lookback_disables_vt_check() {
 
 // ── Time-travel (as_of) tests ─────────────────────────────────────────────────
 
-fn rel_with_vt(subject: NodeId, predicate: &str, object: NodeId, vt_start: i64, vt_end: i64) -> Triple {
+fn rel_with_vt(
+    subject: NodeId,
+    predicate: &str,
+    object: NodeId,
+    vt_start: i64,
+    vt_end: i64,
+) -> Triple {
     Triple {
         kind: Some(TripleKind::Relation(RelationTriple {
             subject: Some(subject),
@@ -1950,12 +2207,20 @@ fn rel_with_vt(subject: NodeId, predicate: &str, object: NodeId, vt_start: i64, 
     }
 }
 
-fn text_prop_with_vt(subject: NodeId, predicate: &str, text: &str, vt_start: i64, vt_end: i64) -> Triple {
+fn text_prop_with_vt(
+    subject: NodeId,
+    predicate: &str,
+    text: &str,
+    vt_start: i64,
+    vt_end: i64,
+) -> Triple {
     Triple {
         kind: Some(TripleKind::Property(PropertyTriple {
             subject: Some(subject),
             predicate: predicate.into(),
-            value: Some(Value { kind: Some(ValueKind::TextVal(text.into())) }),
+            value: Some(Value {
+                kind: Some(ValueKind::TextVal(text.into())),
+            }),
             vt_start,
             vt_end,
         })),
@@ -1970,7 +2235,8 @@ async fn as_of_valid_time_zero_sees_latest() {
     let (_, bob) = new_node();
 
     svc.insert(Request::new(InsertRequest {
-        triples: vec![rel_with_vt(alice.clone(), "knows", bob.clone(), 1000, 0)], ..Default::default()
+        triples: vec![rel_with_vt(alice.clone(), "knows", bob.clone(), 1000, 0)],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -1981,8 +2247,9 @@ async fn as_of_valid_time_zero_sees_latest() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: 0,
-        rules: vec![], ..Default::default()
-    }))
+            rules: vec![],
+            ..Default::default()
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -1999,7 +2266,8 @@ async fn as_of_valid_time_filters_expired_triples() {
 
     // Triple valid in [1000, 2000).
     svc.insert(Request::new(InsertRequest {
-        triples: vec![rel_with_vt(alice.clone(), "knows", bob.clone(), 1000, 2000)], ..Default::default()
+        triples: vec![rel_with_vt(alice.clone(), "knows", bob.clone(), 1000, 2000)],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -2011,8 +2279,9 @@ async fn as_of_valid_time_filters_expired_triples() {
             snapshot_ts: 0,
             as_of_valid_time: 1500,
             as_of_tx_time: 0,
-        rules: vec![], ..Default::default()
-    }))
+            rules: vec![],
+            ..Default::default()
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -2024,14 +2293,22 @@ async fn as_of_valid_time_filters_expired_triples() {
             snapshot_ts: 0,
             as_of_valid_time: 2500,
             as_of_tx_time: 0,
-        rules: vec![], ..Default::default()
-    }))
+            rules: vec![],
+            ..Default::default()
+        }))
         .await
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp_inside.bindings.len(), 1, "triple should be visible inside its vt window");
-    assert!(resp_outside.bindings.is_empty(), "triple should be invisible after its vt window ends");
+    assert_eq!(
+        resp_inside.bindings.len(),
+        1,
+        "triple should be visible inside its vt window"
+    );
+    assert!(
+        resp_outside.bindings.is_empty(),
+        "triple should be invisible after its vt window ends"
+    );
 }
 
 /// Two versions of the same (S,P) with non-overlapping vt ranges. Querying at
@@ -2043,14 +2320,28 @@ async fn as_of_valid_time_returns_correct_version() {
 
     // Version 1: vt=[1000, 2000)
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop_with_vt(alice.clone(), "status", "active", 1000, 2000)], ..Default::default()
+        triples: vec![text_prop_with_vt(
+            alice.clone(),
+            "status",
+            "active",
+            1000,
+            2000,
+        )],
+        ..Default::default()
     }))
     .await
     .unwrap();
 
     // Version 2: vt=[2000, ∞)  (vt_end=0 → END_OF_TIME)
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop_with_vt(alice.clone(), "status", "retired", 2000, 0)], ..Default::default()
+        triples: vec![text_prop_with_vt(
+            alice.clone(),
+            "status",
+            "retired",
+            2000,
+            0,
+        )],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -2062,8 +2353,9 @@ async fn as_of_valid_time_returns_correct_version() {
             snapshot_ts: 0,
             as_of_valid_time: 1500,
             as_of_tx_time: 0,
-        rules: vec![], ..Default::default()
-    }))
+            rules: vec![],
+            ..Default::default()
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -2075,8 +2367,9 @@ async fn as_of_valid_time_returns_correct_version() {
             snapshot_ts: 0,
             as_of_valid_time: 2500,
             as_of_tx_time: 0,
-        rules: vec![], ..Default::default()
-    }))
+            rules: vec![],
+            ..Default::default()
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -2088,15 +2381,28 @@ async fn as_of_valid_time_returns_correct_version() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: 0,
-        rules: vec![], ..Default::default()
-    }))
+            rules: vec![],
+            ..Default::default()
+        }))
         .await
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp_v1.bindings.len(), 1, "vt=1500 should see version 1 (active window)");
-    assert_eq!(resp_v2.bindings.len(), 1, "vt=2500 should see version 2 (active window)");
-    assert_eq!(resp_latest.bindings.len(), 1, "no filter should see current state");
+    assert_eq!(
+        resp_v1.bindings.len(),
+        1,
+        "vt=1500 should see version 1 (active window)"
+    );
+    assert_eq!(
+        resp_v2.bindings.len(),
+        1,
+        "vt=2500 should see version 2 (active window)"
+    );
+    assert_eq!(
+        resp_latest.bindings.len(),
+        1,
+        "no filter should see current state"
+    );
 }
 
 /// as_of_tx_time before the insert: triple is not yet visible.
@@ -2113,7 +2419,8 @@ async fn as_of_tx_time_before_insert_sees_nothing() {
         .as_micros() as i64;
 
     svc.insert(Request::new(InsertRequest {
-        triples: vec![rel(alice.clone(), "knows", bob)], ..Default::default()
+        triples: vec![rel(alice.clone(), "knows", bob)],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -2124,13 +2431,17 @@ async fn as_of_tx_time_before_insert_sees_nothing() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: t_before,
-        rules: vec![], ..Default::default()
-    }))
+            rules: vec![],
+            ..Default::default()
+        }))
         .await
         .unwrap()
         .into_inner();
 
-    assert!(resp.bindings.is_empty(), "triple must not be visible before its commit time");
+    assert!(
+        resp.bindings.is_empty(),
+        "triple must not be visible before its commit time"
+    );
 }
 
 /// as_of_tx_time at the commit timestamp: triple becomes visible.
@@ -2142,7 +2453,8 @@ async fn as_of_tx_time_at_commit_sees_triple() {
 
     let commit_ts = svc
         .insert(Request::new(InsertRequest {
-            triples: vec![rel(alice.clone(), "knows", bob)], ..Default::default()
+            triples: vec![rel(alice.clone(), "knows", bob)],
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -2155,13 +2467,18 @@ async fn as_of_tx_time_at_commit_sees_triple() {
             snapshot_ts: 0,
             as_of_valid_time: 0,
             as_of_tx_time: commit_ts,
-        rules: vec![], ..Default::default()
-    }))
+            rules: vec![],
+            ..Default::default()
+        }))
         .await
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.bindings.len(), 1, "triple must be visible at its commit time");
+    assert_eq!(
+        resp.bindings.len(),
+        1,
+        "triple must be visible at its commit time"
+    );
 }
 
 /// Combining as_of_tx_time and as_of_valid_time: both filters must be satisfied.
@@ -2174,7 +2491,8 @@ async fn as_of_tx_and_vt_combined_filter() {
     // Triple valid in [1000, 3000), committed now.
     let commit_ts = svc
         .insert(Request::new(InsertRequest {
-            triples: vec![rel_with_vt(alice.clone(), "knows", bob, 1000, 3000)], ..Default::default()
+            triples: vec![rel_with_vt(alice.clone(), "knows", bob, 1000, 3000)],
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -2188,8 +2506,9 @@ async fn as_of_tx_and_vt_combined_filter() {
             snapshot_ts: 0,
             as_of_valid_time: 2000,
             as_of_tx_time: commit_ts,
-        rules: vec![], ..Default::default()
-    }))
+            rules: vec![],
+            ..Default::default()
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -2201,8 +2520,9 @@ async fn as_of_tx_and_vt_combined_filter() {
             snapshot_ts: 0,
             as_of_valid_time: 4000,
             as_of_tx_time: commit_ts,
-        rules: vec![], ..Default::default()
-    }))
+            rules: vec![],
+            ..Default::default()
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -2246,9 +2566,7 @@ async fn start_primary_server(
 /// Open a replica store pointing at `primary_address` and start the WAL
 /// replication task. Returns the PolarGraphServer (for direct RPC calls) and
 /// the replica's TempDir.
-async fn open_wal_replica(
-    primary_address: String,
-) -> (PolarGraphServer, TempDir) {
+async fn open_wal_replica(primary_address: String) -> (PolarGraphServer, TempDir) {
     let replica_dir = TempDir::new().unwrap();
     let replica_store =
         TripleStore::open_as_replica(replica_dir.path(), primary_address.clone()).unwrap();
@@ -2277,7 +2595,8 @@ async fn replica_streams_triples_from_primary() {
     let primary = PolarGraphServer::new(primary_store.clone()).unwrap();
     primary
         .insert(Request::new(InsertRequest {
-            triples: vec![rel(alice.clone(), "knows", bob.clone())], ..Default::default()
+            triples: vec![rel(alice.clone(), "knows", bob.clone())],
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -2291,7 +2610,8 @@ async fn replica_streams_triples_from_primary() {
             patterns: vec![VarPattern {
                 subject: Some(bound(&alice)),
                 predicate: "knows".into(),
-                object: Some(var("x")), ..Default::default()
+                object: Some(var("x")),
+                ..Default::default()
             }],
             snapshot_ts: 0,
             as_of_valid_time: 0,
@@ -2303,7 +2623,11 @@ async fn replica_streams_triples_from_primary() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.bindings.len(), 1, "replica receives triple via WAL stream");
+    assert_eq!(
+        resp.bindings.len(),
+        1,
+        "replica receives triple via WAL stream"
+    );
     assert_eq!(resp.bindings[0].vars["x"].bytes, bob.bytes);
 }
 
@@ -2320,11 +2644,16 @@ async fn replica_write_rpcs_return_failed_precondition() {
 
     let err = replica
         .insert(Request::new(InsertRequest {
-            triples: vec![rel(node.clone(), "x", node2.clone())], ..Default::default()
+            triples: vec![rel(node.clone(), "x", node2.clone())],
+            ..Default::default()
         }))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "Insert on replica");
+    assert_eq!(
+        err.code(),
+        tonic::Code::FailedPrecondition,
+        "Insert on replica"
+    );
 
     let err = replica
         .insert_vector(Request::new(InsertVectorRequest {
@@ -2334,7 +2663,11 @@ async fn replica_write_rpcs_return_failed_precondition() {
         }))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "InsertVector on replica");
+    assert_eq!(
+        err.code(),
+        tonic::Code::FailedPrecondition,
+        "InsertVector on replica"
+    );
 
     let err = replica
         .register_node_type(Request::new(RegisterNodeTypeRequest {
@@ -2347,7 +2680,11 @@ async fn replica_write_rpcs_return_failed_precondition() {
         }))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "RegisterNodeType on replica");
+    assert_eq!(
+        err.code(),
+        tonic::Code::FailedPrecondition,
+        "RegisterNodeType on replica"
+    );
 
     let err = replica
         .register_edge_type(Request::new(RegisterEdgeTypeRequest {
@@ -2362,7 +2699,11 @@ async fn replica_write_rpcs_return_failed_precondition() {
         }))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "RegisterEdgeType on replica");
+    assert_eq!(
+        err.code(),
+        tonic::Code::FailedPrecondition,
+        "RegisterEdgeType on replica"
+    );
 
     let err = replica
         .run_retention(Request::new(RunRetentionRequest {
@@ -2371,13 +2712,21 @@ async fn replica_write_rpcs_return_failed_precondition() {
         }))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "RunRetention on replica");
+    assert_eq!(
+        err.code(),
+        tonic::Code::FailedPrecondition,
+        "RunRetention on replica"
+    );
 
     let err = replica
         .create_backup(Request::new(CreateBackupRequest {}))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "CreateBackup on replica");
+    assert_eq!(
+        err.code(),
+        tonic::Code::FailedPrecondition,
+        "CreateBackup on replica"
+    );
 }
 
 #[tokio::test]
@@ -2391,14 +2740,17 @@ async fn stream_wal_on_replica_returns_failed_precondition() {
 
     let replica_store =
         TripleStore::open_as_replica(replica_dir.path(), primary_addr.clone()).unwrap();
-    let (replica_svc, _rs) =
-        PolarGraphServer::new_replica(replica_store, &primary_addr).unwrap();
+    let (replica_svc, _rs) = PolarGraphServer::new_replica(replica_store, &primary_addr).unwrap();
 
     let err = replica_svc
         .stream_wal(Request::new(StreamWalRequest { since_seq: 0 }))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "StreamWal on replica");
+    assert_eq!(
+        err.code(),
+        tonic::Code::FailedPrecondition,
+        "StreamWal on replica"
+    );
 }
 
 #[tokio::test]
@@ -2411,7 +2763,10 @@ async fn replica_status_rpc() {
         .unwrap()
         .into_inner();
     assert!(!status.is_replica, "primary reports is_replica=false");
-    assert!(status.primary_address.is_empty(), "primary has no primary_address");
+    assert!(
+        status.primary_address.is_empty(),
+        "primary has no primary_address"
+    );
     assert_eq!(status.catchup_count, 0);
 
     // Replica: is_replica = true, primary_address is set.
@@ -2447,7 +2802,8 @@ async fn replica_receives_triples_inserted_after_connect() {
     let primary = PolarGraphServer::new(primary_store).unwrap();
     primary
         .insert(Request::new(InsertRequest {
-            triples: vec![rel(alice.clone(), "follows", bob.clone())], ..Default::default()
+            triples: vec![rel(alice.clone(), "follows", bob.clone())],
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -2460,7 +2816,8 @@ async fn replica_receives_triples_inserted_after_connect() {
             patterns: vec![VarPattern {
                 subject: Some(bound(&alice)),
                 predicate: "follows".into(),
-                object: Some(var("y")), ..Default::default()
+                object: Some(var("y")),
+                ..Default::default()
             }],
             snapshot_ts: 0,
             as_of_valid_time: 0,
@@ -2472,7 +2829,11 @@ async fn replica_receives_triples_inserted_after_connect() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.bindings.len(), 1, "replica sees post-connect triple via WAL");
+    assert_eq!(
+        resp.bindings.len(),
+        1,
+        "replica sees post-connect triple via WAL"
+    );
 }
 
 // ── API key authentication tests ──────────────────────────────────────────────
@@ -2537,7 +2898,8 @@ async fn auth_request_without_key_returns_unauthenticated() {
 
     let err = client
         .insert(Request::new(InsertRequest {
-            triples: vec![rel(node_a, "knows", node_b)], ..Default::default()
+            triples: vec![rel(node_a, "knows", node_b)],
+            ..Default::default()
         }))
         .await
         .unwrap_err();
@@ -2556,9 +2918,13 @@ async fn auth_request_with_correct_key_succeeds() {
     let (_, node_b) = new_node();
 
     let resp = client
-        .insert(bearer(InsertRequest {
-            triples: vec![rel(node_a, "knows", node_b)], ..Default::default()
-        }, "valid-key"))
+        .insert(bearer(
+            InsertRequest {
+                triples: vec![rel(node_a, "knows", node_b)],
+                ..Default::default()
+            },
+            "valid-key",
+        ))
         .await
         .unwrap()
         .into_inner();
@@ -2577,9 +2943,13 @@ async fn auth_request_with_wrong_key_returns_unauthenticated() {
     let (_, node_b) = new_node();
 
     let err = client
-        .insert(bearer(InsertRequest {
-            triples: vec![rel(node_a, "knows", node_b)], ..Default::default()
-        }, "wrong-key"))
+        .insert(bearer(
+            InsertRequest {
+                triples: vec![rel(node_a, "knows", node_b)],
+                ..Default::default()
+            },
+            "wrong-key",
+        ))
         .await
         .unwrap_err();
 
@@ -2601,7 +2971,10 @@ async fn auth_replica_status_exempt_from_auth() {
         .unwrap()
         .into_inner();
 
-    assert!(!resp.is_replica, "primary reports is_replica=false without auth key");
+    assert!(
+        !resp.is_replica,
+        "primary reports is_replica=false without auth key"
+    );
 }
 
 #[tokio::test]
@@ -2613,7 +2986,8 @@ async fn auth_disabled_all_requests_pass() {
 
     let resp = svc
         .insert(Request::new(InsertRequest {
-            triples: vec![rel(node_a, "knows", node_b)], ..Default::default()
+            triples: vec![rel(node_a, "knows", node_b)],
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -2635,7 +3009,13 @@ async fn auth_multiple_keys_any_accepted() {
     let (_, a1) = new_node();
     let (_, a2) = new_node();
     client
-        .insert(bearer(InsertRequest { triples: vec![rel(a1, "x", a2)], ..Default::default() }, "key-a"))
+        .insert(bearer(
+            InsertRequest {
+                triples: vec![rel(a1, "x", a2)],
+                ..Default::default()
+            },
+            "key-a",
+        ))
         .await
         .unwrap();
 
@@ -2643,7 +3023,13 @@ async fn auth_multiple_keys_any_accepted() {
     let (_, b1) = new_node();
     let (_, b2) = new_node();
     client
-        .insert(bearer(InsertRequest { triples: vec![rel(b1, "x", b2)], ..Default::default() }, "key-b"))
+        .insert(bearer(
+            InsertRequest {
+                triples: vec![rel(b1, "x", b2)],
+                ..Default::default()
+            },
+            "key-b",
+        ))
         .await
         .unwrap();
 
@@ -2651,7 +3037,13 @@ async fn auth_multiple_keys_any_accepted() {
     let (_, c1) = new_node();
     let (_, c2) = new_node();
     let err = client
-        .insert(bearer(InsertRequest { triples: vec![rel(c1, "x", c2)], ..Default::default() }, "key-c"))
+        .insert(bearer(
+            InsertRequest {
+                triples: vec![rel(c1, "x", c2)],
+                ..Default::default()
+            },
+            "key-c",
+        ))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
@@ -2667,7 +3059,11 @@ async fn auth_multiple_keys_any_accepted() {
 async fn start_server_with_keys_and_store(
     store: TripleStore,
     keys: Vec<String>,
-) -> (SocketAddr, polargraph_server::auth::KeyStore, tokio::sync::oneshot::Sender<()>) {
+) -> (
+    SocketAddr,
+    polargraph_server::auth::KeyStore,
+    tokio::sync::oneshot::Sender<()>,
+) {
     let (auth, key_store) = ApiKeyLayer::new(keys.clone());
     let svc = PolarGraphServer::new(store)
         .unwrap()
@@ -2704,7 +3100,9 @@ async fn api_key_add_and_list() {
     // Add a second key.
     let resp = client
         .add_api_key(bearer(
-            polargraph_server::proto::AddApiKeyRequest { key: "new-key-abcd".into() },
+            polargraph_server::proto::AddApiKeyRequest {
+                key: "new-key-abcd".into(),
+            },
             "initial-key",
         ))
         .await
@@ -2725,7 +3123,10 @@ async fn api_key_add_and_list() {
     // Each prefix should be 4 chars + "****" = 8 chars.
     assert!(list.key_prefixes.iter().all(|p| p.ends_with("****")));
     // Full keys must NOT appear.
-    assert!(!list.key_prefixes.iter().any(|p| p == "initial-key" || p == "new-key-abcd"));
+    assert!(!list
+        .key_prefixes
+        .iter()
+        .any(|p| p == "initial-key" || p == "new-key-abcd"));
     // Masked prefixes should start with the right characters.
     assert!(list.key_prefixes.iter().any(|p| p.starts_with("init")));
     assert!(list.key_prefixes.iter().any(|p| p.starts_with("new-")));
@@ -2742,7 +3143,9 @@ async fn api_key_revoke_removes_key() {
     // Revoke "remove-key".
     let resp = client
         .revoke_api_key(bearer(
-            polargraph_server::proto::RevokeApiKeyRequest { key: "remove-key".into() },
+            polargraph_server::proto::RevokeApiKeyRequest {
+                key: "remove-key".into(),
+            },
             "keep-key",
         ))
         .await
@@ -2754,7 +3157,9 @@ async fn api_key_revoke_removes_key() {
     // Revoking again — not found.
     let resp2 = client
         .revoke_api_key(bearer(
-            polargraph_server::proto::RevokeApiKeyRequest { key: "remove-key".into() },
+            polargraph_server::proto::RevokeApiKeyRequest {
+                key: "remove-key".into(),
+            },
             "keep-key",
         ))
         .await
@@ -2775,7 +3180,9 @@ async fn api_key_new_key_works_for_auth() {
     // Add a second key via the management RPC.
     client
         .add_api_key(bearer(
-            polargraph_server::proto::AddApiKeyRequest { key: "user-key-xyz".into() },
+            polargraph_server::proto::AddApiKeyRequest {
+                key: "user-key-xyz".into(),
+            },
             "admin-key",
         ))
         .await
@@ -2786,13 +3193,19 @@ async fn api_key_new_key_works_for_auth() {
     let (_, b) = new_node();
     let resp = client
         .insert(bearer(
-            InsertRequest { triples: vec![rel(a, "knows", b)], ..Default::default() },
+            InsertRequest {
+                triples: vec![rel(a, "knows", b)],
+                ..Default::default()
+            },
             "user-key-xyz",
         ))
         .await
         .unwrap()
         .into_inner();
-    assert!(resp.commit_ts > 0, "insert with newly added key should succeed");
+    assert!(
+        resp.commit_ts > 0,
+        "insert with newly added key should succeed"
+    );
 }
 
 #[tokio::test]
@@ -2886,7 +3299,10 @@ async fn ui_get_root_returns_html() {
     let res = client.get(format!("{base}/")).send().await.unwrap();
     assert_eq!(res.status(), 200);
     let body = res.text().await.unwrap();
-    assert!(body.contains("PolarGraph"), "HTML should contain 'PolarGraph'");
+    assert!(
+        body.contains("PolarGraph"),
+        "HTML should contain 'PolarGraph'"
+    );
 
     let _ = shutdown.send(());
 }
@@ -2898,10 +3314,17 @@ async fn ui_api_status_returns_expected_fields() {
     let (base, shutdown, _dir) = start_ui_http(store, vec![]).await;
 
     let client = reqwest::Client::new();
-    let res = client.get(format!("{base}/api/status")).send().await.unwrap();
+    let res = client
+        .get(format!("{base}/api/status"))
+        .send()
+        .await
+        .unwrap();
     let status = res.status();
     let body_text = res.text().await.unwrap_or_default();
-    assert_eq!(status, 200, "expected 200 but got {status}; body: {body_text}");
+    assert_eq!(
+        status, 200,
+        "expected 200 but got {status}; body: {body_text}"
+    );
 
     let json: serde_json::Value = serde_json::from_str(&body_text).unwrap();
     assert!(json.get("version").is_some(), "missing 'version'");
@@ -2923,7 +3346,11 @@ async fn ui_api_requires_auth_when_keys_configured() {
     let client = reqwest::Client::new();
 
     // No key → 401
-    let res = client.get(format!("{base}/api/status")).send().await.unwrap();
+    let res = client
+        .get(format!("{base}/api/status"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), 401);
 
     // Wrong key → 401
@@ -2995,11 +3422,18 @@ async fn ui_backups_list_unconfigured_returns_empty() {
     let (base, shutdown, _dir) = start_ui_http(store, vec![]).await;
 
     let client = reqwest::Client::new();
-    let res = client.get(format!("{base}/api/backups")).send().await.unwrap();
+    let res = client
+        .get(format!("{base}/api/backups"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), 200);
     let json: serde_json::Value = res.json().await.unwrap();
     assert_eq!(json["backups"], serde_json::json!([]));
-    assert!(json.get("error").is_some(), "expected error field when backup dir not configured");
+    assert!(
+        json.get("error").is_some(),
+        "expected error field when backup dir not configured"
+    );
 
     let _ = shutdown.send(());
 }
@@ -3020,18 +3454,39 @@ async fn ui_backups_create_and_list() {
         .unwrap();
     assert_eq!(res.status(), 200);
     let json: serde_json::Value = res.json().await.unwrap();
-    assert!(json.get("backup_id").is_some(), "expected backup_id in create response");
+    assert!(
+        json.get("backup_id").is_some(),
+        "expected backup_id in create response"
+    );
 
     // List backups — should contain the one we just made
-    let res = client.get(format!("{base}/api/backups")).send().await.unwrap();
+    let res = client
+        .get(format!("{base}/api/backups"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), 200);
     let json: serde_json::Value = res.json().await.unwrap();
-    assert!(json.get("error").is_none(), "should have no error when backup dir is configured");
-    let backups = json["backups"].as_array().expect("backups should be an array");
-    assert!(!backups.is_empty(), "expected at least one backup after create");
+    assert!(
+        json.get("error").is_none(),
+        "should have no error when backup dir is configured"
+    );
+    let backups = json["backups"]
+        .as_array()
+        .expect("backups should be an array");
+    assert!(
+        !backups.is_empty(),
+        "expected at least one backup after create"
+    );
     assert!(backups[0].get("id").is_some(), "backup entry missing id");
-    assert!(backups[0].get("timestamp").is_some(), "backup entry missing timestamp");
-    assert!(backups[0].get("size_bytes").is_some(), "backup entry missing size_bytes");
+    assert!(
+        backups[0].get("timestamp").is_some(),
+        "backup entry missing timestamp"
+    );
+    assert!(
+        backups[0].get("size_bytes").is_some(),
+        "backup entry missing size_bytes"
+    );
 
     let _ = shutdown.send(());
 }
@@ -3081,7 +3536,9 @@ async fn shutdown_token_stops_server() {
         .unwrap();
     let mut client = PolarGraphServiceClient::new(channel);
     client
-        .list_node_types(Request::new(polargraph_server::proto::ListNodeTypesRequest {}))
+        .list_node_types(Request::new(
+            polargraph_server::proto::ListNodeTypesRequest {},
+        ))
         .await
         .unwrap();
 
@@ -3090,7 +3547,10 @@ async fn shutdown_token_stops_server() {
 
     // Server task should exit within a reasonable deadline.
     let result = tokio::time::timeout(Duration::from_secs(5), jh).await;
-    assert!(result.is_ok(), "server task should complete after token cancelled");
+    assert!(
+        result.is_ok(),
+        "server task should complete after token cancelled"
+    );
 }
 
 #[tokio::test]
@@ -3155,7 +3615,10 @@ async fn wal_client_stops_on_cancellation() {
     // Cancel and confirm the WAL task exits.
     cancel_token.cancel();
     let result = tokio::time::timeout(Duration::from_secs(5), wal_jh).await;
-    assert!(result.is_ok(), "WAL replication task should exit after cancellation");
+    assert!(
+        result.is_ok(),
+        "WAL replication task should exit after cancellation"
+    );
 }
 
 // ── Query timeout tests ───────────────────────────────────────────────────────
@@ -3181,13 +3644,18 @@ async fn query_timeout_fires_on_large_recursive_query() {
         .windows(2)
         .map(|w| rel(w[0].1.clone(), "next", w[1].1.clone()))
         .collect();
-    svc.insert(Request::new(InsertRequest { triples, ..Default::default() })).await.unwrap();
+    svc.insert(Request::new(InsertRequest {
+        triples,
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
 
     let err = svc
         .reachable(Request::new(ReachableRequest {
-            start:     Some(nodes[0].1.clone()),
+            start: Some(nodes[0].1.clone()),
             predicate: "next".into(),
-            max_hops:  0,
+            max_hops: 0,
         }))
         .await
         .unwrap_err();
@@ -3197,7 +3665,11 @@ async fn query_timeout_fires_on_large_recursive_query() {
         tonic::Code::DeadlineExceeded,
         "expected DeadlineExceeded, got: {err:?}"
     );
-    assert!(err.message().contains("1ms"), "message should include timeout: {}", err.message());
+    assert!(
+        err.message().contains("1ms"),
+        "message should include timeout: {}",
+        err.message()
+    );
 }
 
 #[tokio::test]
@@ -3214,16 +3686,17 @@ async fn query_completes_within_generous_timeout() {
             rel(a.clone(), "edge", b.clone()),
             rel(b.clone(), "edge", c.clone()),
             rel(c.clone(), "edge", a.clone()),
-        ], ..Default::default()
+        ],
+        ..Default::default()
     }))
     .await
     .unwrap();
 
     let resp = svc
         .reachable(Request::new(ReachableRequest {
-            start:     Some(a.clone()),
+            start: Some(a.clone()),
             predicate: "edge".into(),
-            max_hops:  0,
+            max_hops: 0,
         }))
         .await
         .unwrap()
@@ -3247,16 +3720,17 @@ async fn query_timeout_zero_disables_timeout() {
             rel(a.clone(), "edge", b.clone()),
             rel(b.clone(), "edge", c.clone()),
             rel(c.clone(), "edge", a.clone()),
-        ], ..Default::default()
+        ],
+        ..Default::default()
     }))
     .await
     .unwrap();
 
     let resp = svc
         .reachable(Request::new(ReachableRequest {
-            start:     Some(a.clone()),
+            start: Some(a.clone()),
             predicate: "edge".into(),
-            max_hops:  0,
+            max_hops: 0,
         }))
         .await
         .expect("query should complete without timeout when timeout_ms=0")
@@ -3308,7 +3782,9 @@ async fn health_rpc_returns_serving_for_running_server() {
 
     let mut client = HealthClient::new(channel);
     let resp = client
-        .check(HealthCheckRequest { service: "polargraph.v1.PolarGraphService".into() })
+        .check(HealthCheckRequest {
+            service: "polargraph.v1.PolarGraphService".into(),
+        })
         .await
         .unwrap()
         .into_inner();
@@ -3358,9 +3834,7 @@ async fn health_http_endpoint_returns_ok_for_primary() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let resp = reqwest::get(format!("http://{addr}/health"))
-        .await
-        .unwrap();
+    let resp = reqwest::get(format!("http://{addr}/health")).await.unwrap();
 
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
@@ -3434,7 +3908,10 @@ async fn rate_limit_single_client_throttled_after_quota() {
     for _ in 0..3 {
         let result = client
             .insert(req_from_ip(
-                InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())], ..Default::default() },
+                InsertRequest {
+                    triples: vec![rel(na.clone(), "knows", nb.clone())],
+                    ..Default::default()
+                },
                 "10.1.1.1",
             ))
             .await;
@@ -3444,7 +3921,10 @@ async fn rate_limit_single_client_throttled_after_quota() {
     // The 4th request should be rejected.
     let err = client
         .insert(req_from_ip(
-            InsertRequest { triples: vec![rel(na, "knows", nb)], ..Default::default() },
+            InsertRequest {
+                triples: vec![rel(na, "knows", nb)],
+                ..Default::default()
+            },
             "10.1.1.1",
         ))
         .await
@@ -3478,7 +3958,10 @@ async fn rate_limit_two_clients_have_independent_buckets() {
     for _ in 0..2 {
         let result = client
             .insert(req_from_ip(
-                InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())], ..Default::default() },
+                InsertRequest {
+                    triples: vec![rel(na.clone(), "knows", nb.clone())],
+                    ..Default::default()
+                },
                 "10.2.2.1",
             ))
             .await;
@@ -3486,18 +3969,28 @@ async fn rate_limit_two_clients_have_independent_buckets() {
     }
     let err = client
         .insert(req_from_ip(
-            InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())], ..Default::default() },
+            InsertRequest {
+                triples: vec![rel(na.clone(), "knows", nb.clone())],
+                ..Default::default()
+            },
             "10.2.2.1",
         ))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::ResourceExhausted, "A should be throttled");
+    assert_eq!(
+        err.code(),
+        tonic::Code::ResourceExhausted,
+        "A should be throttled"
+    );
 
     // Client B (different IP) still has its own full quota.
     for _ in 0..2 {
         let result = client
             .insert(req_from_ip(
-                InsertRequest { triples: vec![rel(na.clone(), "knows", nb.clone())], ..Default::default() },
+                InsertRequest {
+                    triples: vec![rel(na.clone(), "knows", nb.clone())],
+                    ..Default::default()
+                },
                 "10.2.2.2",
             ))
             .await;
@@ -3594,7 +4087,7 @@ async fn migration_status_reflects_applied_state() {
 async fn cypher_query_simple() {
     let (svc, _dir) = open();
     let (alice_core, alice) = new_node();
-    let (bob_core,   bob)   = new_node();
+    let (bob_core, bob) = new_node();
     let (_carol_core, carol) = new_node();
 
     // Insert: alice and bob are Person; carol is Robot.
@@ -3602,11 +4095,12 @@ async fn cypher_query_simple() {
     svc.insert(Request::new(InsertRequest {
         triples: vec![
             text_prop(alice.clone(), "__type", "Person"),
-            text_prop(bob.clone(),   "__type", "Person"),
+            text_prop(bob.clone(), "__type", "Person"),
             text_prop(carol.clone(), "__type", "Robot"),
             rel(alice.clone(), "knows", bob.clone()),
             rel(alice.clone(), "knows", carol.clone()),
-        ], ..Default::default()
+        ],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -3620,7 +4114,8 @@ async fn cypher_query_simple() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![],
-            ef: 0, ..Default::default()
+            ef: 0,
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -3629,13 +4124,13 @@ async fn cypher_query_simple() {
     assert_eq!(resp.rows.len(), 1, "only alice→bob matches; carol is Robot");
 
     let bound_a = resp.rows[0].nodes.get("a").unwrap();
-    let bound_a_core = polargraph_core::id::NodeId(
-        uuid::Uuid::from_bytes(bound_a.bytes[..16].try_into().unwrap()),
-    );
+    let bound_a_core = polargraph_core::id::NodeId(uuid::Uuid::from_bytes(
+        bound_a.bytes[..16].try_into().unwrap(),
+    ));
     let bound_b = resp.rows[0].nodes.get("b").unwrap();
-    let bound_b_core = polargraph_core::id::NodeId(
-        uuid::Uuid::from_bytes(bound_b.bytes[..16].try_into().unwrap()),
-    );
+    let bound_b_core = polargraph_core::id::NodeId(uuid::Uuid::from_bytes(
+        bound_b.bytes[..16].try_into().unwrap(),
+    ));
     assert_eq!(bound_a_core, alice_core);
     assert_eq!(bound_b_core, bob_core);
 }
@@ -3654,7 +4149,8 @@ async fn cypher_query_recursive() {
             rel(a.clone(), "follows", b.clone()),
             rel(b.clone(), "follows", c.clone()),
             rel(c.clone(), "follows", d.clone()),
-        ], ..Default::default()
+        ],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -3666,7 +4162,8 @@ async fn cypher_query_recursive() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![],
-            ef: 0, ..Default::default()
+            ef: 0,
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -3681,17 +4178,21 @@ async fn cypher_query_recursive() {
         .rows
         .iter()
         .filter(|binding| {
-            binding.nodes.get("a").map(|n| {
-                polargraph_core::id::NodeId(
-                    uuid::Uuid::from_bytes(n.bytes[..16].try_into().unwrap()),
-                ) == a_core
-            }).unwrap_or(false)
+            binding
+                .nodes
+                .get("a")
+                .map(|n| {
+                    polargraph_core::id::NodeId(uuid::Uuid::from_bytes(
+                        n.bytes[..16].try_into().unwrap(),
+                    )) == a_core
+                })
+                .unwrap_or(false)
         })
         .filter_map(|binding| {
             binding.nodes.get("b").map(|n| {
-                polargraph_core::id::NodeId(
-                    uuid::Uuid::from_bytes(n.bytes[..16].try_into().unwrap()),
-                )
+                polargraph_core::id::NodeId(uuid::Uuid::from_bytes(
+                    n.bytes[..16].try_into().unwrap(),
+                ))
             })
         })
         .collect();
@@ -3735,11 +4236,11 @@ async fn cypher_vector_near_query() {
 
     // Vectors: a0 is near query [1,0,0]; a1 is slightly off; others are far.
     let vectors: Vec<Vec<f32>> = vec![
-        vec![1.0, 0.0, 0.0],   // a0 — closest
-        vec![0.9, 0.1, 0.0],   // a1 — second
-        vec![0.8, 0.2, 0.0],   // a2 — third
-        vec![0.0, 0.0, 1.0],   // a3 — far
-        vec![0.0, 1.0, 0.0],   // a4 — far
+        vec![1.0, 0.0, 0.0], // a0 — closest
+        vec![0.9, 0.1, 0.0], // a1 — second
+        vec![0.8, 0.2, 0.0], // a2 — third
+        vec![0.0, 0.0, 1.0], // a3 — far
+        vec![0.0, 1.0, 0.0], // a4 — far
     ];
 
     // Insert :cites edges: a0→a1, a1→a2, a3→a4 (a3/a4 are far from query)
@@ -3748,7 +4249,8 @@ async fn cypher_vector_near_query() {
             rel(nodes[0].1.clone(), "cites", nodes[1].1.clone()),
             rel(nodes[1].1.clone(), "cites", nodes[2].1.clone()),
             rel(nodes[3].1.clone(), "cites", nodes[4].1.clone()),
-        ], ..Default::default()
+        ],
+        ..Default::default()
     }))
     .await
     .unwrap();
@@ -3766,13 +4268,17 @@ async fn cypher_vector_near_query() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![1.0, 0.0, 0.0],
-            ef: 0, ..Default::default()
+            ef: 0,
+            ..Default::default()
         }))
         .await
         .unwrap()
         .into_inner();
 
-    assert!(!resp.rows.is_empty(), "expected at least one result from VECTOR_NEAR + cites");
+    assert!(
+        !resp.rows.is_empty(),
+        "expected at least one result from VECTOR_NEAR + cites"
+    );
 
     // All returned "b" nodes must be a1 or a2 (cited by ANN-hit nodes).
     let expected_b_ids: std::collections::HashSet<Vec<u8>> = vec![
@@ -3807,7 +4313,12 @@ async fn query_stream_returns_all_results_in_order() {
     for i in 0..12 {
         triples.push(rel(nodes[i].1.clone(), "likes", nodes[i + 1].1.clone()));
     }
-    svc.insert(Request::new(InsertRequest { triples, ..Default::default() })).await.unwrap();
+    svc.insert(Request::new(InsertRequest {
+        triples,
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
 
     // Stream all :likes edges.
     let mut stream = svc
@@ -3826,7 +4337,10 @@ async fn query_stream_returns_all_results_in_order() {
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.unwrap();
-        assert_eq!(chunk.chunk_index, chunk_count, "chunk_index must be monotonically increasing");
+        assert_eq!(
+            chunk.chunk_index, chunk_count,
+            "chunk_index must be monotonically increasing"
+        );
         chunk_count += 1;
         for row in &chunk.results {
             let a = row.vars.get("a").expect("missing 'a' var").bytes.clone();
@@ -3836,7 +4350,10 @@ async fn query_stream_returns_all_results_in_order() {
         if chunk.done {
             last_done = true;
             // No more chunks should follow after done=true.
-            assert!(stream.next().await.is_none(), "stream should end after done=true chunk");
+            assert!(
+                stream.next().await.is_none(),
+                "stream should end after done=true chunk"
+            );
             break;
         }
     }
@@ -3850,7 +4367,8 @@ async fn query_stream_returns_all_results_in_order() {
         let expected_b = nodes[i + 1].0.as_bytes().to_vec();
         assert!(
             all_rows.contains(&(expected_a, expected_b)),
-            "edge {i}→{} missing from stream results", i + 1
+            "edge {i}→{} missing from stream results",
+            i + 1
         );
     }
 }
@@ -3867,7 +4385,12 @@ async fn cypher_query_stream_respects_limit() {
     for i in 0..10 {
         triples.push(rel(nodes[i].1.clone(), "follows", nodes[i + 1].1.clone()));
     }
-    svc.insert(Request::new(InsertRequest { triples, ..Default::default() })).await.unwrap();
+    svc.insert(Request::new(InsertRequest {
+        triples,
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
 
     // Query with LIMIT 3 — should receive exactly 3 results.
     let mut stream = svc
@@ -3907,8 +4430,16 @@ async fn query_stream_chunk_boundary_math() {
     // Insert 1001 distinct nodes with a self-linking :self edge.
     // We want 1001 rows to cross the 500-boundary twice.
     let nodes: Vec<(polargraph_core::id::NodeId, NodeId)> = (0..1001).map(|_| new_node()).collect();
-    let triples: Vec<_> = nodes.iter().map(|(_, n)| rel(n.clone(), "self", n.clone())).collect();
-    svc.insert(Request::new(InsertRequest { triples, ..Default::default() })).await.unwrap();
+    let triples: Vec<_> = nodes
+        .iter()
+        .map(|(_, n)| rel(n.clone(), "self", n.clone()))
+        .collect();
+    svc.insert(Request::new(InsertRequest {
+        triples,
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
 
     let mut stream = svc
         .query_stream(Request::new(QueryRequest {
@@ -3936,7 +4467,11 @@ async fn query_stream_chunk_boundary_math() {
     assert!(saw_done, "stream must end with done=true");
     assert_eq!(total_rows, 1001, "all 1001 rows must be delivered");
     // Chunk indices must be 0, 1, 2 (three chunks for 1001 rows at 500/chunk).
-    assert_eq!(chunk_indices, vec![0, 1, 2], "expected 3 chunks with sequential indices");
+    assert_eq!(
+        chunk_indices,
+        vec![0, 1, 2],
+        "expected 3 chunks with sequential indices"
+    );
 }
 
 // ── CypherWrite ───────────────────────────────────────────────────────────────
@@ -3956,8 +4491,15 @@ async fn cypher_write_create_node_then_query() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(write_resp.created_node_ids.len(), 1, "should have created one node");
-    assert_eq!(write_resp.triples_written, 3, "__type + name + active = 3 triples");
+    assert_eq!(
+        write_resp.created_node_ids.len(),
+        1,
+        "should have created one node"
+    );
+    assert_eq!(
+        write_resp.triples_written, 3,
+        "__type + name + active = 3 triples"
+    );
     assert_eq!(write_resp.triples_deleted, 0);
 
     // Read back: MATCH all Person nodes and confirm Alice appears.
@@ -3967,7 +4509,8 @@ async fn cypher_write_create_node_then_query() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![],
-            ef: 0, ..Default::default()
+            ef: 0,
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -3975,8 +4518,14 @@ async fn cypher_write_create_node_then_query() {
 
     assert_eq!(query_resp.rows.len(), 1, "expected exactly one Person");
     let created_proto_id = &write_resp.created_node_ids[0];
-    let returned_id = query_resp.rows[0].nodes.get("a").expect("missing 'a' binding");
-    assert_eq!(&returned_id.bytes, created_proto_id, "returned node id must match created id");
+    let returned_id = query_resp.rows[0]
+        .nodes
+        .get("a")
+        .expect("missing 'a' binding");
+    assert_eq!(
+        &returned_id.bytes, created_proto_id,
+        "returned node id must match created id"
+    );
 }
 
 /// MERGE is idempotent: two identical MERGEs produce exactly one node.
@@ -4000,8 +4549,16 @@ async fn cypher_write_merge_is_idempotent() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(r1.created_node_ids.len(), 1, "first MERGE should create the node");
-    assert_eq!(r2.created_node_ids.len(), 0, "second MERGE should be a no-op");
+    assert_eq!(
+        r1.created_node_ids.len(),
+        1,
+        "first MERGE should create the node"
+    );
+    assert_eq!(
+        r2.created_node_ids.len(),
+        0,
+        "second MERGE should be a no-op"
+    );
 
     // Confirm only one Company node in the graph.
     let query_resp = svc
@@ -4010,13 +4567,18 @@ async fn cypher_write_merge_is_idempotent() {
             as_of_valid_time: 0,
             as_of_tx_time: 0,
             vector: vec![],
-            ef: 0, ..Default::default()
+            ef: 0,
+            ..Default::default()
         }))
         .await
         .unwrap()
         .into_inner();
 
-    assert_eq!(query_resp.rows.len(), 1, "expected exactly one Company node after two MERGEs");
+    assert_eq!(
+        query_resp.rows.len(),
+        1,
+        "expected exactly one Company node after two MERGEs"
+    );
 }
 
 // ── Wire transactions ─────────────────────────────────────────────────────────
@@ -4036,8 +4598,12 @@ async fn wire_tx_begin_returns_unique_ids() {
         .into_inner();
     assert!(!r1.tx_id.is_empty(), "tx_id must not be empty");
     assert_ne!(r1.tx_id, r2.tx_id, "each begin must return a unique tx_id");
-    let _ = svc.rollback_transaction(Request::new(RollbackTransactionRequest { tx_id: r1.tx_id })).await;
-    let _ = svc.rollback_transaction(Request::new(RollbackTransactionRequest { tx_id: r2.tx_id })).await;
+    let _ = svc
+        .rollback_transaction(Request::new(RollbackTransactionRequest { tx_id: r1.tx_id }))
+        .await;
+    let _ = svc
+        .rollback_transaction(Request::new(RollbackTransactionRequest { tx_id: r2.tx_id }))
+        .await;
 }
 
 #[tokio::test]
@@ -4065,16 +4631,23 @@ async fn wire_tx_commit_makes_triples_visible() {
     let outside = svc
         .query(Request::new(QueryRequest {
             patterns: vec![VarPattern {
-                subject: Some(Term { kind: Some(TermKind::Bound(alice.clone())) }),
+                subject: Some(Term {
+                    kind: Some(TermKind::Bound(alice.clone())),
+                }),
                 predicate: "tx_edge".to_string(),
-                object: Some(Term { kind: Some(TermKind::Var("v".to_string())) }),
+                object: Some(Term {
+                    kind: Some(TermKind::Var("v".to_string())),
+                }),
             }],
             ..Default::default()
         }))
         .await
         .unwrap()
         .into_inner();
-    assert!(outside.bindings.is_empty(), "triple should not be visible before commit");
+    assert!(
+        outside.bindings.is_empty(),
+        "triple should not be visible before commit"
+    );
 
     let commit_resp = svc
         .commit_transaction(Request::new(CommitTransactionRequest { tx_id }))
@@ -4086,9 +4659,13 @@ async fn wire_tx_commit_makes_triples_visible() {
     let after = svc
         .query(Request::new(QueryRequest {
             patterns: vec![VarPattern {
-                subject: Some(Term { kind: Some(TermKind::Bound(alice.clone())) }),
+                subject: Some(Term {
+                    kind: Some(TermKind::Bound(alice.clone())),
+                }),
                 predicate: "tx_edge".to_string(),
-                object: Some(Term { kind: Some(TermKind::Var("v".to_string())) }),
+                object: Some(Term {
+                    kind: Some(TermKind::Var("v".to_string())),
+                }),
             }],
             ..Default::default()
         }))
@@ -4125,16 +4702,23 @@ async fn wire_tx_rollback_discards_triples() {
     let resp = svc
         .query(Request::new(QueryRequest {
             patterns: vec![VarPattern {
-                subject: Some(Term { kind: Some(TermKind::Bound(alice.clone())) }),
+                subject: Some(Term {
+                    kind: Some(TermKind::Bound(alice.clone())),
+                }),
                 predicate: "tag".to_string(),
-                object: Some(Term { kind: Some(TermKind::Var("v".to_string())) }),
+                object: Some(Term {
+                    kind: Some(TermKind::Var("v".to_string())),
+                }),
             }],
             ..Default::default()
         }))
         .await
         .unwrap()
         .into_inner();
-    assert!(resp.bindings.is_empty(), "rolled-back triple must not appear");
+    assert!(
+        resp.bindings.is_empty(),
+        "rolled-back triple must not appear"
+    );
 }
 
 #[tokio::test]
@@ -4162,9 +4746,13 @@ async fn wire_tx_write_your_own_reads() {
     let resp = svc
         .query(Request::new(QueryRequest {
             patterns: vec![VarPattern {
-                subject: Some(Term { kind: Some(TermKind::Bound(alice.clone())) }),
+                subject: Some(Term {
+                    kind: Some(TermKind::Bound(alice.clone())),
+                }),
                 predicate: "tx_wyr_edge".to_string(),
-                object: Some(Term { kind: Some(TermKind::Var("v".to_string())) }),
+                object: Some(Term {
+                    kind: Some(TermKind::Var("v".to_string())),
+                }),
             }],
             tx_id: tx_id.clone(),
             ..Default::default()
@@ -4172,9 +4760,15 @@ async fn wire_tx_write_your_own_reads() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(resp.bindings.len(), 1, "write-your-own-reads must work within an open transaction");
+    assert_eq!(
+        resp.bindings.len(),
+        1,
+        "write-your-own-reads must work within an open transaction"
+    );
 
-    let _ = svc.rollback_transaction(Request::new(RollbackTransactionRequest { tx_id })).await;
+    let _ = svc
+        .rollback_transaction(Request::new(RollbackTransactionRequest { tx_id }))
+        .await;
 }
 
 #[tokio::test]
@@ -4188,9 +4782,11 @@ async fn wire_tx_rollback_removes_from_map() {
         .into_inner()
         .tx_id;
 
-    svc.rollback_transaction(Request::new(RollbackTransactionRequest { tx_id: tx_id.clone() }))
-        .await
-        .unwrap();
+    svc.rollback_transaction(Request::new(RollbackTransactionRequest {
+        tx_id: tx_id.clone(),
+    }))
+    .await
+    .unwrap();
 
     // A second rollback should return NOT_FOUND.
     let err = svc
@@ -4213,8 +4809,14 @@ async fn show_indexes_returns_all_cfs() {
         .unwrap()
         .into_inner();
 
-    let cf_names: Vec<&str> = resp.column_families.iter().map(|cf| cf.name.as_str()).collect();
-    for expected in &["spo", "sop", "pso", "pos", "osp", "ops", "meta", "hnsw", "tri"] {
+    let cf_names: Vec<&str> = resp
+        .column_families
+        .iter()
+        .map(|cf| cf.name.as_str())
+        .collect();
+    for expected in &[
+        "spo", "sop", "pso", "pos", "osp", "ops", "meta", "hnsw", "tri",
+    ] {
         assert!(
             cf_names.contains(expected),
             "expected CF '{}' in ShowIndexes response, got: {:?}",
@@ -4235,7 +4837,10 @@ async fn show_stats_returns_primary_mode() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.mode, "primary", "ShowStats mode should be 'primary' for a non-replica store");
+    assert_eq!(
+        resp.mode, "primary",
+        "ShowStats mode should be 'primary' for a non-replica store"
+    );
 }
 
 #[tokio::test]
@@ -4260,9 +4865,18 @@ async fn show_stats_reflects_inserts() {
         .into_inner();
 
     assert_eq!(resp.mode, "primary");
-    assert!(resp.mvcc_oracle_ts > 0, "oracle_ts should advance after an insert");
-    assert!(resp.predicate_intern_count >= 1, "at least 'knows' should be interned");
-    assert_eq!(resp.open_transaction_count, 0, "no open transactions after committed insert");
+    assert!(
+        resp.mvcc_oracle_ts > 0,
+        "oracle_ts should advance after an insert"
+    );
+    assert!(
+        resp.predicate_intern_count >= 1,
+        "at least 'knows' should be interned"
+    );
+    assert_eq!(
+        resp.open_transaction_count, 0,
+        "no open transactions after committed insert"
+    );
 }
 
 #[tokio::test]
@@ -4272,9 +4886,7 @@ async fn slow_query_threshold_does_not_break_results() {
     // results (the slow-query check is a pure side-effect, not a gate).
     let dir = TempDir::new().unwrap();
     let store = TripleStore::open(dir.path()).unwrap();
-    let svc = PolarGraphServer::new(store)
-        .unwrap()
-        .with_slow_query_ms(1); // trigger slow-query path on nearly every query
+    let svc = PolarGraphServer::new(store).unwrap().with_slow_query_ms(1); // trigger slow-query path on nearly every query
 
     let (_, alice) = new_node();
     let (_, bob) = new_node();
@@ -4294,13 +4906,20 @@ async fn slow_query_threshold_does_not_break_results() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.bindings.len(), 1, "query should return one binding even when slow-query threshold fires");
-    assert_eq!(resp.bindings[0].vars.get("x").map(|v| v.bytes.clone()), Some(bob.bytes));
+    assert_eq!(
+        resp.bindings.len(),
+        1,
+        "query should return one binding even when slow-query threshold fires"
+    );
+    assert_eq!(
+        resp.bindings[0].vars.get("x").map(|v| v.bytes.clone()),
+        Some(bob.bytes)
+    );
 }
 
 #[tokio::test]
 async fn show_indexes_reflects_registered_vector_space() {
-    use polargraph_server::proto::{ShowIndexesRequest, ShowIndexesResponse, InsertVectorRequest};
+    use polargraph_server::proto::{InsertVectorRequest, ShowIndexesRequest, ShowIndexesResponse};
 
     let (svc, _dir) = open();
 
@@ -4337,13 +4956,21 @@ async fn show_indexes_reflects_registered_vector_space() {
         .unwrap()
         .into_inner();
 
-    let space_names: Vec<&str> = resp.vector_spaces.iter().map(|vs| vs.name.as_str()).collect();
+    let space_names: Vec<&str> = resp
+        .vector_spaces
+        .iter()
+        .map(|vs| vs.name.as_str())
+        .collect();
     assert!(
         space_names.contains(&"doc_embeddings"),
         "expected 'doc_embeddings' in ShowIndexes vector_spaces, got: {:?}",
         space_names
     );
-    let space = resp.vector_spaces.iter().find(|vs| vs.name == "doc_embeddings").unwrap();
+    let space = resp
+        .vector_spaces
+        .iter()
+        .find(|vs| vs.name == "doc_embeddings")
+        .unwrap();
     assert_eq!(space.node_count, 1, "vector space should have one entry");
     assert_eq!(space.dimensions, 3);
 }
@@ -4354,14 +4981,14 @@ async fn show_indexes_reflects_registered_vector_space() {
 async fn cypher_where_contains_finds_match() {
     let (svc, _dir) = open();
     let (_alice_core, alice) = new_node();
-    let (_bob_core,   bob)   = new_node();
+    let (_bob_core, bob) = new_node();
 
     svc.insert(Request::new(InsertRequest {
         triples: vec![
             text_prop(alice.clone(), "__type", "Person"),
             text_prop(alice.clone(), "name", "Alice Smith"),
-            text_prop(bob.clone(),   "__type", "Person"),
-            text_prop(bob.clone(),   "name", "Robert Jones"),
+            text_prop(bob.clone(), "__type", "Person"),
+            text_prop(bob.clone(), "name", "Robert Jones"),
         ],
         ..Default::default()
     }))
@@ -4379,12 +5006,12 @@ async fn cypher_where_contains_finds_match() {
 
     assert_eq!(resp.rows.len(), 1, "only Alice Smith matches");
     let bound = resp.rows[0].nodes.get("n").unwrap();
-    let bound_id = polargraph_core::id::NodeId(
-        uuid::Uuid::from_bytes(bound.bytes[..16].try_into().unwrap()),
-    );
-    let alice_id = polargraph_core::id::NodeId(
-        uuid::Uuid::from_bytes(alice.bytes[..16].try_into().unwrap()),
-    );
+    let bound_id = polargraph_core::id::NodeId(uuid::Uuid::from_bytes(
+        bound.bytes[..16].try_into().unwrap(),
+    ));
+    let alice_id = polargraph_core::id::NodeId(uuid::Uuid::from_bytes(
+        alice.bytes[..16].try_into().unwrap(),
+    ));
     assert_eq!(bound_id, alice_id);
 }
 
@@ -4392,14 +5019,14 @@ async fn cypher_where_contains_finds_match() {
 async fn cypher_where_starts_with_finds_match() {
     let (svc, _dir) = open();
     let (_alice_core, alice) = new_node();
-    let (_bob_core,   bob)   = new_node();
+    let (_bob_core, bob) = new_node();
 
     svc.insert(Request::new(InsertRequest {
         triples: vec![
             text_prop(alice.clone(), "__type", "Person"),
             text_prop(alice.clone(), "name", "Alexandra Doe"),
-            text_prop(bob.clone(),   "__type", "Person"),
-            text_prop(bob.clone(),   "name", "Robert Smith"),
+            text_prop(bob.clone(), "__type", "Person"),
+            text_prop(bob.clone(), "name", "Robert Smith"),
         ],
         ..Default::default()
     }))
@@ -4417,12 +5044,12 @@ async fn cypher_where_starts_with_finds_match() {
 
     assert_eq!(resp.rows.len(), 1, "only Alexandra matches");
     let bound = resp.rows[0].nodes.get("n").unwrap();
-    let bound_id = polargraph_core::id::NodeId(
-        uuid::Uuid::from_bytes(bound.bytes[..16].try_into().unwrap()),
-    );
-    let alice_id = polargraph_core::id::NodeId(
-        uuid::Uuid::from_bytes(alice.bytes[..16].try_into().unwrap()),
-    );
+    let bound_id = polargraph_core::id::NodeId(uuid::Uuid::from_bytes(
+        bound.bytes[..16].try_into().unwrap(),
+    ));
+    let alice_id = polargraph_core::id::NodeId(uuid::Uuid::from_bytes(
+        alice.bytes[..16].try_into().unwrap(),
+    ));
     assert_eq!(bound_id, alice_id);
 }
 
@@ -4457,14 +5084,14 @@ async fn cypher_where_contains_no_match_returns_empty() {
 async fn cypher_where_regex_finds_match() {
     let (svc, _dir) = open();
     let (_alice_core, alice) = new_node();
-    let (_bob_core,   bob)   = new_node();
+    let (_bob_core, bob) = new_node();
 
     svc.insert(Request::new(InsertRequest {
         triples: vec![
             text_prop(alice.clone(), "__type", "Person"),
             text_prop(alice.clone(), "email", "alice@example.com"),
-            text_prop(bob.clone(),   "__type", "Person"),
-            text_prop(bob.clone(),   "email", "bob_at_domain_dot_org"),
+            text_prop(bob.clone(), "__type", "Person"),
+            text_prop(bob.clone(), "email", "bob_at_domain_dot_org"),
         ],
         ..Default::default()
     }))
@@ -4483,12 +5110,12 @@ async fn cypher_where_regex_finds_match() {
 
     assert_eq!(resp.rows.len(), 1, "only alice@example.com matches");
     let bound = resp.rows[0].nodes.get("n").unwrap();
-    let bound_id = polargraph_core::id::NodeId(
-        uuid::Uuid::from_bytes(bound.bytes[..16].try_into().unwrap()),
-    );
-    let alice_id = polargraph_core::id::NodeId(
-        uuid::Uuid::from_bytes(alice.bytes[..16].try_into().unwrap()),
-    );
+    let bound_id = polargraph_core::id::NodeId(uuid::Uuid::from_bytes(
+        bound.bytes[..16].try_into().unwrap(),
+    ));
+    let alice_id = polargraph_core::id::NodeId(uuid::Uuid::from_bytes(
+        alice.bytes[..16].try_into().unwrap(),
+    ));
     assert_eq!(bound_id, alice_id);
 }
 
@@ -4539,7 +5166,11 @@ async fn test_grpc_edge_cardinality_enforced() {
         "expected FAILED_PRECONDITION for cardinality violation, got: {}",
         err.message()
     );
-    assert!(err.message().contains("one object per subject"), "got: {}", err.message());
+    assert!(
+        err.message().contains("one object per subject"),
+        "got: {}",
+        err.message()
+    );
 }
 
 #[tokio::test]
@@ -4550,9 +5181,11 @@ async fn test_grpc_subtype_inheritance() {
     svc.register_node_type(Request::new(RegisterNodeTypeRequest {
         definition: Some(NodeTypeDef {
             type_name: "Entity".into(),
-            fields: vec![
-                FieldDef { field_name: "id_code".into(), kind: "text".into(), required: true },
-            ],
+            fields: vec![FieldDef {
+                field_name: "id_code".into(),
+                kind: "text".into(),
+                required: true,
+            }],
             vector_space: None,
             parent_types: vec![],
         }),
@@ -4564,9 +5197,11 @@ async fn test_grpc_subtype_inheritance() {
     svc.register_node_type(Request::new(RegisterNodeTypeRequest {
         definition: Some(NodeTypeDef {
             type_name: "Person".into(),
-            fields: vec![
-                FieldDef { field_name: "name".into(), kind: "text".into(), required: true },
-            ],
+            fields: vec![FieldDef {
+                field_name: "name".into(),
+                kind: "text".into(),
+                required: true,
+            }],
             vector_space: None,
             parent_types: vec!["Entity".into()],
         }),
@@ -4579,7 +5214,12 @@ async fn test_grpc_subtype_inheritance() {
         .validate_node(Request::new(ValidateNodeRequest {
             type_name: "Person".into(),
             properties: std::collections::HashMap::from([
-                ("name".to_string(), Value { kind: Some(ValueKind::TextVal("Alice".into())) }),
+                (
+                    "name".to_string(),
+                    Value {
+                        kind: Some(ValueKind::TextVal("Alice".into())),
+                    },
+                ),
                 // "id_code" from Entity is missing
             ]),
         }))
@@ -4587,7 +5227,10 @@ async fn test_grpc_subtype_inheritance() {
         .unwrap()
         .into_inner();
 
-    assert!(!resp.valid, "validation should fail when inherited required field is missing");
+    assert!(
+        !resp.valid,
+        "validation should fail when inherited required field is missing"
+    );
     assert!(
         resp.errors.iter().any(|e| e.contains("id_code")),
         "error should mention missing inherited field 'id_code': {:?}",
@@ -4599,15 +5242,28 @@ async fn test_grpc_subtype_inheritance() {
         .validate_node(Request::new(ValidateNodeRequest {
             type_name: "Person".into(),
             properties: std::collections::HashMap::from([
-                ("name".to_string(), Value { kind: Some(ValueKind::TextVal("Alice".into())) }),
-                ("id_code".to_string(), Value { kind: Some(ValueKind::TextVal("E001".into())) }),
+                (
+                    "name".to_string(),
+                    Value {
+                        kind: Some(ValueKind::TextVal("Alice".into())),
+                    },
+                ),
+                (
+                    "id_code".to_string(),
+                    Value {
+                        kind: Some(ValueKind::TextVal("E001".into())),
+                    },
+                ),
             ]),
         }))
         .await
         .unwrap()
         .into_inner();
 
-    assert!(resp2.valid, "validation should pass when all inherited fields are present");
+    assert!(
+        resp2.valid,
+        "validation should pass when all inherited fields are present"
+    );
 }
 
 #[tokio::test]
@@ -4683,9 +5339,15 @@ async fn test_grpc_validate_ontology() {
         .unwrap()
         .into_inner();
 
-    assert!(!resp2.valid, "ontology should report violation when inverse is missing");
     assert!(
-        resp2.violations.iter().any(|v| v.violation_type == "inverse"),
+        !resp2.valid,
+        "ontology should report violation when inverse is missing"
+    );
+    assert!(
+        resp2
+            .violations
+            .iter()
+            .any(|v| v.violation_type == "inverse"),
         "expected 'inverse' violation type; got: {:?}",
         resp2.violations
     );
@@ -4783,8 +5445,7 @@ async fn ui_keys_add_and_revoke() {
 // ── Edge annotation (RDF-star) tests ─────────────────────────────────────────
 
 use polargraph_server::proto::{
-    EdgeAnnotation, GetEdgeAnnotationsRequest,
-    edge_annotation::Value as AnnotationValue,
+    edge_annotation::Value as AnnotationValue, EdgeAnnotation, GetEdgeAnnotationsRequest,
 };
 
 /// Insert a relation and return its edge UUID bytes (from InsertResponse).
@@ -4806,7 +5467,7 @@ async fn insert_relation_with_known_edge(
 async fn edge_annotation_property_roundtrip() {
     let (svc, _dir) = open();
     let (_, alice) = new_node();
-    let (_, bob)   = new_node();
+    let (_, bob) = new_node();
 
     let edge_bytes = insert_relation_with_known_edge(&svc, alice, "trusts", bob).await;
     assert_eq!(edge_bytes.len(), 16, "edge_id should be 16 bytes");
@@ -4824,7 +5485,9 @@ async fn edge_annotation_property_roundtrip() {
     };
     svc.insert(Request::new(ann_req)).await.unwrap();
 
-    let get_req = GetEdgeAnnotationsRequest { edge_id: edge_bytes };
+    let get_req = GetEdgeAnnotationsRequest {
+        edge_id: edge_bytes,
+    };
     let resp = svc
         .get_edge_annotations(Request::new(get_req))
         .await
@@ -4863,7 +5526,9 @@ async fn edge_annotation_relation_roundtrip() {
     };
     svc.insert(Request::new(ann_req)).await.unwrap();
 
-    let get_req = GetEdgeAnnotationsRequest { edge_id: edge_bytes };
+    let get_req = GetEdgeAnnotationsRequest {
+        edge_id: edge_bytes,
+    };
     let resp = svc
         .get_edge_annotations(Request::new(get_req))
         .await
@@ -4932,8 +5597,11 @@ async fn edge_annotation_in_insert_batch() {
         .into_inner();
 
     assert_eq!(resp.annotations.len(), 2);
-    let predicates: std::collections::HashSet<_> =
-        resp.annotations.iter().map(|a| a.predicate.as_str()).collect();
+    let predicates: std::collections::HashSet<_> = resp
+        .annotations
+        .iter()
+        .map(|a| a.predicate.as_str())
+        .collect();
     assert!(predicates.contains("weight"));
     assert!(predicates.contains("source"));
 }
@@ -4941,8 +5609,7 @@ async fn edge_annotation_in_insert_batch() {
 // ── Access control tests ──────────────────────────────────────────────────────
 
 use polargraph_server::proto::{
-    grant_access_request::Target as GrantTarget,
-    revoke_access_request::Target as RevokeTarget,
+    grant_access_request::Target as GrantTarget, revoke_access_request::Target as RevokeTarget,
 };
 
 /// add_user_to_group writes a MEMBER_OF triple; get_user_access returns the
@@ -4950,13 +5617,13 @@ use polargraph_server::proto::{
 #[tokio::test]
 async fn add_user_to_group_and_grant_access_visible_in_get_user_access() {
     let (svc, _dir) = open();
-    let (core_user, _)  = new_node();
+    let (core_user, _) = new_node();
     let (core_group, _) = new_node();
-    let (core_node, _)  = new_node();
+    let (core_node, _) = new_node();
 
     // Add user to group.
     svc.add_user_to_group(Request::new(AddUserToGroupRequest {
-        user_id:  core_user.as_bytes().to_vec(),
+        user_id: core_user.as_bytes().to_vec(),
         group_id: core_group.as_bytes().to_vec(),
     }))
     .await
@@ -4990,11 +5657,11 @@ async fn add_user_to_group_and_grant_access_visible_in_get_user_access() {
 #[tokio::test]
 async fn grant_access_type_name_appears_in_type_grants() {
     let (svc, _dir) = open();
-    let (core_user, _)  = new_node();
+    let (core_user, _) = new_node();
     let (core_group, _) = new_node();
 
     svc.add_user_to_group(Request::new(AddUserToGroupRequest {
-        user_id:  core_user.as_bytes().to_vec(),
+        user_id: core_user.as_bytes().to_vec(),
         group_id: core_group.as_bytes().to_vec(),
     }))
     .await
@@ -5026,12 +5693,12 @@ async fn grant_access_type_name_appears_in_type_grants() {
 #[tokio::test]
 async fn revoke_access_removes_node_from_access_set() {
     let (svc, _dir) = open();
-    let (core_user, _)  = new_node();
+    let (core_user, _) = new_node();
     let (core_group, _) = new_node();
-    let (core_node, _)  = new_node();
+    let (core_node, _) = new_node();
 
     svc.add_user_to_group(Request::new(AddUserToGroupRequest {
-        user_id:  core_user.as_bytes().to_vec(),
+        user_id: core_user.as_bytes().to_vec(),
         group_id: core_group.as_bytes().to_vec(),
     }))
     .await
@@ -5075,7 +5742,7 @@ async fn revoke_access_removes_node_from_access_set() {
 #[tokio::test]
 async fn query_filtered_by_user_id() {
     let (svc, _dir) = open();
-    let (core_user, _)  = new_node();
+    let (core_user, _) = new_node();
     let (core_group, _) = new_node();
     let (core_allowed, proto_allowed) = new_node();
     let (_, proto_hidden) = new_node();
@@ -5084,7 +5751,7 @@ async fn query_filtered_by_user_id() {
     svc.insert(Request::new(InsertRequest {
         triples: vec![
             text_prop(proto_allowed.clone(), "label", "allowed"),
-            text_prop(proto_hidden.clone(),  "label", "hidden"),
+            text_prop(proto_hidden.clone(), "label", "hidden"),
         ],
         ..Default::default()
     }))
@@ -5093,7 +5760,7 @@ async fn query_filtered_by_user_id() {
 
     // Grant user access to only the allowed node.
     svc.add_user_to_group(Request::new(AddUserToGroupRequest {
-        user_id:  core_user.as_bytes().to_vec(),
+        user_id: core_user.as_bytes().to_vec(),
         group_id: core_group.as_bytes().to_vec(),
     }))
     .await
@@ -5124,7 +5791,11 @@ async fn query_filtered_by_user_id() {
         .filter_map(|r| r.vars.get("s").cloned())
         .collect();
 
-    assert_eq!(subjects.len(), 1, "expected exactly one result after filtering");
+    assert_eq!(
+        subjects.len(),
+        1,
+        "expected exactly one result after filtering"
+    );
     assert_eq!(
         subjects[0].bytes,
         core_allowed.as_bytes().to_vec(),
@@ -5152,14 +5823,18 @@ async fn query_without_user_id_returns_all() {
     let resp = svc
         .query(Request::new(QueryRequest {
             patterns: vec![pattern(var("s"), "color", any())],
-            user_id: String::new(),  // no user_id → no filtering
+            user_id: String::new(), // no user_id → no filtering
             ..Default::default()
         }))
         .await
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.bindings.len(), 2, "expected both nodes without access filter");
+    assert_eq!(
+        resp.bindings.len(),
+        2,
+        "expected both nodes without access filter"
+    );
 }
 
 #[tokio::test]
@@ -5203,7 +5878,10 @@ async fn cypher_id_function_returns_edge_uuid() {
         other => panic!("expected TextVal, got {:?}", other),
     };
     let returned_uuid = uuid::Uuid::parse_str(&uuid_str).expect("id(r) should be a valid UUID");
-    assert_eq!(returned_uuid, expected_uuid, "edge UUID from id(r) should match the inserted edge_id");
+    assert_eq!(
+        returned_uuid, expected_uuid,
+        "edge UUID from id(r) should match the inserted edge_id"
+    );
 }
 
 #[tokio::test]
@@ -5235,7 +5913,10 @@ async fn cypher_element_id_alias_returns_same_uuid() {
 
     assert_eq!(resp.rows.len(), 1);
     let row = &resp.rows[0];
-    let id_val = row.values.get("id(r)").expect("id(r) should be in values (elementId maps to same key)");
+    let id_val = row
+        .values
+        .get("id(r)")
+        .expect("id(r) should be in values (elementId maps to same key)");
     let uuid_str = match &id_val.kind {
         Some(ValueKind::TextVal(s)) => s.clone(),
         other => panic!("expected TextVal, got {:?}", other),
@@ -5275,7 +5956,10 @@ async fn cypher_id_n_returns_node_uuid() {
         other => panic!("expected TextVal, got {:?}", other),
     };
     let returned_uuid = uuid::Uuid::parse_str(&uuid_str).expect("id(n) should be a valid UUID");
-    assert_eq!(returned_uuid, a_core.0, "node UUID from id(n) should match the inserted NodeId");
+    assert_eq!(
+        returned_uuid, a_core.0,
+        "node UUID from id(n) should match the inserted NodeId"
+    );
 }
 
 #[tokio::test]
@@ -5303,25 +5987,33 @@ async fn cypher_element_id_n_returns_node_uuid() {
     let row = &resp.rows[0];
 
     // elementId(n) maps to the same output key as id(n).
-    let id_val = row.values.get("id(n)").expect("id(n) key should be present for elementId(n)");
+    let id_val = row
+        .values
+        .get("id(n)")
+        .expect("id(n) key should be present for elementId(n)");
     let uuid_str = match &id_val.kind {
         Some(ValueKind::TextVal(s)) => s.clone(),
         other => panic!("expected TextVal, got {:?}", other),
     };
     let returned_uuid = uuid::Uuid::parse_str(&uuid_str).expect("should be valid UUID");
-    assert_eq!(returned_uuid, b_core.0, "node UUID from elementId(n) should match the inserted NodeId");
+    assert_eq!(
+        returned_uuid, b_core.0,
+        "node UUID from elementId(n) should match the inserted NodeId"
+    );
 }
 
 // ── GetPropertyHistory tests ──────────────────────────────────────────────────
 
-use polargraph_server::proto::{GetPropertyHistoryRequest};
+use polargraph_server::proto::GetPropertyHistoryRequest;
 
 fn int_prop(subject: NodeId, predicate: &str, n: i64) -> Triple {
     Triple {
         kind: Some(TripleKind::Property(PropertyTriple {
             subject: Some(subject),
             predicate: predicate.into(),
-            value: Some(Value { kind: Some(ValueKind::IntVal(n)) }),
+            value: Some(Value {
+                kind: Some(ValueKind::IntVal(n)),
+            }),
             vt_start: 0,
             vt_end: 0,
         })),
@@ -5403,10 +6095,14 @@ async fn property_history_multiple_writes_newest_first() {
 
     assert_eq!(resp.versions.len(), 3);
     // Newest first. Value: {"type":"Int","v":N}.
-    let vals: Vec<i64> = resp.versions.iter().map(|v| {
-        let j: serde_json::Value = serde_json::from_str(&v.value_json).unwrap();
-        j["v"].as_i64().unwrap()
-    }).collect();
+    let vals: Vec<i64> = resp
+        .versions
+        .iter()
+        .map(|v| {
+            let j: serde_json::Value = serde_json::from_str(&v.value_json).unwrap();
+            j["v"].as_i64().unwrap()
+        })
+        .collect();
     assert_eq!(vals, vec![3, 2, 1]);
     // Transaction times strictly decreasing (newest first).
     assert!(resp.versions[0].transaction_time > resp.versions[1].transaction_time);
@@ -5420,21 +6116,29 @@ async fn property_history_multiple_writes_newest_first() {
 async fn cypher_edge_prop_filter_gt() {
     let (svc, _dir) = open();
     let (_, alice) = new_node();
-    let (_, bob)   = new_node();
+    let (_, bob) = new_node();
     let (_, carol) = new_node();
 
     // alice-[r1:knows]->bob  with annotation since=2019
     // alice-[r2:knows]->carol with annotation since=2022
-    let resp1 = svc.insert(Request::new(InsertRequest {
-        triples: vec![rel(alice.clone(), "knows", bob.clone())],
-        ..Default::default()
-    })).await.unwrap().into_inner();
+    let resp1 = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(alice.clone(), "knows", bob.clone())],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
     let edge1_bytes = resp1.edge_ids[0].clone();
 
-    let resp2 = svc.insert(Request::new(InsertRequest {
-        triples: vec![rel(alice.clone(), "knows", carol.clone())],
-        ..Default::default()
-    })).await.unwrap().into_inner();
+    let resp2 = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(alice.clone(), "knows", carol.clone())],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
     let edge2_bytes = resp2.edge_ids[0].clone();
 
     svc.insert(Request::new(InsertRequest {
@@ -5442,31 +6146,44 @@ async fn cypher_edge_prop_filter_gt() {
             EdgeAnnotation {
                 edge_id: edge1_bytes,
                 predicate: "since".into(),
-                value: Some(AnnotationValue::Scalar(Value { kind: Some(ValueKind::IntVal(2019)) })),
+                value: Some(AnnotationValue::Scalar(Value {
+                    kind: Some(ValueKind::IntVal(2019)),
+                })),
             },
             EdgeAnnotation {
                 edge_id: edge2_bytes,
                 predicate: "since".into(),
-                value: Some(AnnotationValue::Scalar(Value { kind: Some(ValueKind::IntVal(2022)) })),
+                value: Some(AnnotationValue::Scalar(Value {
+                    kind: Some(ValueKind::IntVal(2022)),
+                })),
             },
         ],
         ..Default::default()
-    })).await.unwrap();
+    }))
+    .await
+    .unwrap();
 
-    let resp = svc.cypher_query(Request::new(CypherQueryRequest {
-        cypher: "MATCH (a)-[r:knows]->(b) WHERE r.since > 2020 RETURN a, b".to_string(),
-        ..Default::default()
-    })).await.unwrap().into_inner();
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (a)-[r:knows]->(b) WHERE r.since > 2020 RETURN a, b".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
 
-    assert_eq!(resp.rows.len(), 1, "only the 2022 edge should pass the filter");
+    assert_eq!(
+        resp.rows.len(),
+        1,
+        "only the 2022 edge should pass the filter"
+    );
     // b should be carol (the 2022 edge target)
     let b_bytes = &resp.rows[0].nodes["b"].bytes;
-    let b_id = polargraph_core::id::NodeId(
-        uuid::Uuid::from_bytes(b_bytes[..16].try_into().unwrap()),
-    );
-    let carol_core = polargraph_core::id::NodeId(
-        uuid::Uuid::from_bytes(carol.bytes[..16].try_into().unwrap()),
-    );
+    let b_id =
+        polargraph_core::id::NodeId(uuid::Uuid::from_bytes(b_bytes[..16].try_into().unwrap()));
+    let carol_core = polargraph_core::id::NodeId(uuid::Uuid::from_bytes(
+        carol.bytes[..16].try_into().unwrap(),
+    ));
     assert_eq!(b_id, carol_core);
 }
 
@@ -5477,27 +6194,42 @@ async fn cypher_edge_prop_filter_no_match() {
     let (_, a) = new_node();
     let (_, b) = new_node();
 
-    let resp1 = svc.insert(Request::new(InsertRequest {
-        triples: vec![rel(a.clone(), "knows", b.clone())],
-        ..Default::default()
-    })).await.unwrap().into_inner();
+    let resp1 = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(a.clone(), "knows", b.clone())],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
     let edge_bytes = resp1.edge_ids[0].clone();
 
     svc.insert(Request::new(InsertRequest {
         edge_annotations: vec![EdgeAnnotation {
             edge_id: edge_bytes,
             predicate: "since".into(),
-            value: Some(AnnotationValue::Scalar(Value { kind: Some(ValueKind::IntVal(2022)) })),
+            value: Some(AnnotationValue::Scalar(Value {
+                kind: Some(ValueKind::IntVal(2022)),
+            })),
         }],
         ..Default::default()
-    })).await.unwrap();
+    }))
+    .await
+    .unwrap();
 
-    let resp = svc.cypher_query(Request::new(CypherQueryRequest {
-        cypher: "MATCH (a)-[r:knows]->(b) WHERE r.since > 9999 RETURN a, b".to_string(),
-        ..Default::default()
-    })).await.unwrap().into_inner();
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (a)-[r:knows]->(b) WHERE r.since > 9999 RETURN a, b".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
 
-    assert!(resp.rows.is_empty(), "filter that matches nothing should return empty");
+    assert!(
+        resp.rows.is_empty(),
+        "filter that matches nothing should return empty"
+    );
 }
 
 /// `RETURN r.since` includes the annotation value in the binding row's values map.
@@ -5507,29 +6239,44 @@ async fn cypher_edge_prop_return_projection() {
     let (_, a) = new_node();
     let (_, b) = new_node();
 
-    let resp1 = svc.insert(Request::new(InsertRequest {
-        triples: vec![rel(a.clone(), "knows", b.clone())],
-        ..Default::default()
-    })).await.unwrap().into_inner();
+    let resp1 = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(a.clone(), "knows", b.clone())],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
     let edge_bytes = resp1.edge_ids[0].clone();
 
     svc.insert(Request::new(InsertRequest {
         edge_annotations: vec![EdgeAnnotation {
             edge_id: edge_bytes,
             predicate: "since".into(),
-            value: Some(AnnotationValue::Scalar(Value { kind: Some(ValueKind::IntVal(2021)) })),
+            value: Some(AnnotationValue::Scalar(Value {
+                kind: Some(ValueKind::IntVal(2021)),
+            })),
         }],
         ..Default::default()
-    })).await.unwrap();
+    }))
+    .await
+    .unwrap();
 
-    let resp = svc.cypher_query(Request::new(CypherQueryRequest {
-        cypher: "MATCH (a)-[r:knows]->(b) RETURN r.since".to_string(),
-        ..Default::default()
-    })).await.unwrap().into_inner();
+    let resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (a)-[r:knows]->(b) RETURN r.since".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
 
     assert_eq!(resp.rows.len(), 1);
     let row = &resp.rows[0];
-    let since_val = row.values.get("r.since").expect("r.since should be in values");
+    let since_val = row
+        .values
+        .get("r.since")
+        .expect("r.since should be in values");
     assert_eq!(since_val.kind, Some(ValueKind::IntVal(2021)));
 }
 
@@ -5538,19 +6285,27 @@ async fn cypher_edge_prop_return_projection() {
 async fn cypher_stream_edge_prop_filter() {
     let (svc, _dir) = open();
     let (_, alice) = new_node();
-    let (_, bob)   = new_node();
+    let (_, bob) = new_node();
     let (_, carol) = new_node();
 
-    let resp1 = svc.insert(Request::new(InsertRequest {
-        triples: vec![rel(alice.clone(), "knows", bob.clone())],
-        ..Default::default()
-    })).await.unwrap().into_inner();
+    let resp1 = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(alice.clone(), "knows", bob.clone())],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
     let edge1_bytes = resp1.edge_ids[0].clone();
 
-    let resp2 = svc.insert(Request::new(InsertRequest {
-        triples: vec![rel(alice.clone(), "knows", carol.clone())],
-        ..Default::default()
-    })).await.unwrap().into_inner();
+    let resp2 = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![rel(alice.clone(), "knows", carol.clone())],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
     let edge2_bytes = resp2.edge_ids[0].clone();
 
     svc.insert(Request::new(InsertRequest {
@@ -5558,27 +6313,39 @@ async fn cypher_stream_edge_prop_filter() {
             EdgeAnnotation {
                 edge_id: edge1_bytes,
                 predicate: "weight".into(),
-                value: Some(AnnotationValue::Scalar(Value { kind: Some(ValueKind::IntVal(1)) })),
+                value: Some(AnnotationValue::Scalar(Value {
+                    kind: Some(ValueKind::IntVal(1)),
+                })),
             },
             EdgeAnnotation {
                 edge_id: edge2_bytes,
                 predicate: "weight".into(),
-                value: Some(AnnotationValue::Scalar(Value { kind: Some(ValueKind::IntVal(10)) })),
+                value: Some(AnnotationValue::Scalar(Value {
+                    kind: Some(ValueKind::IntVal(10)),
+                })),
             },
         ],
         ..Default::default()
-    })).await.unwrap();
+    }))
+    .await
+    .unwrap();
 
-    let mut stream = svc.cypher_query_stream(Request::new(CypherQueryRequest {
-        cypher: "MATCH (a)-[r:knows]->(b) WHERE r.weight >= 10 RETURN a, b".to_string(),
-        ..Default::default()
-    })).await.unwrap().into_inner();
+    let mut stream = svc
+        .cypher_query_stream(Request::new(CypherQueryRequest {
+            cypher: "MATCH (a)-[r:knows]->(b) WHERE r.weight >= 10 RETURN a, b".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
 
     let mut total_rows = 0usize;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.unwrap();
         total_rows += chunk.results.len();
-        if chunk.done { break; }
+        if chunk.done {
+            break;
+        }
     }
 
     assert_eq!(total_rows, 1, "only the edge with weight >= 10 should pass");
@@ -5595,20 +6362,24 @@ const OWL_SAME_AS_IRI: &str = "http://www.w3.org/2002/07/owl#sameAs";
 /// Helper: build a RelationTriple proto with no edge_id or vt.
 fn owl_rel(s: &NodeId, pred: &str, o: &NodeId) -> Triple {
     Triple {
-        kind: Some(TripleKind::Relation(polargraph_server::proto::RelationTriple {
-            subject: Some(s.clone()),
-            predicate: pred.to_string(),
-            object: Some(o.clone()),
-            vt_start: 0,
-            vt_end: i64::MAX,
-            properties: vec![],
-        })),
+        kind: Some(TripleKind::Relation(
+            polargraph_server::proto::RelationTriple {
+                subject: Some(s.clone()),
+                predicate: pred.to_string(),
+                object: Some(o.clone()),
+                vt_start: 0,
+                vt_end: i64::MAX,
+                properties: vec![],
+            },
+        )),
     }
 }
 
 /// NodeId helper from a core NodeId.
 fn core_to_proto(id: &polargraph_core::id::NodeId) -> NodeId {
-    NodeId { bytes: id.as_bytes().to_vec() }
+    NodeId {
+        bytes: id.as_bytes().to_vec(),
+    }
 }
 
 /// After materializing rdfs9 (subClassOf + type), the derived CF should
@@ -5643,14 +6414,22 @@ async fn run_materialization_rdfs9_subclass_propagation() {
 
     // Run materialization (clear_first=true)
     let resp: RunMaterializationResponse = svc
-        .run_materialization(Request::new(RunMaterializationRequest { clear_first: true }))
+        .run_materialization(Request::new(RunMaterializationRequest {
+            clear_first: true,
+        }))
         .await
         .unwrap()
         .into_inner();
 
     assert!(resp.rules_fired > 0, "at least one rule should have fired");
-    assert!(resp.derived_triples > 0, "at least one derived triple expected");
-    assert!(resp.iterations > 0, "at least one fixpoint iteration expected");
+    assert!(
+        resp.derived_triples > 0,
+        "at least one derived triple expected"
+    );
+    assert!(
+        resp.iterations > 0,
+        "at least one fixpoint iteration expected"
+    );
 }
 
 /// eq-sym: materializing owl:sameAs produces the symmetric inverse.
@@ -5672,7 +6451,9 @@ async fn run_materialization_eq_sym_sameas() {
     .unwrap();
 
     let resp = svc
-        .run_materialization(Request::new(RunMaterializationRequest { clear_first: true }))
+        .run_materialization(Request::new(RunMaterializationRequest {
+            clear_first: true,
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -5697,17 +6478,27 @@ async fn run_materialization_incremental_reaches_fixpoint() {
     .unwrap();
 
     // Full run
-    svc.run_materialization(Request::new(RunMaterializationRequest { clear_first: true }))
-        .await
-        .unwrap();
+    svc.run_materialization(Request::new(RunMaterializationRequest {
+        clear_first: true,
+    }))
+    .await
+    .unwrap();
 
     // Incremental run: should fire 0 new rules
     let resp = svc
-        .run_materialization(Request::new(RunMaterializationRequest { clear_first: false }))
+        .run_materialization(Request::new(RunMaterializationRequest {
+            clear_first: false,
+        }))
         .await
         .unwrap()
         .into_inner();
 
-    assert_eq!(resp.rules_fired, 0, "incremental run on converged state should fire 0 rules");
-    assert_eq!(resp.iterations, 0, "incremental run on converged state should need 0 iterations");
+    assert_eq!(
+        resp.rules_fired, 0,
+        "incremental run on converged state should fire 0 rules"
+    );
+    assert_eq!(
+        resp.iterations, 0,
+        "incremental run on converged state should need 0 iterations"
+    );
 }

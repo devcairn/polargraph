@@ -295,9 +295,7 @@ cache_size       = 500
 
         assert_eq!(
             cfg.auth.api_keys.as_deref(),
-            Some(
-                ["key-alpha".to_string(), "key-beta".to_string()].as_slice()
-            )
+            Some(["key-alpha".to_string(), "key-beta".to_string()].as_slice())
         );
         assert_eq!(cfg.auth.no_auth, Some(false));
 
@@ -316,19 +314,25 @@ cache_size       = 500
         // CLI value present → CLI wins.
         let cli_val: Option<String> = Some("from-cli".to_string());
         let config_val: Option<String> = Some("from-config".to_string());
-        let result = cli_val.or(config_val).unwrap_or_else(|| "default".to_string());
+        let result = cli_val
+            .or(config_val)
+            .unwrap_or_else(|| "default".to_string());
         assert_eq!(result, "from-cli");
 
         // CLI absent, config present → config wins.
         let cli_val: Option<String> = None;
         let config_val: Option<String> = Some("from-config".to_string());
-        let result = cli_val.or(config_val).unwrap_or_else(|| "default".to_string());
+        let result = cli_val
+            .or(config_val)
+            .unwrap_or_else(|| "default".to_string());
         assert_eq!(result, "from-config");
 
         // Both absent → default.
         let cli_val: Option<String> = None;
         let config_val: Option<String> = None;
-        let result = cli_val.or(config_val).unwrap_or_else(|| "default".to_string());
+        let result = cli_val
+            .or(config_val)
+            .unwrap_or_else(|| "default".to_string());
         assert_eq!(result, "default");
     }
 

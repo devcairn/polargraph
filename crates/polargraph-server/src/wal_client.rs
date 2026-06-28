@@ -13,7 +13,10 @@ use crate::{
     service::ReplicaState,
 };
 use polargraph_storage::TripleStore;
-use std::{sync::{atomic::Ordering, Arc}, time::Duration};
+use std::{
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tonic_health::{server::HealthReporter, ServingStatus};
@@ -56,12 +59,22 @@ pub async fn run_replication(
         // Mark disconnected while attempting to (re)connect.
         state.connected.store(false, Ordering::Relaxed);
         if let Some(ref mut h) = health {
-            h.set_service_status(HEALTH_SVC, ServingStatus::NotServing).await;
+            h.set_service_status(HEALTH_SVC, ServingStatus::NotServing)
+                .await;
         }
 
         info!(primary = %primary_address, "WAL replication: connecting to primary");
 
-        match connect_and_stream(&store, &primary_address, &state, &token, &tls_ca_pem, &mut health).await {
+        match connect_and_stream(
+            &store,
+            &primary_address,
+            &state,
+            &token,
+            &tls_ca_pem,
+            &mut health,
+        )
+        .await
+        {
             Ok(()) => {
                 if token.is_cancelled() {
                     return;
@@ -72,7 +85,10 @@ pub async fn run_replication(
                 if token.is_cancelled() {
                     return;
                 }
-                warn!("WAL replication error: {e}; reconnecting in {:.1}s", backoff.as_secs_f32());
+                warn!(
+                    "WAL replication error: {e}; reconnecting in {:.1}s",
+                    backoff.as_secs_f32()
+                );
             }
         }
 
@@ -118,7 +134,8 @@ async fn connect_and_stream(
     // Stream established — mark connected and report Serving.
     state.connected.store(true, Ordering::Relaxed);
     if let Some(ref mut h) = health {
-        h.set_service_status(HEALTH_SVC, ServingStatus::Serving).await;
+        h.set_service_status(HEALTH_SVC, ServingStatus::Serving)
+            .await;
     }
     info!("WAL replication: stream established");
 

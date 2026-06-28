@@ -105,7 +105,10 @@ mod tests {
 
         // Should complete within 1 second.
         let result = tokio::time::timeout(Duration::from_secs(1), handle).await;
-        assert!(result.is_ok(), "scheduler did not exit within 1 second after cancel");
+        assert!(
+            result.is_ok(),
+            "scheduler did not exit within 1 second after cancel"
+        );
     }
 
     /// Verify RetentionPolicy default field values used by the scheduler.

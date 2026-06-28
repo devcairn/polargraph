@@ -14,19 +14,22 @@ use axum::{
 };
 use polargraph_core::{id::NodeId, triple::Triple, value::Value};
 use serde::{Deserialize, Serialize};
-use std::{sync::{atomic::Ordering, Arc}, time::Instant};
+use std::{
+    sync::{atomic::Ordering, Arc},
+    time::Instant,
+};
 use tonic::Request;
 use uuid::Uuid;
 
 use crate::{
     auth::{check_bearer_auth, KeyStore},
     proto::{
-        self, term::Kind as TermKind, triple::Kind as TripleKind, value::Kind as ValueKind,
-        polar_graph_service_server::PolarGraphService,
-        CreateBackupRequest, InsertRequest, ListBackupsRequest, ListEdgeTypesRequest,
-        ListNodeTypesRequest, PropertyTriple, PurgeOldBackupsRequest, QueryRequest,
-        RelationTriple, ReplicaStatusRequest, ShowIndexesRequest, ShowStatsRequest,
-        Triple as ProtoTriple, Value as ProtoValue, VarPattern,
+        self, polar_graph_service_server::PolarGraphService, term::Kind as TermKind,
+        triple::Kind as TripleKind, value::Kind as ValueKind, CreateBackupRequest, InsertRequest,
+        ListBackupsRequest, ListEdgeTypesRequest, ListNodeTypesRequest, PropertyTriple,
+        PurgeOldBackupsRequest, QueryRequest, RelationTriple, ReplicaStatusRequest,
+        ShowIndexesRequest, ShowStatsRequest, Triple as ProtoTriple, Value as ProtoValue,
+        VarPattern,
     },
     service::PolarGraphServer,
 };
@@ -126,7 +129,10 @@ async fn health_check(State(state): State<Arc<UiState>>) -> Response {
             .unwrap_or(false);
 
         if !connected {
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(DegradedResponse { status: "degraded" }))
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(DegradedResponse { status: "degraded" }),
+            )
                 .into_response();
         }
     }
@@ -134,7 +140,15 @@ async fn health_check(State(state): State<Arc<UiState>>) -> Response {
     let triples = state.service.store().estimate_triple_count();
     let mode = if is_replica { "replica" } else { "primary" };
 
-    (StatusCode::OK, Json(HealthResponse { status: "ok", mode, triples })).into_response()
+    (
+        StatusCode::OK,
+        Json(HealthResponse {
+            status: "ok",
+            mode,
+            triples,
+        }),
+    )
+        .into_response()
 }
 
 // ── /api/status ───────────────────────────────────────────────────────────────
@@ -152,10 +166,7 @@ struct StatusResponse {
     auth_enabled: bool,
 }
 
-async fn api_status(
-    State(state): State<Arc<UiState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn api_status(State(state): State<Arc<UiState>>, headers: HeaderMap) -> Response {
     if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
@@ -170,7 +181,11 @@ async fn api_status(
     let (is_replica, primary_address, last_applied_seq, wal_lag_entries) = match &replica {
         Some(r) => (
             r.is_replica,
-            if r.primary_address.is_empty() { None } else { Some(r.primary_address.clone()) },
+            if r.primary_address.is_empty() {
+                None
+            } else {
+                Some(r.primary_address.clone())
+            },
             r.last_applied_seq,
             r.replication_lag_entries,
         ),
@@ -217,10 +232,7 @@ struct NodeTypeJson {
     vector_space: Option<VectorSpaceJson>,
 }
 
-async fn api_node_types(
-    State(state): State<Arc<UiState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn api_node_types(State(state): State<Arc<UiState>>, headers: HeaderMap) -> Response {
     if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
@@ -248,7 +260,11 @@ async fn api_node_types(
             fields: d
                 .fields
                 .into_iter()
-                .map(|f| FieldDefJson { name: f.field_name, kind: f.kind, required: f.required })
+                .map(|f| FieldDefJson {
+                    name: f.field_name,
+                    kind: f.kind,
+                    required: f.required,
+                })
                 .collect(),
             vector_space: d.vector_space.map(|vs| VectorSpaceJson {
                 space_name: vs.space_name,
@@ -276,10 +292,7 @@ struct EdgeTypeJson {
     fields: Vec<FieldDefJson>,
 }
 
-async fn api_edge_types(
-    State(state): State<Arc<UiState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn api_edge_types(State(state): State<Arc<UiState>>, headers: HeaderMap) -> Response {
     if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
@@ -304,12 +317,24 @@ async fn api_edge_types(
         .into_iter()
         .map(|d| EdgeTypeJson {
             predicate: d.predicate,
-            domain: if d.domain.is_empty() { None } else { Some(d.domain) },
-            range: if d.range.is_empty() { None } else { Some(d.range) },
+            domain: if d.domain.is_empty() {
+                None
+            } else {
+                Some(d.domain)
+            },
+            range: if d.range.is_empty() {
+                None
+            } else {
+                Some(d.range)
+            },
             fields: d
                 .fields
                 .into_iter()
-                .map(|f| FieldDefJson { name: f.field_name, kind: f.kind, required: f.required })
+                .map(|f| FieldDefJson {
+                    name: f.field_name,
+                    kind: f.kind,
+                    required: f.required,
+                })
                 .collect(),
         })
         .collect();
@@ -328,10 +353,7 @@ struct MetricsResponse {
     uptime_secs: u64,
 }
 
-async fn api_metrics(
-    State(state): State<Arc<UiState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn api_metrics(State(state): State<Arc<UiState>>, headers: HeaderMap) -> Response {
     if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
@@ -384,11 +406,17 @@ fn parse_term(s: &str) -> Result<proto::Term, String> {
         if var.is_empty() {
             return Err("variable name must not be empty after '?'".into());
         }
-        return Ok(proto::Term { kind: Some(TermKind::Var(var.to_owned())) });
+        return Ok(proto::Term {
+            kind: Some(TermKind::Var(var.to_owned())),
+        });
     }
     let uuid = Uuid::parse_str(s).map_err(|_| format!("'{s}' is not a valid UUID or ?variable"))?;
-    let node_id = proto::NodeId { bytes: uuid.as_bytes().to_vec() };
-    Ok(proto::Term { kind: Some(TermKind::Bound(node_id)) })
+    let node_id = proto::NodeId {
+        bytes: uuid.as_bytes().to_vec(),
+    };
+    Ok(proto::Term {
+        kind: Some(TermKind::Bound(node_id)),
+    })
 }
 
 async fn api_query(
@@ -405,18 +433,28 @@ async fn api_query(
         let subject = match parse_term(&p.s) {
             Ok(t) => Some(t),
             Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": e})),
+                )
                     .into_response()
             }
         };
         let object = match parse_term(&p.o) {
             Ok(t) => Some(t),
             Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": e})),
+                )
                     .into_response()
             }
         };
-        patterns.push(VarPattern { subject, predicate: p.p.clone(), object });
+        patterns.push(VarPattern {
+            subject,
+            predicate: p.p.clone(),
+            object,
+        });
     }
 
     let req = QueryRequest {
@@ -440,10 +478,7 @@ async fn api_query(
                         .into_iter()
                         .map(|(k, v)| {
                             let uuid = Uuid::from_bytes(
-                                v.bytes
-                                    .as_slice()
-                                    .try_into()
-                                    .unwrap_or([0u8; 16]),
+                                v.bytes.as_slice().try_into().unwrap_or([0u8; 16]),
                             );
                             (k, serde_json::Value::String(uuid.to_string()))
                         })
@@ -489,11 +524,15 @@ async fn api_insert(
                 .into_response()
         }
     };
-    let subject_id = proto::NodeId { bytes: subject_uuid.as_bytes().to_vec() };
+    let subject_id = proto::NodeId {
+        bytes: subject_uuid.as_bytes().to_vec(),
+    };
 
     // Auto-detect: if object is a UUID → RelationTriple; otherwise → PropertyTriple(text).
     let triple = if let Ok(obj_uuid) = Uuid::parse_str(&body.object) {
-        let object_id = proto::NodeId { bytes: obj_uuid.as_bytes().to_vec() };
+        let object_id = proto::NodeId {
+            bytes: obj_uuid.as_bytes().to_vec(),
+        };
         ProtoTriple {
             kind: Some(TripleKind::Relation(RelationTriple {
                 subject: Some(subject_id),
@@ -509,7 +548,9 @@ async fn api_insert(
             kind: Some(TripleKind::Property(PropertyTriple {
                 subject: Some(subject_id),
                 predicate: body.predicate.clone(),
-                value: Some(ProtoValue { kind: Some(ValueKind::TextVal(body.object.clone())) }),
+                value: Some(ProtoValue {
+                    kind: Some(ValueKind::TextVal(body.object.clone())),
+                }),
                 vt_start: 0,
                 vt_end: 0,
             })),
@@ -518,7 +559,10 @@ async fn api_insert(
 
     match state
         .service
-        .insert(Request::new(InsertRequest { triples: vec![triple], ..Default::default() }))
+        .insert(Request::new(InsertRequest {
+            triples: vec![triple],
+            ..Default::default()
+        }))
         .await
     {
         Ok(resp) => {
@@ -567,7 +611,8 @@ async fn api_search(
     let limit = params.limit.min(200);
 
     // Get the set of subjects of the requested type (if type filter is set).
-    let type_subjects: Option<std::collections::HashSet<NodeId>> = if params.type_filter.is_empty() {
+    let type_subjects: Option<std::collections::HashSet<NodeId>> = if params.type_filter.is_empty()
+    {
         None
     } else {
         let store = state.service.store();
@@ -585,11 +630,11 @@ async fn api_search(
             triples
                 .into_iter()
                 .filter_map(|t| match t {
-                    Triple::Property { subject, value: Value::Text(ref tn), .. }
-                        if tn == &params.type_filter =>
-                    {
-                        Some(subject)
-                    }
+                    Triple::Property {
+                        subject,
+                        value: Value::Text(ref tn),
+                        ..
+                    } if tn == &params.type_filter => Some(subject),
                     _ => None,
                 })
                 .collect(),
@@ -624,10 +669,13 @@ async fn api_search(
             }
             // Match query against object (text values and relation target IDs).
             match t {
-                Triple::Property { value: Value::Text(ref s), .. } => {
-                    s.to_lowercase().contains(&q)
-                }
-                Triple::Relation { object, predicate, .. } => {
+                Triple::Property {
+                    value: Value::Text(ref s),
+                    ..
+                } => s.to_lowercase().contains(&q),
+                Triple::Relation {
+                    object, predicate, ..
+                } => {
                     object.to_string().to_lowercase().contains(&q)
                         || predicate.0.to_lowercase().contains(&q)
                 }
@@ -637,22 +685,42 @@ async fn api_search(
         })
         .take(limit)
         .map(|t| match t {
-            Triple::Relation { subject, predicate, object, .. } => SearchHit {
+            Triple::Relation {
+                subject,
+                predicate,
+                object,
+                ..
+            } => SearchHit {
                 subject: subject.to_string(),
                 predicate: predicate.0.clone(),
                 object: object.to_string(),
             },
-            Triple::Property { subject, predicate, value, .. } => SearchHit {
+            Triple::Property {
+                subject,
+                predicate,
+                value,
+                ..
+            } => SearchHit {
                 subject: subject.to_string(),
                 predicate: predicate.0.clone(),
                 object: format_value(&value),
             },
-            Triple::EdgeProperty { edge, predicate, value, .. } => SearchHit {
+            Triple::EdgeProperty {
+                edge,
+                predicate,
+                value,
+                ..
+            } => SearchHit {
                 subject: edge.0.to_string(),
                 predicate: predicate.0.clone(),
                 object: format_value(&value),
             },
-            Triple::EdgeRelation { edge, predicate, object, .. } => SearchHit {
+            Triple::EdgeRelation {
+                edge,
+                predicate,
+                object,
+                ..
+            } => SearchHit {
                 subject: edge.0.to_string(),
                 predicate: predicate.0.clone(),
                 object: object.to_string(),
@@ -677,56 +745,68 @@ fn format_value(v: &Value) -> String {
 
 // ── /api/indexes ──────────────────────────────────────────────────────────────
 
-async fn api_indexes(
-    State(state): State<Arc<UiState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn api_indexes(State(state): State<Arc<UiState>>, headers: HeaderMap) -> Response {
     if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
-    match state.service.show_indexes(Request::new(ShowIndexesRequest {})).await {
+    match state
+        .service
+        .show_indexes(Request::new(ShowIndexesRequest {}))
+        .await
+    {
         Ok(r) => {
             let resp = r.into_inner();
-            let cfs: Vec<serde_json::Value> = resp.column_families.into_iter().map(|cf| {
-                serde_json::json!({
-                    "name": cf.name,
-                    "approx_key_count": cf.approx_key_count,
-                    "approx_size_bytes": cf.approx_size_bytes,
+            let cfs: Vec<serde_json::Value> = resp
+                .column_families
+                .into_iter()
+                .map(|cf| {
+                    serde_json::json!({
+                        "name": cf.name,
+                        "approx_key_count": cf.approx_key_count,
+                        "approx_size_bytes": cf.approx_size_bytes,
+                    })
                 })
-            }).collect();
-            let spaces: Vec<serde_json::Value> = resp.vector_spaces.into_iter().map(|vs| {
-                serde_json::json!({
-                    "name": vs.name,
-                    "dimensions": vs.dimensions,
-                    "node_count": vs.node_count,
-                    "storage_mode": vs.storage_mode,
+                .collect();
+            let spaces: Vec<serde_json::Value> = resp
+                .vector_spaces
+                .into_iter()
+                .map(|vs| {
+                    serde_json::json!({
+                        "name": vs.name,
+                        "dimensions": vs.dimensions,
+                        "node_count": vs.node_count,
+                        "storage_mode": vs.storage_mode,
+                    })
                 })
-            }).collect();
+                .collect();
             Json(serde_json::json!({
                 "column_families": cfs,
                 "vector_spaces": spaces,
                 "predicate_count": resp.predicate_count,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.message()})),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
 // ── /api/stats ────────────────────────────────────────────────────────────────
 
-async fn api_stats(
-    State(state): State<Arc<UiState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn api_stats(State(state): State<Arc<UiState>>, headers: HeaderMap) -> Response {
     if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
-    match state.service.show_stats(Request::new(ShowStatsRequest {})).await {
+    match state
+        .service
+        .show_stats(Request::new(ShowStatsRequest {}))
+        .await
+    {
         Ok(r) => {
             let s = r.into_inner();
             Json(serde_json::json!({
@@ -737,12 +817,14 @@ async fn api_stats(
                 "predicate_intern_count": s.predicate_intern_count,
                 "open_transaction_count": s.open_transaction_count,
                 "mode": s.mode,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.message()})),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -762,59 +844,70 @@ struct ListBackupsApiResponse {
     error: Option<String>,
 }
 
-async fn api_backups_list(
-    State(state): State<Arc<UiState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn api_backups_list(State(state): State<Arc<UiState>>, headers: HeaderMap) -> Response {
     if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
-    match state.service.list_backups(Request::new(ListBackupsRequest {})).await {
+    match state
+        .service
+        .list_backups(Request::new(ListBackupsRequest {}))
+        .await
+    {
         Ok(r) => {
-            let backups = r.into_inner().backups.into_iter().map(|b| BackupInfoJson {
-                id: b.backup_id,
-                timestamp: b.timestamp,
-                size_bytes: b.size_bytes,
-            }).collect();
-            Json(ListBackupsApiResponse { backups, error: None }).into_response()
-        }
-        Err(e) if e.code() == tonic::Code::FailedPrecondition => {
+            let backups = r
+                .into_inner()
+                .backups
+                .into_iter()
+                .map(|b| BackupInfoJson {
+                    id: b.backup_id,
+                    timestamp: b.timestamp,
+                    size_bytes: b.size_bytes,
+                })
+                .collect();
             Json(ListBackupsApiResponse {
-                backups: vec![],
-                error: Some("backup directory not configured".into()),
-            }).into_response()
+                backups,
+                error: None,
+            })
+            .into_response()
         }
+        Err(e) if e.code() == tonic::Code::FailedPrecondition => Json(ListBackupsApiResponse {
+            backups: vec![],
+            error: Some("backup directory not configured".into()),
+        })
+        .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.message()})),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
-async fn api_backups_create(
-    State(state): State<Arc<UiState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn api_backups_create(State(state): State<Arc<UiState>>, headers: HeaderMap) -> Response {
     if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }
 
-    match state.service.create_backup(Request::new(CreateBackupRequest {})).await {
+    match state
+        .service
+        .create_backup(Request::new(CreateBackupRequest {}))
+        .await
+    {
         Ok(r) => {
             let inner = r.into_inner();
             Json(serde_json::json!({"backup_id": inner.backup_id})).into_response()
         }
-        Err(e) if e.code() == tonic::Code::FailedPrecondition => {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "backup directory not configured"})),
-            ).into_response()
-        }
+        Err(e) if e.code() == tonic::Code::FailedPrecondition => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "backup directory not configured"})),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.message()})),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -841,25 +934,22 @@ async fn api_backups_purge(
             let inner = r.into_inner();
             Json(serde_json::json!({"purged": inner.deleted_count})).into_response()
         }
-        Err(e) if e.code() == tonic::Code::FailedPrecondition => {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "backup directory not configured"})),
-            ).into_response()
-        }
+        Err(e) if e.code() == tonic::Code::FailedPrecondition => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "backup directory not configured"})),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.message()})),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
 // ── /api/keys ─────────────────────────────────────────────────────────────────
 
-async fn api_keys_list(
-    State(state): State<Arc<UiState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn api_keys_list(State(state): State<Arc<UiState>>, headers: HeaderMap) -> Response {
     if let Some(err) = require_auth_ks(&headers, &state.api_keys) {
         return err;
     }

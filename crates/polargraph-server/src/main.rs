@@ -50,9 +50,9 @@ use clap::Parser;
 use hyper::server::accept;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use polargraph_core::schema::RetentionPolicy;
-use polargraph_storage::{MigrationRunner, TripleStore};
 use polargraph_server::config::{self, Config};
 use polargraph_server::wal_client;
+use polargraph_storage::{MigrationRunner, TripleStore};
 use proto::polar_graph_service_server::PolarGraphServiceServer;
 use service::PolarGraphServer;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -63,7 +63,10 @@ use tonic_health::ServingStatus;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use polargraph_server::{auth::ApiKeyLayer, proto, rate_limit::RateLimitLayer, retention_scheduler, service, telemetry, ui_api};
+use polargraph_server::{
+    auth::ApiKeyLayer, proto, rate_limit::RateLimitLayer, retention_scheduler, service, telemetry,
+    ui_api,
+};
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -73,27 +76,15 @@ use polargraph_server::{auth::ApiKeyLayer, proto, rate_limit::RateLimitLayer, re
 struct Cli {
     /// Path to a TOML configuration file.  When omitted the server tries
     /// `./polargraph.toml` then `~/.config/polargraph/config.toml`.
-    #[arg(
-        long = "config",
-        env = "POLARGRAPH_CONFIG",
-        value_name = "PATH"
-    )]
+    #[arg(long = "config", env = "POLARGRAPH_CONFIG", value_name = "PATH")]
     config: Option<PathBuf>,
 
     /// Directory where RocksDB stores its data files.
-    #[arg(
-        long = "data-dir",
-        env = "POLARGRAPH_DATA_DIR",
-        value_name = "PATH"
-    )]
+    #[arg(long = "data-dir", env = "POLARGRAPH_DATA_DIR", value_name = "PATH")]
     data_dir: Option<PathBuf>,
 
     /// Socket address the gRPC server will listen on.
-    #[arg(
-        long = "listen",
-        env = "POLARGRAPH_LISTEN_ADDR",
-        value_name = "ADDR"
-    )]
+    #[arg(long = "listen", env = "POLARGRAPH_LISTEN_ADDR", value_name = "ADDR")]
     listen_addr: Option<SocketAddr>,
 
     /// Directory for storing RocksDB backup files.
@@ -105,19 +96,11 @@ struct Cli {
     backup_dir: Option<PathBuf>,
 
     /// Log level / filter directive (same syntax as `RUST_LOG`).
-    #[arg(
-        long = "log-level",
-        env = "RUST_LOG",
-        value_name = "LEVEL"
-    )]
+    #[arg(long = "log-level", env = "RUST_LOG", value_name = "LEVEL")]
     log_level: Option<String>,
 
     /// Log output format (`pretty` or `json`).
-    #[arg(
-        long = "log-format",
-        env = "LOG_FORMAT",
-        value_name = "FORMAT"
-    )]
+    #[arg(long = "log-format", env = "LOG_FORMAT", value_name = "FORMAT")]
     log_format: Option<String>,
 
     /// TCP port for the Prometheus `/metrics` HTTP endpoint.
@@ -166,11 +149,7 @@ struct Cli {
     retention_interval_secs: Option<u64>,
 
     /// Open as a WAL replica of the primary at this gRPC address.
-    #[arg(
-        long = "replica-of",
-        env = "POLARGRAPH_REPLICA_OF",
-        value_name = "URL"
-    )]
+    #[arg(long = "replica-of", env = "POLARGRAPH_REPLICA_OF", value_name = "URL")]
     replica_of: Option<String>,
 
     /// API key required on all gRPC and HTTP management requests.
@@ -187,11 +166,7 @@ struct Cli {
     no_auth: bool,
 
     /// TCP port for the web management UI.
-    #[arg(
-        long = "ui-port",
-        env = "POLARGRAPH_UI_PORT",
-        value_name = "PORT"
-    )]
+    #[arg(long = "ui-port", env = "POLARGRAPH_UI_PORT", value_name = "PORT")]
     ui_port: Option<u16>,
 
     /// Disable the web management UI entirely.
@@ -258,19 +233,11 @@ struct Cli {
 
     /// Path to PEM certificate file. When combined with --tls-key, enables TLS
     /// on the gRPC server, management UI, and metrics endpoint.
-    #[arg(
-        long = "tls-cert",
-        env = "POLARGRAPH_TLS_CERT",
-        value_name = "PATH"
-    )]
+    #[arg(long = "tls-cert", env = "POLARGRAPH_TLS_CERT", value_name = "PATH")]
     tls_cert: Option<PathBuf>,
 
     /// Path to PEM private key file. Must be supplied together with --tls-cert.
-    #[arg(
-        long = "tls-key",
-        env = "POLARGRAPH_TLS_KEY",
-        value_name = "PATH"
-    )]
+    #[arg(long = "tls-key", env = "POLARGRAPH_TLS_KEY", value_name = "PATH")]
     tls_key: Option<PathBuf>,
 
     /// CA certificate (PEM) used to verify the primary's TLS certificate when
@@ -303,11 +270,7 @@ fn resolve<T>(cli_val: Option<T>, config_val: Option<T>, default: T) -> T {
 
 /// Merge two optional `PathBuf`s, converting the config string to a path.
 #[inline]
-fn resolve_path(
-    cli_val: Option<PathBuf>,
-    config_val: Option<String>,
-    default: &str,
-) -> PathBuf {
+fn resolve_path(cli_val: Option<PathBuf>, config_val: Option<String>, default: &str) -> PathBuf {
     cli_val
         .or_else(|| config_val.map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(default))
@@ -326,8 +289,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // ── Config file ───────────────────────────────────────────────────────────
-    let cfg: Config = config::load_config(cli.config.as_deref())
-        .context("failed to load configuration file")?;
+    let cfg: Config =
+        config::load_config(cli.config.as_deref()).context("failed to load configuration file")?;
 
     // ── Merge: CLI/env > config file > built-in defaults ─────────────────────
     let data_dir = resolve_path(cli.data_dir, cfg.server.data_dir, "/data");
@@ -338,16 +301,26 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| "0.0.0.0:50051".parse().unwrap())
     });
     let backup_dir = resolve_path_opt(cli.backup_dir, cfg.storage.backup_dir);
-    let log_level = resolve(cli.log_level, cfg.observability.log_level, "info".to_string());
-    let log_format = resolve(cli.log_format, cfg.observability.log_format, "pretty".to_string());
+    let log_level = resolve(
+        cli.log_level,
+        cfg.observability.log_level,
+        "info".to_string(),
+    );
+    let log_format = resolve(
+        cli.log_format,
+        cfg.observability.log_format,
+        "pretty".to_string(),
+    );
     let metrics_port = resolve(cli.metrics_port, cfg.server.metrics_port, 9090u16);
     let no_metrics = cli.no_metrics || cfg.observability.no_metrics.unwrap_or(false);
-    let retention_tx_age_secs = cli.retention_tx_age_secs.or(cfg.storage.retention_tx_age_secs);
+    let retention_tx_age_secs = cli
+        .retention_tx_age_secs
+        .or(cfg.storage.retention_tx_age_secs);
     let retention_vt_lookback_secs = cli
         .retention_vt_lookback_secs
         .or(cfg.storage.retention_vt_lookback_secs);
-    let retention_schedule_enabled = cli.retention_schedule
-        || cfg.storage.retention_schedule.enabled.unwrap_or(false);
+    let retention_schedule_enabled =
+        cli.retention_schedule || cfg.storage.retention_schedule.enabled.unwrap_or(false);
     let retention_interval_secs = cli
         .retention_interval_secs
         .or(cfg.storage.retention_schedule.interval_secs)
@@ -362,7 +335,11 @@ async fn main() -> Result<()> {
     let ui_port = resolve(cli.ui_port, cfg.server.ui_port, 8080u16);
     let no_ui = cli.no_ui || cfg.observability.no_ui.unwrap_or(false);
     let query_timeout_ms = resolve(cli.query_timeout_ms, cfg.query.timeout_ms, 30_000u64);
-    let shutdown_timeout_ms = resolve(cli.shutdown_timeout_ms, cfg.server.shutdown_timeout_ms, 10_000u64);
+    let shutdown_timeout_ms = resolve(
+        cli.shutdown_timeout_ms,
+        cfg.server.shutdown_timeout_ms,
+        10_000u64,
+    );
     let slow_query_ms = resolve(cli.slow_query_ms, cfg.query.slow_query_ms, 1_000u64);
     let tls_cert = resolve_path_opt(cli.tls_cert, cfg.tls.cert);
     let tls_key = resolve_path_opt(cli.tls_key, cfg.tls.key);
@@ -379,7 +356,10 @@ async fn main() -> Result<()> {
 
     match log_format.as_str() {
         "json" => {
-            tracing_subscriber::fmt().json().with_env_filter(filter).init();
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .init();
         }
         _ => {
             tracing_subscriber::fmt().with_env_filter(filter).init();
@@ -472,8 +452,8 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to create data dir: {}", data_dir.display()))?;
 
     let (store, replica_address) = if let Some(primary_addr) = &replica_of {
-        let store = TripleStore::open_as_replica(&data_dir, primary_addr.clone())
-            .with_context(|| {
+        let store =
+            TripleStore::open_as_replica(&data_dir, primary_addr.clone()).with_context(|| {
                 format!(
                     "failed to open replica TripleStore at {} (primary={})",
                     data_dir.display(),
@@ -492,9 +472,7 @@ async fn main() -> Result<()> {
     // ── Schema migrations (primary only) ─────────────────────────────────────
     if replica_address.is_none() {
         let runner = MigrationRunner::new(store.clone());
-        let stats = runner
-            .run_pending()
-            .context("schema migration failed")?;
+        let stats = runner.run_pending().context("schema migration failed")?;
         if stats.applied.is_empty() {
             info!("schema migrations: database is up to date");
         } else {
@@ -599,7 +577,10 @@ async fn main() -> Result<()> {
                     .expect("metrics HTTP server error");
             }
         });
-        info!(port = metrics_port, "Prometheus /metrics endpoint listening");
+        info!(
+            port = metrics_port,
+            "Prometheus /metrics endpoint listening"
+        );
         Some(jh)
     } else {
         None
@@ -625,7 +606,14 @@ async fn main() -> Result<()> {
         let wal_health = health_reporter.clone();
         let wal_ca = replica_tls_ca_bytes.clone();
         tokio::spawn(async move {
-            wal_client::run_replication(repl_store, repl_state, wal_token, Some(wal_health), wal_ca).await;
+            wal_client::run_replication(
+                repl_store,
+                repl_state,
+                wal_token,
+                Some(wal_health),
+                wal_ca,
+            )
+            .await;
         });
 
         let server = server
@@ -679,7 +667,10 @@ async fn main() -> Result<()> {
                     .expect("UI HTTP server error");
             }
         });
-        info!(port = ui_port, "management UI listening at http://0.0.0.0:{}", ui_port);
+        info!(
+            port = ui_port,
+            "management UI listening at http://0.0.0.0:{}", ui_port
+        );
         Some(jh)
     } else {
         None
@@ -783,10 +774,7 @@ async fn serve_axum_tls(
         let acceptor = acceptor.clone();
         async move {
             let tcp = res.map_err(std::io::Error::other)?;
-            acceptor
-                .accept(tcp)
-                .await
-                .map_err(std::io::Error::other)
+            acceptor.accept(tcp).await.map_err(std::io::Error::other)
         }
     });
 

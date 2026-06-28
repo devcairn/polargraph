@@ -19,7 +19,10 @@
 //!   OPS  [object(16)][pred(4)][subject(16)][tt(8)]
 
 use crate::error::StorageError;
-use polargraph_core::{id::{EdgeId, NodeId}, temporal::Timestamp};
+use polargraph_core::{
+    id::{EdgeId, NodeId},
+    temporal::Timestamp,
+};
 use uuid::Uuid;
 
 /// Interned predicate ID — 32-bit so keys stay compact.
@@ -199,33 +202,61 @@ pub fn encode_ops(o: &NodeId, p: PredId, s: &NodeId, tt: Timestamp) -> [u8; 44] 
 
 pub fn decode_spo(key: &[u8]) -> Result<DecodedSpo, StorageError> {
     check_len(key, 44, "SPO")?;
-    Ok(DecodedSpo { subject: node_id_from(&key[0..16]), pred_id: pred_from(&key[16..20]), object: node_id_from(&key[20..36]), tt: tt_from(&key[36..44]) })
+    Ok(DecodedSpo {
+        subject: node_id_from(&key[0..16]),
+        pred_id: pred_from(&key[16..20]),
+        object: node_id_from(&key[20..36]),
+        tt: tt_from(&key[36..44]),
+    })
 }
 
 pub fn decode_sop(key: &[u8]) -> Result<DecodedSop, StorageError> {
     check_len(key, 44, "SOP")?;
-    Ok(DecodedSop { subject: node_id_from(&key[0..16]), object: node_id_from(&key[16..32]), pred_id: pred_from(&key[32..36]), tt: tt_from(&key[36..44]) })
+    Ok(DecodedSop {
+        subject: node_id_from(&key[0..16]),
+        object: node_id_from(&key[16..32]),
+        pred_id: pred_from(&key[32..36]),
+        tt: tt_from(&key[36..44]),
+    })
 }
 
 pub fn decode_pso(key: &[u8]) -> Result<DecodedPso, StorageError> {
     check_len(key, 44, "PSO")?;
-    Ok(DecodedPso { pred_id: pred_from(&key[0..4]), subject: node_id_from(&key[4..20]), object: node_id_from(&key[20..36]), tt: tt_from(&key[36..44]) })
+    Ok(DecodedPso {
+        pred_id: pred_from(&key[0..4]),
+        subject: node_id_from(&key[4..20]),
+        object: node_id_from(&key[20..36]),
+        tt: tt_from(&key[36..44]),
+    })
 }
 
 pub fn decode_pos(key: &[u8]) -> Result<DecodedPos, StorageError> {
     check_len(key, 44, "POS")?;
-    Ok(DecodedPos { pred_id: pred_from(&key[0..4]), object: node_id_from(&key[4..20]), subject: node_id_from(&key[20..36]), tt: tt_from(&key[36..44]) })
+    Ok(DecodedPos {
+        pred_id: pred_from(&key[0..4]),
+        object: node_id_from(&key[4..20]),
+        subject: node_id_from(&key[20..36]),
+        tt: tt_from(&key[36..44]),
+    })
 }
 
 pub fn decode_osp(key: &[u8]) -> Result<DecodedOsp, StorageError> {
     check_len(key, 44, "OSP")?;
-    Ok(DecodedOsp { object: node_id_from(&key[0..16]), subject: node_id_from(&key[16..32]), pred_id: pred_from(&key[32..36]), tt: tt_from(&key[36..44]) })
+    Ok(DecodedOsp {
+        object: node_id_from(&key[0..16]),
+        subject: node_id_from(&key[16..32]),
+        pred_id: pred_from(&key[32..36]),
+        tt: tt_from(&key[36..44]),
+    })
 }
 
 #[inline]
 fn check_len(key: &[u8], expected: usize, name: &str) -> Result<(), StorageError> {
     if key.len() != expected {
-        Err(StorageError::KeyDecode(format!("{name} key must be {expected} bytes, got {}", key.len())))
+        Err(StorageError::KeyDecode(format!(
+            "{name} key must be {expected} bytes, got {}",
+            key.len()
+        )))
     } else {
         Ok(())
     }
@@ -347,7 +378,9 @@ pub fn pea_prefix_pred_edge(pred_id: PredId, edge: &EdgeId) -> [u8; 20] {
 // ── prefix helpers for range scans ───────────────────────────────────────────
 
 /// SPO prefix: all triples with the given subject.
-pub fn spo_prefix_s(s: &NodeId) -> [u8; 16] { *s.as_bytes() }
+pub fn spo_prefix_s(s: &NodeId) -> [u8; 16] {
+    *s.as_bytes()
+}
 
 /// SPO prefix: all triples with given (subject, predicate).
 pub fn spo_prefix_sp(s: &NodeId, p: PredId) -> [u8; 20] {
@@ -375,7 +408,9 @@ pub fn sop_prefix_so(s: &NodeId, o: &NodeId) -> [u8; 32] {
 }
 
 /// PSO prefix: all triples with the given predicate.
-pub fn pso_prefix_p(p: PredId) -> [u8; 4] { p.to_be_bytes() }
+pub fn pso_prefix_p(p: PredId) -> [u8; 4] {
+    p.to_be_bytes()
+}
 
 /// POS prefix: all triples with given (predicate, object).
 pub fn pos_prefix_po(p: PredId, o: &NodeId) -> [u8; 20] {
@@ -386,7 +421,9 @@ pub fn pos_prefix_po(p: PredId, o: &NodeId) -> [u8; 20] {
 }
 
 /// OSP prefix: all triples with the given object.
-pub fn osp_prefix_o(o: &NodeId) -> [u8; 16] { *o.as_bytes() }
+pub fn osp_prefix_o(o: &NodeId) -> [u8; 16] {
+    *o.as_bytes()
+}
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 

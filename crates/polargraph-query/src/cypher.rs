@@ -54,7 +54,10 @@ pub enum CypherError {
 
 impl CypherError {
     fn at(pos: usize, msg: impl Into<String>) -> Self {
-        CypherError::Parse { pos, msg: msg.into() }
+        CypherError::Parse {
+            pos,
+            msg: msg.into(),
+        }
     }
 }
 
@@ -142,21 +145,52 @@ struct CypherPath {
 /// Comparison operator for WHERE predicates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComparisonOp {
-    Eq, Ne, Gt, Gte, Lt, Lte,
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
 }
 
 #[derive(Debug)]
 pub enum WhereClause {
-    PropertyEq  { var: String, prop: String, value: CypherValue },
-    PropertyCmp { var: String, prop: String, op: ComparisonOp, value: CypherValue },
-    VectorNear  { var: String, space: String, k: u32, ef: Option<u32> },
+    PropertyEq {
+        var: String,
+        prop: String,
+        value: CypherValue,
+    },
+    PropertyCmp {
+        var: String,
+        prop: String,
+        op: ComparisonOp,
+        value: CypherValue,
+    },
+    VectorNear {
+        var: String,
+        space: String,
+        k: u32,
+        ef: Option<u32>,
+    },
     /// `WHERE a.prop CONTAINS "needle"` — case-sensitive substring match.
-    Contains    { var: String, prop: String, value: String },
+    Contains {
+        var: String,
+        prop: String,
+        value: String,
+    },
     /// `WHERE a.prop STARTS WITH "prefix"` — case-sensitive prefix match.
-    StartsWith  { var: String, prop: String, value: String },
+    StartsWith {
+        var: String,
+        prop: String,
+        value: String,
+    },
     /// `WHERE a.prop =~ "^pattern.*"` — full regex match.
     /// Falls back to a full predicate scan; no trigram pre-filter.
-    Regex       { var: String, prop: String, pattern: String },
+    Regex {
+        var: String,
+        prop: String,
+        pattern: String,
+    },
 }
 
 /// A single item in a RETURN clause.
@@ -320,10 +354,18 @@ pub fn write_statement_to_ops(stmt: WriteStatement) -> Vec<WriteOp> {
         WriteStatement::Create(clauses) => clauses
             .into_iter()
             .map(|c| match c {
-                CreateClause::Node { var, label, props } => WriteOp::CreateNode { var, label, props },
-                CreateClause::Relation { subject_var, predicate, object_var } => {
-                    WriteOp::CreateRelation { subject_var, predicate, object_var }
+                CreateClause::Node { var, label, props } => {
+                    WriteOp::CreateNode { var, label, props }
                 }
+                CreateClause::Relation {
+                    subject_var,
+                    predicate,
+                    object_var,
+                } => WriteOp::CreateRelation {
+                    subject_var,
+                    predicate,
+                    object_var,
+                },
             })
             .collect(),
         WriteStatement::Merge { var, label, props } => vec![WriteOp::Merge { var, label, props }],
@@ -377,7 +419,11 @@ pub fn execute_write_ops(
                 created_ids.push(node_id);
             }
 
-            WriteOp::CreateRelation { subject_var, predicate, object_var } => {
+            WriteOp::CreateRelation {
+                subject_var,
+                predicate,
+                object_var,
+            } => {
                 let subject = bindings
                     .get(subject_var)
                     .copied()
@@ -466,7 +512,11 @@ pub fn execute_write_ops(
         }
     }
 
-    Ok(WriteResult { created_ids, triples_written, triples_deleted })
+    Ok(WriteResult {
+        created_ids,
+        triples_written,
+        triples_deleted,
+    })
 }
 
 /// Execute a write statement against an open MVCC transaction.
@@ -495,9 +545,11 @@ fn find_matching_node(
             .scan_by_predicate("__type")?
             .into_iter()
             .filter_map(|t| match t {
-                Triple::Property { subject, value: Value::Text(v), .. } if v == label_str => {
-                    Some(subject)
-                }
+                Triple::Property {
+                    subject,
+                    value: Value::Text(v),
+                    ..
+                } if v == label_str => Some(subject),
                 _ => None,
             })
             .collect()
@@ -535,30 +587,67 @@ fn find_matching_node(
 /// Re-insert a triple with its valid-time window closed at `now`.
 fn close_valid_time(triple: Triple, now: Timestamp) -> Triple {
     match triple {
-        Triple::Property { subject, predicate, value, temporal } => Triple::Property {
+        Triple::Property {
             subject,
             predicate,
             value,
-            temporal: BiTemporalRange { vt_start: temporal.vt_start, vt_end: now, tt: Timestamp::now() },
+            temporal,
+        } => Triple::Property {
+            subject,
+            predicate,
+            value,
+            temporal: BiTemporalRange {
+                vt_start: temporal.vt_start,
+                vt_end: now,
+                tt: Timestamp::now(),
+            },
         },
-        Triple::Relation { subject, predicate, object, edge_id, temporal } => Triple::Relation {
+        Triple::Relation {
             subject,
             predicate,
             object,
             edge_id,
-            temporal: BiTemporalRange { vt_start: temporal.vt_start, vt_end: now, tt: Timestamp::now() },
+            temporal,
+        } => Triple::Relation {
+            subject,
+            predicate,
+            object,
+            edge_id,
+            temporal: BiTemporalRange {
+                vt_start: temporal.vt_start,
+                vt_end: now,
+                tt: Timestamp::now(),
+            },
         },
-        Triple::EdgeProperty { edge, predicate, value, temporal } => Triple::EdgeProperty {
+        Triple::EdgeProperty {
             edge,
             predicate,
             value,
-            temporal: BiTemporalRange { vt_start: temporal.vt_start, vt_end: now, tt: Timestamp::now() },
+            temporal,
+        } => Triple::EdgeProperty {
+            edge,
+            predicate,
+            value,
+            temporal: BiTemporalRange {
+                vt_start: temporal.vt_start,
+                vt_end: now,
+                tt: Timestamp::now(),
+            },
         },
-        Triple::EdgeRelation { edge, predicate, object, temporal } => Triple::EdgeRelation {
+        Triple::EdgeRelation {
             edge,
             predicate,
             object,
-            temporal: BiTemporalRange { vt_start: temporal.vt_start, vt_end: now, tt: Timestamp::now() },
+            temporal,
+        } => Triple::EdgeRelation {
+            edge,
+            predicate,
+            object,
+            temporal: BiTemporalRange {
+                vt_start: temporal.vt_start,
+                vt_end: now,
+                tt: Timestamp::now(),
+            },
         },
     }
 }
@@ -727,15 +816,15 @@ enum Token {
     Eq,
     Star,
     DotDot,
-    Arrow,      // ->
-    LeftArrow,  // <-
-    Dash,       // -
-    Tilde,      // ~  (used in =~ regex operator)
-    Gt,         // >
-    Lt,         // <
-    Gte,        // >=
-    Lte,        // <=
-    Ne,         // <>
+    Arrow,     // ->
+    LeftArrow, // <-
+    Dash,      // -
+    Tilde,     // ~  (used in =~ regex operator)
+    Gt,        // >
+    Lt,        // <
+    Gte,       // >=
+    Lte,       // <=
+    Ne,        // <>
     Ident(String),
     Str(String),
     Int(i64),
@@ -751,7 +840,10 @@ struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     fn new(src: &'a str) -> Self {
-        Self { src: src.as_bytes(), pos: 0 }
+        Self {
+            src: src.as_bytes(),
+            pos: 0,
+        }
     }
 
     fn peek(&self) -> Option<u8> {
@@ -764,7 +856,9 @@ impl<'a> Lexer<'a> {
 
     fn advance(&mut self) -> Option<u8> {
         let c = self.src.get(self.pos).copied();
-        if c.is_some() { self.pos += 1; }
+        if c.is_some() {
+            self.pos += 1;
+        }
         c
     }
 
@@ -785,16 +879,14 @@ impl<'a> Lexer<'a> {
         loop {
             match self.advance() {
                 Some(c) if c == quote => return Ok(Token::Str(s)),
-                Some(b'\\') => {
-                    match self.advance() {
-                        Some(b'n') => s.push('\n'),
-                        Some(b't') => s.push('\t'),
-                        Some(b'"') => s.push('"'),
-                        Some(b'\'') => s.push('\''),
-                        Some(b'\\') => s.push('\\'),
-                        _ => return Err(CypherError::at(start, "invalid escape in string")),
-                    }
-                }
+                Some(b'\\') => match self.advance() {
+                    Some(b'n') => s.push('\n'),
+                    Some(b't') => s.push('\t'),
+                    Some(b'"') => s.push('"'),
+                    Some(b'\'') => s.push('\''),
+                    Some(b'\\') => s.push('\\'),
+                    _ => return Err(CypherError::at(start, "invalid escape in string")),
+                },
                 Some(c) => s.push(c as char),
                 None => return Err(CypherError::at(start, "unterminated string literal")),
             }
@@ -855,14 +947,21 @@ impl<'a> Lexer<'a> {
                         tokens.push((pos, Token::Dash));
                     }
                 }
-                Some(b'<') => {
-                    match self.peek() {
-                        Some(b'-') => { self.advance(); tokens.push((pos, Token::LeftArrow)); }
-                        Some(b'=') => { self.advance(); tokens.push((pos, Token::Lte)); }
-                        Some(b'>') => { self.advance(); tokens.push((pos, Token::Ne)); }
-                        _ => tokens.push((pos, Token::Lt)),
+                Some(b'<') => match self.peek() {
+                    Some(b'-') => {
+                        self.advance();
+                        tokens.push((pos, Token::LeftArrow));
                     }
-                }
+                    Some(b'=') => {
+                        self.advance();
+                        tokens.push((pos, Token::Lte));
+                    }
+                    Some(b'>') => {
+                        self.advance();
+                        tokens.push((pos, Token::Ne));
+                    }
+                    _ => tokens.push((pos, Token::Lt)),
+                },
                 Some(b'>') => {
                     if self.peek() == Some(b'=') {
                         self.advance();
@@ -916,14 +1015,17 @@ impl<'a> Lexer<'a> {
                     }
                     let upper = s.to_ascii_uppercase();
                     let tok = match upper.as_str() {
-                        "TRUE"  => Token::Ident("true".into()),
+                        "TRUE" => Token::Ident("true".into()),
                         "FALSE" => Token::Ident("false".into()),
-                        _       => Token::Ident(s),
+                        _ => Token::Ident(s),
                     };
                     tokens.push((pos, tok));
                 }
                 Some(c) => {
-                    return Err(CypherError::at(pos, format!("unexpected character {:?}", c as char)));
+                    return Err(CypherError::at(
+                        pos,
+                        format!("unexpected character {:?}", c as char),
+                    ));
                 }
             }
         }
@@ -945,7 +1047,10 @@ impl Parser {
     }
 
     fn current_pos(&self) -> usize {
-        self.tokens.get(self.pos).map(|(p, _)| *p).unwrap_or(usize::MAX)
+        self.tokens
+            .get(self.pos)
+            .map(|(p, _)| *p)
+            .unwrap_or(usize::MAX)
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -954,16 +1059,27 @@ impl Parser {
 
     fn advance(&mut self) -> Option<&Token> {
         let t = self.tokens.get(self.pos).map(|(_, t)| t);
-        if t.is_some() { self.pos += 1; }
+        if t.is_some() {
+            self.pos += 1;
+        }
         t
     }
 
     fn expect(&mut self, expected: &Token) -> Result<(), CypherError> {
         let pos = self.current_pos();
         match self.peek() {
-            Some(t) if t == expected => { self.advance(); Ok(()) }
-            Some(other) => Err(CypherError::at(pos, format!("expected {:?}, got {:?}", expected, other))),
-            None => Err(CypherError::at(pos, format!("expected {:?}, got end of input", expected))),
+            Some(t) if t == expected => {
+                self.advance();
+                Ok(())
+            }
+            Some(other) => Err(CypherError::at(
+                pos,
+                format!("expected {:?}, got {:?}", expected, other),
+            )),
+            None => Err(CypherError::at(
+                pos,
+                format!("expected {:?}, got end of input", expected),
+            )),
         }
     }
 
@@ -971,9 +1087,18 @@ impl Parser {
     fn expect_ident(&mut self) -> Result<String, CypherError> {
         let pos = self.current_pos();
         match self.peek().cloned() {
-            Some(Token::Ident(s)) => { self.advance(); Ok(s) }
-            Some(other) => Err(CypherError::at(pos, format!("expected identifier, got {:?}", other))),
-            None => Err(CypherError::at(pos, "expected identifier, got end of input")),
+            Some(Token::Ident(s)) => {
+                self.advance();
+                Ok(s)
+            }
+            Some(other) => Err(CypherError::at(
+                pos,
+                format!("expected identifier, got {:?}", other),
+            )),
+            None => Err(CypherError::at(
+                pos,
+                "expected identifier, got end of input",
+            )),
         }
     }
 
@@ -981,8 +1106,14 @@ impl Parser {
     fn expect_int(&mut self) -> Result<i64, CypherError> {
         let pos = self.current_pos();
         match self.peek().cloned() {
-            Some(Token::Int(n)) => { self.advance(); Ok(n) }
-            Some(other) => Err(CypherError::at(pos, format!("expected integer, got {:?}", other))),
+            Some(Token::Int(n)) => {
+                self.advance();
+                Ok(n)
+            }
+            Some(other) => Err(CypherError::at(
+                pos,
+                format!("expected integer, got {:?}", other),
+            )),
             None => Err(CypherError::at(pos, "expected integer, got end of input")),
         }
     }
@@ -1060,7 +1191,10 @@ impl Parser {
             self.advance();
             let n = self.expect_int()?;
             if n < 0 {
-                return Err(CypherError::at(self.current_pos(), "SKIP must be non-negative"));
+                return Err(CypherError::at(
+                    self.current_pos(),
+                    "SKIP must be non-negative",
+                ));
             }
             skip = Some(n as usize);
         }
@@ -1071,7 +1205,10 @@ impl Parser {
             self.advance();
             let n = self.expect_int()?;
             if n < 0 {
-                return Err(CypherError::at(self.current_pos(), "LIMIT must be non-negative"));
+                return Err(CypherError::at(
+                    self.current_pos(),
+                    "LIMIT must be non-negative",
+                ));
             }
             limit = Some(n as usize);
         }
@@ -1083,7 +1220,16 @@ impl Parser {
             ));
         }
 
-        Ok(CypherQuery { call_clause, match_patterns, where_clauses, return_items, limit, order_by, skip, with_clause })
+        Ok(CypherQuery {
+            call_clause,
+            match_patterns,
+            where_clauses,
+            return_items,
+            limit,
+            order_by,
+            skip,
+            with_clause,
+        })
     }
 
     /// Parse `VECTOR_NEAR(param, "space", k[, ef=N]) YIELD var1[, var2, ...]`.
@@ -1095,7 +1241,10 @@ impl Parser {
         if !procedure.eq_ignore_ascii_case("VECTOR_NEAR") {
             return Err(CypherError::at(
                 pos,
-                format!("unknown procedure '{}'; only VECTOR_NEAR is supported", procedure),
+                format!(
+                    "unknown procedure '{}'; only VECTOR_NEAR is supported",
+                    procedure
+                ),
             ));
         }
 
@@ -1105,11 +1254,19 @@ impl Parser {
 
         let pos = self.current_pos();
         let space = match self.peek().cloned() {
-            Some(Token::Str(s)) => { self.advance(); s }
-            other => return Err(CypherError::at(
-                pos,
-                format!("CALL VECTOR_NEAR: expected string literal for space name, got {:?}", other),
-            )),
+            Some(Token::Str(s)) => {
+                self.advance();
+                s
+            }
+            other => {
+                return Err(CypherError::at(
+                    pos,
+                    format!(
+                        "CALL VECTOR_NEAR: expected string literal for space name, got {:?}",
+                        other
+                    ),
+                ))
+            }
         };
 
         self.expect(&Token::Comma)?;
@@ -1230,7 +1387,11 @@ impl Parser {
         while self.is_rel_start() {
             let (rel, direction) = self.parse_rel_direction()?;
             let end = self.parse_node_pat()?;
-            hops.push(HopPat { rel, direction, end });
+            hops.push(HopPat {
+                rel,
+                direction,
+                end,
+            });
         }
 
         Ok(CypherPath { start, hops })
@@ -1329,7 +1490,7 @@ impl Parser {
 
         let (recursive, max_hops) = if self.peek() == Some(&Token::Star) {
             self.advance(); // consume '*'
-            // Optional bounds: *N..M or *N (single) or bare *
+                            // Optional bounds: *N..M or *N (single) or bare *
             match self.peek().cloned() {
                 Some(Token::Int(n)) => {
                     self.advance();
@@ -1350,7 +1511,12 @@ impl Parser {
         };
 
         self.expect(&Token::RBracket)?;
-        Ok(RelPat { var, predicate, recursive, max_hops })
+        Ok(RelPat {
+            var,
+            predicate,
+            recursive,
+            max_hops,
+        })
     }
 
     fn parse_where_clause(&mut self) -> Result<Vec<WhereClause>, CypherError> {
@@ -1371,11 +1537,19 @@ impl Parser {
             self.expect(&Token::Comma)?;
             let pos = self.current_pos();
             let space = match self.peek().cloned() {
-                Some(Token::Str(s)) => { self.advance(); s }
-                other => return Err(CypherError::at(
-                    pos,
-                    format!("VECTOR_NEAR: expected string literal for space name, got {:?}", other),
-                )),
+                Some(Token::Str(s)) => {
+                    self.advance();
+                    s
+                }
+                other => {
+                    return Err(CypherError::at(
+                        pos,
+                        format!(
+                            "VECTOR_NEAR: expected string literal for space name, got {:?}",
+                            other
+                        ),
+                    ))
+                }
             };
             self.expect(&Token::Comma)?;
             let k_val = self.expect_int()?;
@@ -1408,7 +1582,12 @@ impl Parser {
                 None
             };
             self.expect(&Token::RParen)?;
-            Ok(WhereClause::VectorNear { var, space, k: k_val as u32, ef: ef_val })
+            Ok(WhereClause::VectorNear {
+                var,
+                space,
+                k: k_val as u32,
+                ef: ef_val,
+            })
         } else {
             // var.prop <op> value
             self.expect(&Token::Dot)?;
@@ -1418,10 +1597,22 @@ impl Parser {
                 self.advance(); // consume CONTAINS
                 let pos = self.current_pos();
                 let val = match self.peek().cloned() {
-                    Some(Token::Str(s)) => { self.advance(); s }
-                    other => return Err(CypherError::at(pos, format!("CONTAINS expects a string, got {:?}", other))),
+                    Some(Token::Str(s)) => {
+                        self.advance();
+                        s
+                    }
+                    other => {
+                        return Err(CypherError::at(
+                            pos,
+                            format!("CONTAINS expects a string, got {:?}", other),
+                        ))
+                    }
                 };
-                Ok(WhereClause::Contains { var: first, prop, value: val })
+                Ok(WhereClause::Contains {
+                    var: first,
+                    prop,
+                    value: val,
+                })
             } else if self.peek_keyword("STARTS") {
                 self.advance(); // consume STARTS
                 let pos = self.current_pos();
@@ -1431,37 +1622,80 @@ impl Parser {
                 self.advance(); // consume WITH
                 let pos = self.current_pos();
                 let val = match self.peek().cloned() {
-                    Some(Token::Str(s)) => { self.advance(); s }
-                    other => return Err(CypherError::at(pos, format!("STARTS WITH expects a string, got {:?}", other))),
+                    Some(Token::Str(s)) => {
+                        self.advance();
+                        s
+                    }
+                    other => {
+                        return Err(CypherError::at(
+                            pos,
+                            format!("STARTS WITH expects a string, got {:?}", other),
+                        ))
+                    }
                 };
-                Ok(WhereClause::StartsWith { var: first, prop, value: val })
+                Ok(WhereClause::StartsWith {
+                    var: first,
+                    prop,
+                    value: val,
+                })
             } else if self.peek() == Some(&Token::Eq) {
                 self.advance(); // consume =
                 if self.peek() == Some(&Token::Tilde) {
                     self.advance(); // consume ~
                     let pos = self.current_pos();
                     let pattern = match self.peek().cloned() {
-                        Some(Token::Str(s)) => { self.advance(); s }
-                        other => return Err(CypherError::at(pos, format!("=~ expects a regex string, got {:?}", other))),
+                        Some(Token::Str(s)) => {
+                            self.advance();
+                            s
+                        }
+                        other => {
+                            return Err(CypherError::at(
+                                pos,
+                                format!("=~ expects a regex string, got {:?}", other),
+                            ))
+                        }
                     };
-                    Ok(WhereClause::Regex { var: first, prop, pattern })
+                    Ok(WhereClause::Regex {
+                        var: first,
+                        prop,
+                        pattern,
+                    })
                 } else {
                     let value = self.parse_literal()?;
-                    Ok(WhereClause::PropertyEq { var: first, prop, value })
+                    Ok(WhereClause::PropertyEq {
+                        var: first,
+                        prop,
+                        value,
+                    })
                 }
-            } else if matches!(self.peek(), Some(Token::Gt) | Some(Token::Gte) | Some(Token::Lt) | Some(Token::Lte) | Some(Token::Ne)) {
+            } else if matches!(
+                self.peek(),
+                Some(Token::Gt)
+                    | Some(Token::Gte)
+                    | Some(Token::Lt)
+                    | Some(Token::Lte)
+                    | Some(Token::Ne)
+            ) {
                 let op = match self.advance() {
-                    Some(Token::Gt)  => ComparisonOp::Gt,
+                    Some(Token::Gt) => ComparisonOp::Gt,
                     Some(Token::Gte) => ComparisonOp::Gte,
-                    Some(Token::Lt)  => ComparisonOp::Lt,
+                    Some(Token::Lt) => ComparisonOp::Lt,
                     Some(Token::Lte) => ComparisonOp::Lte,
-                    Some(Token::Ne)  => ComparisonOp::Ne,
+                    Some(Token::Ne) => ComparisonOp::Ne,
                     _ => unreachable!(),
                 };
                 let value = self.parse_literal()?;
-                Ok(WhereClause::PropertyCmp { var: first, prop, op, value })
+                Ok(WhereClause::PropertyCmp {
+                    var: first,
+                    prop,
+                    op,
+                    value,
+                })
             } else {
-                Err(CypherError::at(self.current_pos(), "expected comparison operator or =~ after property name"))
+                Err(CypherError::at(
+                    self.current_pos(),
+                    "expected comparison operator or =~ after property name",
+                ))
             }
         }
     }
@@ -1540,7 +1774,10 @@ impl Parser {
         // Aggregate must have `AS alias`.
         let pos2 = self.current_pos();
         if !self.peek_keyword("AS") {
-            return Err(CypherError::at(pos2, format!("aggregate at position {} requires AS alias", pos)));
+            return Err(CypherError::at(
+                pos2,
+                format!("aggregate at position {} requires AS alias", pos),
+            ));
         }
         self.advance(); // consume AS
         let alias = self.expect_ident()?;
@@ -1550,20 +1787,47 @@ impl Parser {
     fn parse_literal(&mut self) -> Result<CypherValue, CypherError> {
         let pos = self.current_pos();
         match self.peek().cloned() {
-            Some(Token::Str(s)) => { self.advance(); Ok(CypherValue::Str(s)) }
-            Some(Token::Int(n)) => { self.advance(); Ok(CypherValue::Int(n)) }
-            Some(Token::Float(f)) => { self.advance(); Ok(CypherValue::Float(f)) }
-            Some(Token::Param(name)) => { self.advance(); Ok(CypherValue::Param(name)) }
+            Some(Token::Str(s)) => {
+                self.advance();
+                Ok(CypherValue::Str(s))
+            }
+            Some(Token::Int(n)) => {
+                self.advance();
+                Ok(CypherValue::Int(n))
+            }
+            Some(Token::Float(f)) => {
+                self.advance();
+                Ok(CypherValue::Float(f))
+            }
+            Some(Token::Param(name)) => {
+                self.advance();
+                Ok(CypherValue::Param(name))
+            }
             Some(Token::Ident(s)) => {
                 let lower = s.to_ascii_lowercase();
                 match lower.as_str() {
-                    "true"  => { self.advance(); Ok(CypherValue::Bool(true)) }
-                    "false" => { self.advance(); Ok(CypherValue::Bool(false)) }
-                    _ => Err(CypherError::at(pos, format!("expected literal value, got identifier {:?}", s))),
+                    "true" => {
+                        self.advance();
+                        Ok(CypherValue::Bool(true))
+                    }
+                    "false" => {
+                        self.advance();
+                        Ok(CypherValue::Bool(false))
+                    }
+                    _ => Err(CypherError::at(
+                        pos,
+                        format!("expected literal value, got identifier {:?}", s),
+                    )),
                 }
             }
-            Some(other) => Err(CypherError::at(pos, format!("expected literal value, got {:?}", other))),
-            None => Err(CypherError::at(pos, "expected literal value, got end of input")),
+            Some(other) => Err(CypherError::at(
+                pos,
+                format!("expected literal value, got {:?}", other),
+            )),
+            None => Err(CypherError::at(
+                pos,
+                "expected literal value, got end of input",
+            )),
         }
     }
 }
@@ -1571,11 +1835,33 @@ impl Parser {
 fn is_clause_keyword(s: &str) -> bool {
     matches!(
         s.to_ascii_uppercase().as_str(),
-        "MATCH" | "WHERE" | "AND" | "RETURN" | "LIMIT" | "VECTOR_NEAR"
-        | "CREATE" | "MERGE" | "SET" | "DELETE"
-        | "WITH" | "ORDER" | "BY" | "SKIP" | "ASC" | "DESC"
-        | "AS" | "COUNT" | "COLLECT" | "SUM" | "AVG" | "MIN" | "MAX"
-        | "CONTAINS" | "STARTS" | "CALL" | "YIELD"
+        "MATCH"
+            | "WHERE"
+            | "AND"
+            | "RETURN"
+            | "LIMIT"
+            | "VECTOR_NEAR"
+            | "CREATE"
+            | "MERGE"
+            | "SET"
+            | "DELETE"
+            | "WITH"
+            | "ORDER"
+            | "BY"
+            | "SKIP"
+            | "ASC"
+            | "DESC"
+            | "AS"
+            | "COUNT"
+            | "COLLECT"
+            | "SUM"
+            | "AVG"
+            | "MIN"
+            | "MAX"
+            | "CONTAINS"
+            | "STARTS"
+            | "CALL"
+            | "YIELD"
     )
 }
 
@@ -1602,18 +1888,30 @@ impl Parser {
                 let (subj_var, obj_var) = match direction {
                     Direction::Out => (
                         node.var.ok_or_else(|| {
-                            CypherError::at(self.current_pos(), "CREATE relation: subject node must have a variable")
+                            CypherError::at(
+                                self.current_pos(),
+                                "CREATE relation: subject node must have a variable",
+                            )
                         })?,
                         end_node.var.ok_or_else(|| {
-                            CypherError::at(self.current_pos(), "CREATE relation: object node must have a variable")
+                            CypherError::at(
+                                self.current_pos(),
+                                "CREATE relation: object node must have a variable",
+                            )
                         })?,
                     ),
                     Direction::In => (
                         end_node.var.ok_or_else(|| {
-                            CypherError::at(self.current_pos(), "CREATE relation: subject node must have a variable")
+                            CypherError::at(
+                                self.current_pos(),
+                                "CREATE relation: subject node must have a variable",
+                            )
                         })?,
                         node.var.ok_or_else(|| {
-                            CypherError::at(self.current_pos(), "CREATE relation: object node must have a variable")
+                            CypherError::at(
+                                self.current_pos(),
+                                "CREATE relation: object node must have a variable",
+                            )
                         })?,
                     ),
                 };
@@ -1675,7 +1973,11 @@ impl Parser {
         } else if self.peek_keyword("MERGE") {
             self.advance();
             let node = self.parse_node_pat()?;
-            Ok(WriteStatement::Merge { var: node.var, label: node.label, props: node.props })
+            Ok(WriteStatement::Merge {
+                var: node.var,
+                label: node.label,
+                props: node.props,
+            })
         } else if self.peek_keyword("SET") {
             self.advance();
             Ok(WriteStatement::Set(self.parse_set_clauses()?))
@@ -1683,7 +1985,10 @@ impl Parser {
             self.advance();
             Ok(WriteStatement::Delete(self.parse_delete_vars()?))
         } else {
-            Err(CypherError::at(pos, "expected CREATE, MERGE, SET, or DELETE"))
+            Err(CypherError::at(
+                pos,
+                "expected CREATE, MERGE, SET, or DELETE",
+            ))
         }
     }
 
@@ -1727,12 +2032,18 @@ impl Parser {
 
         let pos = self.current_pos();
         if self.peek().is_none() {
-            return Err(CypherError::at(pos, "expected a write clause (CREATE/MERGE/SET/DELETE)"));
+            return Err(CypherError::at(
+                pos,
+                "expected a write clause (CREATE/MERGE/SET/DELETE)",
+            ));
         }
         let stmt = self.parse_write_statement()?;
         let writes = write_statement_to_ops(stmt);
 
-        Ok(CompiledWrite { match_query, writes })
+        Ok(CompiledWrite {
+            match_query,
+            writes,
+        })
     }
 }
 
@@ -1823,54 +2134,106 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
     let mut text_filters: Vec<TextFilter> = Vec::new();
 
     let add_where = |wc: WhereClause,
-                         vf: &mut Vec<ValueFilter>,
-                         tf: &mut Vec<TextFilter>,
-                         vn: &mut Option<VectorNearClause>,
-                         eaf: &mut Vec<EdgeAnnotationFilter>,
-                         evs: &HashSet<String>| {
+                     vf: &mut Vec<ValueFilter>,
+                     tf: &mut Vec<TextFilter>,
+                     vn: &mut Option<VectorNearClause>,
+                     eaf: &mut Vec<EdgeAnnotationFilter>,
+                     evs: &HashSet<String>| {
         match wc {
             WhereClause::PropertyEq { var, prop, value } => {
                 if evs.contains(&var) {
-                    eaf.push(EdgeAnnotationFilter { var, predicate: prop, op: ComparisonOp::Eq, value: value.to_core_value() });
+                    eaf.push(EdgeAnnotationFilter {
+                        var,
+                        predicate: prop,
+                        op: ComparisonOp::Eq,
+                        value: value.to_core_value(),
+                    });
                 } else {
-                    vf.push(ValueFilter { var, predicate: prop, value: value.to_filter_value() });
+                    vf.push(ValueFilter {
+                        var,
+                        predicate: prop,
+                        value: value.to_filter_value(),
+                    });
                 }
             }
-            WhereClause::PropertyCmp { var, prop, op, value } => {
+            WhereClause::PropertyCmp {
+                var,
+                prop,
+                op,
+                value,
+            } => {
                 if evs.contains(&var) {
-                    eaf.push(EdgeAnnotationFilter { var, predicate: prop, op, value: value.to_core_value() });
+                    eaf.push(EdgeAnnotationFilter {
+                        var,
+                        predicate: prop,
+                        op,
+                        value: value.to_core_value(),
+                    });
                 } else {
                     // For node properties, only equality is currently supported;
                     // treat as a value filter for equality, skip others.
                     if matches!(op, ComparisonOp::Eq) {
-                        vf.push(ValueFilter { var, predicate: prop, value: value.to_filter_value() });
+                        vf.push(ValueFilter {
+                            var,
+                            predicate: prop,
+                            value: value.to_filter_value(),
+                        });
                     }
                 }
             }
             WhereClause::VectorNear { var, space, k, ef } => {
                 if vn.is_none() {
-                    *vn = Some(VectorNearClause { seed_variable: var, space, k, ef, score_variable: None });
+                    *vn = Some(VectorNearClause {
+                        seed_variable: var,
+                        space,
+                        k,
+                        ef,
+                        score_variable: None,
+                    });
                 }
             }
             WhereClause::Contains { var, prop, value } => {
-                tf.push(TextFilter { var, predicate: prop, kind: TextFilterKind::Contains(value) });
+                tf.push(TextFilter {
+                    var,
+                    predicate: prop,
+                    kind: TextFilterKind::Contains(value),
+                });
             }
             WhereClause::StartsWith { var, prop, value } => {
-                tf.push(TextFilter { var, predicate: prop, kind: TextFilterKind::StartsWith(value) });
+                tf.push(TextFilter {
+                    var,
+                    predicate: prop,
+                    kind: TextFilterKind::StartsWith(value),
+                });
             }
             WhereClause::Regex { var, prop, pattern } => {
-                tf.push(TextFilter { var, predicate: prop, kind: TextFilterKind::Regex(pattern) });
+                tf.push(TextFilter {
+                    var,
+                    predicate: prop,
+                    kind: TextFilterKind::Regex(pattern),
+                });
             }
         }
     };
 
     for wc in cypher.where_clauses {
-        add_where(wc, &mut value_filters, &mut text_filters, &mut vector_near, &mut edge_annotation_filters, &edge_vars);
+        add_where(
+            wc,
+            &mut value_filters,
+            &mut text_filters,
+            &mut vector_near,
+            &mut edge_annotation_filters,
+            &edge_vars,
+        );
     }
 
     // CALL clause: desugars to VectorNearClause (takes precedence over WHERE VECTOR_NEAR).
     if let Some(call) = cypher.call_clause {
-        let node_var = call.yield_vars.first().cloned().unwrap_or_else(|| "__call_node".into());
+        let node_var = call
+            .yield_vars
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "__call_node".into());
         let score_var = call.yield_vars.get(1).cloned();
         vector_near = Some(VectorNearClause {
             seed_variable: node_var,
@@ -1884,7 +2247,14 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
     // WITH clause: append its filters.
     if let Some(with) = cypher.with_clause {
         for wc in with.filters {
-            add_where(wc, &mut value_filters, &mut text_filters, &mut vector_near, &mut edge_annotation_filters, &edge_vars);
+            add_where(
+                wc,
+                &mut value_filters,
+                &mut text_filters,
+                &mut vector_near,
+                &mut edge_annotation_filters,
+                &edge_vars,
+            );
         }
     }
 
@@ -1905,7 +2275,9 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
                     prop_projections.push((var, prop));
                 }
             }
-            ReturnItem::Aggregation { func, alias } => aggregations.push(AggregationSpec { func, alias }),
+            ReturnItem::Aggregation { func, alias } => {
+                aggregations.push(AggregationSpec { func, alias })
+            }
             ReturnItem::EdgeId { rel_var } => {
                 // id(var) / elementId(var) — route to edge or node projection based on var type.
                 if edge_vars.contains(&rel_var) {
@@ -1949,9 +2321,13 @@ fn collect_rel_bound_vars(paths: &[CypherPath]) -> HashSet<String> {
     let mut bound = HashSet::new();
     for path in paths {
         if !path.hops.is_empty() {
-            if let Some(v) = &path.start.var { bound.insert(v.clone()); }
+            if let Some(v) = &path.start.var {
+                bound.insert(v.clone());
+            }
             for hop in &path.hops {
-                if let Some(v) = &hop.end.var { bound.insert(v.clone()); }
+                if let Some(v) = &hop.end.var {
+                    bound.insert(v.clone());
+                }
             }
         }
     }
@@ -2012,7 +2388,7 @@ fn compile_path(
                 // The evaluator uses reachable_from_hops at runtime — no TC rules needed.
                 let (subj, obj) = match hop.direction {
                     Direction::Out => (Term::Var(current_var.clone()), Term::Var(end_var.clone())),
-                    Direction::In  => (Term::Var(end_var.clone()), Term::Var(current_var.clone())),
+                    Direction::In => (Term::Var(end_var.clone()), Term::Var(current_var.clone())),
                 };
                 patterns.push(VarPattern {
                     subject: subj,
@@ -2039,31 +2415,29 @@ fn compile_path(
                         }]),
                     );
                     // Recursive rule: __tc_pred(x, z) :- __tc_pred(x, y), pred(y, z)
-                    rules.push(
-                        Rule::new(tc_pred.clone(), "x", "z").with_body(vec![
-                            VarPattern {
-                                subject: Term::Var("x".into()),
-                                predicate: Some(tc_pred.clone()),
-                                predicate_var: None,
-                                object: Term::Var("y".into()),
-                                edge_var: None,
-                                max_hops: None,
-                            },
-                            VarPattern {
-                                subject: Term::Var("y".into()),
-                                predicate: Some(pred.clone()),
-                                predicate_var: None,
-                                object: Term::Var("z".into()),
-                                edge_var: None,
-                                max_hops: None,
-                            },
-                        ]),
-                    );
+                    rules.push(Rule::new(tc_pred.clone(), "x", "z").with_body(vec![
+                        VarPattern {
+                            subject: Term::Var("x".into()),
+                            predicate: Some(tc_pred.clone()),
+                            predicate_var: None,
+                            object: Term::Var("y".into()),
+                            edge_var: None,
+                            max_hops: None,
+                        },
+                        VarPattern {
+                            subject: Term::Var("y".into()),
+                            predicate: Some(pred.clone()),
+                            predicate_var: None,
+                            object: Term::Var("z".into()),
+                            edge_var: None,
+                            max_hops: None,
+                        },
+                    ]));
                 }
 
                 let (subj, obj) = match hop.direction {
                     Direction::Out => (Term::Var(current_var.clone()), Term::Var(end_var.clone())),
-                    Direction::In  => (Term::Var(end_var.clone()), Term::Var(current_var.clone())),
+                    Direction::In => (Term::Var(end_var.clone()), Term::Var(current_var.clone())),
                 };
                 patterns.push(VarPattern {
                     subject: subj,
@@ -2077,7 +2451,7 @@ fn compile_path(
         } else {
             let (subj, obj) = match hop.direction {
                 Direction::Out => (Term::Var(current_var.clone()), Term::Var(end_var.clone())),
-                Direction::In  => (Term::Var(end_var.clone()), Term::Var(current_var.clone())),
+                Direction::In => (Term::Var(end_var.clone()), Term::Var(current_var.clone())),
             };
             // Register the relationship variable in edge_vars so WHERE clauses
             // on it are routed to edge_annotation_filters.
@@ -2257,7 +2631,10 @@ pub fn apply_text_filters(
 
             let triples = snapshot.scan_by_subject_predicate(&node_id, &filter.predicate)?;
             let matched = triples.iter().any(|t| match t {
-                Triple::Property { value: Value::Text(text), .. } => match &filter.kind {
+                Triple::Property {
+                    value: Value::Text(text),
+                    ..
+                } => match &filter.kind {
                     TextFilterKind::Contains(needle) => text.contains(needle.as_str()),
                     TextFilterKind::StartsWith(prefix) => text.starts_with(prefix.as_str()),
                     TextFilterKind::Regex(pattern) => regex::Regex::new(pattern)
@@ -2329,10 +2706,10 @@ pub fn apply_edge_annotation_filters(
 fn compare_values(actual: &Value, op: &ComparisonOp, expected: &Value) -> bool {
     use std::cmp::Ordering;
     let ord: Option<Ordering> = match (actual, expected) {
-        (Value::Int(a), Value::Int(b))     => a.partial_cmp(b),
+        (Value::Int(a), Value::Int(b)) => a.partial_cmp(b),
         (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
-        (Value::Text(a), Value::Text(b))   => a.partial_cmp(b),
-        (Value::Bool(a), Value::Bool(b))   => a.partial_cmp(b),
+        (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
+        (Value::Bool(a), Value::Bool(b)) => a.partial_cmp(b),
         _ => {
             // Cross-type: only equality makes sense.
             return matches!(op, ComparisonOp::Eq) && actual == expected;
@@ -2340,9 +2717,16 @@ fn compare_values(actual: &Value, op: &ComparisonOp, expected: &Value) -> bool {
     };
     matches!(
         (ord, op),
-        (Some(Ordering::Equal),   ComparisonOp::Eq | ComparisonOp::Gte | ComparisonOp::Lte)
-        | (Some(Ordering::Less),  ComparisonOp::Lt | ComparisonOp::Lte | ComparisonOp::Ne)
-        | (Some(Ordering::Greater), ComparisonOp::Gt | ComparisonOp::Gte | ComparisonOp::Ne)
+        (
+            Some(Ordering::Equal),
+            ComparisonOp::Eq | ComparisonOp::Gte | ComparisonOp::Lte
+        ) | (
+            Some(Ordering::Less),
+            ComparisonOp::Lt | ComparisonOp::Lte | ComparisonOp::Ne
+        ) | (
+            Some(Ordering::Greater),
+            ComparisonOp::Gt | ComparisonOp::Gte | ComparisonOp::Ne
+        )
     )
 }
 
@@ -2363,9 +2747,16 @@ mod tests {
     // ── parser unit tests ─────────────────────────────────────────────────────
 
     fn return_var_names(q: &CypherQuery) -> Vec<&str> {
-        q.return_items.iter().filter_map(|r| {
-            if let ReturnItem::Variable(v) = r { Some(v.as_str()) } else { None }
-        }).collect()
+        q.return_items
+            .iter()
+            .filter_map(|r| {
+                if let ReturnItem::Variable(v) = r {
+                    Some(v.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     #[test]
@@ -2395,7 +2786,8 @@ mod tests {
 
     #[test]
     fn parse_where() {
-        let q = parse(r#"MATCH (a:Person)-[:knows]->(b) WHERE a.name = "Alice" RETURN a, b"#).unwrap();
+        let q =
+            parse(r#"MATCH (a:Person)-[:knows]->(b) WHERE a.name = "Alice" RETURN a, b"#).unwrap();
         assert_eq!(q.where_clauses.len(), 1);
         match &q.where_clauses[0] {
             WhereClause::PropertyEq { var, prop, value } => {
@@ -2411,13 +2803,22 @@ mod tests {
     fn parse_where_and_multiple() {
         let q = parse(r#"MATCH (a) WHERE a.name = "X" AND a.active = true RETURN a"#).unwrap();
         assert_eq!(q.where_clauses.len(), 2);
-        assert!(matches!(&q.where_clauses[0], WhereClause::PropertyEq { .. }));
-        assert!(matches!(&q.where_clauses[1], WhereClause::PropertyEq { .. }));
+        assert!(matches!(
+            &q.where_clauses[0],
+            WhereClause::PropertyEq { .. }
+        ));
+        assert!(matches!(
+            &q.where_clauses[1],
+            WhereClause::PropertyEq { .. }
+        ));
     }
 
     #[test]
     fn parse_vector_near() {
-        let q = parse(r#"MATCH (a:Document)-[:cites]->(b) WHERE VECTOR_NEAR(a, "doc_space", 10) RETURN b"#).unwrap();
+        let q = parse(
+            r#"MATCH (a:Document)-[:cites]->(b) WHERE VECTOR_NEAR(a, "doc_space", 10) RETURN b"#,
+        )
+        .unwrap();
         assert_eq!(q.where_clauses.len(), 1);
         match &q.where_clauses[0] {
             WhereClause::VectorNear { var, space, k, ef } => {
@@ -2455,13 +2856,20 @@ mod tests {
     fn parse_vector_near_with_property_filter() {
         let q = parse(r#"MATCH (a)-[:cites]->(b) WHERE VECTOR_NEAR(a, "docs", 5) AND b.published = true RETURN b"#).unwrap();
         assert_eq!(q.where_clauses.len(), 2);
-        assert!(matches!(&q.where_clauses[0], WhereClause::VectorNear { .. }));
-        assert!(matches!(&q.where_clauses[1], WhereClause::PropertyEq { .. }));
+        assert!(matches!(
+            &q.where_clauses[0],
+            WhereClause::VectorNear { .. }
+        ));
+        assert!(matches!(
+            &q.where_clauses[1],
+            WhereClause::PropertyEq { .. }
+        ));
     }
 
     #[test]
     fn compile_vector_near_sets_vector_near_clause() {
-        let q = parse(r#"MATCH (a)-[:cites]->(b) WHERE VECTOR_NEAR(a, "docs", 5) RETURN b"#).unwrap();
+        let q =
+            parse(r#"MATCH (a)-[:cites]->(b) WHERE VECTOR_NEAR(a, "docs", 5) RETURN b"#).unwrap();
         let compiled = compile(q);
         let vn = compiled.vector_near.expect("expected VectorNearClause");
         assert_eq!(vn.seed_variable, "a");
@@ -2526,7 +2934,10 @@ mod tests {
         // Should emit a value filter for __type = Person
         assert_eq!(compiled.value_filters.len(), 1);
         assert_eq!(compiled.value_filters[0].predicate, "__type");
-        assert_eq!(compiled.value_filters[0].value, FilterValue::Literal(Value::Text("Person".into())));
+        assert_eq!(
+            compiled.value_filters[0].value,
+            FilterValue::Literal(Value::Text("Person".into()))
+        );
     }
 
     #[test]
@@ -2551,7 +2962,10 @@ mod tests {
         assert_eq!(compiled.rules[1].head_predicate, "__tc_knows");
         // Query pattern uses derived predicate
         assert_eq!(compiled.query.patterns.len(), 1);
-        assert_eq!(compiled.query.patterns[0].predicate.as_deref(), Some("__tc_knows"));
+        assert_eq!(
+            compiled.query.patterns[0].predicate.as_deref(),
+            Some("__tc_knows")
+        );
     }
 
     #[test]
@@ -2562,7 +2976,10 @@ mod tests {
         assert_eq!(compiled.value_filters.len(), 1);
         assert_eq!(compiled.value_filters[0].var, "a");
         assert_eq!(compiled.value_filters[0].predicate, "name");
-        assert_eq!(compiled.value_filters[0].value, FilterValue::Literal(Value::Text("Alice".into())));
+        assert_eq!(
+            compiled.value_filters[0].value,
+            FilterValue::Literal(Value::Text("Alice".into()))
+        );
     }
 
     // ── apply_value_filters integration ──────────────────────────────────────
@@ -2593,7 +3010,9 @@ mod tests {
 
     fn commit(store: &TripleStore, triples: Vec<Triple>) -> polargraph_storage::Snapshot {
         let mut tx = store.begin();
-        for t in triples { tx.insert(t); }
+        for t in triples {
+            tx.insert(t);
+        }
         let ts = tx.commit().unwrap();
         store.snapshot(ts)
     }
@@ -2603,10 +3022,13 @@ mod tests {
         let (store, _dir) = open();
         let alice = NodeId::new();
 
-        let snap = commit(&store, vec![
-            prop_triple(alice, "__type", "Person"),
-            prop_triple(alice, "name", "Alice"),
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                prop_triple(alice, "__type", "Person"),
+                prop_triple(alice, "name", "Alice"),
+            ],
+        );
 
         let bindings = vec![{
             let mut b = std::collections::HashMap::new();
@@ -2614,9 +3036,11 @@ mod tests {
             b
         }];
 
-        let filters = vec![
-            ValueFilter { var: "a".into(), predicate: "__type".into(), value: FilterValue::Literal(Value::Text("Person".into())) },
-        ];
+        let filters = vec![ValueFilter {
+            var: "a".into(),
+            predicate: "__type".into(),
+            value: FilterValue::Literal(Value::Text("Person".into())),
+        }];
 
         let result = apply_value_filters(bindings, &filters, &snap).unwrap();
         assert_eq!(result.len(), 1);
@@ -2627,9 +3051,7 @@ mod tests {
         let (store, _dir) = open();
         let alice = NodeId::new();
 
-        let snap = commit(&store, vec![
-            prop_triple(alice, "__type", "Employee"),
-        ]);
+        let snap = commit(&store, vec![prop_triple(alice, "__type", "Employee")]);
 
         let bindings = vec![{
             let mut b = std::collections::HashMap::new();
@@ -2637,9 +3059,11 @@ mod tests {
             b
         }];
 
-        let filters = vec![
-            ValueFilter { var: "a".into(), predicate: "__type".into(), value: FilterValue::Literal(Value::Text("Person".into())) },
-        ];
+        let filters = vec![ValueFilter {
+            var: "a".into(),
+            predicate: "__type".into(),
+            value: FilterValue::Literal(Value::Text("Person".into())),
+        }];
 
         let result = apply_value_filters(bindings, &filters, &snap).unwrap();
         assert!(result.is_empty());
@@ -2652,13 +3076,16 @@ mod tests {
         let bob = NodeId::new();
         let carol = NodeId::new();
 
-        let snap = commit(&store, vec![
-            prop_triple(alice, "__type", "Person"),
-            prop_triple(bob, "__type", "Person"),
-            prop_triple(carol, "__type", "Robot"),
-            rel_triple(alice, "knows", bob),
-            rel_triple(alice, "knows", carol),
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                prop_triple(alice, "__type", "Person"),
+                prop_triple(bob, "__type", "Person"),
+                prop_triple(carol, "__type", "Robot"),
+                rel_triple(alice, "knows", bob),
+                rel_triple(alice, "knows", carol),
+            ],
+        );
 
         let b1 = {
             let mut b = std::collections::HashMap::new();
@@ -2674,8 +3101,16 @@ mod tests {
         };
 
         let filters = vec![
-            ValueFilter { var: "a".into(), predicate: "__type".into(), value: FilterValue::Literal(Value::Text("Person".into())) },
-            ValueFilter { var: "b".into(), predicate: "__type".into(), value: FilterValue::Literal(Value::Text("Person".into())) },
+            ValueFilter {
+                var: "a".into(),
+                predicate: "__type".into(),
+                value: FilterValue::Literal(Value::Text("Person".into())),
+            },
+            ValueFilter {
+                var: "b".into(),
+                predicate: "__type".into(),
+                value: FilterValue::Literal(Value::Text("Person".into())),
+            },
         ];
 
         let result = apply_value_filters(vec![b1, b2], &filters, &snap).unwrap();
@@ -2718,7 +3153,11 @@ mod tests {
                 // from the path — but our parser emits a single Relation clause)
                 assert_eq!(clauses.len(), 1);
                 match &clauses[0] {
-                    CreateClause::Relation { subject_var, predicate, object_var } => {
+                    CreateClause::Relation {
+                        subject_var,
+                        predicate,
+                        object_var,
+                    } => {
                         assert_eq!(subject_var, "a");
                         assert_eq!(predicate, "knows");
                         assert_eq!(object_var, "b");
@@ -2785,7 +3224,10 @@ mod tests {
             r#"MATCH (a:Person) WHERE a.name = "Alice" CREATE (b:Friend {name: "Bob"})"#,
         )
         .unwrap();
-        assert!(compiled.match_query.is_some(), "MATCH portion should be compiled");
+        assert!(
+            compiled.match_query.is_some(),
+            "MATCH portion should be compiled"
+        );
         assert_eq!(compiled.writes.len(), 1);
         match &compiled.writes[0] {
             WriteOp::CreateNode { var, label, props } => {
@@ -2891,7 +3333,10 @@ mod tests {
         assert_eq!(q.return_items.len(), 2);
         assert!(matches!(&q.return_items[0], ReturnItem::Variable(v) if v == "a"));
         match &q.return_items[1] {
-            ReturnItem::Aggregation { func: AggFunc::CountStar, alias } => {
+            ReturnItem::Aggregation {
+                func: AggFunc::CountStar,
+                alias,
+            } => {
                 assert_eq!(alias, "n");
             }
             other => panic!("expected count(*) AS n, got {:?}", other),
@@ -2902,7 +3347,10 @@ mod tests {
     fn parse_count_var_aggregation() {
         let q = parse("MATCH (a)-[:knows]->(b) RETURN a, count(b) AS n").unwrap();
         match &q.return_items[1] {
-            ReturnItem::Aggregation { func: AggFunc::Count(var), alias } => {
+            ReturnItem::Aggregation {
+                func: AggFunc::Count(var),
+                alias,
+            } => {
                 assert_eq!(var, "b");
                 assert_eq!(alias, "n");
             }
@@ -2914,7 +3362,10 @@ mod tests {
     fn parse_collect_aggregation() {
         let q = parse("MATCH (a)-[:knows]->(b) RETURN a, collect(b) AS bs").unwrap();
         match &q.return_items[1] {
-            ReturnItem::Aggregation { func: AggFunc::Collect(var), alias } => {
+            ReturnItem::Aggregation {
+                func: AggFunc::Collect(var),
+                alias,
+            } => {
                 assert_eq!(var, "b");
                 assert_eq!(alias, "bs");
             }
@@ -2956,8 +3407,9 @@ mod tests {
     #[test]
     fn parse_with_clause_with_filter() {
         let q = parse(
-            r#"MATCH (a:Person)-[:knows]->(b:Person) WITH a, b WHERE a.active = true RETURN b"#
-        ).unwrap();
+            r#"MATCH (a:Person)-[:knows]->(b:Person) WITH a, b WHERE a.active = true RETURN b"#,
+        )
+        .unwrap();
         let with_clause = q.with_clause.as_ref().expect("expected WITH clause");
         assert_eq!(with_clause.vars.len(), 2);
         assert_eq!(with_clause.filters.len(), 1);
@@ -2986,21 +3438,27 @@ mod tests {
 
     #[test]
     fn compile_with_filter_becomes_value_filter() {
-        let q = parse(
-            r#"MATCH (a:Person)-[:knows]->(b) WITH a, b WHERE a.active = true RETURN b"#
-        ).unwrap();
+        let q = parse(r#"MATCH (a:Person)-[:knows]->(b) WITH a, b WHERE a.active = true RETURN b"#)
+            .unwrap();
         let compiled = compile(q);
         // One filter from :Person label, one from WITH WHERE
-        let active_filter = compiled.value_filters.iter()
+        let active_filter = compiled
+            .value_filters
+            .iter()
             .find(|f| f.predicate == "active")
             .expect("expected active filter");
         assert_eq!(active_filter.var, "a");
-        assert!(matches!(&active_filter.value, FilterValue::Literal(Value::Bool(true))));
+        assert!(matches!(
+            &active_filter.value,
+            FilterValue::Literal(Value::Bool(true))
+        ));
     }
 
     #[test]
     fn compile_order_by_and_skip_propagated() {
-        let q = parse("MATCH (a)-[:knows]->(b) RETURN a, count(*) AS n ORDER BY n DESC SKIP 2 LIMIT 5").unwrap();
+        let q =
+            parse("MATCH (a)-[:knows]->(b) RETURN a, count(*) AS n ORDER BY n DESC SKIP 2 LIMIT 5")
+                .unwrap();
         let compiled = compile(q);
         assert_eq!(compiled.order_by.len(), 1);
         assert_eq!(compiled.order_by[0].key, "n");
@@ -3021,7 +3479,10 @@ mod tests {
     fn parse_sum_aggregation() {
         let q = parse("MATCH (a)-[:edge]->(b) RETURN a, sum(b.score) AS total").unwrap();
         match &q.return_items[1] {
-            ReturnItem::Aggregation { func: AggFunc::Sum { var, prop }, alias } => {
+            ReturnItem::Aggregation {
+                func: AggFunc::Sum { var, prop },
+                alias,
+            } => {
                 assert_eq!(var, "b");
                 assert_eq!(prop, "score");
                 assert_eq!(alias, "total");
@@ -3034,7 +3495,10 @@ mod tests {
     fn parse_avg_aggregation() {
         let q = parse("MATCH (a)-[:edge]->(b) RETURN a, avg(b.confidence) AS mean").unwrap();
         match &q.return_items[1] {
-            ReturnItem::Aggregation { func: AggFunc::Avg { var, prop }, alias } => {
+            ReturnItem::Aggregation {
+                func: AggFunc::Avg { var, prop },
+                alias,
+            } => {
                 assert_eq!(var, "b");
                 assert_eq!(prop, "confidence");
                 assert_eq!(alias, "mean");
@@ -3047,14 +3511,24 @@ mod tests {
     fn parse_min_and_max_aggregations() {
         let q = parse("MATCH (a)-[:e]->(b) RETURN min(a.val) AS lo, max(a.val) AS hi").unwrap();
         match &q.return_items[0] {
-            ReturnItem::Aggregation { func: AggFunc::Min { var, prop }, alias } => {
-                assert_eq!(var, "a"); assert_eq!(prop, "val"); assert_eq!(alias, "lo");
+            ReturnItem::Aggregation {
+                func: AggFunc::Min { var, prop },
+                alias,
+            } => {
+                assert_eq!(var, "a");
+                assert_eq!(prop, "val");
+                assert_eq!(alias, "lo");
             }
             other => panic!("expected min, got {:?}", other),
         }
         match &q.return_items[1] {
-            ReturnItem::Aggregation { func: AggFunc::Max { var, prop }, alias } => {
-                assert_eq!(var, "a"); assert_eq!(prop, "val"); assert_eq!(alias, "hi");
+            ReturnItem::Aggregation {
+                func: AggFunc::Max { var, prop },
+                alias,
+            } => {
+                assert_eq!(var, "a");
+                assert_eq!(prop, "val");
+                assert_eq!(alias, "hi");
             }
             other => panic!("expected max, got {:?}", other),
         }
@@ -3066,7 +3540,10 @@ mod tests {
         let compiled = compile(q);
         assert_eq!(compiled.aggregations.len(), 1);
         match &compiled.aggregations[0].func {
-            AggFunc::Sum { var, prop } => { assert_eq!(var, "b"); assert_eq!(prop, "score"); }
+            AggFunc::Sum { var, prop } => {
+                assert_eq!(var, "b");
+                assert_eq!(prop, "score");
+            }
             other => panic!("expected Sum, got {:?}", other),
         }
         assert_eq!(compiled.aggregations[0].alias, "total");
@@ -3078,7 +3555,9 @@ mod tests {
         let q = parse("MATCH (a)-[:knows]->(b) RETURN a, avg(b.weight) AS w").unwrap();
         let compiled = compile(q);
         assert_eq!(compiled.aggregations.len(), 1);
-        assert!(matches!(&compiled.aggregations[0].func, AggFunc::Avg { var, prop } if var == "b" && prop == "weight"));
+        assert!(
+            matches!(&compiled.aggregations[0].func, AggFunc::Avg { var, prop } if var == "b" && prop == "weight")
+        );
     }
 
     #[test]
@@ -3086,8 +3565,14 @@ mod tests {
         let q = parse("MATCH (a)-[:e]->(b) RETURN min(b.v) AS lo, max(b.v) AS hi").unwrap();
         let compiled = compile(q);
         assert_eq!(compiled.aggregations.len(), 2);
-        assert!(matches!(&compiled.aggregations[0].func, AggFunc::Min { .. }));
-        assert!(matches!(&compiled.aggregations[1].func, AggFunc::Max { .. }));
+        assert!(matches!(
+            &compiled.aggregations[0].func,
+            AggFunc::Min { .. }
+        ));
+        assert!(matches!(
+            &compiled.aggregations[1].func,
+            AggFunc::Max { .. }
+        ));
     }
 
     // ── Variable-length path (bounded hop) tests ──────────────────────────────
@@ -3113,7 +3598,10 @@ mod tests {
         let q = parse("MATCH (a)-[:hops*1..3]->(b) RETURN b").unwrap();
         let compiled = compile(q);
         // No TC rules — bounded hop uses max_hops on the VarPattern instead.
-        assert!(compiled.rules.is_empty(), "bounded hop should not emit TC rules");
+        assert!(
+            compiled.rules.is_empty(),
+            "bounded hop should not emit TC rules"
+        );
         assert_eq!(compiled.query.patterns.len(), 1);
         let p = &compiled.query.patterns[0];
         assert_eq!(p.max_hops, Some(3));
@@ -3124,7 +3612,11 @@ mod tests {
     fn compile_unlimited_recursive_still_emits_tc_rules() {
         let q = parse("MATCH (a)-[:knows*]->(b) RETURN b").unwrap();
         let compiled = compile(q);
-        assert_eq!(compiled.rules.len(), 2, "unlimited recursive should emit base + recursive TC rules");
+        assert_eq!(
+            compiled.rules.len(),
+            2,
+            "unlimited recursive should emit base + recursive TC rules"
+        );
         assert_eq!(compiled.query.patterns[0].max_hops, None);
     }
 
@@ -3136,20 +3628,22 @@ mod tests {
         let c = NodeId::new();
         let d = NodeId::new();
         // chain: a → b → c → d
-        let snap = commit(&store, vec![
-            rel_triple(a, "link", b),
-            rel_triple(b, "link", c),
-            rel_triple(c, "link", d),
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel_triple(a, "link", b),
+                rel_triple(b, "link", c),
+                rel_triple(c, "link", d),
+            ],
+        );
 
         // max_hops=2: should reach b and c, not d
         let q = parse("MATCH (a)-[:link*1..2]->(b) RETURN b").unwrap();
         let compiled = compile(q);
 
         let raw = crate::datalog::execute_query(&compiled.query, &snap, None, None).unwrap();
-        let found: std::collections::HashSet<NodeId> = raw.iter()
-            .filter_map(|b| b.get("b").copied())
-            .collect();
+        let found: std::collections::HashSet<NodeId> =
+            raw.iter().filter_map(|b| b.get("b").copied()).collect();
 
         // a is the start — but it's not bound; the query starts with a free subject
         // so we get all pairs. Filter to those where subject == a.
@@ -3158,8 +3652,10 @@ mod tests {
         // The pattern subject=Var("a"), object=Var("b") with max_hops=2:
         // For each unique "a" binding, BFS up to 2 hops.
         // We just verify d is NOT reachable if we start from the node that is 3 hops away.
-        assert!(!found.contains(&d) || found.len() > 1,
-            "d should only appear in the result when starting from a is 3 hops");
+        assert!(
+            !found.contains(&d) || found.len() > 1,
+            "d should only appear in the result when starting from a is 3 hops"
+        );
     }
 
     // ── CALL / YIELD syntax tests ─────────────────────────────────────────────
@@ -3185,18 +3681,24 @@ mod tests {
         assert_eq!(q.match_patterns.len(), 1);
         assert_eq!(q.match_patterns[0].hops[0].rel.predicate, "related");
 
-        let ret_vars: Vec<&str> = q.return_items.iter().filter_map(|r| {
-            if let ReturnItem::Variable(v) = r { Some(v.as_str()) } else { None }
-        }).collect();
+        let ret_vars: Vec<&str> = q
+            .return_items
+            .iter()
+            .filter_map(|r| {
+                if let ReturnItem::Variable(v) = r {
+                    Some(v.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(ret_vars, vec!["other", "score"]);
     }
 
     #[test]
     fn parse_call_yield_with_ef() {
-        let q = parse(
-            r#"CALL VECTOR_NEAR(vec, "docs", 10, ef=200) YIELD doc, dist RETURN doc"#,
-        )
-        .unwrap();
+        let q = parse(r#"CALL VECTOR_NEAR(vec, "docs", 10, ef=200) YIELD doc, dist RETURN doc"#)
+            .unwrap();
         let call = q.call_clause.as_ref().expect("expected CallClause");
         assert_eq!(call.ef, Some(200));
         assert_eq!(call.yield_vars, vec!["doc", "dist"]);
@@ -3204,12 +3706,12 @@ mod tests {
 
     #[test]
     fn compile_call_yield_sets_vector_near_and_score_variable() {
-        let q = parse(
-            r#"CALL VECTOR_NEAR(qvec, "embs", 5) YIELD node, score RETURN node, score"#,
-        )
-        .unwrap();
+        let q = parse(r#"CALL VECTOR_NEAR(qvec, "embs", 5) YIELD node, score RETURN node, score"#)
+            .unwrap();
         let compiled = compile(q);
-        let vn = compiled.vector_near.expect("expected VectorNearClause from CALL");
+        let vn = compiled
+            .vector_near
+            .expect("expected VectorNearClause from CALL");
         assert_eq!(vn.seed_variable, "node");
         assert_eq!(vn.space, "embs");
         assert_eq!(vn.k, 5);
@@ -3219,10 +3721,7 @@ mod tests {
     #[test]
     fn call_yield_without_match_is_valid() {
         // CALL alone (no MATCH) is legal — match_patterns will be empty.
-        let q = parse(
-            r#"CALL VECTOR_NEAR(v, "s", 3) YIELD node RETURN node"#,
-        )
-        .unwrap();
+        let q = parse(r#"CALL VECTOR_NEAR(v, "s", 3) YIELD node RETURN node"#).unwrap();
         assert!(q.match_patterns.is_empty());
         let call = q.call_clause.as_ref().expect("expected CallClause");
         assert_eq!(call.yield_vars, vec!["node"]);
@@ -3237,8 +3736,10 @@ mod tests {
         let r = parse(r#"CALL FULL_TEXT_SEARCH("index", "query") YIELD node RETURN node"#);
         assert!(r.is_err(), "unknown procedure should fail");
         let err = r.unwrap_err().to_string();
-        assert!(err.contains("FULL_TEXT_SEARCH") || err.contains("unknown procedure"),
-            "error message should name the bad procedure: {err}");
+        assert!(
+            err.contains("FULL_TEXT_SEARCH") || err.contains("unknown procedure"),
+            "error message should name the bad procedure: {err}"
+        );
     }
 
     #[test]
@@ -3250,7 +3751,8 @@ mod tests {
     #[test]
     fn where_vector_near_score_variable_is_none() {
         // Existing WHERE form must still compile with score_variable = None.
-        let q = parse(r#"MATCH (a)-[:cites]->(b) WHERE VECTOR_NEAR(a, "docs", 5) RETURN b"#).unwrap();
+        let q =
+            parse(r#"MATCH (a)-[:cites]->(b) WHERE VECTOR_NEAR(a, "docs", 5) RETURN b"#).unwrap();
         let compiled = compile(q);
         let vn = compiled.vector_near.expect("VectorNearClause");
         assert_eq!(vn.score_variable, None);
@@ -3262,10 +3764,10 @@ mod tests {
         let a = NodeId::new();
         let b = NodeId::new();
         let c = NodeId::new();
-        commit(&store, vec![
-            rel_triple(a, "edge", b),
-            rel_triple(b, "edge", c),
-        ]);
+        commit(
+            &store,
+            vec![rel_triple(a, "edge", b), rel_triple(b, "edge", c)],
+        );
 
         // Add a prop to bind `a` in the WHERE clause
         let snap = {
@@ -3283,8 +3785,15 @@ mod tests {
         let raw = crate::datalog::execute_query(&compiled.query, &snap, None, None).unwrap();
         let filtered = apply_value_filters(raw, &compiled.value_filters, &snap).unwrap();
 
-        let found: Vec<NodeId> = filtered.iter().filter_map(|b| b.get("b").copied()).collect();
-        assert_eq!(found.len(), 1, "only direct neighbour should be reachable at depth 1");
+        let found: Vec<NodeId> = filtered
+            .iter()
+            .filter_map(|b| b.get("b").copied())
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "only direct neighbour should be reachable at depth 1"
+        );
         assert_eq!(found[0], b);
     }
 
@@ -3297,21 +3806,31 @@ mod tests {
         let compiled = compile(q);
 
         // The value filter should contain a Param placeholder.
-        let name_filter = compiled.value_filters.iter()
+        let name_filter = compiled
+            .value_filters
+            .iter()
             .find(|f| f.predicate == "name")
             .expect("expected name filter");
-        assert!(matches!(&name_filter.value, FilterValue::Param(n) if n == "name"),
-            "expected FilterValue::Param(\"name\"), got {:?}", name_filter.value);
+        assert!(
+            matches!(&name_filter.value, FilterValue::Param(n) if n == "name"),
+            "expected FilterValue::Param(\"name\"), got {:?}",
+            name_filter.value
+        );
 
         // After substitution, the placeholder should become a literal.
         let mut params = std::collections::HashMap::new();
         params.insert("name".to_string(), Value::Text("Alice".to_string()));
         let substituted = compiled.substitute_params(&params).unwrap();
-        let name_filter = substituted.value_filters.iter()
+        let name_filter = substituted
+            .value_filters
+            .iter()
             .find(|f| f.predicate == "name")
             .expect("expected name filter after substitution");
-        assert!(matches!(&name_filter.value, FilterValue::Literal(Value::Text(s)) if s == "Alice"),
-            "expected FilterValue::Literal(Text(\"Alice\")), got {:?}", name_filter.value);
+        assert!(
+            matches!(&name_filter.value, FilterValue::Literal(Value::Text(s)) if s == "Alice"),
+            "expected FilterValue::Literal(Text(\"Alice\")), got {:?}",
+            name_filter.value
+        );
     }
 
     #[test]
@@ -3319,7 +3838,9 @@ mod tests {
         let q = parse(r#"MATCH (a:Product) WHERE a.price = $min_price RETURN a"#).unwrap();
         let compiled = compile(q);
 
-        let price_filter = compiled.value_filters.iter()
+        let price_filter = compiled
+            .value_filters
+            .iter()
             .find(|f| f.predicate == "price")
             .expect("expected price filter");
         assert!(matches!(&price_filter.value, FilterValue::Param(n) if n == "min_price"));
@@ -3327,10 +3848,15 @@ mod tests {
         let mut params = std::collections::HashMap::new();
         params.insert("min_price".to_string(), Value::Int(42));
         let substituted = compiled.substitute_params(&params).unwrap();
-        let price_filter = substituted.value_filters.iter()
+        let price_filter = substituted
+            .value_filters
+            .iter()
             .find(|f| f.predicate == "price")
             .expect("expected price filter after substitution");
-        assert!(matches!(&price_filter.value, FilterValue::Literal(Value::Int(42))));
+        assert!(matches!(
+            &price_filter.value,
+            FilterValue::Literal(Value::Int(42))
+        ));
     }
 
     #[test]
@@ -3343,8 +3869,10 @@ mod tests {
         let result = compiled.substitute_params(&params);
         assert!(result.is_err(), "expected error for missing parameter");
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("missing") && msg.contains("missing"),
-            "error should mention the missing param: {msg}");
+        assert!(
+            msg.contains("missing") && msg.contains("missing"),
+            "error should mention the missing param: {msg}"
+        );
     }
 
     #[test]
@@ -3353,19 +3881,26 @@ mod tests {
         let q = parse(r#"MATCH (a:Person)-[:knows*]->(b) WHERE a.name = $name RETURN b"#).unwrap();
         let compiled = compile(q);
 
-        let name_filter = compiled.value_filters.iter()
+        let name_filter = compiled
+            .value_filters
+            .iter()
             .find(|f| f.predicate == "name")
             .expect("expected name filter");
         assert!(matches!(&name_filter.value, FilterValue::Param(n) if n == "name"));
 
         // Verify the transitive rule was generated.
-        assert!(!compiled.rules.is_empty(), "expected transitive rules for [:knows*]");
+        assert!(
+            !compiled.rules.is_empty(),
+            "expected transitive rules for [:knows*]"
+        );
 
         // Substitution should still work.
         let mut params = std::collections::HashMap::new();
         params.insert("name".to_string(), Value::Text("Bob".to_string()));
         let substituted = compiled.substitute_params(&params).unwrap();
-        let name_filter = substituted.value_filters.iter()
+        let name_filter = substituted
+            .value_filters
+            .iter()
             .find(|f| f.predicate == "name")
             .expect("expected name filter after substitution");
         assert!(matches!(&name_filter.value, FilterValue::Literal(Value::Text(s)) if s == "Bob"));
@@ -3390,8 +3925,12 @@ mod tests {
     fn parse_prop_projection_multiple() {
         let q = parse("MATCH (n) RETURN n.name, n.description").unwrap();
         assert_eq!(q.return_items.len(), 2);
-        assert!(matches!(&q.return_items[0], ReturnItem::PropProjection { var, prop } if var == "n" && prop == "name"));
-        assert!(matches!(&q.return_items[1], ReturnItem::PropProjection { var, prop } if var == "n" && prop == "description"));
+        assert!(
+            matches!(&q.return_items[0], ReturnItem::PropProjection { var, prop } if var == "n" && prop == "name")
+        );
+        assert!(
+            matches!(&q.return_items[1], ReturnItem::PropProjection { var, prop } if var == "n" && prop == "description")
+        );
     }
 
     #[test]
@@ -3399,17 +3938,22 @@ mod tests {
         let q = parse("MATCH (n)-[:knows]->(m) RETURN n, m.name").unwrap();
         assert_eq!(q.return_items.len(), 2);
         assert!(matches!(&q.return_items[0], ReturnItem::Variable(v) if v == "n"));
-        assert!(matches!(&q.return_items[1], ReturnItem::PropProjection { var, prop } if var == "m" && prop == "name"));
+        assert!(
+            matches!(&q.return_items[1], ReturnItem::PropProjection { var, prop } if var == "m" && prop == "name")
+        );
     }
 
     #[test]
     fn compile_prop_projection_populates_field() {
         let q = parse("MATCH (n) RETURN n.name, n.description").unwrap();
         let compiled = compile(q);
-        assert_eq!(compiled.prop_projections, vec![
-            ("n".to_string(), "name".to_string()),
-            ("n".to_string(), "description".to_string()),
-        ]);
+        assert_eq!(
+            compiled.prop_projections,
+            vec![
+                ("n".to_string(), "name".to_string()),
+                ("n".to_string(), "description".to_string()),
+            ]
+        );
         // No plain return_vars when only prop projections are used.
         assert!(compiled.return_vars.is_empty());
     }
@@ -3419,18 +3963,24 @@ mod tests {
         let q = parse("MATCH (n)-[:knows]->(m) RETURN n, m.name").unwrap();
         let compiled = compile(q);
         assert_eq!(compiled.return_vars, vec!["n"]);
-        assert_eq!(compiled.prop_projections, vec![("m".to_string(), "name".to_string())]);
+        assert_eq!(
+            compiled.prop_projections,
+            vec![("m".to_string(), "name".to_string())]
+        );
     }
 
     #[test]
     fn prop_projection_resolves_values_from_snapshot() {
         let (store, _dir) = open();
         let n = NodeId::new();
-        let snap = commit(&store, vec![
-            prop_triple(n, "__type", "Crate"),
-            prop_triple(n, "name", "serde"),
-            prop_triple(n, "description", "Rust serialization framework"),
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                prop_triple(n, "__type", "Crate"),
+                prop_triple(n, "name", "serde"),
+                prop_triple(n, "description", "Rust serialization framework"),
+            ],
+        );
 
         // Use (n:Crate) label syntax so the binding pattern for `n` is emitted.
         let q = parse("MATCH (n:Crate) RETURN n.name, n.description").unwrap();
@@ -3460,8 +4010,14 @@ mod tests {
             }
         }
 
-        assert_eq!(values.get("n.name"), Some(&Value::Text("serde".to_string())));
-        assert_eq!(values.get("n.description"), Some(&Value::Text("Rust serialization framework".to_string())));
+        assert_eq!(
+            values.get("n.name"),
+            Some(&Value::Text("serde".to_string()))
+        );
+        assert_eq!(
+            values.get("n.description"),
+            Some(&Value::Text("Rust serialization framework".to_string()))
+        );
     }
 
     // ── id(r) / elementId(r) tests ────────────────────────────────────────────
@@ -3469,18 +4025,34 @@ mod tests {
     #[test]
     fn parse_id_function() {
         let q = parse("MATCH (a)-[r:DEPENDS_ON]->(b) RETURN a, b, id(r)").unwrap();
-        let edge_id_items: Vec<_> = q.return_items.iter().filter_map(|item| {
-            if let ReturnItem::EdgeId { rel_var } = item { Some(rel_var.as_str()) } else { None }
-        }).collect();
+        let edge_id_items: Vec<_> = q
+            .return_items
+            .iter()
+            .filter_map(|item| {
+                if let ReturnItem::EdgeId { rel_var } = item {
+                    Some(rel_var.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(edge_id_items, vec!["r"]);
     }
 
     #[test]
     fn parse_element_id_function() {
         let q = parse("MATCH (a)-[r:DEPENDS_ON]->(b) RETURN a, b, elementId(r)").unwrap();
-        let edge_id_items: Vec<_> = q.return_items.iter().filter_map(|item| {
-            if let ReturnItem::EdgeId { rel_var } = item { Some(rel_var.as_str()) } else { None }
-        }).collect();
+        let edge_id_items: Vec<_> = q
+            .return_items
+            .iter()
+            .filter_map(|item| {
+                if let ReturnItem::EdgeId { rel_var } = item {
+                    Some(rel_var.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(edge_id_items, vec!["r"]);
     }
 
@@ -3504,7 +4076,11 @@ mod tests {
         // r should be in edge_vars so WHERE clauses on it are handled correctly
         assert!(compiled.edge_vars.contains("r"), "r should be in edge_vars");
         // The VarPattern for the hop should have edge_var = Some("r")
-        let vp = compiled.query.patterns.iter().find(|p| p.predicate.as_deref() == Some("DEPENDS_ON"));
+        let vp = compiled
+            .query
+            .patterns
+            .iter()
+            .find(|p| p.predicate.as_deref() == Some("DEPENDS_ON"));
         assert!(vp.is_some(), "DEPENDS_ON pattern should exist");
         assert_eq!(vp.unwrap().edge_var.as_deref(), Some("r"));
     }
@@ -3540,7 +4116,10 @@ mod tests {
         // r is bound as NodeId bytes reinterpreting EdgeId
         let r_as_node = binding.get("r").expect("r should be bound");
         let recovered_edge = EdgeId(r_as_node.0);
-        assert_eq!(recovered_edge, edge_id, "recovered EdgeId from binding should match");
+        assert_eq!(
+            recovered_edge, edge_id,
+            "recovered EdgeId from binding should match"
+        );
     }
 
     // ── id(n) / elementId(n) tests ────────────────────────────────────────────
@@ -3601,7 +4180,10 @@ mod tests {
         assert_eq!(f.predicate, "weight");
         assert_eq!(f.op, ComparisonOp::Eq);
         assert_eq!(f.value, Value::Int(5));
-        assert!(compiled.value_filters.is_empty(), "should not appear in value_filters");
+        assert!(
+            compiled.value_filters.is_empty(),
+            "should not appear in value_filters"
+        );
     }
 
     #[test]
@@ -3629,15 +4211,24 @@ mod tests {
     fn edge_prop_projection_routes_to_edge_prop_projections() {
         let q = parse("MATCH (a)-[r:knows]->(b) RETURN r.since").unwrap();
         let compiled = compile(q);
-        assert_eq!(compiled.edge_prop_projections, vec![("r".to_string(), "since".to_string())]);
-        assert!(compiled.prop_projections.is_empty(), "should not be in node prop_projections");
+        assert_eq!(
+            compiled.edge_prop_projections,
+            vec![("r".to_string(), "since".to_string())]
+        );
+        assert!(
+            compiled.prop_projections.is_empty(),
+            "should not be in node prop_projections"
+        );
     }
 
     #[test]
     fn node_prop_projection_not_in_edge_prop_projections() {
         let q = parse("MATCH (n)-[:knows]->(m) RETURN n.name").unwrap();
         let compiled = compile(q);
-        assert_eq!(compiled.prop_projections, vec![("n".to_string(), "name".to_string())]);
+        assert_eq!(
+            compiled.prop_projections,
+            vec![("n".to_string(), "name".to_string())]
+        );
         assert!(compiled.edge_prop_projections.is_empty());
     }
 }

@@ -68,7 +68,9 @@ fn scan_by_subject_returns_all_triples_for_node() {
     let carol = NodeId::new();
 
     store.insert(&relation(alice, "reports-to", bob)).unwrap();
-    store.insert(&relation(alice, "collaborates-with", carol)).unwrap();
+    store
+        .insert(&relation(alice, "collaborates-with", carol))
+        .unwrap();
     store.insert(&property(alice, "name", "Alice")).unwrap();
 
     let triples = store.scan_by_subject(&alice).unwrap();
@@ -91,7 +93,9 @@ fn scan_by_subject_predicate_filters_correctly() {
     store.insert(&relation(alice, "reports-to", carol)).unwrap();
     store.insert(&relation(alice, "manages", bob)).unwrap();
 
-    let triples = store.scan_by_subject_predicate(&alice, "reports-to").unwrap();
+    let triples = store
+        .scan_by_subject_predicate(&alice, "reports-to")
+        .unwrap();
     assert_eq!(triples.len(), 2);
     for t in &triples {
         assert_eq!(t.predicate().0, "reports-to");
@@ -188,7 +192,9 @@ fn scan_by_predicate_object_with_wrong_object_returns_empty() {
     store.insert(&relation(alice, "reports-to", bob)).unwrap();
 
     // carol is not the object of any reports-to edge
-    let triples = store.scan_by_predicate_object("reports-to", &carol).unwrap();
+    let triples = store
+        .scan_by_predicate_object("reports-to", &carol)
+        .unwrap();
     assert!(triples.is_empty());
 }
 
@@ -209,7 +215,10 @@ fn scan_by_subject_predicate_unknown_predicate_returns_empty() {
     let b = NodeId::new();
     store.insert(&relation(a, "knows", b)).unwrap();
 
-    assert!(store.scan_by_subject_predicate(&a, "never-inserted").unwrap().is_empty());
+    assert!(store
+        .scan_by_subject_predicate(&a, "never-inserted")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -224,7 +233,11 @@ fn triples_for_node_a_do_not_bleed_into_scan_for_node_b() {
     store.insert(&property(a, "name", "A")).unwrap();
 
     let b_triples = store.scan_by_subject(&b).unwrap();
-    assert!(b_triples.is_empty(), "b has no triples but got {}", b_triples.len());
+    assert!(
+        b_triples.is_empty(),
+        "b has no triples but got {}",
+        b_triples.len()
+    );
 }
 
 // ── 3. Property value round-trips ─────────────────────────────────────────────
@@ -251,19 +264,31 @@ fn property_null_round_trip() {
 
 #[test]
 fn property_bool_true_round_trip() {
-    assert_eq!(insert_and_scan_property(Value::Bool(true)), Value::Bool(true));
+    assert_eq!(
+        insert_and_scan_property(Value::Bool(true)),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn property_bool_false_round_trip() {
-    assert_eq!(insert_and_scan_property(Value::Bool(false)), Value::Bool(false));
+    assert_eq!(
+        insert_and_scan_property(Value::Bool(false)),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn property_int_round_trip() {
     assert_eq!(insert_and_scan_property(Value::Int(42)), Value::Int(42));
-    assert_eq!(insert_and_scan_property(Value::Int(i64::MIN)), Value::Int(i64::MIN));
-    assert_eq!(insert_and_scan_property(Value::Int(i64::MAX)), Value::Int(i64::MAX));
+    assert_eq!(
+        insert_and_scan_property(Value::Int(i64::MIN)),
+        Value::Int(i64::MIN)
+    );
+    assert_eq!(
+        insert_and_scan_property(Value::Int(i64::MAX)),
+        Value::Int(i64::MAX)
+    );
 }
 
 #[test]
@@ -305,7 +330,8 @@ fn multiple_property_types_on_same_node() {
     assert_eq!(triples.len(), 3);
 
     let find_value = |pred: &str| -> Value {
-        triples.iter()
+        triples
+            .iter()
             .find(|t| t.predicate().0 == pred)
             .and_then(|t| match t {
                 Triple::Property { value, .. } => Some(value.clone()),
@@ -337,9 +363,14 @@ fn edge_id_survives_insert_and_scan() {
 
     match &triples[0] {
         Triple::Relation { edge_id, .. } => {
-            assert_eq!(*edge_id, original_edge_id, "EdgeId must survive the round-trip");
+            assert_eq!(
+                *edge_id, original_edge_id,
+                "EdgeId must survive the round-trip"
+            );
         }
-        Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => panic!("expected Relation"),
+        Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => {
+            panic!("expected Relation")
+        }
     }
 }
 
@@ -352,16 +383,23 @@ fn two_edges_have_distinct_edge_ids_after_scan() {
     let eid1 = EdgeId::new();
     let eid2 = EdgeId::new();
 
-    store.insert(&relation_with_edge(a, "knows", b, eid1)).unwrap();
-    store.insert(&relation_with_edge(a, "knows", c, eid2)).unwrap();
+    store
+        .insert(&relation_with_edge(a, "knows", b, eid1))
+        .unwrap();
+    store
+        .insert(&relation_with_edge(a, "knows", c, eid2))
+        .unwrap();
 
     let triples = store.scan_by_subject(&a).unwrap();
     assert_eq!(triples.len(), 2);
 
-    let edge_ids: Vec<EdgeId> = triples.iter().filter_map(|t| match t {
-        Triple::Relation { edge_id, .. } => Some(*edge_id),
-        _ => None,
-    }).collect();
+    let edge_ids: Vec<EdgeId> = triples
+        .iter()
+        .filter_map(|t| match t {
+            Triple::Relation { edge_id, .. } => Some(*edge_id),
+            _ => None,
+        })
+        .collect();
 
     assert!(edge_ids.contains(&eid1));
     assert!(edge_ids.contains(&eid2));
@@ -513,7 +551,13 @@ fn relation_subject_field_is_correct_after_scan() {
 fn trigram_insert_and_search() {
     let (store, _dir) = open_store();
     let alice = NodeId::new();
-    store.insert(&property(alice, "name", Value::Text("Alice Smith".to_string()))).unwrap();
+    store
+        .insert(&property(
+            alice,
+            "name",
+            Value::Text("Alice Smith".to_string()),
+        ))
+        .unwrap();
 
     let ts = Timestamp(store.oracle_ts());
     let hits = store.text_search("name", "Smith", ts, None).unwrap();
@@ -525,7 +569,9 @@ fn trigram_insert_and_search() {
 fn trigram_no_match_returns_empty() {
     let (store, _dir) = open_store();
     let node = NodeId::new();
-    store.insert(&property(node, "name", Value::Text("Alice".to_string()))).unwrap();
+    store
+        .insert(&property(node, "name", Value::Text("Alice".to_string())))
+        .unwrap();
 
     let ts = Timestamp(store.oracle_ts());
     let hits = store.text_search("name", "Bob", ts, None).unwrap();
@@ -537,8 +583,20 @@ fn trigram_multi_intersection() {
     let (store, _dir) = open_store();
     let alice = NodeId::new();
     let bob = NodeId::new();
-    store.insert(&property(alice, "bio", Value::Text("database engineer".to_string()))).unwrap();
-    store.insert(&property(bob, "bio", Value::Text("software developer".to_string()))).unwrap();
+    store
+        .insert(&property(
+            alice,
+            "bio",
+            Value::Text("database engineer".to_string()),
+        ))
+        .unwrap();
+    store
+        .insert(&property(
+            bob,
+            "bio",
+            Value::Text("software developer".to_string()),
+        ))
+        .unwrap();
 
     let ts = Timestamp(store.oracle_ts());
     // "engineer" contains trigrams unique to alice's value
@@ -554,9 +612,13 @@ fn trigram_stale_entries_eliminated_by_snapshot_confirmation() {
     // no longer matches the live value.
     let (store, _dir) = open_store();
     let node = NodeId::new();
-    store.insert(&property(node, "name", Value::Text("Alice".to_string()))).unwrap();
+    store
+        .insert(&property(node, "name", Value::Text("Alice".to_string())))
+        .unwrap();
     // Overwrite with a completely different value
-    store.insert(&property(node, "name", Value::Text("Charlie".to_string()))).unwrap();
+    store
+        .insert(&property(node, "name", Value::Text("Charlie".to_string())))
+        .unwrap();
 
     let ts = Timestamp(store.oracle_ts());
     // "Alice" is stale — snapshot confirmation must filter it out
@@ -575,9 +637,13 @@ fn trigram_short_string_and_empty_string() {
     let a = NodeId::new();
     let b = NodeId::new();
     // Two-character value — padded trigram
-    store.insert(&property(a, "tag", Value::Text("ab".to_string()))).unwrap();
+    store
+        .insert(&property(a, "tag", Value::Text("ab".to_string())))
+        .unwrap();
     // Empty string — no trigrams written, so no hits
-    store.insert(&property(b, "tag", Value::Text("".to_string()))).unwrap();
+    store
+        .insert(&property(b, "tag", Value::Text("".to_string())))
+        .unwrap();
 
     let ts = Timestamp(store.oracle_ts());
     // Searching for "ab" finds the two-char node
@@ -596,7 +662,9 @@ fn trigram_predicate_isolation() {
     // surface results from another predicate.
     let (store, _dir) = open_store();
     let node = NodeId::new();
-    store.insert(&property(node, "name", Value::Text("Alice".to_string()))).unwrap();
+    store
+        .insert(&property(node, "name", Value::Text("Alice".to_string())))
+        .unwrap();
 
     let ts = Timestamp(store.oracle_ts());
     // Correct predicate finds the node

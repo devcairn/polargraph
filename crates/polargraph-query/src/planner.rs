@@ -41,7 +41,11 @@ pub struct Pattern {
 
 impl Pattern {
     pub fn new() -> Self {
-        Self { subject: None, predicate: None, object: None }
+        Self {
+            subject: None,
+            predicate: None,
+            object: None,
+        }
     }
 
     pub fn with_subject(mut self, s: NodeId) -> Self {
@@ -61,7 +65,11 @@ impl Pattern {
 
     /// Returns the bind mask as (subject_bound, predicate_bound, object_bound).
     pub fn bind_mask(&self) -> (bool, bool, bool) {
-        (self.subject.is_some(), self.predicate.is_some(), self.object.is_some())
+        (
+            self.subject.is_some(),
+            self.predicate.is_some(),
+            self.object.is_some(),
+        )
     }
 }
 
@@ -93,7 +101,11 @@ pub struct SchemaHints {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexChoice {
     /// SPO exact lookup: all three slots bound.
-    SpoExact { subject: NodeId, predicate: String, object: NodeId },
+    SpoExact {
+        subject: NodeId,
+        predicate: String,
+        object: NodeId,
+    },
     /// SPO prefix on (subject, predicate).
     SpoPrefixSP { subject: NodeId, predicate: String },
     /// SPO prefix on subject only (object is unbound).
@@ -170,13 +182,26 @@ pub struct AnnotationPattern {
 }
 
 impl AnnotationPattern {
-    pub fn new() -> Self { Self { edge: None, predicate: None } }
-    pub fn with_edge(mut self, e: polargraph_core::id::EdgeId) -> Self { self.edge = Some(e); self }
-    pub fn with_predicate(mut self, p: impl Into<String>) -> Self { self.predicate = Some(p.into()); self }
+    pub fn new() -> Self {
+        Self {
+            edge: None,
+            predicate: None,
+        }
+    }
+    pub fn with_edge(mut self, e: polargraph_core::id::EdgeId) -> Self {
+        self.edge = Some(e);
+        self
+    }
+    pub fn with_predicate(mut self, p: impl Into<String>) -> Self {
+        self.predicate = Some(p.into());
+        self
+    }
 }
 
 impl Default for AnnotationPattern {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Index choice for annotation CF scans.
@@ -185,7 +210,10 @@ pub enum AnnotationIndexChoice {
     /// EPA scan by edge_id (all predicates on that edge).
     EpaByEdge { edge: polargraph_core::id::EdgeId },
     /// EPA scan by (edge_id, predicate) — point lookup.
-    EpaByEdgePred { edge: polargraph_core::id::EdgeId, predicate: String },
+    EpaByEdgePred {
+        edge: polargraph_core::id::EdgeId,
+        predicate: String,
+    },
     /// PEA scan by predicate (all edges with that annotation).
     PeaByPred { predicate: String },
     /// Full EPA scan — avoid; no useful prefix.
@@ -199,8 +227,12 @@ pub fn choose_annotation_index(pattern: &AnnotationPattern) -> AnnotationIndexCh
             edge: pattern.edge.unwrap(),
             predicate: pattern.predicate.clone().unwrap(),
         },
-        (true, false) => AnnotationIndexChoice::EpaByEdge { edge: pattern.edge.unwrap() },
-        (false, true) => AnnotationIndexChoice::PeaByPred { predicate: pattern.predicate.clone().unwrap() },
+        (true, false) => AnnotationIndexChoice::EpaByEdge {
+            edge: pattern.edge.unwrap(),
+        },
+        (false, true) => AnnotationIndexChoice::PeaByPred {
+            predicate: pattern.predicate.clone().unwrap(),
+        },
         (false, false) => AnnotationIndexChoice::EpaFull,
     }
 }
@@ -221,7 +253,10 @@ mod tests {
     fn all_bound_chooses_spo_exact() {
         let s = node(1);
         let o = node(2);
-        let p = Pattern::new().with_subject(s).with_predicate("knows").with_object(o);
+        let p = Pattern::new()
+            .with_subject(s)
+            .with_predicate("knows")
+            .with_object(o);
         assert!(matches!(choose_index(&p), IndexChoice::SpoExact { .. }));
     }
 
@@ -287,9 +322,16 @@ mod tests {
         let s = node(1);
         let o = node(2);
         assert_eq!(Pattern::new().bind_mask(), (false, false, false));
-        assert_eq!(Pattern::new().with_subject(s).bind_mask(), (true, false, false));
         assert_eq!(
-            Pattern::new().with_subject(s).with_predicate("p").with_object(o).bind_mask(),
+            Pattern::new().with_subject(s).bind_mask(),
+            (true, false, false)
+        );
+        assert_eq!(
+            Pattern::new()
+                .with_subject(s)
+                .with_predicate("p")
+                .with_object(o)
+                .bind_mask(),
             (true, true, true)
         );
     }

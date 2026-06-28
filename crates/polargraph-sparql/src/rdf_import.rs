@@ -36,8 +36,7 @@ pub fn bnode_to_node_id(bnode_id: &str) -> NodeId {
 /// Derive a deterministic [`EdgeId`] from the three IRI/blank-node strings of
 /// a Relation triple. The same (S, P, O) combination always yields the same EdgeId.
 pub fn edge_id_for(subject: &str, predicate: &str, object: &str) -> EdgeId {
-    let mut buf =
-        Vec::with_capacity(subject.len() + predicate.len() + object.len() + 2);
+    let mut buf = Vec::with_capacity(subject.len() + predicate.len() + object.len() + 2);
     buf.extend_from_slice(subject.as_bytes());
     buf.push(b'\x00');
     buf.extend_from_slice(predicate.as_bytes());
@@ -84,26 +83,27 @@ fn xsd_literal_to_value(value: &str, datatype_iri: &str) -> Value {
         | "http://www.w3.org/2001/XMLSchema#short"
         | "http://www.w3.org/2001/XMLSchema#byte"
         | "http://www.w3.org/2001/XMLSchema#nonNegativeInteger"
-        | "http://www.w3.org/2001/XMLSchema#positiveInteger" => {
-            value.parse::<i64>().map(Value::Int).unwrap_or_else(|_| Value::Text(value.to_string()))
-        }
+        | "http://www.w3.org/2001/XMLSchema#positiveInteger" => value
+            .parse::<i64>()
+            .map(Value::Int)
+            .unwrap_or_else(|_| Value::Text(value.to_string())),
         "http://www.w3.org/2001/XMLSchema#double"
         | "http://www.w3.org/2001/XMLSchema#float"
-        | "http://www.w3.org/2001/XMLSchema#decimal" => {
-            value.parse::<f64>().map(Value::Float).unwrap_or_else(|_| Value::Text(value.to_string()))
-        }
-        "http://www.w3.org/2001/XMLSchema#boolean" => {
-            Value::Bool(matches!(value, "true" | "1"))
-        }
+        | "http://www.w3.org/2001/XMLSchema#decimal" => value
+            .parse::<f64>()
+            .map(Value::Float)
+            .unwrap_or_else(|_| Value::Text(value.to_string())),
+        "http://www.w3.org/2001/XMLSchema#boolean" => Value::Bool(matches!(value, "true" | "1")),
         _ => Value::Text(value.to_string()),
     }
 }
 
 fn rio_literal_to_imported(lit: &Literal<'_>) -> (Value, String) {
     match lit {
-        Literal::Simple { value } => {
-            (Value::Text(value.to_string()), "http://www.w3.org/2001/XMLSchema#string".to_string())
-        }
+        Literal::Simple { value } => (
+            Value::Text(value.to_string()),
+            "http://www.w3.org/2001/XMLSchema#string".to_string(),
+        ),
         Literal::LanguageTaggedString { value, language } => {
             (Value::Text(value.to_string()), format!("lang:{}", language))
         }
@@ -120,7 +120,10 @@ fn rio_subject_to_parts(s: &Subject<'_>) -> (String, bool) {
         Subject::BlankNode(b) => (b.id.to_string(), true),
         Subject::Triple(t) => {
             // RDF-star: quoted triple as subject — render as N-Triples-star string.
-            (format!("<< {} {} {} >>", t.subject, t.predicate, t.object), false)
+            (
+                format!("<< {} {} {} >>", t.subject, t.predicate, t.object),
+                false,
+            )
         }
     }
 }
@@ -158,10 +161,12 @@ pub fn parse_ntriples(input: &[u8]) -> Result<Vec<ImportedTriple>, String> {
     let mut parser = NTriplesParser::new(cursor);
     let mut triples = Vec::new();
     parser
-        .parse_all(&mut |t: Triple<'_>| -> Result<(), rio_turtle::TurtleError> {
-            triples.push(collect_triple(t));
-            Ok(())
-        })
+        .parse_all(
+            &mut |t: Triple<'_>| -> Result<(), rio_turtle::TurtleError> {
+                triples.push(collect_triple(t));
+                Ok(())
+            },
+        )
         .map_err(|e| format!("N-Triples parse error: {}", e))?;
     Ok(triples)
 }
@@ -174,10 +179,12 @@ pub fn parse_turtle(input: &[u8]) -> Result<Vec<ImportedTriple>, String> {
     let mut parser = TurtleParser::new(cursor, None);
     let mut triples = Vec::new();
     parser
-        .parse_all(&mut |t: Triple<'_>| -> Result<(), rio_turtle::TurtleError> {
-            triples.push(collect_triple(t));
-            Ok(())
-        })
+        .parse_all(
+            &mut |t: Triple<'_>| -> Result<(), rio_turtle::TurtleError> {
+                triples.push(collect_triple(t));
+                Ok(())
+            },
+        )
         .map_err(|e| format!("Turtle parse error: {}", e))?;
     Ok(triples)
 }
@@ -225,48 +232,49 @@ pub fn parse_jsonld(input: &str) -> Result<Vec<ImportedTriple>, String> {
             };
 
             for item in items {
-                let imported_object =
-                    if let Some(id) = item.get("@id").and_then(|v| v.as_str()) {
-                        ImportedObject::Iri(id.to_string())
-                    } else if let Some(raw_val) = item.get("@value") {
-                        let type_str = item
-                            .get("@type")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("xsd:string");
-                        let full_dt = expand_xsd_prefix(type_str);
-                        let value = xsd_literal_to_value(
-                            raw_val.as_str().unwrap_or(&raw_val.to_string()),
-                            &full_dt,
-                        );
-                        ImportedObject::Literal { value, datatype: full_dt }
-                    } else {
-                        match item {
-                            serde_json::Value::String(s) => ImportedObject::Literal {
-                                value: Value::Text(s.clone()),
-                                datatype: "http://www.w3.org/2001/XMLSchema#string".to_string(),
-                            },
-                            serde_json::Value::Number(n) => {
-                                if let Some(i) = n.as_i64() {
-                                    ImportedObject::Literal {
-                                        value: Value::Int(i),
-                                        datatype: "http://www.w3.org/2001/XMLSchema#integer"
-                                            .to_string(),
-                                    }
-                                } else {
-                                    ImportedObject::Literal {
-                                        value: Value::Float(n.as_f64().unwrap_or(0.0)),
-                                        datatype: "http://www.w3.org/2001/XMLSchema#double"
-                                            .to_string(),
-                                    }
+                let imported_object = if let Some(id) = item.get("@id").and_then(|v| v.as_str()) {
+                    ImportedObject::Iri(id.to_string())
+                } else if let Some(raw_val) = item.get("@value") {
+                    let type_str = item
+                        .get("@type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("xsd:string");
+                    let full_dt = expand_xsd_prefix(type_str);
+                    let value = xsd_literal_to_value(
+                        raw_val.as_str().unwrap_or(&raw_val.to_string()),
+                        &full_dt,
+                    );
+                    ImportedObject::Literal {
+                        value,
+                        datatype: full_dt,
+                    }
+                } else {
+                    match item {
+                        serde_json::Value::String(s) => ImportedObject::Literal {
+                            value: Value::Text(s.clone()),
+                            datatype: "http://www.w3.org/2001/XMLSchema#string".to_string(),
+                        },
+                        serde_json::Value::Number(n) => {
+                            if let Some(i) = n.as_i64() {
+                                ImportedObject::Literal {
+                                    value: Value::Int(i),
+                                    datatype: "http://www.w3.org/2001/XMLSchema#integer"
+                                        .to_string(),
+                                }
+                            } else {
+                                ImportedObject::Literal {
+                                    value: Value::Float(n.as_f64().unwrap_or(0.0)),
+                                    datatype: "http://www.w3.org/2001/XMLSchema#double".to_string(),
                                 }
                             }
-                            serde_json::Value::Bool(b) => ImportedObject::Literal {
-                                value: Value::Bool(*b),
-                                datatype: "http://www.w3.org/2001/XMLSchema#boolean".to_string(),
-                            },
-                            _ => continue,
                         }
-                    };
+                        serde_json::Value::Bool(b) => ImportedObject::Literal {
+                            value: Value::Bool(*b),
+                            datatype: "http://www.w3.org/2001/XMLSchema#boolean".to_string(),
+                        },
+                        _ => continue,
+                    }
+                };
 
                 triples.push(ImportedTriple {
                     subject: subject.clone(),
@@ -337,7 +345,10 @@ mod tests {
         let triples = parse_ntriples(nt).unwrap();
         assert!(matches!(
             &triples[0].object,
-            ImportedObject::Literal { value: Value::Int(30), .. }
+            ImportedObject::Literal {
+                value: Value::Int(30),
+                ..
+            }
         ));
     }
 
@@ -364,11 +375,15 @@ mod tests {
         }"#;
         let triples = parse_jsonld(jsonld).unwrap();
         assert_eq!(triples.len(), 2);
-        let rel =
-            triples.iter().find(|t| t.predicate == "http://schema.org/knows").unwrap();
+        let rel = triples
+            .iter()
+            .find(|t| t.predicate == "http://schema.org/knows")
+            .unwrap();
         assert!(matches!(&rel.object, ImportedObject::Iri(s) if s == "urn:uuid:bbb"));
-        let prop =
-            triples.iter().find(|t| t.predicate == "http://schema.org/name").unwrap();
+        let prop = triples
+            .iter()
+            .find(|t| t.predicate == "http://schema.org/name")
+            .unwrap();
         assert!(matches!(
             &prop.object,
             ImportedObject::Literal { value: Value::Text(s), .. } if s == "Alice"

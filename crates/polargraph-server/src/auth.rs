@@ -48,14 +48,21 @@ impl ApiKeyLayer {
     /// `KeyStore` handle so callers can add/revoke keys at runtime.
     pub fn new(keys: Vec<String>) -> (Self, KeyStore) {
         let store: KeyStore = Arc::new(RwLock::new(keys));
-        (Self { keys: Arc::clone(&store) }, store)
+        (
+            Self {
+                keys: Arc::clone(&store),
+            },
+            store,
+        )
     }
 
     /// Create a disabled layer — all requests pass through. No `KeyStore` is
     /// returned because auth is off; use [`Self::new`] with an empty vec when
     /// you want a handle to later enable auth.
     pub fn disabled() -> Self {
-        Self { keys: Arc::new(RwLock::new(vec![])) }
+        Self {
+            keys: Arc::new(RwLock::new(vec![])),
+        }
     }
 
     /// Returns `true` when at least one key is configured.
@@ -68,7 +75,10 @@ impl<S> Layer<S> for ApiKeyLayer {
     type Service = ApiKeyService<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        ApiKeyService { inner, keys: Arc::clone(&self.keys) }
+        ApiKeyService {
+            inner,
+            keys: Arc::clone(&self.keys),
+        }
     }
 }
 
@@ -178,19 +188,28 @@ mod tests {
     #[test]
     fn bearer_prefix_accepted() {
         let keys = vec!["secret".to_string()];
-        assert!(check_bearer_auth(&headers_with_auth("Bearer secret"), &keys));
+        assert!(check_bearer_auth(
+            &headers_with_auth("Bearer secret"),
+            &keys
+        ));
     }
 
     #[test]
     fn apikey_prefix_accepted() {
         let keys = vec!["secret".to_string()];
-        assert!(check_bearer_auth(&headers_with_auth("ApiKey secret"), &keys));
+        assert!(check_bearer_auth(
+            &headers_with_auth("ApiKey secret"),
+            &keys
+        ));
     }
 
     #[test]
     fn wrong_key_rejected() {
         let keys = vec!["secret".to_string()];
-        assert!(!check_bearer_auth(&headers_with_auth("Bearer wrong"), &keys));
+        assert!(!check_bearer_auth(
+            &headers_with_auth("Bearer wrong"),
+            &keys
+        ));
     }
 
     #[test]
@@ -204,7 +223,10 @@ mod tests {
         let keys = vec!["key-a".to_string(), "key-b".to_string()];
         assert!(check_bearer_auth(&headers_with_auth("Bearer key-a"), &keys));
         assert!(check_bearer_auth(&headers_with_auth("Bearer key-b"), &keys));
-        assert!(!check_bearer_auth(&headers_with_auth("Bearer key-c"), &keys));
+        assert!(!check_bearer_auth(
+            &headers_with_auth("Bearer key-c"),
+            &keys
+        ));
     }
 
     #[test]

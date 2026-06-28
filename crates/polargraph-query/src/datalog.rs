@@ -41,7 +41,10 @@
 //!   triples match subject variables but their scalar value is not bindable.
 //! - No negation, no aggregation.
 
-use crate::{eval::{evaluate, evaluate_with_overlay, evaluate_with_registry}, planner::Pattern};
+use crate::{
+    eval::{evaluate, evaluate_with_overlay, evaluate_with_registry},
+    planner::Pattern,
+};
 use polargraph_core::{
     id::{EdgeId, NodeId},
     temporal::{BiTemporalRange, Timestamp},
@@ -126,7 +129,10 @@ impl VarPattern {
         }
     }
 
-    pub fn subject(mut self, s: Term) -> Self { self.subject = s; self }
+    pub fn subject(mut self, s: Term) -> Self {
+        self.subject = s;
+        self
+    }
     pub fn predicate(mut self, p: impl Into<String>) -> Self {
         self.predicate = Some(p.into());
         self
@@ -135,7 +141,10 @@ impl VarPattern {
         self.predicate_var = Some(v.into());
         self
     }
-    pub fn object(mut self, o: Term) -> Self { self.object = o; self }
+    pub fn object(mut self, o: Term) -> Self {
+        self.object = o;
+        self
+    }
     pub fn with_edge_var(mut self, v: impl Into<String>) -> Self {
         self.edge_var = Some(v.into());
         self
@@ -143,7 +152,9 @@ impl VarPattern {
 }
 
 impl Default for VarPattern {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// A map from node variable name to its bound `NodeId`.
@@ -164,7 +175,9 @@ pub struct Query {
 }
 
 impl Query {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn pattern(mut self, p: VarPattern) -> Self {
         self.patterns.push(p);
@@ -183,16 +196,21 @@ impl Query {
 /// When `predicate_var` names a variable already present in `pred_bindings`,
 /// the bound predicate string is used as the concrete predicate, enabling
 /// predicate variables to act as predicates in subsequent patterns.
-fn substitute_with_preds(vp: &VarPattern, bindings: &Bindings, pred_bindings: &PredBindings) -> Pattern {
+fn substitute_with_preds(
+    vp: &VarPattern,
+    bindings: &Bindings,
+    pred_bindings: &PredBindings,
+) -> Pattern {
     Pattern {
         subject: resolve_term(&vp.subject, bindings),
         predicate: vp.predicate.clone().or_else(|| {
-            vp.predicate_var.as_ref().and_then(|v| pred_bindings.get(v).cloned())
+            vp.predicate_var
+                .as_ref()
+                .and_then(|v| pred_bindings.get(v).cloned())
         }),
         object: resolve_term(&vp.object, bindings),
     }
 }
-
 
 fn resolve_term(term: &Term, bindings: &Bindings) -> Option<NodeId> {
     match term {
@@ -232,7 +250,7 @@ fn extend_full(
     // Bind / check object slot — only Relation triples have a NodeId object.
     match &vp.object {
         Term::Any | Term::Param(_) => {} // nothing to bind
-        Term::Bound(_) => {} // substitution already handled this
+        Term::Bound(_) => {}             // substitution already handled this
         Term::Var(_) => {
             match triple {
                 Triple::Relation { object, .. } => {
@@ -242,7 +260,9 @@ fn extend_full(
                         return None;
                     }
                 }
-                Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => {
+                Triple::Property { .. }
+                | Triple::EdgeProperty { .. }
+                | Triple::EdgeRelation { .. } => {
                     // Object variable can't bind to a scalar/annotation value — skip.
                     return None;
                 }
@@ -274,7 +294,6 @@ fn extend_full(
 
     Some((node_out, pred_out))
 }
-
 
 /// Attempt to bind `term` to `value` within `bindings`.
 ///
@@ -342,7 +361,9 @@ fn evaluate_seeded_inner(
                         let mut seen = HashSet::new();
                         all.into_iter()
                             .filter_map(|t| match t {
-                                Triple::Relation { subject, .. } if seen.insert(subject) => Some(subject),
+                                Triple::Relation { subject, .. } if seen.insert(subject) => {
+                                    Some(subject)
+                                }
                                 _ => None,
                             })
                             .collect()
@@ -353,22 +374,31 @@ fn evaluate_seeded_inner(
                         let mut base = bindings.clone();
                         if let Term::Var(sv) = &vp.subject {
                             if let Some(&existing) = base.get(sv.as_str()) {
-                                if existing != start_id { continue; }
+                                if existing != start_id {
+                                    continue;
+                                }
                             } else {
                                 base.insert(sv.clone(), start_id);
                             }
                         }
 
-                        let reachable = reachable_from_hops(start_id, pred, snapshot, hops, deadline)?;
+                        let reachable =
+                            reachable_from_hops(start_id, pred, snapshot, hops, deadline)?;
                         for target in reachable {
                             match &vp.object {
-                                Term::Any | Term::Param(_) => next.push((base.clone(), pred_bindings.clone())),
+                                Term::Any | Term::Param(_) => {
+                                    next.push((base.clone(), pred_bindings.clone()))
+                                }
                                 Term::Bound(id) => {
-                                    if *id == target { next.push((base.clone(), pred_bindings.clone())); }
+                                    if *id == target {
+                                        next.push((base.clone(), pred_bindings.clone()));
+                                    }
                                 }
                                 Term::Var(name) => {
                                     if let Some(&existing) = base.get(name.as_str()) {
-                                        if existing == target { next.push((base.clone(), pred_bindings.clone())); }
+                                        if existing == target {
+                                            next.push((base.clone(), pred_bindings.clone()));
+                                        }
                                     } else {
                                         let mut b = base.clone();
                                         b.insert(name.clone(), target);
@@ -422,11 +452,16 @@ pub fn execute_query_seeded(
     deadline: Option<Instant>,
     registry: Option<&EdgeTypeRegistry>,
 ) -> Result<Vec<Bindings>, QueryError> {
-    let seeds = initial.into_iter().map(|b| (b, PredBindings::new())).collect();
-    Ok(evaluate_seeded_inner(query, snapshot, seeds, deadline, registry)?
+    let seeds = initial
         .into_iter()
-        .map(|(b, _pb)| b)
-        .collect())
+        .map(|b| (b, PredBindings::new()))
+        .collect();
+    Ok(
+        evaluate_seeded_inner(query, snapshot, seeds, deadline, registry)?
+            .into_iter()
+            .map(|(b, _pb)| b)
+            .collect(),
+    )
 }
 
 /// Like [`execute_query_seeded`] but also returns predicate variable bindings.
@@ -441,7 +476,10 @@ pub fn execute_query_seeded_full(
     deadline: Option<Instant>,
     registry: Option<&EdgeTypeRegistry>,
 ) -> Result<Vec<(Bindings, PredBindings)>, QueryError> {
-    let seeds = initial.into_iter().map(|b| (b, PredBindings::new())).collect();
+    let seeds = initial
+        .into_iter()
+        .map(|b| (b, PredBindings::new()))
+        .collect();
     evaluate_seeded_inner(query, snapshot, seeds, deadline, registry)
 }
 
@@ -632,7 +670,9 @@ pub fn execute_recursive(
         for rule in rules {
             // Evaluate the rule body conjunctively, consulting derived facts
             // for derived predicates and storage for base predicates.
-            let body_query = Query { patterns: rule.body.clone() };
+            let body_query = Query {
+                patterns: rule.body.clone(),
+            };
             let solutions = execute_query_hybrid(&body_query, snapshot, &derived, deadline)?;
 
             // Extract head variable bindings to produce new derived facts.
@@ -725,10 +765,12 @@ pub fn reachable_from(
     let seed: Vec<(String, NodeId, NodeId)> = direct
         .iter()
         .filter_map(|t| match t {
-            Triple::Relation { subject, object, .. } => {
-                Some(("reachable".into(), *subject, *object))
+            Triple::Relation {
+                subject, object, ..
+            } => Some(("reachable".into(), *subject, *object)),
+            Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => {
+                None
             }
-            Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => None,
         })
         .collect();
 
@@ -753,7 +795,13 @@ pub fn reachable_from(
     // Collect all objects reachable from `start` (subject == start).
     let reachable = derived
         .get("reachable")
-        .map(|pairs| pairs.iter().filter(|(s, _)| *s == start).map(|(_, o)| *o).collect())
+        .map(|pairs| {
+            pairs
+                .iter()
+                .filter(|(s, _)| *s == start)
+                .map(|(_, o)| *o)
+                .collect()
+        })
         .unwrap_or_default();
 
     Ok(reachable)
@@ -873,16 +921,23 @@ mod tests {
 
     fn commit(store: &TripleStore, triples: Vec<Triple>) -> polargraph_storage::Snapshot {
         let mut tx = store.begin();
-        for t in triples { tx.insert(t); }
+        for t in triples {
+            tx.insert(t);
+        }
         let ts = tx.commit().unwrap();
         store.snapshot(ts)
     }
 
-    fn bound(id: NodeId) -> Term { Term::Bound(id) }
-    fn var(name: &str) -> Term { Term::Var(name.into()) }
+    fn bound(id: NodeId) -> Term {
+        Term::Bound(id)
+    }
+    fn var(name: &str) -> Term {
+        Term::Var(name.into())
+    }
 
     fn collect_var(results: &[Bindings], name: &str) -> Vec<NodeId> {
-        let mut ids: Vec<NodeId> = results.iter()
+        let mut ids: Vec<NodeId> = results
+            .iter()
             .filter_map(|b| b.get(name).copied())
             .collect();
         ids.sort();
@@ -898,14 +953,20 @@ mod tests {
         let bob = NodeId::new();
         let carol = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(alice, "knows", bob),
-            rel(alice, "knows", carol),
-            rel(bob, "knows", carol),
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(alice, "knows", bob),
+                rel(alice, "knows", carol),
+                rel(bob, "knows", carol),
+            ],
+        );
 
         let q = Query::new().pattern(
-            VarPattern::new().subject(bound(alice)).predicate("knows").object(var("who"))
+            VarPattern::new()
+                .subject(bound(alice))
+                .predicate("knows")
+                .object(var("who")),
         );
 
         let results = execute_query(&q, &snap, None, None).unwrap();
@@ -924,7 +985,10 @@ mod tests {
         let snap = commit(&store, vec![rel(alice, "knows", NodeId::new())]);
 
         let q = Query::new().pattern(
-            VarPattern::new().subject(bound(nobody)).predicate("knows").object(var("x"))
+            VarPattern::new()
+                .subject(bound(nobody))
+                .predicate("knows")
+                .object(var("x")),
         );
 
         assert!(execute_query(&q, &snap, None, None).unwrap().is_empty());
@@ -941,20 +1005,33 @@ mod tests {
         let alice = NodeId::new();
         let bob = NodeId::new();
         let carol = NodeId::new();
-        let dave = NodeId::new();   // different manager
+        let dave = NodeId::new(); // different manager
         let mgr_a = NodeId::new();
         let mgr_b = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(alice, "reports-to", mgr_a),
-            rel(bob,   "reports-to", mgr_a),
-            rel(carol, "reports-to", mgr_a),
-            rel(dave,  "reports-to", mgr_b), // different manager — should not appear
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(alice, "reports-to", mgr_a),
+                rel(bob, "reports-to", mgr_a),
+                rel(carol, "reports-to", mgr_a),
+                rel(dave, "reports-to", mgr_b), // different manager — should not appear
+            ],
+        );
 
         let q = Query::new()
-            .pattern(VarPattern::new().subject(bound(alice)).predicate("reports-to").object(var("mgr")))
-            .pattern(VarPattern::new().subject(var("colleague")).predicate("reports-to").object(var("mgr")));
+            .pattern(
+                VarPattern::new()
+                    .subject(bound(alice))
+                    .predicate("reports-to")
+                    .object(var("mgr")),
+            )
+            .pattern(
+                VarPattern::new()
+                    .subject(var("colleague"))
+                    .predicate("reports-to")
+                    .object(var("mgr")),
+            );
 
         let results = execute_query(&q, &snap, None, None).unwrap();
 
@@ -975,14 +1052,24 @@ mod tests {
         let bob = NodeId::new();
         let mgr = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(alice, "reports-to", mgr),
-            rel(bob, "reports-to", mgr),
-        ]);
+        let snap = commit(
+            &store,
+            vec![rel(alice, "reports-to", mgr), rel(bob, "reports-to", mgr)],
+        );
 
         let q = Query::new()
-            .pattern(VarPattern::new().subject(bound(alice)).predicate("reports-to").object(var("m")))
-            .pattern(VarPattern::new().subject(var("c")).predicate("reports-to").object(var("m")));
+            .pattern(
+                VarPattern::new()
+                    .subject(bound(alice))
+                    .predicate("reports-to")
+                    .object(var("m")),
+            )
+            .pattern(
+                VarPattern::new()
+                    .subject(var("c"))
+                    .predicate("reports-to")
+                    .object(var("m")),
+            );
 
         let results = execute_query(&q, &snap, None, None).unwrap();
         // Every result must have ?m = mgr.
@@ -999,20 +1086,33 @@ mod tests {
         // (alice, knows, ?b) ∧ (?b, knows, ?c)
         let (store, _dir) = open();
         let alice = NodeId::new();
-        let bob   = NodeId::new();
+        let bob = NodeId::new();
         let carol = NodeId::new();
-        let dave  = NodeId::new();
+        let dave = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(alice, "knows", bob),
-            rel(alice, "knows", carol),
-            rel(bob,   "knows", dave),
-            rel(carol, "knows", dave),
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(alice, "knows", bob),
+                rel(alice, "knows", carol),
+                rel(bob, "knows", dave),
+                rel(carol, "knows", dave),
+            ],
+        );
 
         let q = Query::new()
-            .pattern(VarPattern::new().subject(bound(alice)).predicate("knows").object(var("b")))
-            .pattern(VarPattern::new().subject(var("b")).predicate("knows").object(var("c")));
+            .pattern(
+                VarPattern::new()
+                    .subject(bound(alice))
+                    .predicate("knows")
+                    .object(var("b")),
+            )
+            .pattern(
+                VarPattern::new()
+                    .subject(var("b"))
+                    .predicate("knows")
+                    .object(var("c")),
+            );
 
         let results = execute_query(&q, &snap, None, None).unwrap();
 
@@ -1026,27 +1126,45 @@ mod tests {
     fn three_pattern_project_chain() {
         // (alice, owns-project, ?proj) ∧ (?proj, uses-tech, ?tech) ∧ (?tech, vendor, ?vendor)
         let (store, _dir) = open();
-        let alice  = NodeId::new();
-        let proj1  = NodeId::new();
-        let proj2  = NodeId::new();
-        let rust   = NodeId::new();
+        let alice = NodeId::new();
+        let proj1 = NodeId::new();
+        let proj2 = NodeId::new();
+        let rust = NodeId::new();
         let python = NodeId::new();
         let mozilla = NodeId::new();
-        let psf    = NodeId::new();
+        let psf = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(alice,  "owns-project", proj1),
-            rel(alice,  "owns-project", proj2),
-            rel(proj1,  "uses-tech",    rust),
-            rel(proj2,  "uses-tech",    python),
-            rel(rust,   "vendor",       mozilla),
-            rel(python, "vendor",       psf),
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(alice, "owns-project", proj1),
+                rel(alice, "owns-project", proj2),
+                rel(proj1, "uses-tech", rust),
+                rel(proj2, "uses-tech", python),
+                rel(rust, "vendor", mozilla),
+                rel(python, "vendor", psf),
+            ],
+        );
 
         let q = Query::new()
-            .pattern(VarPattern::new().subject(bound(alice)).predicate("owns-project").object(var("proj")))
-            .pattern(VarPattern::new().subject(var("proj")).predicate("uses-tech").object(var("tech")))
-            .pattern(VarPattern::new().subject(var("tech")).predicate("vendor").object(var("vendor")));
+            .pattern(
+                VarPattern::new()
+                    .subject(bound(alice))
+                    .predicate("owns-project")
+                    .object(var("proj")),
+            )
+            .pattern(
+                VarPattern::new()
+                    .subject(var("proj"))
+                    .predicate("uses-tech")
+                    .object(var("tech")),
+            )
+            .pattern(
+                VarPattern::new()
+                    .subject(var("tech"))
+                    .predicate("vendor")
+                    .object(var("vendor")),
+            );
 
         let results = execute_query(&q, &snap, None, None).unwrap();
         assert_eq!(results.len(), 2);
@@ -1063,15 +1181,21 @@ mod tests {
         // (? knows ?) where subject == object — "who knows themselves?"
         let (store, _dir) = open();
         let alice = NodeId::new();
-        let bob   = NodeId::new();
+        let bob = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(alice, "knows", alice), // self-loop
-            rel(alice, "knows", bob),   // not a self-loop
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(alice, "knows", alice), // self-loop
+                rel(alice, "knows", bob),   // not a self-loop
+            ],
+        );
 
         let q = Query::new().pattern(
-            VarPattern::new().subject(var("x")).predicate("knows").object(var("x"))
+            VarPattern::new()
+                .subject(var("x"))
+                .predicate("knows")
+                .object(var("x")),
         );
 
         let results = execute_query(&q, &snap, None, None).unwrap();
@@ -1083,21 +1207,39 @@ mod tests {
     fn conflicting_bindings_produce_no_result() {
         let (store, _dir) = open();
         let alice = NodeId::new();
-        let bob   = NodeId::new();
+        let bob = NodeId::new();
         let carol = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(alice, "knows", bob),
-            rel(alice, "knows", carol),
-            rel(bob,   "knows", bob),   // bob has a self-loop; carol does not
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(alice, "knows", bob),
+                rel(alice, "knows", carol),
+                rel(bob, "knows", bob), // bob has a self-loop; carol does not
+            ],
+        );
 
         // Patterns 1+2 bind ?x to bob or carol.
         let q = Query::new()
-            .pattern(VarPattern::new().subject(bound(alice)).predicate("knows").object(var("x")))
-            .pattern(VarPattern::new().subject(bound(alice)).predicate("knows").object(var("x")))
+            .pattern(
+                VarPattern::new()
+                    .subject(bound(alice))
+                    .predicate("knows")
+                    .object(var("x")),
+            )
+            .pattern(
+                VarPattern::new()
+                    .subject(bound(alice))
+                    .predicate("knows")
+                    .object(var("x")),
+            )
             // Third pattern: ?x must know itself — only bob satisfies this.
-            .pattern(VarPattern::new().subject(var("x")).predicate("knows").object(var("x")));
+            .pattern(
+                VarPattern::new()
+                    .subject(var("x"))
+                    .predicate("knows")
+                    .object(var("x")),
+            );
 
         // carol has no self-loop so its binding is eliminated; only ?x = bob survives.
         let results = execute_query(&q, &snap, None, None).unwrap();
@@ -1110,15 +1252,18 @@ mod tests {
     fn subject_variable_matches_property_triples() {
         let (store, _dir) = open();
         let alice = NodeId::new();
-        let bob   = NodeId::new();
+        let bob = NodeId::new();
 
-        let snap = commit(&store, vec![
-            prop(alice, "name", "Alice"),
-            prop(bob,   "name", "Bob"),
-        ]);
+        let snap = commit(
+            &store,
+            vec![prop(alice, "name", "Alice"), prop(bob, "name", "Bob")],
+        );
 
         let q = Query::new().pattern(
-            VarPattern::new().subject(var("who")).predicate("name").object(Term::Any)
+            VarPattern::new()
+                .subject(var("who"))
+                .predicate("name")
+                .object(Term::Any),
         );
 
         let results = execute_query(&q, &snap, None, None).unwrap();
@@ -1133,20 +1278,29 @@ mod tests {
         // Object var can't bind to a Value — property triples are excluded.
         let (store, _dir) = open();
         let alice = NodeId::new();
-        let bob   = NodeId::new();
+        let bob = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(alice, "knows", bob),  // relation → ?obj binds to bob
-            prop(alice, "name", "A"),  // property → skipped
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(alice, "knows", bob), // relation → ?obj binds to bob
+                prop(alice, "name", "A"), // property → skipped
+            ],
+        );
 
         let q = Query::new().pattern(
-            VarPattern::new().subject(bound(alice)).predicate("name").object(var("obj"))
+            VarPattern::new()
+                .subject(bound(alice))
+                .predicate("name")
+                .object(var("obj")),
         );
 
         // "name" is a property predicate — object is a Value, not a NodeId.
         let results = execute_query(&q, &snap, None, None).unwrap();
-        assert!(results.is_empty(), "object var cannot bind to scalar property value");
+        assert!(
+            results.is_empty(),
+            "object var cannot bind to scalar property value"
+        );
     }
 
     // ── empty query ───────────────────────────────────────────────────────────
@@ -1167,13 +1321,23 @@ mod tests {
     fn unsatisfiable_second_pattern_returns_empty() {
         let (store, _dir) = open();
         let alice = NodeId::new();
-        let bob   = NodeId::new();
+        let bob = NodeId::new();
 
         let snap = commit(&store, vec![rel(alice, "knows", bob)]);
 
         let q = Query::new()
-            .pattern(VarPattern::new().subject(bound(alice)).predicate("knows").object(var("x")))
-            .pattern(VarPattern::new().subject(var("x")).predicate("owns-project").object(var("proj")));
+            .pattern(
+                VarPattern::new()
+                    .subject(bound(alice))
+                    .predicate("knows")
+                    .object(var("x")),
+            )
+            .pattern(
+                VarPattern::new()
+                    .subject(var("x"))
+                    .predicate("owns-project")
+                    .object(var("proj")),
+            );
 
         // bob has no "owns-project" edges → second pattern fails → no results.
         let results = execute_query(&q, &snap, None, None).unwrap();
@@ -1184,7 +1348,10 @@ mod tests {
 
     // Helper: build a seed vec from a list of (predicate, subject, object) triples.
     fn seed(triples: &[(&str, NodeId, NodeId)]) -> Vec<(String, NodeId, NodeId)> {
-        triples.iter().map(|(p, s, o)| (p.to_string(), *s, *o)).collect()
+        triples
+            .iter()
+            .map(|(p, s, o)| (p.to_string(), *s, *o))
+            .collect()
     }
 
     #[test]
@@ -1197,22 +1364,25 @@ mod tests {
         let c = NodeId::new();
         let d = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(a, "edge", b),
-            rel(b, "edge", c),
-            rel(c, "edge", d),
-        ]);
+        let snap = commit(
+            &store,
+            vec![rel(a, "edge", b), rel(b, "edge", c), rel(c, "edge", d)],
+        );
 
         // Seed: direct neighbours of a.
         let s = seed(&[("tc", a, b)]);
 
         // Rule: tc(X, Z) :- tc(X, Y), edge(Y, Z)
-        let rules = vec![
-            Rule::new("tc", "x", "z").with_body(vec![
-                VarPattern::new().subject(Term::var("x")).predicate("tc").object(Term::var("y")),
-                VarPattern::new().subject(Term::var("y")).predicate("edge").object(Term::var("z")),
-            ])
-        ];
+        let rules = vec![Rule::new("tc", "x", "z").with_body(vec![
+            VarPattern::new()
+                .subject(Term::var("x"))
+                .predicate("tc")
+                .object(Term::var("y")),
+            VarPattern::new()
+                .subject(Term::var("y"))
+                .predicate("edge")
+                .object(Term::var("z")),
+        ])];
 
         let derived = execute_recursive(&s, &rules, &snap, None).unwrap();
         let tc = derived.get("tc").unwrap();
@@ -1233,20 +1403,27 @@ mod tests {
         let c = NodeId::new();
         let d = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(a, "edge", b),
-            rel(a, "edge", c),
-            rel(b, "edge", d),
-            rel(c, "edge", d),
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(a, "edge", b),
+                rel(a, "edge", c),
+                rel(b, "edge", d),
+                rel(c, "edge", d),
+            ],
+        );
 
         let s = seed(&[("tc", a, b), ("tc", a, c)]);
-        let rules = vec![
-            Rule::new("tc", "x", "z").with_body(vec![
-                VarPattern::new().subject(Term::var("x")).predicate("tc").object(Term::var("y")),
-                VarPattern::new().subject(Term::var("y")).predicate("edge").object(Term::var("z")),
-            ])
-        ];
+        let rules = vec![Rule::new("tc", "x", "z").with_body(vec![
+            VarPattern::new()
+                .subject(Term::var("x"))
+                .predicate("tc")
+                .object(Term::var("y")),
+            VarPattern::new()
+                .subject(Term::var("y"))
+                .predicate("edge")
+                .object(Term::var("z")),
+        ])];
 
         let derived = execute_recursive(&s, &rules, &snap, None).unwrap();
         let tc = derived.get("tc").unwrap();
@@ -1254,7 +1431,11 @@ mod tests {
         assert!(tc.contains(&(a, b)));
         assert!(tc.contains(&(a, c)));
         assert!(tc.contains(&(a, d)));
-        assert_eq!(tc.len(), 3, "each target appears only once despite two paths to d");
+        assert_eq!(
+            tc.len(),
+            3,
+            "each target appears only once despite two paths to d"
+        );
     }
 
     #[test]
@@ -1265,19 +1446,22 @@ mod tests {
         let b = NodeId::new();
         let c = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(a, "edge", b),
-            rel(b, "edge", c),
-            rel(c, "edge", a),
-        ]);
+        let snap = commit(
+            &store,
+            vec![rel(a, "edge", b), rel(b, "edge", c), rel(c, "edge", a)],
+        );
 
         let s = seed(&[("tc", a, b)]);
-        let rules = vec![
-            Rule::new("tc", "x", "z").with_body(vec![
-                VarPattern::new().subject(Term::var("x")).predicate("tc").object(Term::var("y")),
-                VarPattern::new().subject(Term::var("y")).predicate("edge").object(Term::var("z")),
-            ])
-        ];
+        let rules = vec![Rule::new("tc", "x", "z").with_body(vec![
+            VarPattern::new()
+                .subject(Term::var("x"))
+                .predicate("tc")
+                .object(Term::var("y")),
+            VarPattern::new()
+                .subject(Term::var("y"))
+                .predicate("edge")
+                .object(Term::var("z")),
+        ])];
 
         // Must terminate and not loop forever.
         let derived = execute_recursive(&s, &rules, &snap, None).unwrap();
@@ -1299,12 +1483,16 @@ mod tests {
         let snap = commit(&store, vec![]); // empty store
 
         let s = seed(&[("tc", a, b)]);
-        let rules = vec![
-            Rule::new("tc", "x", "z").with_body(vec![
-                VarPattern::new().subject(Term::var("x")).predicate("tc").object(Term::var("y")),
-                VarPattern::new().subject(Term::var("y")).predicate("edge").object(Term::var("z")),
-            ])
-        ];
+        let rules = vec![Rule::new("tc", "x", "z").with_body(vec![
+            VarPattern::new()
+                .subject(Term::var("x"))
+                .predicate("tc")
+                .object(Term::var("y")),
+            VarPattern::new()
+                .subject(Term::var("y"))
+                .predicate("edge")
+                .object(Term::var("z")),
+        ])];
 
         let derived = execute_recursive(&s, &rules, &snap, None).unwrap();
         let tc = derived.get("tc").unwrap();
@@ -1320,12 +1508,16 @@ mod tests {
 
         let snap = commit(&store, vec![rel(a, "edge", b)]);
 
-        let rules = vec![
-            Rule::new("tc", "x", "z").with_body(vec![
-                VarPattern::new().subject(Term::var("x")).predicate("tc").object(Term::var("y")),
-                VarPattern::new().subject(Term::var("y")).predicate("edge").object(Term::var("z")),
-            ])
-        ];
+        let rules = vec![Rule::new("tc", "x", "z").with_body(vec![
+            VarPattern::new()
+                .subject(Term::var("x"))
+                .predicate("tc")
+                .object(Term::var("y")),
+            VarPattern::new()
+                .subject(Term::var("y"))
+                .predicate("edge")
+                .object(Term::var("z")),
+        ])];
 
         let derived = execute_recursive(&[], &rules, &snap, None).unwrap();
         // No seed → no derived facts (the base case for tc has nothing to expand).
@@ -1344,11 +1536,10 @@ mod tests {
         let c = NodeId::new();
         let d = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(a, "knows", b),
-            rel(b, "knows", c),
-            rel(c, "knows", d),
-        ]);
+        let snap = commit(
+            &store,
+            vec![rel(a, "knows", b), rel(b, "knows", c), rel(c, "knows", d)],
+        );
 
         let reachable = reachable_from(a, "knows", &snap, None).unwrap();
         assert!(reachable.contains(&b));
@@ -1365,12 +1556,15 @@ mod tests {
         let c = NodeId::new();
         let d = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(a, "knows", b),
-            rel(a, "knows", c),
-            rel(b, "knows", d),
-            rel(c, "knows", d),
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(a, "knows", b),
+                rel(a, "knows", c),
+                rel(b, "knows", d),
+                rel(c, "knows", d),
+            ],
+        );
 
         let reachable = reachable_from(a, "knows", &snap, None).unwrap();
         assert_eq!(reachable.len(), 3);
@@ -1386,17 +1580,19 @@ mod tests {
         let b = NodeId::new();
         let c = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(a, "knows", b),
-            rel(b, "knows", c),
-            rel(c, "knows", a),
-        ]);
+        let snap = commit(
+            &store,
+            vec![rel(a, "knows", b), rel(b, "knows", c), rel(c, "knows", a)],
+        );
 
         let reachable = reachable_from(a, "knows", &snap, None).unwrap();
         // b and c are reachable; a itself via cycle.
         assert!(reachable.contains(&b));
         assert!(reachable.contains(&c));
-        assert!(reachable.contains(&a), "a can reach itself through the cycle");
+        assert!(
+            reachable.contains(&a),
+            "a can reach itself through the cycle"
+        );
     }
 
     #[test]
@@ -1432,14 +1628,14 @@ mod tests {
         let c = NodeId::new();
 
         // a→b via "knows", b→c via "manages" — reachability only follows "knows".
-        let snap = commit(&store, vec![
-            rel(a, "knows", b),
-            rel(b, "manages", c),
-        ]);
+        let snap = commit(&store, vec![rel(a, "knows", b), rel(b, "manages", c)]);
 
         let reachable = reachable_from(a, "knows", &snap, None).unwrap();
         assert!(reachable.contains(&b));
-        assert!(!reachable.contains(&c), "c only reachable via 'manages', not 'knows'");
+        assert!(
+            !reachable.contains(&c),
+            "c only reachable via 'manages', not 'knows'"
+        );
     }
 
     // ── deadline / timeout ────────────────────────────────────────────────────
@@ -1454,15 +1650,22 @@ mod tests {
         // A deadline that is already in the past fires on the first iteration.
         let expired = Some(Instant::now() - std::time::Duration::from_millis(1));
         let s = seed(&[("tc", a, b)]);
-        let rules = vec![
-            Rule::new("tc", "x", "z").with_body(vec![
-                VarPattern::new().subject(Term::var("x")).predicate("tc").object(Term::var("y")),
-                VarPattern::new().subject(Term::var("y")).predicate("edge").object(Term::var("z")),
-            ])
-        ];
+        let rules = vec![Rule::new("tc", "x", "z").with_body(vec![
+            VarPattern::new()
+                .subject(Term::var("x"))
+                .predicate("tc")
+                .object(Term::var("y")),
+            VarPattern::new()
+                .subject(Term::var("y"))
+                .predicate("edge")
+                .object(Term::var("z")),
+        ])];
 
         let result = execute_recursive(&s, &rules, &snap, expired);
-        assert!(matches!(result, Err(QueryError::Timeout)), "expected Timeout, got {result:?}");
+        assert!(
+            matches!(result, Err(QueryError::Timeout)),
+            "expected Timeout, got {result:?}"
+        );
     }
 
     #[test]
@@ -1474,11 +1677,17 @@ mod tests {
 
         let expired = Some(Instant::now() - std::time::Duration::from_millis(1));
         let q = Query::new().pattern(
-            VarPattern::new().subject(Term::Bound(a)).predicate("knows").object(Term::var("x"))
+            VarPattern::new()
+                .subject(Term::Bound(a))
+                .predicate("knows")
+                .object(Term::var("x")),
         );
 
         let result = execute_query(&q, &snap, expired, None);
-        assert!(matches!(result, Err(QueryError::Timeout)), "expected Timeout, got {result:?}");
+        assert!(
+            matches!(result, Err(QueryError::Timeout)),
+            "expected Timeout, got {result:?}"
+        );
     }
 
     #[test]
@@ -1489,7 +1698,10 @@ mod tests {
         let snap = commit(&store, vec![rel(a, "knows", b)]);
 
         let q = Query::new().pattern(
-            VarPattern::new().subject(Term::Bound(a)).predicate("knows").object(Term::var("x"))
+            VarPattern::new()
+                .subject(Term::Bound(a))
+                .predicate("knows")
+                .object(Term::var("x")),
         );
 
         let result = execute_query(&q, &snap, None, None);
@@ -1518,7 +1730,10 @@ mod tests {
         let results = execute_query(&q, &snap, None, None).unwrap();
         let found: Vec<NodeId> = results.iter().filter_map(|b| b.get("x").copied()).collect();
         assert_eq!(found.len(), 1);
-        assert!(found.contains(&b), "only direct neighbour should be reachable at depth 1");
+        assert!(
+            found.contains(&b),
+            "only direct neighbour should be reachable at depth 1"
+        );
         assert!(!found.contains(&c), "c is 2 hops away, should not appear");
     }
 
@@ -1531,12 +1746,15 @@ mod tests {
         let d = NodeId::new();
         let e = NodeId::new();
         // chain: a → b → c → d → e
-        let snap = commit(&store, vec![
-            rel(a, "hop", b),
-            rel(b, "hop", c),
-            rel(c, "hop", d),
-            rel(d, "hop", e),
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(a, "hop", b),
+                rel(b, "hop", c),
+                rel(c, "hop", d),
+                rel(d, "hop", e),
+            ],
+        );
 
         let mut vp = VarPattern::new()
             .subject(Term::Bound(a))
@@ -1546,9 +1764,8 @@ mod tests {
 
         let q = Query::new().pattern(vp);
         let results = execute_query(&q, &snap, None, None).unwrap();
-        let found: std::collections::HashSet<NodeId> = results.iter()
-            .filter_map(|b| b.get("x").copied())
-            .collect();
+        let found: std::collections::HashSet<NodeId> =
+            results.iter().filter_map(|b| b.get("x").copied()).collect();
 
         assert!(found.contains(&b), "b is 1 hop away");
         assert!(found.contains(&c), "c is 2 hops away");
@@ -1562,33 +1779,38 @@ mod tests {
     fn predicate_var_bound_subject_returns_all_predicates() {
         let (store, _dir) = open();
         let alice = NodeId::new();
-        let bob   = NodeId::new();
-        let acme  = NodeId::new();
+        let bob = NodeId::new();
+        let acme = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(alice, "knows", bob),
-            rel(alice, "manages", acme),
-        ]);
+        let snap = commit(
+            &store,
+            vec![rel(alice, "knows", bob), rel(alice, "manages", acme)],
+        );
 
         // Pattern: (alice, ?p, ?o) — enumerate all outgoing edges from alice.
         let q = Query::new().pattern(
             VarPattern::new()
                 .subject(bound(alice))
                 .predicate_var("p")
-                .object(var("o"))
+                .object(var("o")),
         );
 
         let results = execute_query_full(&q, &snap, None, None).unwrap();
         assert_eq!(results.len(), 2, "alice has two outgoing edges");
 
-        let preds: std::collections::HashSet<String> = results.iter()
+        let preds: std::collections::HashSet<String> = results
+            .iter()
             .map(|(_nb, pb)| pb.get("p").cloned().unwrap())
             .collect();
-        assert!(preds.contains("knows"),   "predicate 'knows' must be bound");
-        assert!(preds.contains("manages"), "predicate 'manages' must be bound");
+        assert!(preds.contains("knows"), "predicate 'knows' must be bound");
+        assert!(
+            preds.contains("manages"),
+            "predicate 'manages' must be bound"
+        );
 
         // Each binding should also have the object variable set.
-        let objects: std::collections::HashSet<NodeId> = results.iter()
+        let objects: std::collections::HashSet<NodeId> = results
+            .iter()
             .map(|(nb, _pb)| nb.get("o").copied().unwrap())
             .collect();
         assert!(objects.contains(&bob));
@@ -1602,23 +1824,21 @@ mod tests {
         let b = NodeId::new();
         let c = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(a, "knows",   b),
-            rel(b, "manages", c),
-        ]);
+        let snap = commit(&store, vec![rel(a, "knows", b), rel(b, "manages", c)]);
 
         // Fully unbound: (?s, ?p, ?o)
         let q = Query::new().pattern(
             VarPattern::new()
                 .subject(var("s"))
                 .predicate_var("p")
-                .object(var("o"))
+                .object(var("o")),
         );
 
         let results = execute_query_full(&q, &snap, None, None).unwrap();
         assert_eq!(results.len(), 2, "two triples in the store");
 
-        let preds: std::collections::HashSet<String> = results.iter()
+        let preds: std::collections::HashSet<String> = results
+            .iter()
             .map(|(_nb, pb)| pb.get("p").cloned().unwrap())
             .collect();
         assert!(preds.contains("knows"));
@@ -1631,29 +1851,32 @@ mod tests {
         // Pattern 2: (?o, "knows", ?x) — join on ?o with a fixed predicate
         let (store, _dir) = open();
         let alice = NodeId::new();
-        let bob   = NodeId::new();
+        let bob = NodeId::new();
         let carol = NodeId::new();
-        let dave  = NodeId::new();
+        let dave = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(alice, "knows",   bob),
-            rel(alice, "manages", carol),
-            rel(bob,   "knows",   dave),   // bob knows dave — joins on Pattern 2
-            rel(carol, "reports", dave),   // carol doesn't "know" anyone — no join
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(alice, "knows", bob),
+                rel(alice, "manages", carol),
+                rel(bob, "knows", dave), // bob knows dave — joins on Pattern 2
+                rel(carol, "reports", dave), // carol doesn't "know" anyone — no join
+            ],
+        );
 
         let q = Query::new()
             .pattern(
                 VarPattern::new()
                     .subject(bound(alice))
                     .predicate_var("p")
-                    .object(var("o"))
+                    .object(var("o")),
             )
             .pattern(
                 VarPattern::new()
                     .subject(var("o"))
                     .predicate("knows")
-                    .object(var("x"))
+                    .object(var("x")),
             );
 
         let results = execute_query_full(&q, &snap, None, None).unwrap();
@@ -1673,16 +1896,19 @@ mod tests {
         let a = NodeId::new();
         let b = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(a, "self", a),  // self-loop — satisfies ?x == ?x
-            rel(a, "edge", b),  // a ≠ b — should not match
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(a, "self", a), // self-loop — satisfies ?x == ?x
+                rel(a, "edge", b), // a ≠ b — should not match
+            ],
+        );
 
         let q = Query::new().pattern(
             VarPattern::new()
                 .subject(var("x"))
                 .predicate_var("p")
-                .object(var("x"))  // same variable → self-loop only
+                .object(var("x")), // same variable → self-loop only
         );
 
         let results = execute_query_full(&q, &snap, None, None).unwrap();
@@ -1698,14 +1924,17 @@ mod tests {
         // This exercises the substitute_with_preds path.
         let (store, _dir) = open();
         let alice = NodeId::new();
-        let bob   = NodeId::new();
+        let bob = NodeId::new();
         let carol = NodeId::new();
 
-        let snap = commit(&store, vec![
-            rel(alice, "knows", bob),
-            rel(bob,   "knows", carol),
-            rel(alice, "manages", carol), // different predicate — should not appear
-        ]);
+        let snap = commit(
+            &store,
+            vec![
+                rel(alice, "knows", bob),
+                rel(bob, "knows", carol),
+                rel(alice, "manages", carol), // different predicate — should not appear
+            ],
+        );
 
         // Pattern 1: (alice, ?p, bob)   → binds p="knows"
         // Pattern 2: (bob, ?p, ?x)      → reuses p="knows" as the predicate
@@ -1714,17 +1943,21 @@ mod tests {
                 VarPattern::new()
                     .subject(bound(alice))
                     .predicate_var("p")
-                    .object(bound(bob))
+                    .object(bound(bob)),
             )
             .pattern(
                 VarPattern::new()
                     .subject(bound(bob))
-                    .predicate_var("p")   // same variable — must reuse "knows"
-                    .object(var("x"))
+                    .predicate_var("p") // same variable — must reuse "knows"
+                    .object(var("x")),
             );
 
         let results = execute_query_full(&q, &snap, None, None).unwrap();
-        assert_eq!(results.len(), 1, "only the knows chain satisfies both patterns");
+        assert_eq!(
+            results.len(),
+            1,
+            "only the knows chain satisfies both patterns"
+        );
         let (nb, pb) = &results[0];
         assert_eq!(nb.get("x").copied(), Some(carol));
         assert_eq!(pb.get("p").map(String::as_str), Some("knows"));

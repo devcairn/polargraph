@@ -17,20 +17,32 @@ pub enum Value {
 }
 
 impl From<bool> for Value {
-    fn from(v: bool) -> Self { Value::Bool(v) }
+    fn from(v: bool) -> Self {
+        Value::Bool(v)
+    }
 }
 impl From<i64> for Value {
-    fn from(v: i64) -> Self { Value::Int(v) }
+    fn from(v: i64) -> Self {
+        Value::Int(v)
+    }
 }
 impl From<f64> for Value {
-    fn from(v: f64) -> Self { Value::Float(v) }
+    fn from(v: f64) -> Self {
+        Value::Float(v)
+    }
 }
 impl From<String> for Value {
-    fn from(v: String) -> Self { Value::Text(v) }
+    fn from(v: String) -> Self {
+        Value::Text(v)
+    }
 }
 impl From<&str> for Value {
-    fn from(v: &str) -> Self { Value::Text(v.to_owned()) }
+    fn from(v: &str) -> Self {
+        Value::Text(v.to_owned())
+    }
 }
 impl From<Vec<f32>> for Value {
-    fn from(v: Vec<f32>) -> Self { Value::Vector(v) }
+    fn from(v: Vec<f32>) -> Self {
+        Value::Vector(v)
+    }
 }

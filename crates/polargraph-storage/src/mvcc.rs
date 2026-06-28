@@ -23,8 +23,7 @@
 //! restarts pick up where they left off.
 
 use crate::{
-    cf,
-    codec,
+    cf, codec,
     error::StorageError,
     keys,
     store::{encode_epo_value, TripleStore},
@@ -156,7 +155,11 @@ pub struct Transaction {
 
 impl Transaction {
     pub(crate) fn new(store: TripleStore, read_ts: Timestamp) -> Self {
-        Self { store, read_ts, write_buffer: Vec::new() }
+        Self {
+            store,
+            read_ts,
+            write_buffer: Vec::new(),
+        }
     }
 
     /// Buffer a triple for insertion at commit time.
@@ -185,11 +188,13 @@ impl Transaction {
         subject: &NodeId,
         predicate: &str,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_subject_predicate_at(subject, predicate, self.read_ts, None)
+        self.store
+            .scan_by_subject_predicate_at(subject, predicate, self.read_ts, None)
     }
 
     pub fn scan_by_predicate(&self, predicate: &str) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_predicate_at(predicate, self.read_ts, None)
+        self.store
+            .scan_by_predicate_at(predicate, self.read_ts, None)
     }
 
     pub fn scan_by_predicate_object(
@@ -197,7 +202,8 @@ impl Transaction {
         predicate: &str,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_predicate_object_at(predicate, object, self.read_ts, None)
+        self.store
+            .scan_by_predicate_object_at(predicate, object, self.read_ts, None)
     }
 
     pub fn scan_by_object(&self, object: &NodeId) -> Result<Vec<Triple>, StorageError> {
@@ -209,7 +215,8 @@ impl Transaction {
         subject: &NodeId,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_subject_object_at(subject, object, self.read_ts, None)
+        self.store
+            .scan_by_subject_object_at(subject, object, self.read_ts, None)
     }
 
     pub fn scan_all(&self) -> Result<Vec<Triple>, StorageError> {
@@ -232,7 +239,10 @@ impl Transaction {
         }
 
         let (commit_ts, _guard) = self.store.oracle().begin_commit();
-        debug!("tx commit: read_ts={} commit_ts={}", self.read_ts.0, commit_ts.0);
+        debug!(
+            "tx commit: read_ts={} commit_ts={}",
+            self.read_ts.0, commit_ts.0
+        );
 
         // ── conflict check (hexastore triples only) ───────────────────────────
         for triple in &self.write_buffer {
@@ -266,17 +276,28 @@ impl Transaction {
                         &encode_value(triple, &temporal_stamped)?,
                     )?;
                     // Trigram index: write TRI CF entries for text property values.
-                    if let Triple::Property { value: Value::Text(text), .. } = triple {
-                        self.store.batch_text_trigrams(&mut batch, &triple.subject(), pred_id, text)?;
+                    if let Triple::Property {
+                        value: Value::Text(text),
+                        ..
+                    } = triple
+                    {
+                        self.store.batch_text_trigrams(
+                            &mut batch,
+                            &triple.subject(),
+                            pred_id,
+                            text,
+                        )?;
                     }
                 }
                 Triple::EdgeProperty { edge, value, .. } => {
                     let value_bytes = codec::encode_property(value, &temporal_stamped)?;
-                    self.store.batch_epa(&mut batch, *edge, pred_id, commit_ts, &value_bytes)?;
+                    self.store
+                        .batch_epa(&mut batch, *edge, pred_id, commit_ts, &value_bytes)?;
                 }
                 Triple::EdgeRelation { edge, object, .. } => {
                     let epo_val = encode_epo_value(&temporal_stamped);
-                    self.store.batch_epo(&mut batch, *edge, pred_id, *object, commit_ts, &epo_val)?;
+                    self.store
+                        .batch_epo(&mut batch, *edge, pred_id, *object, commit_ts, &epo_val)?;
                 }
             }
         }
@@ -353,7 +374,11 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub(crate) fn new(store: TripleStore, ts: Timestamp) -> Self {
-        Self { store, ts, vt_as_of: None }
+        Self {
+            store,
+            ts,
+            vt_as_of: None,
+        }
     }
 
     /// Set the valid-time filter for this snapshot.
@@ -366,7 +391,8 @@ impl Snapshot {
     }
 
     pub fn scan_by_subject(&self, subject: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_subject_at(subject, self.ts, self.vt_as_of)
+        self.store
+            .scan_by_subject_at(subject, self.ts, self.vt_as_of)
     }
 
     pub fn scan_by_subject_predicate(
@@ -374,11 +400,13 @@ impl Snapshot {
         subject: &NodeId,
         predicate: &str,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_subject_predicate_at(subject, predicate, self.ts, self.vt_as_of)
+        self.store
+            .scan_by_subject_predicate_at(subject, predicate, self.ts, self.vt_as_of)
     }
 
     pub fn scan_by_predicate(&self, predicate: &str) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_predicate_at(predicate, self.ts, self.vt_as_of)
+        self.store
+            .scan_by_predicate_at(predicate, self.ts, self.vt_as_of)
     }
 
     pub fn scan_by_predicate_object(
@@ -386,7 +414,8 @@ impl Snapshot {
         predicate: &str,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_predicate_object_at(predicate, object, self.ts, self.vt_as_of)
+        self.store
+            .scan_by_predicate_object_at(predicate, object, self.ts, self.vt_as_of)
     }
 
     pub fn scan_by_object(&self, object: &NodeId) -> Result<Vec<Triple>, StorageError> {
@@ -398,7 +427,8 @@ impl Snapshot {
         subject: &NodeId,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_subject_object_at(subject, object, self.ts, self.vt_as_of)
+        self.store
+            .scan_by_subject_object_at(subject, object, self.ts, self.vt_as_of)
     }
 
     pub fn scan_all(&self) -> Result<Vec<Triple>, StorageError> {
@@ -406,8 +436,13 @@ impl Snapshot {
     }
 
     /// Return `NodeId`s confirmed to have a live text value for `predicate` containing `query`.
-    pub fn text_search(&self, predicate: &str, query: &str) -> Result<Vec<polargraph_core::id::NodeId>, StorageError> {
-        self.store.text_search(predicate, query, self.ts, self.vt_as_of)
+    pub fn text_search(
+        &self,
+        predicate: &str,
+        query: &str,
+    ) -> Result<Vec<polargraph_core::id::NodeId>, StorageError> {
+        self.store
+            .text_search(predicate, query, self.ts, self.vt_as_of)
     }
 
     /// Return all annotations on `edge` as of this snapshot's timestamp.
@@ -442,9 +477,7 @@ impl Snapshot {
 fn object_of(triple: &Triple) -> NodeId {
     match triple {
         Triple::Relation { object, .. } => *object,
-        Triple::Property { .. }
-        | Triple::EdgeProperty { .. }
-        | Triple::EdgeRelation { .. } => {
+        Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => {
             // Property triples and edge annotations use the sentinel.
             // (EdgeProperty/EdgeRelation are handled separately before this
             // function would be reached, but we need an arm to satisfy Rust.)
@@ -467,10 +500,7 @@ fn stamp_temporal(original: &BiTemporalRange, commit_ts: Timestamp) -> BiTempora
 ///
 /// Edge annotations (`EdgeProperty`/`EdgeRelation`) are handled separately in
 /// `commit()` and should never be passed here; returns an empty vec for them.
-fn encode_value(
-    triple: &Triple,
-    temporal: &BiTemporalRange,
-) -> Result<Vec<u8>, StorageError> {
+fn encode_value(triple: &Triple, temporal: &BiTemporalRange) -> Result<Vec<u8>, StorageError> {
     match triple {
         Triple::Relation { edge_id, .. } => Ok(codec::encode_relation(edge_id, temporal)),
         Triple::Property { value, .. } => codec::encode_property(value, temporal),

@@ -139,7 +139,9 @@ pub fn decode_value(bytes: &[u8]) -> Result<DecodedValue, StorageError> {
                 },
             })
         }
-        d => Err(StorageError::KeyDecode(format!("unknown discriminant 0x{d:02x}"))),
+        d => Err(StorageError::KeyDecode(format!(
+            "unknown discriminant 0x{d:02x}"
+        ))),
     }
 }
 
@@ -148,7 +150,11 @@ pub fn decode_value(bytes: &[u8]) -> Result<DecodedValue, StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polargraph_core::{id::EdgeId, temporal::{BiTemporalRange, Timestamp}, value::Value};
+    use polargraph_core::{
+        id::EdgeId,
+        temporal::{BiTemporalRange, Timestamp},
+        value::Value,
+    };
 
     fn temporal(vt_start: i64, vt_end: i64, tt: i64) -> BiTemporalRange {
         BiTemporalRange {
@@ -189,8 +195,8 @@ mod tests {
     fn relation_edge_id_survives_all_bytes() {
         // Use a non-trivial UUID to catch byte-order bugs.
         let eid = EdgeId(uuid::Uuid::from_bytes([
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
-            0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54,
+            0x32, 0x10,
         ]));
         let t = temporal(100, 200, 300);
         let encoded = encode_relation(&eid, &t);
@@ -230,8 +236,14 @@ mod tests {
     #[test]
     fn property_int_round_trip() {
         assert_eq!(property_round_trip(Value::Int(0)), Value::Int(0));
-        assert_eq!(property_round_trip(Value::Int(i64::MIN)), Value::Int(i64::MIN));
-        assert_eq!(property_round_trip(Value::Int(i64::MAX)), Value::Int(i64::MAX));
+        assert_eq!(
+            property_round_trip(Value::Int(i64::MIN)),
+            Value::Int(i64::MIN)
+        );
+        assert_eq!(
+            property_round_trip(Value::Int(i64::MAX)),
+            Value::Int(i64::MAX)
+        );
     }
 
     #[test]
@@ -314,7 +326,10 @@ mod tests {
         // 1 disc + 8 vt_start + 8 vt_end + 4 len + 5 * 4 floats = 41
         assert_eq!(encoded.len(), 41);
         match decode_value(&encoded).unwrap() {
-            DecodedValue::Property { value: Value::Vector(floats), temporal } => {
+            DecodedValue::Property {
+                value: Value::Vector(floats),
+                temporal,
+            } => {
                 assert_eq!(floats.len(), 5);
                 assert_eq!(floats[0], 1.0_f32);
                 assert_eq!(floats[1], -2.5_f32);
@@ -330,7 +345,10 @@ mod tests {
         let t = temporal(0, 0, 0);
         let encoded = encode_property(&v, &t).unwrap();
         match decode_value(&encoded).unwrap() {
-            DecodedValue::Property { value: Value::Vector(floats), .. } => {
+            DecodedValue::Property {
+                value: Value::Vector(floats),
+                ..
+            } => {
                 assert!(floats.is_empty());
             }
             other => panic!("unexpected: {other:?}"),

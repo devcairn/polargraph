@@ -129,9 +129,9 @@ impl MigrationRunner {
     pub fn current_version(&self) -> Result<u32, StorageError> {
         let meta_cf = self.store.cf_handle(cf::META)?;
         match self.store.db_ref().get_cf(&meta_cf, META_VERSION_KEY)? {
-            Some(bytes) if bytes.len() >= 4 => Ok(u32::from_le_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3],
-            ])),
+            Some(bytes) if bytes.len() >= 4 => {
+                Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            }
             _ => Ok(0),
         }
     }
@@ -237,11 +237,7 @@ impl MigrationRunner {
         let meta_cf = self.store.cf_handle(cf::META)?;
         let mut batch = WriteBatch::default();
         batch.put_cf(&meta_cf, key.as_bytes(), &json);
-        batch.put_cf(
-            &meta_cf,
-            META_VERSION_KEY,
-            migration.version.to_le_bytes(),
-        );
+        batch.put_cf(&meta_cf, META_VERSION_KEY, migration.version.to_le_bytes());
         self.store.db_write(batch)
     }
 

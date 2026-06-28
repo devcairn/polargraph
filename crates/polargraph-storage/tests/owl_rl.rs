@@ -51,7 +51,13 @@ fn insert_relation(store: &TripleStore, subject: NodeId, pred: &str, object: Nod
 fn derived_contains(store: &TripleStore, s: NodeId, pred: &str, o: NodeId) -> bool {
     let derived = store.scan_derived().unwrap();
     derived.iter().any(|t| {
-        if let Triple::Relation { subject, predicate, object, .. } = t {
+        if let Triple::Relation {
+            subject,
+            predicate,
+            object,
+            ..
+        } = t
+        {
             *subject == s && predicate.0 == pred && *object == o
         } else {
             false
@@ -77,8 +83,11 @@ fn rdfs9_subclass_type_propagation() {
     let stats = owl_rl::materialize(&store, true).unwrap();
 
     // Should infer: Fido rdf:type Animal
-    assert!(derived_contains(&store, fido, RDF_TYPE, animal_class),
-        "rdfs9 should infer fido:type:Animal; stats={:?}", stats);
+    assert!(
+        derived_contains(&store, fido, RDF_TYPE, animal_class),
+        "rdfs9 should infer fido:type:Animal; stats={:?}",
+        stats
+    );
     assert!(stats.rules_fired > 0);
     assert!(stats.derived_triples > 0);
 }
@@ -100,8 +109,10 @@ fn rdfs11_subclass_transitivity() {
     owl_rl::materialize(&store, true).unwrap();
 
     // Should infer: Poodle subClassOf Animal
-    assert!(derived_contains(&store, poodle, RDFS_SUBCLASS_OF, animal),
-        "rdfs11 should infer poodle subClassOf animal");
+    assert!(
+        derived_contains(&store, poodle, RDFS_SUBCLASS_OF, animal),
+        "rdfs11 should infer poodle subClassOf animal"
+    );
 }
 
 // ── rdfs2: domain constraint → type ──────────────────────────────────────────
@@ -125,8 +136,10 @@ fn rdfs2_domain_type_inference() {
     owl_rl::materialize(&store, true).unwrap();
 
     // Should infer: Alice rdf:type Person
-    assert!(derived_contains(&store, alice, RDF_TYPE, person_class),
-        "rdfs2 should infer alice:type:Person from domain constraint");
+    assert!(
+        derived_contains(&store, alice, RDF_TYPE, person_class),
+        "rdfs2 should infer alice:type:Person from domain constraint"
+    );
 }
 
 // ── rdfs3: range constraint → type ───────────────────────────────────────────
@@ -149,8 +162,10 @@ fn rdfs3_range_type_inference() {
     owl_rl::materialize(&store, true).unwrap();
 
     // Should infer: Bob rdf:type Person (the *object* gets typed by rdfs:range)
-    assert!(derived_contains(&store, bob, RDF_TYPE, person_class),
-        "rdfs3 should infer bob:type:Person from range constraint");
+    assert!(
+        derived_contains(&store, bob, RDF_TYPE, person_class),
+        "rdfs3 should infer bob:type:Person from range constraint"
+    );
 }
 
 // ── prp-symp: SymmetricProperty ──────────────────────────────────────────────
@@ -177,8 +192,10 @@ fn prp_symp_symmetric_property() {
     owl_rl::materialize(&store, true).unwrap();
 
     // Should infer: Bob likes Alice
-    assert!(derived_contains(&store, bob, "likes", alice),
-        "prp-symp should infer bob likes alice");
+    assert!(
+        derived_contains(&store, bob, "likes", alice),
+        "prp-symp should infer bob likes alice"
+    );
 }
 
 // ── prp-inv1: inverseOf ───────────────────────────────────────────────────────
@@ -208,8 +225,10 @@ fn prp_inv1_inverse_of() {
     owl_rl::materialize(&store, true).unwrap();
 
     // Should infer: Bob knownBy Alice
-    assert!(derived_contains(&store, bob, "knownBy", alice),
-        "prp-inv1 should infer bob knownBy alice");
+    assert!(
+        derived_contains(&store, bob, "knownBy", alice),
+        "prp-inv1 should infer bob knownBy alice"
+    );
 }
 
 // ── eq-sym: sameAs symmetry ───────────────────────────────────────────────────
@@ -227,8 +246,10 @@ fn eq_sym_sameas_symmetry() {
     owl_rl::materialize(&store, true).unwrap();
 
     // Should infer: Alice2 owl:sameAs Alice
-    assert!(derived_contains(&store, alice2, OWL_SAME_AS, alice),
-        "eq-sym should infer alice2 sameAs alice");
+    assert!(
+        derived_contains(&store, alice2, OWL_SAME_AS, alice),
+        "eq-sym should infer alice2 sameAs alice"
+    );
 }
 
 // ── clear_derived: wipe DRV CF ────────────────────────────────────────────────
@@ -243,11 +264,17 @@ fn clear_derived_removes_all_derived_triples() {
 
     // Run once — produces derived triples
     owl_rl::materialize(&store, true).unwrap();
-    assert!(!store.scan_derived().unwrap().is_empty(), "DRV should have entries after first run");
+    assert!(
+        !store.scan_derived().unwrap().is_empty(),
+        "DRV should have entries after first run"
+    );
 
     // Clear + empty base → no derived triples remain
     store.clear_derived().unwrap();
-    assert!(store.scan_derived().unwrap().is_empty(), "DRV should be empty after clear");
+    assert!(
+        store.scan_derived().unwrap().is_empty(),
+        "DRV should be empty after clear"
+    );
 }
 
 // ── incremental: second run finds fixpoint immediately ────────────────────────
@@ -266,6 +293,9 @@ fn incremental_run_reaches_fixpoint() {
 
     // Incremental run: DRV already contains all inferred facts → 0 new facts
     let stats2 = owl_rl::materialize(&store, false).unwrap();
-    assert_eq!(stats2.rules_fired, 0, "incremental run on converged state should fire 0 rules");
+    assert_eq!(
+        stats2.rules_fired, 0,
+        "incremental run on converged state should fire 0 rules"
+    );
     assert_eq!(stats2.iterations, 0);
 }

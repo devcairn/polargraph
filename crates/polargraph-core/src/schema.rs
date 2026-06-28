@@ -28,12 +28,12 @@ impl FieldKind {
     pub fn matches(self, value: &Value) -> bool {
         matches!(
             (self, value),
-            (FieldKind::Bool,   Value::Bool(_))
-            | (FieldKind::Int,    Value::Int(_))
-            | (FieldKind::Float,  Value::Float(_))
-            | (FieldKind::Text,   Value::Text(_))
-            | (FieldKind::Blob,   Value::Blob(_))
-            | (FieldKind::Vector, Value::Vector(_))
+            (FieldKind::Bool, Value::Bool(_))
+                | (FieldKind::Int, Value::Int(_))
+                | (FieldKind::Float, Value::Float(_))
+                | (FieldKind::Text, Value::Text(_))
+                | (FieldKind::Blob, Value::Blob(_))
+                | (FieldKind::Vector, Value::Vector(_))
         )
     }
 }
@@ -41,11 +41,11 @@ impl FieldKind {
 impl std::fmt::Display for FieldKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            FieldKind::Bool   => "bool",
-            FieldKind::Int    => "int",
-            FieldKind::Float  => "float",
-            FieldKind::Text   => "text",
-            FieldKind::Blob   => "blob",
+            FieldKind::Bool => "bool",
+            FieldKind::Int => "int",
+            FieldKind::Float => "float",
+            FieldKind::Text => "text",
+            FieldKind::Blob => "blob",
             FieldKind::Vector => "vector",
         };
         write!(f, "{s}")
@@ -64,11 +64,19 @@ pub struct FieldDef {
 
 impl FieldDef {
     pub fn required(name: impl Into<String>, kind: FieldKind) -> Self {
-        Self { name: name.into(), kind, required: true }
+        Self {
+            name: name.into(),
+            kind,
+            required: true,
+        }
     }
 
     pub fn optional(name: impl Into<String>, kind: FieldKind) -> Self {
-        Self { name: name.into(), kind, required: false }
+        Self {
+            name: name.into(),
+            kind,
+            required: false,
+        }
     }
 }
 
@@ -155,7 +163,12 @@ pub struct NodeTypeDef {
 
 impl NodeTypeDef {
     pub fn new(type_name: impl Into<String>, fields: Vec<FieldDef>) -> Self {
-        Self { type_name: type_name.into(), fields, vector_space: None, parent_types: vec![] }
+        Self {
+            type_name: type_name.into(),
+            fields,
+            vector_space: None,
+            parent_types: vec![],
+        }
     }
 
     pub fn with_vector_space(mut self, space: VectorSpaceDef) -> Self {
@@ -245,12 +258,14 @@ pub const BUILTIN_HAS_ACCESS_TYPE_PRED: &str = "HAS_ACCESS_TYPE";
 /// These definitions are registered at server startup if not already present.
 pub fn builtin_node_types() -> Vec<NodeTypeDef> {
     vec![
-        NodeTypeDef::new(BUILTIN_USER_TYPE, vec![
-            FieldDef::optional("display_name", FieldKind::Text),
-        ]),
-        NodeTypeDef::new(BUILTIN_GROUP_TYPE, vec![
-            FieldDef::required("name", FieldKind::Text),
-        ]),
+        NodeTypeDef::new(
+            BUILTIN_USER_TYPE,
+            vec![FieldDef::optional("display_name", FieldKind::Text)],
+        ),
+        NodeTypeDef::new(
+            BUILTIN_GROUP_TYPE,
+            vec![FieldDef::required("name", FieldKind::Text)],
+        ),
     ]
 }
 
@@ -315,11 +330,14 @@ mod tests {
 
     #[test]
     fn node_type_def_serialises_round_trip() {
-        let def = NodeTypeDef::new("Person", vec![
-            FieldDef::required("name", FieldKind::Text),
-            FieldDef::optional("age", FieldKind::Int),
-            FieldDef::optional("embedding", FieldKind::Vector),
-        ]);
+        let def = NodeTypeDef::new(
+            "Person",
+            vec![
+                FieldDef::required("name", FieldKind::Text),
+                FieldDef::optional("age", FieldKind::Int),
+                FieldDef::optional("embedding", FieldKind::Vector),
+            ],
+        );
         let json = serde_json::to_string(&def).unwrap();
         let back: NodeTypeDef = serde_json::from_str(&json).unwrap();
         assert_eq!(def, back);

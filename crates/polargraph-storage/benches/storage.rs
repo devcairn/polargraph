@@ -6,9 +6,7 @@
 //!
 //! HTML reports land in target/criterion/.
 
-use criterion::{
-    criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use polargraph_core::{
     id::{EdgeId, NodeId},
     schema::StorageMode,
@@ -161,7 +159,12 @@ fn bench_hnsw_insert(c: &mut Criterion) {
             // Seed with a few nodes so the index structure is non-trivial.
             for i in 0u64..20 {
                 store
-                    .insert_vector("bench", NodeId::new(), lcg_vec(i * 137, dims), StorageMode::Memory)
+                    .insert_vector(
+                        "bench",
+                        NodeId::new(),
+                        lcg_vec(i * 137, dims),
+                        StorageMode::Memory,
+                    )
                     .unwrap();
             }
             let mut seed = 999u64;
@@ -169,7 +172,11 @@ fn bench_hnsw_insert(c: &mut Criterion) {
                 seed = seed.wrapping_add(1);
                 let id = NodeId::new();
                 let vec = lcg_vec(seed, dims);
-                std::hint::black_box(store.insert_vector("bench", id, vec, StorageMode::Memory).unwrap())
+                std::hint::black_box(
+                    store
+                        .insert_vector("bench", id, vec, StorageMode::Memory)
+                        .unwrap(),
+                )
             });
             drop(dir);
         });
@@ -189,11 +196,11 @@ fn bench_hnsw_search(c: &mut Criterion) {
             let items: Vec<(NodeId, Vec<f32>)> = (0..n as u64)
                 .map(|i| (NodeId::new(), lcg_vec(i, dims)))
                 .collect();
-            store.batch_insert_vectors("bench", &items, StorageMode::Memory).0;
+            store
+                .batch_insert_vectors("bench", &items, StorageMode::Memory)
+                .0;
             let query = lcg_vec(u64::MAX, dims);
-            b.iter(|| {
-                std::hint::black_box(store.search_vector("bench", query.clone(), 10))
-            });
+            b.iter(|| std::hint::black_box(store.search_vector("bench", query.clone(), 10)));
             drop(dir);
         });
     }
@@ -217,7 +224,9 @@ fn bench_hnsw_recall(c: &mut Criterion) {
         let items: Vec<(NodeId, Vec<f32>)> = (0..N as u64)
             .map(|i| (NodeId::new(), lcg_vec(i, DIMS)))
             .collect();
-        store.batch_insert_vectors("bench", &items, StorageMode::Memory).0;
+        store
+            .batch_insert_vectors("bench", &items, StorageMode::Memory)
+            .0;
 
         let mut q_seed = 0xdeadbeef_u64;
         b.iter(|| {
@@ -292,9 +301,7 @@ fn bench_filtered_search(c: &mut Criterion) {
     });
 
     group.bench_function("search_in_set", |b| {
-        b.iter(|| {
-            std::hint::black_box(store.search_vector_in_set("bench", &query, K, &allowed))
-        });
+        b.iter(|| std::hint::black_box(store.search_vector_in_set("bench", &query, K, &allowed)));
     });
 
     group.finish();
@@ -391,9 +398,7 @@ fn bench_annotation_scan(c: &mut Criterion) {
     });
 
     group.bench_function("scan_by_predicate_1k_edges", |b| {
-        b.iter(|| {
-            std::hint::black_box(store.scan_annotations_by_predicate("prop0", ts).unwrap())
-        });
+        b.iter(|| std::hint::black_box(store.scan_annotations_by_predicate("prop0", ts).unwrap()));
     });
 
     group.finish();
@@ -498,11 +503,19 @@ fn setup_bsbm_store() -> (TripleStore, tempfile::TempDir, i64) {
 
     // Products
     for (i, &pid) in products.iter().enumerate() {
-        let type_idx = if n_types <= 5 { 0 } else { 5 + (i % (n_types - 5)) };
+        let type_idx = if n_types <= 5 {
+            0
+        } else {
+            5 + (i % (n_types - 5))
+        };
         all_triples.push(bsbm_rel(pid, BSBM_TYPE, types[type_idx]));
         let n_feats = 2 + (i % 3);
         for f in 0..n_feats {
-            all_triples.push(bsbm_rel(pid, BSBM_FEATURE, features[(i + f * 7) % n_features]));
+            all_triples.push(bsbm_rel(
+                pid,
+                BSBM_FEATURE,
+                features[(i + f * 7) % n_features],
+            ));
         }
         all_triples.push(bsbm_prop_int(pid, BSBM_NUM1, ((i * 7 + 13) % 500) as i64));
     }
@@ -511,7 +524,11 @@ fn setup_bsbm_store() -> (TripleStore, tempfile::TempDir, i64) {
     for (i, &oid) in offers.iter().enumerate() {
         all_triples.push(bsbm_rel(oid, BSBM_OFFER_FOR, products[i % n_products]));
         all_triples.push(bsbm_rel(oid, BSBM_VENDOR, vendors[i % n_vendors]));
-        all_triples.push(bsbm_prop_float(oid, BSBM_PRICE, 10.0 + (i as f64 * 3.7) % 990.0));
+        all_triples.push(bsbm_prop_float(
+            oid,
+            BSBM_PRICE,
+            10.0 + (i as f64 * 3.7) % 990.0,
+        ));
     }
 
     // Reviews
@@ -548,7 +565,9 @@ fn bench_bsbm_q1(c: &mut Criterion) {
     group.bench_function("q1_product_search", |b| {
         b.iter(|| {
             // PSO: all subjects with bsbm:type = type_node
-            let type_triples = snap.scan_by_predicate_object(BSBM_TYPE, &type_node).unwrap();
+            let type_triples = snap
+                .scan_by_predicate_object(BSBM_TYPE, &type_node)
+                .unwrap();
             let candidates: Vec<NodeId> = type_triples
                 .into_iter()
                 .filter_map(|t| match t {
@@ -558,28 +577,36 @@ fn bench_bsbm_q1(c: &mut Criterion) {
                 .collect();
 
             // Feature + numeric filter
-            let results: Vec<NodeId> = candidates
-                .into_iter()
-                .filter(|pid| {
-                    let has_feat = snap
-                        .scan_by_subject_predicate(pid, BSBM_FEATURE)
-                        .ok()
-                        .map(|ts| {
-                            ts.into_iter().any(|t| matches!(
+            let results: Vec<NodeId> =
+                candidates
+                    .into_iter()
+                    .filter(|pid| {
+                        let has_feat =
+                            snap.scan_by_subject_predicate(pid, BSBM_FEATURE)
+                                .ok()
+                                .map(|ts| {
+                                    ts.into_iter().any(|t| matches!(
                                 t, Triple::Relation { object, .. } if object == feature_node
                             ))
-                        })
-                        .unwrap_or(false);
-                    if !has_feat { return false; }
-                    snap.scan_by_subject_predicate(pid, BSBM_NUM1)
-                        .ok()
-                        .and_then(|ts| ts.into_iter().find_map(|t| match t {
-                            Triple::Property { value: polargraph_core::value::Value::Int(n), .. } => Some(n),
-                            _ => None,
-                        }))
-                        .is_some_and(|n| n > threshold)
-                })
-                .collect();
+                                })
+                                .unwrap_or(false);
+                        if !has_feat {
+                            return false;
+                        }
+                        snap.scan_by_subject_predicate(pid, BSBM_NUM1)
+                            .ok()
+                            .and_then(|ts| {
+                                ts.into_iter().find_map(|t| match t {
+                                    Triple::Property {
+                                        value: polargraph_core::value::Value::Int(n),
+                                        ..
+                                    } => Some(n),
+                                    _ => None,
+                                })
+                            })
+                            .is_some_and(|n| n > threshold)
+                    })
+                    .collect();
             std::hint::black_box(results)
         });
     });
@@ -601,26 +628,44 @@ fn bench_bsbm_q7(c: &mut Criterion) {
     group.bench_function("q7_five_way_join", |b| {
         b.iter(|| {
             // POS: all offers for this product
-            let offer_triples = snap.scan_by_predicate_object(BSBM_OFFER_FOR, &product).unwrap();
+            let offer_triples = snap
+                .scan_by_predicate_object(BSBM_OFFER_FOR, &product)
+                .unwrap();
             // POS: all reviews for this product
-            let review_triples = snap.scan_by_predicate_object(BSBM_REVIEW_FOR, &product).unwrap();
+            let review_triples = snap
+                .scan_by_predicate_object(BSBM_REVIEW_FOR, &product)
+                .unwrap();
 
             // Enrich offers: fetch vendor + price
             let mut cheapest: Option<(NodeId, f64)> = None;
             for t in &offer_triples {
-                let Some(oid) = (match t { Triple::Relation { object, .. } => Some(*object), _ => None }) else { continue };
+                let Some(oid) = (match t {
+                    Triple::Relation { object, .. } => Some(*object),
+                    _ => None,
+                }) else {
+                    continue;
+                };
                 let _vendor = snap
-                    .scan_by_subject_predicate(&oid, BSBM_VENDOR).ok()
-                    .and_then(|ts| ts.into_iter().find_map(|t| match t {
-                        Triple::Relation { object, .. } => Some(object),
-                        _ => None,
-                    }));
+                    .scan_by_subject_predicate(&oid, BSBM_VENDOR)
+                    .ok()
+                    .and_then(|ts| {
+                        ts.into_iter().find_map(|t| match t {
+                            Triple::Relation { object, .. } => Some(object),
+                            _ => None,
+                        })
+                    });
                 let price = snap
-                    .scan_by_subject_predicate(&oid, BSBM_PRICE).ok()
-                    .and_then(|ts| ts.into_iter().find_map(|t| match t {
-                        Triple::Property { value: polargraph_core::value::Value::Float(f), .. } => Some(f),
-                        _ => None,
-                    }))
+                    .scan_by_subject_predicate(&oid, BSBM_PRICE)
+                    .ok()
+                    .and_then(|ts| {
+                        ts.into_iter().find_map(|t| match t {
+                            Triple::Property {
+                                value: polargraph_core::value::Value::Float(f),
+                                ..
+                            } => Some(f),
+                            _ => None,
+                        })
+                    })
                     .unwrap_or(f64::MAX);
                 if cheapest.map_or(true, |(_, p)| price < p) {
                     cheapest = Some((oid, price));
@@ -630,13 +675,19 @@ fn bench_bsbm_q7(c: &mut Criterion) {
             // Enrich reviews: fetch reviewer
             let _reviewers: Vec<NodeId> = review_triples
                 .iter()
-                .filter_map(|t| match t { Triple::Relation { object, .. } => Some(*object), _ => None })
+                .filter_map(|t| match t {
+                    Triple::Relation { object, .. } => Some(*object),
+                    _ => None,
+                })
                 .filter_map(|rid| {
-                    snap.scan_by_subject_predicate(&rid, BSBM_REVIEWER).ok()
-                        .and_then(|ts| ts.into_iter().find_map(|t| match t {
-                            Triple::Relation { object, .. } => Some(object),
-                            _ => None,
-                        }))
+                    snap.scan_by_subject_predicate(&rid, BSBM_REVIEWER)
+                        .ok()
+                        .and_then(|ts| {
+                            ts.into_iter().find_map(|t| match t {
+                                Triple::Relation { object, .. } => Some(object),
+                                _ => None,
+                            })
+                        })
                 })
                 .collect();
 
@@ -651,7 +702,13 @@ fn bench_bsbm_q7(c: &mut Criterion) {
 
 criterion_group!(writes, bench_triple_writes);
 criterion_group!(queries, bench_pattern_query);
-criterion_group!(vector, bench_hnsw_insert, bench_hnsw_search, bench_hnsw_recall, bench_filtered_search);
+criterion_group!(
+    vector,
+    bench_hnsw_insert,
+    bench_hnsw_search,
+    bench_hnsw_recall,
+    bench_filtered_search
+);
 criterion_group!(annotations, bench_annotation_write, bench_annotation_scan);
 criterion_group!(bsbm, bench_bsbm_q1, bench_bsbm_q7);
 criterion_main!(writes, queries, vector, annotations, bsbm);

@@ -83,7 +83,10 @@ fn commit_returns_monotonically_increasing_timestamps() {
     tx2.insert(relation(a, "knows", c));
     let ts2 = tx2.commit().unwrap();
 
-    assert!(ts2 > ts1, "commit timestamps must be monotonically increasing");
+    assert!(
+        ts2 > ts1,
+        "commit timestamps must be monotonically increasing"
+    );
 }
 
 #[test]
@@ -116,7 +119,10 @@ fn uncommitted_write_invisible_to_concurrent_snapshot() {
 
     // The pre-write snapshot must not see the buffered write.
     let triples = pre_write_snap.scan_by_subject(&alice).unwrap();
-    assert!(triples.is_empty(), "uncommitted data must not bleed through");
+    assert!(
+        triples.is_empty(),
+        "uncommitted data must not bleed through"
+    );
 
     // A new snapshot taken right now also must not see it.
     let mid_snap = store.snapshot(store.begin().read_ts);
@@ -150,7 +156,11 @@ fn snapshot_read_inside_tx_sees_only_committed_data() {
     // (writes are only visible after commit).
     // (This is a design choice — buffered writes are not readable within the tx.)
     let seen_again = tx.scan_by_subject(&alice).unwrap();
-    assert_eq!(seen_again.len(), 1, "buffered writes not visible via tx reads");
+    assert_eq!(
+        seen_again.len(),
+        1,
+        "buffered writes not visible via tx reads"
+    );
 }
 
 // ── 3. Snapshot reads — point-in-time correctness ────────────────────────────
@@ -206,7 +216,11 @@ fn multiple_versions_of_same_triple_deduplicated_to_latest() {
 
     let snap = store.snapshot(ts2);
     let triples = snap.scan_by_subject(&alice).unwrap();
-    assert_eq!(triples.len(), 1, "duplicate (S,P,O) must deduplicate to one result");
+    assert_eq!(
+        triples.len(),
+        1,
+        "duplicate (S,P,O) must deduplicate to one result"
+    );
 }
 
 #[test]
@@ -239,7 +253,8 @@ fn snapshot_sees_property_values_correctly() {
     assert_eq!(triples.len(), 2);
 
     let find = |pred: &str| -> Value {
-        triples.iter()
+        triples
+            .iter()
             .find(|t| t.predicate().0 == pred)
             .and_then(|t| match t {
                 Triple::Property { value, .. } => Some(value.clone()),
@@ -336,7 +351,11 @@ fn multi_triple_tx_all_visible_after_commit() {
 
     let snap = store.snapshot(ts);
     let triples = snap.scan_by_subject(&alice).unwrap();
-    assert_eq!(triples.len(), 3, "all triples in tx must be committed atomically");
+    assert_eq!(
+        triples.len(),
+        3,
+        "all triples in tx must be committed atomically"
+    );
 }
 
 #[test]
@@ -356,8 +375,11 @@ fn all_triples_in_tx_get_same_commit_timestamp() {
     assert_eq!(triples.len(), 2);
 
     for t in &triples {
-        assert_eq!(t.temporal().tt, commit_ts,
-            "all triples in one tx must share the same tt");
+        assert_eq!(
+            t.temporal().tt,
+            commit_ts,
+            "all triples in one tx must share the same tt"
+        );
     }
 }
 
@@ -409,8 +431,10 @@ fn oracle_counter_persists_across_reopen() {
         let mut tx = store.begin();
         tx.insert(relation(alice, "knows", carol));
         let new_commit_ts = tx.commit().unwrap();
-        assert!(new_commit_ts > ts_before_reopen,
-            "post-reopen commit_ts must be > pre-reopen commit_ts");
+        assert!(
+            new_commit_ts > ts_before_reopen,
+            "post-reopen commit_ts must be > pre-reopen commit_ts"
+        );
     }
 }
 

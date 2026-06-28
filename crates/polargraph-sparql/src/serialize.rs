@@ -12,24 +12,12 @@ pub fn value_to_nt_literal(val: &Value) -> String {
             "\"{}\"^^<http://www.w3.org/2001/XMLSchema#string>",
             nt_escape(s)
         ),
-        Value::Int(n) => format!(
-            "\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>",
-            n
-        ),
-        Value::Float(f) => format!(
-            "\"{}\"^^<http://www.w3.org/2001/XMLSchema#double>",
-            f
-        ),
-        Value::Bool(b) => format!(
-            "\"{}\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
-            b
-        ),
+        Value::Int(n) => format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>", n),
+        Value::Float(f) => format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#double>", f),
+        Value::Bool(b) => format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#boolean>", b),
         Value::Blob(b) => {
             let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
-            format!(
-                "\"{}\"^^<http://www.w3.org/2001/XMLSchema#hexBinary>",
-                hex
-            )
+            format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#hexBinary>", hex)
         }
         Value::Vector(v) => {
             // Represent as a JSON-array string — not an RDF standard but best-effort.
@@ -39,9 +27,7 @@ pub fn value_to_nt_literal(val: &Value) -> String {
                 s.join(",")
             )
         }
-        Value::Null => {
-            "\"\"^^<http://www.w3.org/2001/XMLSchema#string>".to_string()
-        }
+        Value::Null => "\"\"^^<http://www.w3.org/2001/XMLSchema#string>".to_string(),
     }
 }
 
@@ -81,11 +67,7 @@ pub enum RdfStarSubject {
     /// An ordinary IRI or blank node already rendered with angle brackets, e.g. `<urn:uuid:…>`.
     Iri(String),
     /// A quoted triple `<< s p o >>` used as the subject of an outer statement.
-    QuotedTriple {
-        s: String,
-        p: String,
-        o: String,
-    },
+    QuotedTriple { s: String, p: String, o: String },
 }
 
 impl RdfStarSubject {
@@ -162,8 +144,11 @@ pub fn serialize_turtle_star(triples: &[RdfStarTriple]) -> String {
             RdfStarSubject::QuotedTriple { s, p, o } => {
                 quoted_lines.push(format!(
                     "<< {s} {p} {o} >> {} {} .\n",
-                    t.predicate, t.object,
-                    s = s, p = p, o = o,
+                    t.predicate,
+                    t.object,
+                    s = s,
+                    p = p,
+                    o = o,
                 ));
             }
         }
@@ -341,9 +326,15 @@ fn nt_object_to_jsonld(obj: &str) -> serde_json::Value {
                 (short, json_val)
             } else if let Some(lang_part) = after.strip_prefix('@') {
                 let lang = lang_part.trim();
-                (format!("rdf:langString@{}", lang), serde_json::Value::String(value_str.to_string()))
+                (
+                    format!("rdf:langString@{}", lang),
+                    serde_json::Value::String(value_str.to_string()),
+                )
             } else {
-                ("xsd:string".to_string(), serde_json::Value::String(value_str.to_string()))
+                (
+                    "xsd:string".to_string(),
+                    serde_json::Value::String(value_str.to_string()),
+                )
             };
             return serde_json::json!({ "@value": coerced, "@type": type_str });
         }
@@ -373,13 +364,11 @@ fn coerce_xsd_value(s: &str, dt_iri: &str) -> serde_json::Value {
                 }
             }
         }
-        "http://www.w3.org/2001/XMLSchema#boolean" => {
-            match s {
-                "true" | "1" => return serde_json::Value::Bool(true),
-                "false" | "0" => return serde_json::Value::Bool(false),
-                _ => {}
-            }
-        }
+        "http://www.w3.org/2001/XMLSchema#boolean" => match s {
+            "true" | "1" => return serde_json::Value::Bool(true),
+            "false" | "0" => return serde_json::Value::Bool(false),
+            _ => {}
+        },
         _ => {}
     }
     serde_json::Value::String(s.to_string())
@@ -387,7 +376,9 @@ fn coerce_xsd_value(s: &str, dt_iri: &str) -> serde_json::Value {
 
 /// Strip surrounding angle brackets from an IRI string: `<iri>` → `iri`.
 pub fn strip_brackets(s: &str) -> &str {
-    s.strip_prefix('<').and_then(|s| s.strip_suffix('>')).unwrap_or(s)
+    s.strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(s)
 }
 
 // ── Schema RDF serializer / parser ────────────────────────────────────────────
@@ -618,7 +609,11 @@ pub fn parse_schema_rdf(
                     .map(|s| s.as_str())
                     .unwrap_or("");
                 let kind = xsd_to_field_kind(range).to_string();
-                let field = SchemaField { name: field_name.to_string(), kind, required: false };
+                let field = SchemaField {
+                    name: field_name.to_string(),
+                    kind,
+                    required: false,
+                };
 
                 // Try to attach to a matching node type first.
                 if let Some(nt) = node_types.iter_mut().find(|n| n.type_name == owner) {
@@ -644,7 +639,12 @@ pub fn parse_schema_rdf(
                 .and_then(|r| r.strip_prefix(TYPE_BASE))
                 .unwrap_or("")
                 .to_string();
-            Some(SchemaEdgeType { predicate: predicate.clone(), domain, range, fields: Vec::new() })
+            Some(SchemaEdgeType {
+                predicate: predicate.clone(),
+                domain,
+                range,
+                fields: Vec::new(),
+            })
         })
         .collect();
 
@@ -732,7 +732,10 @@ mod tests {
             object: "<urn:uuid:bbb>".to_string(),
         }];
         let out = serialize_ntriples(&triples);
-        assert_eq!(out, "<urn:uuid:aaa> <http://example.org/knows> <urn:uuid:bbb> .\n");
+        assert_eq!(
+            out,
+            "<urn:uuid:aaa> <http://example.org/knows> <urn:uuid:bbb> .\n"
+        );
     }
 
     #[test]

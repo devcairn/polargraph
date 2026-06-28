@@ -4,12 +4,12 @@
 //! parse ↔ serialize round-trips and structural correctness of all supported
 //! RDF formats.
 
+use polargraph_core::value::Value;
 use polargraph_sparql::{
     parse_jsonld, parse_ntriples, parse_schema_rdf, parse_turtle, serialize_jsonld,
     serialize_ntriples, serialize_schema_rdf, serialize_turtle, ImportedObject, RdfTriple,
     SchemaEdgeType, SchemaField, SchemaNodeType,
 };
-use polargraph_core::value::Value;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -50,7 +50,11 @@ fn roundtrip_ntriples() {
                 }
                 ImportedObject::BlankNode(id) => format!("_:{}", id),
             };
-            Some(RdfTriple { subject, predicate, object })
+            Some(RdfTriple {
+                subject,
+                predicate,
+                object,
+            })
         })
         .collect();
 
@@ -58,14 +62,21 @@ fn roundtrip_ntriples() {
 
     // Re-parse the serialized output.
     let re_parsed = parse_ntriples(serialized.as_bytes()).expect("re-parse failed");
-    assert_eq!(re_parsed.len(), parsed.len(), "triple count mismatch after round-trip");
+    assert_eq!(
+        re_parsed.len(),
+        parsed.len(),
+        "triple count mismatch after round-trip"
+    );
 
     // Verify all original subjects appear in re-parsed output.
     let orig_subjects: std::collections::HashSet<&str> =
         parsed.iter().map(|t| t.subject.as_str()).collect();
     let re_subjects: std::collections::HashSet<&str> =
         re_parsed.iter().map(|t| t.subject.as_str()).collect();
-    assert_eq!(orig_subjects, re_subjects, "subjects changed after round-trip");
+    assert_eq!(
+        orig_subjects, re_subjects,
+        "subjects changed after round-trip"
+    );
 }
 
 // ── Test 2: Turtle round-trip ─────────────────────────────────────────────────
@@ -89,20 +100,36 @@ fn roundtrip_turtle() {
             let predicate = format!("<{}>", t.predicate);
             let object = match &t.object {
                 ImportedObject::Iri(iri) => format!("<{}>", iri),
-                ImportedObject::Literal { value: Value::Text(s), .. } => {
+                ImportedObject::Literal {
+                    value: Value::Text(s),
+                    ..
+                } => {
                     format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#string>", s)
                 }
                 ImportedObject::Literal { value, .. } => format!("{:?}", value),
                 ImportedObject::BlankNode(id) => format!("_:{}", id),
             };
-            RdfTriple { subject, predicate, object }
+            RdfTriple {
+                subject,
+                predicate,
+                object,
+            }
         })
         .collect();
 
     let turtle_out = serialize_turtle(&rdf_triples);
-    assert!(turtle_out.contains("@prefix xsd:"), "should have prefix declarations");
-    assert!(turtle_out.contains("http://example.org/Alice"), "should contain Alice");
-    assert!(turtle_out.contains("http://schema.org/knows"), "should contain knows predicate");
+    assert!(
+        turtle_out.contains("@prefix xsd:"),
+        "should have prefix declarations"
+    );
+    assert!(
+        turtle_out.contains("http://example.org/Alice"),
+        "should contain Alice"
+    );
+    assert!(
+        turtle_out.contains("http://schema.org/knows"),
+        "should contain knows predicate"
+    );
 
     // Re-parse from Turtle.
     let re_parsed = parse_turtle(turtle_out.as_bytes()).expect("re-parse Turtle failed");
@@ -143,26 +170,39 @@ fn jsonld_export_structure() {
 
     // Must have @context and @graph.
     assert!(doc.get("@context").is_some(), "missing @context");
-    let graph = doc.get("@graph").expect("missing @graph").as_array().expect("@graph not array");
+    let graph = doc
+        .get("@graph")
+        .expect("missing @graph")
+        .as_array()
+        .expect("@graph not array");
     assert_eq!(graph.len(), 2, "expected 2 subject groups");
 
     // Find Alice's node.
-    let alice = graph.iter().find(|n| {
-        n.get("@id").and_then(|v| v.as_str()) == Some("urn:uuid:aaa")
-    }).expect("Alice node not found");
+    let alice = graph
+        .iter()
+        .find(|n| n.get("@id").and_then(|v| v.as_str()) == Some("urn:uuid:aaa"))
+        .expect("Alice node not found");
 
     // knows predicate → { "@id": "urn:uuid:bbb" }
-    let knows = alice.get("http://schema.org/knows").expect("knows predicate missing");
+    let knows = alice
+        .get("http://schema.org/knows")
+        .expect("knows predicate missing");
     assert_eq!(
         knows.get("@id").and_then(|v| v.as_str()),
         Some("urn:uuid:bbb")
     );
 
     // name predicate → { "@value": ..., "@type": "xsd:string" }
-    let name = alice.get("http://schema.org/name").expect("name predicate missing");
+    let name = alice
+        .get("http://schema.org/name")
+        .expect("name predicate missing");
     assert!(name.get("@value").is_some(), "@value missing");
     let type_str = name.get("@type").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(type_str.contains("string"), "expected xsd:string type, got: {}", type_str);
+    assert!(
+        type_str.contains("string"),
+        "expected xsd:string type, got: {}",
+        type_str
+    );
 }
 
 // ── Test 4: JSON-LD import ────────────────────────────────────────────────────
@@ -187,25 +227,43 @@ fn jsonld_import() {
     // 4 predicates on Alice.
     assert_eq!(triples.len(), 4);
 
-    let knows = triples.iter().find(|t| t.predicate.contains("knows")).unwrap();
+    let knows = triples
+        .iter()
+        .find(|t| t.predicate.contains("knows"))
+        .unwrap();
     assert!(matches!(&knows.object, ImportedObject::Iri(s) if s == "urn:uuid:bob"));
 
-    let name_t = triples.iter().find(|t| t.predicate.contains("name")).unwrap();
+    let name_t = triples
+        .iter()
+        .find(|t| t.predicate.contains("name"))
+        .unwrap();
     assert!(matches!(
         &name_t.object,
         ImportedObject::Literal { value: Value::Text(s), .. } if s == "Alice"
     ));
 
-    let age_t = triples.iter().find(|t| t.predicate.contains("age")).unwrap();
+    let age_t = triples
+        .iter()
+        .find(|t| t.predicate.contains("age"))
+        .unwrap();
     assert!(matches!(
         &age_t.object,
-        ImportedObject::Literal { value: Value::Int(30), .. }
+        ImportedObject::Literal {
+            value: Value::Int(30),
+            ..
+        }
     ));
 
-    let score_t = triples.iter().find(|t| t.predicate.contains("score")).unwrap();
+    let score_t = triples
+        .iter()
+        .find(|t| t.predicate.contains("score"))
+        .unwrap();
     assert!(matches!(
         &score_t.object,
-        ImportedObject::Literal { value: Value::Float(_), .. }
+        ImportedObject::Literal {
+            value: Value::Float(_),
+            ..
+        }
     ));
 }
 
@@ -242,28 +300,39 @@ fn subgraph_export_import() {
     assert_eq!(imported.len(), triples.len(), "triple count mismatch");
 
     // All subjects must be preserved.
-    let export_subjects: std::collections::HashSet<String> =
-        triples.iter().map(|t| {
+    let export_subjects: std::collections::HashSet<String> = triples
+        .iter()
+        .map(|t| {
             // Strip angle brackets.
             t.subject.trim_matches(|c| c == '<' || c == '>').to_string()
-        }).collect();
+        })
+        .collect();
     let import_subjects: std::collections::HashSet<String> =
         imported.iter().map(|t| t.subject.clone()).collect();
     assert_eq!(export_subjects, import_subjects);
 
     // Verify the relation triple.
-    let rel = imported.iter().find(|t| t.predicate.contains("knows")).unwrap();
+    let rel = imported
+        .iter()
+        .find(|t| t.predicate.contains("knows"))
+        .unwrap();
     assert!(matches!(&rel.object, ImportedObject::Iri(s) if s == "urn:uuid:bob"));
 
     // Verify the property triple.
-    let prop = imported.iter().find(|t| t.predicate.contains("name")).unwrap();
+    let prop = imported
+        .iter()
+        .find(|t| t.predicate.contains("name"))
+        .unwrap();
     assert!(matches!(
         &prop.object,
         ImportedObject::Literal { value: Value::Text(s), .. } if s == "Alice"
     ));
 
     // Verify the annotation triple.
-    let ann = imported.iter().find(|t| t.predicate.contains("since")).unwrap();
+    let ann = imported
+        .iter()
+        .find(|t| t.predicate.contains("since"))
+        .unwrap();
     assert!(matches!(
         &ann.object,
         ImportedObject::Literal { value: Value::Text(s), .. } if s == "2024-01-01"
@@ -278,16 +347,26 @@ fn schema_rdf_roundtrip() {
         SchemaNodeType {
             type_name: "Person".to_string(),
             fields: vec![
-                SchemaField { name: "name".to_string(), kind: "text".to_string(), required: true },
-                SchemaField { name: "age".to_string(), kind: "int".to_string(), required: false },
+                SchemaField {
+                    name: "name".to_string(),
+                    kind: "text".to_string(),
+                    required: true,
+                },
+                SchemaField {
+                    name: "age".to_string(),
+                    kind: "int".to_string(),
+                    required: false,
+                },
             ],
             parent_types: vec![],
         },
         SchemaNodeType {
             type_name: "Company".to_string(),
-            fields: vec![
-                SchemaField { name: "name".to_string(), kind: "text".to_string(), required: true },
-            ],
+            fields: vec![SchemaField {
+                name: "name".to_string(),
+                kind: "text".to_string(),
+                required: true,
+            }],
             parent_types: vec![],
         },
     ];
@@ -296,35 +375,77 @@ fn schema_rdf_roundtrip() {
         predicate: "works_at".to_string(),
         domain: "Person".to_string(),
         range: "Company".to_string(),
-        fields: vec![
-            SchemaField { name: "since".to_string(), kind: "text".to_string(), required: false },
-        ],
+        fields: vec![SchemaField {
+            name: "since".to_string(),
+            kind: "text".to_string(),
+            required: false,
+        }],
     }];
 
     let turtle_out = serialize_schema_rdf(&node_types, &edge_types);
 
     // Structural checks on the Turtle output.
     assert!(turtle_out.contains("owl:Class"), "missing owl:Class");
-    assert!(turtle_out.contains("urn:polargraph:type:Person"), "missing Person type IRI");
-    assert!(turtle_out.contains("urn:polargraph:type:Company"), "missing Company type IRI");
-    assert!(turtle_out.contains("owl:ObjectProperty"), "missing owl:ObjectProperty");
-    assert!(turtle_out.contains("urn:polargraph:rel:works_at"), "missing works_at IRI");
+    assert!(
+        turtle_out.contains("urn:polargraph:type:Person"),
+        "missing Person type IRI"
+    );
+    assert!(
+        turtle_out.contains("urn:polargraph:type:Company"),
+        "missing Company type IRI"
+    );
+    assert!(
+        turtle_out.contains("owl:ObjectProperty"),
+        "missing owl:ObjectProperty"
+    );
+    assert!(
+        turtle_out.contains("urn:polargraph:rel:works_at"),
+        "missing works_at IRI"
+    );
     assert!(turtle_out.contains("rdfs:domain"), "missing rdfs:domain");
     assert!(turtle_out.contains("rdfs:range"), "missing rdfs:range");
-    assert!(turtle_out.contains("owl:DatatypeProperty"), "missing owl:DatatypeProperty");
-    assert!(turtle_out.contains("urn:polargraph:prop:Person/name"), "missing Person/name prop");
+    assert!(
+        turtle_out.contains("owl:DatatypeProperty"),
+        "missing owl:DatatypeProperty"
+    );
+    assert!(
+        turtle_out.contains("urn:polargraph:prop:Person/name"),
+        "missing Person/name prop"
+    );
 
     // Parse the Turtle back and verify the schema structure.
     let (re_nodes, re_edges) =
         parse_schema_rdf(turtle_out.as_bytes()).expect("parse_schema_rdf failed");
 
-    assert_eq!(re_nodes.len(), 2, "expected 2 node types, got {}", re_nodes.len());
-    assert_eq!(re_edges.len(), 1, "expected 1 edge type, got {}", re_edges.len());
+    assert_eq!(
+        re_nodes.len(),
+        2,
+        "expected 2 node types, got {}",
+        re_nodes.len()
+    );
+    assert_eq!(
+        re_edges.len(),
+        1,
+        "expected 1 edge type, got {}",
+        re_edges.len()
+    );
 
-    let person = re_nodes.iter().find(|n| n.type_name == "Person").expect("Person not found");
+    let person = re_nodes
+        .iter()
+        .find(|n| n.type_name == "Person")
+        .expect("Person not found");
     assert_eq!(person.fields.len(), 2, "Person should have 2 fields");
-    assert!(person.fields.iter().any(|f| f.name == "name"), "name field missing");
-    assert!(person.fields.iter().any(|f| f.name == "age" && f.kind == "int"), "age int field missing");
+    assert!(
+        person.fields.iter().any(|f| f.name == "name"),
+        "name field missing"
+    );
+    assert!(
+        person
+            .fields
+            .iter()
+            .any(|f| f.name == "age" && f.kind == "int"),
+        "age int field missing"
+    );
 
     let edge = &re_edges[0];
     assert_eq!(edge.predicate, "works_at");

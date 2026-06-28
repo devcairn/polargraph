@@ -55,9 +55,15 @@ pub fn apply_view(view: &View, triples: Vec<Triple>) -> Vec<ProjectedTriple> {
             let display_label = view.edge_label(&pred).to_owned();
             let display_reversed = match &t {
                 Triple::Relation { .. } => view.is_reversed(&pred),
-                Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => false,
+                Triple::Property { .. }
+                | Triple::EdgeProperty { .. }
+                | Triple::EdgeRelation { .. } => false,
             };
-            ProjectedTriple { triple: t, display_label, display_reversed }
+            ProjectedTriple {
+                triple: t,
+                display_label,
+                display_reversed,
+            }
         })
         .collect()
 }
@@ -108,7 +114,10 @@ mod tests {
         let mut v = View::new("test", "Test");
         v.edge_presentations.insert(
             pred.into(),
-            EdgePresentation { label: label.into(), reverse_direction: reversed },
+            EdgePresentation {
+                label: label.into(),
+                reverse_direction: reversed,
+            },
         );
         v
     }
@@ -144,9 +153,9 @@ mod tests {
 
         let triples = vec![
             rel(a, "knows", b),
-            rel(a, "manages", b),   // not in view
+            rel(a, "manages", b), // not in view
             prop(a, "name"),
-            prop(a, "salary"),      // not in view
+            prop(a, "salary"), // not in view
         ];
 
         let result = apply_view(&view, triples);
@@ -162,11 +171,7 @@ mod tests {
         let b = NodeId::new();
         let view = make_view(&[]); // empty → show everything
 
-        let triples = vec![
-            rel(a, "knows", b),
-            rel(a, "manages", b),
-            prop(a, "name"),
-        ];
+        let triples = vec![rel(a, "knows", b), rel(a, "manages", b), prop(a, "name")];
 
         let result = apply_view(&view, triples);
         assert_eq!(result.len(), 3);
@@ -227,7 +232,10 @@ mod tests {
         let result = apply_view(&view, vec![prop(a, "name")]);
         assert_eq!(result.len(), 1);
         // Property triples ignore the reversed flag.
-        assert!(!result[0].display_reversed, "property triples are never reversed");
+        assert!(
+            !result[0].display_reversed,
+            "property triples are never reversed"
+        );
     }
 
     // ── projected triple accessors ────────────────────────────────────────────
@@ -260,7 +268,12 @@ mod tests {
         let result = apply_view(&view, vec![triple]);
         assert_eq!(result.len(), 1);
         match &result[0].triple {
-            Triple::Relation { subject, object, edge_id, .. } => {
+            Triple::Relation {
+                subject,
+                object,
+                edge_id,
+                ..
+            } => {
                 assert_eq!(*subject, a);
                 assert_eq!(*object, b);
                 assert_eq!(*edge_id, eid);
@@ -286,26 +299,35 @@ mod tests {
         let mut view = View::new("org", "Org");
         view.edge_presentations.insert(
             "reports-to".into(),
-            EdgePresentation { label: "manages".into(), reverse_direction: true },
+            EdgePresentation {
+                label: "manages".into(),
+                reverse_direction: true,
+            },
         );
         view.edge_presentations.insert(
             "owns-project".into(),
-            EdgePresentation { label: "responsible-for".into(), reverse_direction: false },
+            EdgePresentation {
+                label: "responsible-for".into(),
+                reverse_direction: false,
+            },
         );
 
-        let triples = vec![
-            rel(a, "reports-to", b),
-            rel(a, "owns-project", c),
-        ];
+        let triples = vec![rel(a, "reports-to", b), rel(a, "owns-project", c)];
 
         let result = apply_view(&view, triples);
         assert_eq!(result.len(), 2);
 
-        let reports = result.iter().find(|r| r.canonical_predicate() == "reports-to").unwrap();
+        let reports = result
+            .iter()
+            .find(|r| r.canonical_predicate() == "reports-to")
+            .unwrap();
         assert_eq!(reports.display_label, "manages");
         assert!(reports.display_reversed);
 
-        let owns = result.iter().find(|r| r.canonical_predicate() == "owns-project").unwrap();
+        let owns = result
+            .iter()
+            .find(|r| r.canonical_predicate() == "owns-project")
+            .unwrap();
         assert_eq!(owns.display_label, "responsible-for");
         assert!(!owns.display_reversed);
     }

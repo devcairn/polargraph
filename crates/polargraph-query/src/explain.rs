@@ -59,7 +59,11 @@ pub fn explain_query(query: &Query, rules: &[Rule]) -> ExplainPlan {
 
     let plan_text = render_plan_text(&steps, rules, has_recursive_rules);
 
-    ExplainPlan { steps, has_recursive_rules, plan_text }
+    ExplainPlan {
+        steps,
+        has_recursive_rules,
+        plan_text,
+    }
 }
 
 // ── Pattern analysis ──────────────────────────────────────────────────────────
@@ -149,7 +153,11 @@ fn index_reason(choice: &IndexChoice) -> &'static str {
 
 fn format_var_pattern(vp: &VarPattern) -> String {
     let s = format_term(&vp.subject);
-    let p = vp.predicate.as_deref().map(|p| format!(":{p}")).unwrap_or_else(|| "?".to_string());
+    let p = vp
+        .predicate
+        .as_deref()
+        .map(|p| format!(":{p}"))
+        .unwrap_or_else(|| "?".to_string());
     let o = format_term(&vp.object);
     format!("[{s}, {p}, {o}]")
 }
@@ -167,9 +175,9 @@ fn format_term(term: &Term) -> String {
 
 fn detect_recursive(rules: &[Rule]) -> bool {
     rules.iter().any(|rule| {
-        rule.body.iter().any(|vp| {
-            vp.predicate.as_deref() == Some(&rule.head_predicate)
-        })
+        rule.body
+            .iter()
+            .any(|vp| vp.predicate.as_deref() == Some(&rule.head_predicate))
     })
 }
 
@@ -201,12 +209,17 @@ fn render_plan_text(steps: &[ExplainStep], rules: &[Rule], has_recursive: bool) 
     if rules.is_empty() {
         out.push_str("Recursive rules: none\n");
     } else {
-        let label = if has_recursive { "yes (recursive)" } else { "yes (non-recursive)" };
+        let label = if has_recursive {
+            "yes (recursive)"
+        } else {
+            "yes (non-recursive)"
+        };
         out.push_str(&format!("Recursive rules: {label}\n"));
         for rule in rules {
-            let recursive = rule.body.iter().any(|vp| {
-                vp.predicate.as_deref() == Some(&rule.head_predicate)
-            });
+            let recursive = rule
+                .body
+                .iter()
+                .any(|vp| vp.predicate.as_deref() == Some(&rule.head_predicate));
             let flag = if recursive { " [recursive]" } else { "" };
             out.push_str(&format!(
                 "  {} (?{}, ?{}) :- {} body pattern(s){}\n",
@@ -258,12 +271,20 @@ mod tests {
         let plan = explain_query(&query, &[]);
 
         // Step 1: only predicate bound → PSO (subject and object are unbound vars)
-        assert!(plan.steps[0].index_used.starts_with("PSO"), "step 1 index: {}", plan.steps[0].index_used);
+        assert!(
+            plan.steps[0].index_used.starts_with("PSO"),
+            "step 1 index: {}",
+            plan.steps[0].index_used
+        );
         assert!(plan.steps[0].binds.contains(&"s".to_string()));
         assert!(plan.steps[0].binds.contains(&"o".to_string()));
 
         // Step 2: subject (?s) now bound from step 1, predicate also bound → SPO
-        assert!(plan.steps[1].index_used.starts_with("SPO"), "step 2 index: {}", plan.steps[1].index_used);
+        assert!(
+            plan.steps[1].index_used.starts_with("SPO"),
+            "step 2 index: {}",
+            plan.steps[1].index_used
+        );
         assert!(plan.steps[1].binds.contains(&"n".to_string()));
         assert!(!plan.steps[1].binds.contains(&"s".to_string())); // already bound
     }
@@ -271,18 +292,16 @@ mod tests {
     /// A rule whose body references its own head predicate is recursive.
     #[test]
     fn recursive_rule_detected() {
-        let rules = vec![
-            Rule::new("reachable", "x", "z").with_body(vec![
-                VarPattern::new()
-                    .subject(Term::var("x"))
-                    .predicate("reachable") // head predicate in body → recursive
-                    .object(Term::var("y")),
-                VarPattern::new()
-                    .subject(Term::var("y"))
-                    .predicate("edge")
-                    .object(Term::var("z")),
-            ]),
-        ];
+        let rules = vec![Rule::new("reachable", "x", "z").with_body(vec![
+            VarPattern::new()
+                .subject(Term::var("x"))
+                .predicate("reachable") // head predicate in body → recursive
+                .object(Term::var("y")),
+            VarPattern::new()
+                .subject(Term::var("y"))
+                .predicate("edge")
+                .object(Term::var("z")),
+        ])];
 
         let query = Query::new();
         let plan = explain_query(&query, &rules);
@@ -294,18 +313,16 @@ mod tests {
     /// A rule that doesn't reference its own head is non-recursive.
     #[test]
     fn non_recursive_rule_not_flagged() {
-        let rules = vec![
-            Rule::new("colleague", "x", "y").with_body(vec![
-                VarPattern::new()
-                    .subject(Term::var("x"))
-                    .predicate("works_at")
-                    .object(Term::var("org")),
-                VarPattern::new()
-                    .subject(Term::var("y"))
-                    .predicate("works_at")
-                    .object(Term::var("org")),
-            ]),
-        ];
+        let rules = vec![Rule::new("colleague", "x", "y").with_body(vec![
+            VarPattern::new()
+                .subject(Term::var("x"))
+                .predicate("works_at")
+                .object(Term::var("org")),
+            VarPattern::new()
+                .subject(Term::var("y"))
+                .predicate("works_at")
+                .object(Term::var("org")),
+        ])];
 
         let query = Query::new();
         let plan = explain_query(&query, &rules);
@@ -326,6 +343,10 @@ mod tests {
         );
 
         let plan = explain_query(&query, &[]);
-        assert!(plan.steps[0].index_used.starts_with("SPO (exact lookup)"), "got: {}", plan.steps[0].index_used);
+        assert!(
+            plan.steps[0].index_used.starts_with("SPO (exact lookup)"),
+            "got: {}",
+            plan.steps[0].index_used
+        );
     }
 }

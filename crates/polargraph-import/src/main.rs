@@ -57,11 +57,7 @@ use tracing::info;
 #[command(name = "polargraph-import", version, about, long_about = None)]
 struct Cli {
     /// RocksDB data directory (same path used by polargraphd --data-dir).
-    #[arg(
-        long = "data-dir",
-        env = "POLARGRAPH_DATA_DIR",
-        value_name = "PATH"
-    )]
+    #[arg(long = "data-dir", env = "POLARGRAPH_DATA_DIR", value_name = "PATH")]
     data_dir: PathBuf,
 
     /// Input N-Triples file (.nt). Use `-` to read from stdin.
@@ -91,7 +87,12 @@ struct Cli {
     format: String,
 
     /// Log filter directive (same syntax as `RUST_LOG`).
-    #[arg(long = "log", env = "RUST_LOG", default_value = "info", value_name = "FILTER")]
+    #[arg(
+        long = "log",
+        env = "RUST_LOG",
+        default_value = "info",
+        value_name = "FILTER"
+    )]
     log_filter: String,
 }
 
@@ -135,15 +136,13 @@ fn main() -> Result<()> {
                 current_batch.push(t);
                 if current_batch.len() >= cli.batch_size {
                     batch_num += 1;
-                    total_imported +=
-                        flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                    total_imported += flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
                     current_batch.clear();
                 }
             }
             if !current_batch.is_empty() {
                 batch_num += 1;
-                total_imported +=
-                    flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                total_imported += flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
             }
         }
         "jsonld" | "json-ld" => {
@@ -155,15 +154,13 @@ fn main() -> Result<()> {
                 current_batch.push(t);
                 if current_batch.len() >= cli.batch_size {
                     batch_num += 1;
-                    total_imported +=
-                        flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                    total_imported += flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
                     current_batch.clear();
                 }
             }
             if !current_batch.is_empty() {
                 batch_num += 1;
-                total_imported +=
-                    flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                total_imported += flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
             }
         }
         _ => {
@@ -174,8 +171,7 @@ fn main() -> Result<()> {
 
             for line in reader.lines() {
                 line_num = line_num.wrapping_add(1);
-                let line =
-                    line.with_context(|| format!("I/O error reading line {line_num}"))?;
+                let line = line.with_context(|| format!("I/O error reading line {line_num}"))?;
 
                 match parse_line(&line) {
                     Some(triple) => current_batch.push(triple),
@@ -190,15 +186,13 @@ fn main() -> Result<()> {
 
                 if current_batch.len() >= cli.batch_size {
                     batch_num += 1;
-                    total_imported +=
-                        flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                    total_imported += flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
                     current_batch.clear();
                 }
             }
             if !current_batch.is_empty() {
                 batch_num += 1;
-                total_imported +=
-                    flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                total_imported += flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
             }
             if skipped > 0 {
                 info!(skipped, "lines skipped (unparseable — not blank/comment)");
@@ -360,49 +354,55 @@ fn parse_input_turtle(input: &[u8]) -> Result<Vec<Triple>> {
     };
 
     parser
-        .parse_all(&mut |t: RioTriple<'_>| -> Result<(), rio_turtle::TurtleError> {
-            let subject_str = match &t.subject {
-                Subject::NamedNode(n) => n.iri.to_string(),
-                Subject::BlankNode(b) => format!("_:bnode_{}", b.id),
-                Subject::Triple(_) => return Ok(()), // skip quoted triple subjects
-            };
-            let subject = uri_to_node_id(&subject_str);
-            let predicate = Predicate::new(t.predicate.iri);
+        .parse_all(
+            &mut |t: RioTriple<'_>| -> Result<(), rio_turtle::TurtleError> {
+                let subject_str = match &t.subject {
+                    Subject::NamedNode(n) => n.iri.to_string(),
+                    Subject::BlankNode(b) => format!("_:bnode_{}", b.id),
+                    Subject::Triple(_) => return Ok(()), // skip quoted triple subjects
+                };
+                let subject = uri_to_node_id(&subject_str);
+                let predicate = Predicate::new(t.predicate.iri);
 
-            let triple = match &t.object {
-                Term::NamedNode(n) => Triple::Relation {
-                    subject,
-                    predicate,
-                    object: uri_to_node_id(n.iri),
-                    edge_id: edge_id_for(&subject_str, t.predicate.iri, n.iri),
-                    temporal: temporal_template,
-                },
-                Term::BlankNode(b) => {
-                    let bnode_uri = format!("_:bnode_{}", b.id);
-                    Triple::Relation {
+                let triple = match &t.object {
+                    Term::NamedNode(n) => Triple::Relation {
                         subject,
                         predicate,
-                        object: uri_to_node_id(&bnode_uri),
-                        edge_id: edge_id_for(&subject_str, t.predicate.iri, &bnode_uri),
+                        object: uri_to_node_id(n.iri),
+                        edge_id: edge_id_for(&subject_str, t.predicate.iri, n.iri),
                         temporal: temporal_template,
+                    },
+                    Term::BlankNode(b) => {
+                        let bnode_uri = format!("_:bnode_{}", b.id);
+                        Triple::Relation {
+                            subject,
+                            predicate,
+                            object: uri_to_node_id(&bnode_uri),
+                            edge_id: edge_id_for(&subject_str, t.predicate.iri, &bnode_uri),
+                            temporal: temporal_template,
+                        }
                     }
-                }
-                Term::Literal(lit) => {
-                    let value = match lit {
-                        Literal::Simple { value } | Literal::LanguageTaggedString { value, .. } => {
-                            Value::Text(value.to_string())
+                    Term::Literal(lit) => {
+                        let value = match lit {
+                            Literal::Simple { value }
+                            | Literal::LanguageTaggedString { value, .. } => {
+                                Value::Text(value.to_string())
+                            }
+                            Literal::Typed { value, datatype } => xsd_to_value(value, datatype.iri),
+                        };
+                        Triple::Property {
+                            subject,
+                            predicate,
+                            value,
+                            temporal: temporal_template,
                         }
-                        Literal::Typed { value, datatype } => {
-                            xsd_to_value(value, datatype.iri)
-                        }
-                    };
-                    Triple::Property { subject, predicate, value, temporal: temporal_template }
-                }
-                Term::Triple(_) => return Ok(()), // skip quoted triple objects
-            };
-            triples.push(triple);
-            Ok(())
-        })
+                    }
+                    Term::Triple(_) => return Ok(()), // skip quoted triple objects
+                };
+                triples.push(triple);
+                Ok(())
+            },
+        )
         .map_err(|e| anyhow::anyhow!("Turtle parse error: {}", e))?;
 
     Ok(triples)
@@ -410,8 +410,7 @@ fn parse_input_turtle(input: &[u8]) -> Result<Vec<Triple>> {
 
 /// Parse a JSON-LD document into PolarGraph triples.
 fn parse_input_jsonld(input: &str) -> Result<Vec<Triple>> {
-    let doc: serde_json::Value =
-        serde_json::from_str(input).context("JSON parse error")?;
+    let doc: serde_json::Value = serde_json::from_str(input).context("JSON parse error")?;
 
     let graph = doc
         .get("@graph")
@@ -465,8 +464,7 @@ fn parse_input_jsonld(input: &str) -> Result<Vec<Triple>> {
                         .and_then(|t| t.as_str())
                         .unwrap_or("xsd:string");
                     let full_dt = expand_xsd_prefix(type_str);
-                    let value =
-                        xsd_to_value(raw.as_str().unwrap_or(&raw.to_string()), &full_dt);
+                    let value = xsd_to_value(raw.as_str().unwrap_or(&raw.to_string()), &full_dt);
                     triples.push(Triple::Property {
                         subject,
                         predicate: predicate.clone(),
@@ -486,17 +484,17 @@ fn xsd_to_value(s: &str, datatype: &str) -> Value {
     match datatype {
         "http://www.w3.org/2001/XMLSchema#integer"
         | "http://www.w3.org/2001/XMLSchema#long"
-        | "http://www.w3.org/2001/XMLSchema#int" => {
-            s.parse::<i64>().map(Value::Int).unwrap_or_else(|_| Value::Text(s.to_string()))
-        }
+        | "http://www.w3.org/2001/XMLSchema#int" => s
+            .parse::<i64>()
+            .map(Value::Int)
+            .unwrap_or_else(|_| Value::Text(s.to_string())),
         "http://www.w3.org/2001/XMLSchema#double"
         | "http://www.w3.org/2001/XMLSchema#float"
-        | "http://www.w3.org/2001/XMLSchema#decimal" => {
-            s.parse::<f64>().map(Value::Float).unwrap_or_else(|_| Value::Text(s.to_string()))
-        }
-        "http://www.w3.org/2001/XMLSchema#boolean" => {
-            Value::Bool(matches!(s, "true" | "1"))
-        }
+        | "http://www.w3.org/2001/XMLSchema#decimal" => s
+            .parse::<f64>()
+            .map(Value::Float)
+            .unwrap_or_else(|_| Value::Text(s.to_string())),
+        "http://www.w3.org/2001/XMLSchema#boolean" => Value::Bool(matches!(s, "true" | "1")),
         _ => Value::Text(s.to_string()),
     }
 }
@@ -517,7 +515,8 @@ mod tests {
 
     #[test]
     fn parse_relation_line() {
-        let line = "<http://example.org/Alice> <http://schema.org/knows> <http://example.org/Bob> .";
+        let line =
+            "<http://example.org/Alice> <http://schema.org/knows> <http://example.org/Bob> .";
         let triple = parse_line(line).unwrap();
         assert!(matches!(triple, Triple::Relation { .. }));
     }
@@ -527,7 +526,10 @@ mod tests {
         let line = r#"<http://example.org/Alice> <http://schema.org/name> "Alice" ."#;
         let triple = parse_line(line).unwrap();
         match triple {
-            Triple::Property { value: Value::Text(s), .. } => assert_eq!(s, "Alice"),
+            Triple::Property {
+                value: Value::Text(s),
+                ..
+            } => assert_eq!(s, "Alice"),
             other => panic!("unexpected: {other:?}"),
         }
     }

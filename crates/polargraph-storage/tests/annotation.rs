@@ -48,7 +48,12 @@ fn insert_edge_property(store: &TripleStore, edge: EdgeId, pred: &str, value: Va
     tx.commit().unwrap()
 }
 
-fn insert_edge_relation(store: &TripleStore, edge: EdgeId, pred: &str, object: NodeId) -> Timestamp {
+fn insert_edge_relation(
+    store: &TripleStore,
+    edge: EdgeId,
+    pred: &str,
+    object: NodeId,
+) -> Timestamp {
     let t = Triple::EdgeRelation {
         edge,
         predicate: Predicate::new(pred),
@@ -70,7 +75,12 @@ fn insert_and_scan_edge_property_annotations() {
 
     let edge_id = insert_relation(&store, a, "knows", b);
     insert_edge_property(&store, edge_id, "confidence", Value::Float(0.95));
-    let ts = insert_edge_property(&store, edge_id, "source", Value::Text("db_import".to_string()));
+    let ts = insert_edge_property(
+        &store,
+        edge_id,
+        "source",
+        Value::Text("db_import".to_string()),
+    );
 
     let annotations = store.scan_edge_annotations(edge_id, ts).unwrap();
 
@@ -178,7 +188,11 @@ fn annotation_mvcc_isolation() {
 
     // New snapshot should see the annotation.
     let ann_after = store.scan_edge_annotations(edge_id, ts_after).unwrap();
-    assert_eq!(ann_after.len(), 1, "annotation should be visible at ts_after");
+    assert_eq!(
+        ann_after.len(),
+        1,
+        "annotation should be visible at ts_after"
+    );
 }
 
 // ── test 5: get_edge_annotation point lookup ─────────────────────────────────
@@ -192,9 +206,7 @@ fn get_edge_annotation_point_lookup() {
     let edge_id = insert_relation(&store, a, "knows", b);
     let ts = insert_edge_property(&store, edge_id, "score", Value::Int(42));
 
-    let found = store
-        .get_edge_annotation(edge_id, "score", ts)
-        .unwrap();
+    let found = store.get_edge_annotation(edge_id, "score", ts).unwrap();
 
     let ann = found.expect("annotation not found");
     match ann.value {

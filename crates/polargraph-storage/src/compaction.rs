@@ -51,12 +51,11 @@ impl CompactionManager {
         let start = std::time::Instant::now();
 
         let now_us = now_micros();
-        let tx_cutoff = Timestamp(now_us.saturating_sub(
-            (policy.tx_age_secs as i64).saturating_mul(1_000_000),
-        ));
-        let vt_cutoff = policy.vt_lookback_secs.map(|secs| {
-            Timestamp(now_us.saturating_sub((secs as i64).saturating_mul(1_000_000)))
-        });
+        let tx_cutoff =
+            Timestamp(now_us.saturating_sub((policy.tx_age_secs as i64).saturating_mul(1_000_000)));
+        let vt_cutoff = policy
+            .vt_lookback_secs
+            .map(|secs| Timestamp(now_us.saturating_sub((secs as i64).saturating_mul(1_000_000))));
 
         let mut total_scanned = 0usize;
         let mut total_deleted = 0usize;
@@ -217,7 +216,12 @@ mod tests {
         let key = make_key(500); // recent tx, so tx check passes
         let value = codec::encode_property(&Value::Bool(true), &temporal(0, 10)).unwrap();
         // vt_end=10, vt_cutoff=100 → expired by vt
-        assert!(is_expired(&key, &value, Timestamp(100), Some(Timestamp(100))));
+        assert!(is_expired(
+            &key,
+            &value,
+            Timestamp(100),
+            Some(Timestamp(100))
+        ));
     }
 
     #[test]
@@ -225,6 +229,11 @@ mod tests {
         let key = make_key(500);
         let value = codec::encode_property(&Value::Bool(true), &temporal(0, i64::MAX)).unwrap();
         // vt_end=MAX → never expired by vt
-        assert!(!is_expired(&key, &value, Timestamp(100), Some(Timestamp(200))));
+        assert!(!is_expired(
+            &key,
+            &value,
+            Timestamp(100),
+            Some(Timestamp(200))
+        ));
     }
 }

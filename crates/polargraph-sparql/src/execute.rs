@@ -281,12 +281,10 @@ pub fn apply_sparql_filter(binding: &SparqlBindings, filter: &SparqlFilter) -> b
     match filter {
         SparqlFilter::Bound(var) => binding.contains_key(var),
 
-        SparqlFilter::VarEq(a, b) => {
-            match (binding.get(a), binding.get(b)) {
-                (Some(av), Some(bv)) => av == bv,
-                _ => false,
-            }
-        }
+        SparqlFilter::VarEq(a, b) => match (binding.get(a), binding.get(b)) {
+            (Some(av), Some(bv)) => av == bv,
+            _ => false,
+        },
 
         SparqlFilter::IsIri(var) => {
             matches!(binding.get(var), Some(SparqlValue::Uri(_)))
@@ -321,12 +319,14 @@ fn compare_var_lit(binding: &SparqlBindings, var: &str, lit: &SparqlLiteral) -> 
         (SparqlValue::LiteralFloat(v), SparqlLiteral::Float(l)) => {
             v.partial_cmp(l).map(|o| o as i32).unwrap_or(i32::MIN)
         }
-        (SparqlValue::LiteralInt(v), SparqlLiteral::Float(l)) => {
-            (*v as f64).partial_cmp(l).map(|o| o as i32).unwrap_or(i32::MIN)
-        }
-        (SparqlValue::LiteralFloat(v), SparqlLiteral::Int(l)) => {
-            v.partial_cmp(&(*l as f64)).map(|o| o as i32).unwrap_or(i32::MIN)
-        }
+        (SparqlValue::LiteralInt(v), SparqlLiteral::Float(l)) => (*v as f64)
+            .partial_cmp(l)
+            .map(|o| o as i32)
+            .unwrap_or(i32::MIN),
+        (SparqlValue::LiteralFloat(v), SparqlLiteral::Int(l)) => v
+            .partial_cmp(&(*l as f64))
+            .map(|o| o as i32)
+            .unwrap_or(i32::MIN),
         (SparqlValue::Literal(v), SparqlLiteral::Str(l)) => v.cmp(l) as i32,
         (SparqlValue::LiteralBool(v), SparqlLiteral::Bool(l)) => v.cmp(l) as i32,
         // Numeric vs string: incomparable
@@ -344,4 +344,3 @@ fn serialize_for_key(val: &SparqlValue) -> String {
         SparqlValue::LiteralBool(b) => format!("bool:{}", b),
     }
 }
-

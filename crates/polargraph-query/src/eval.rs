@@ -8,7 +8,10 @@
 //! The evaluator deliberately does not know about `View`s — that layer sits
 //! above and is handled by `projection::apply_view`.
 
-use crate::planner::{choose_annotation_index, choose_index, AnnotationIndexChoice, AnnotationPattern, IndexChoice, Pattern};
+use crate::planner::{
+    choose_annotation_index, choose_index, AnnotationIndexChoice, AnnotationPattern, IndexChoice,
+    Pattern,
+};
 use polargraph_core::{id::NodeId, triple::Triple, value::Value};
 use polargraph_storage::{EdgeTypeRegistry, Snapshot, StorageError};
 use tracing::warn;
@@ -55,12 +58,18 @@ pub fn evaluate_with_registry(
 }
 
 /// Returns `true` if `node` has a `__type` property equal to `expected_type`.
-fn node_has_type(node: NodeId, expected_type: &str, snapshot: &Snapshot) -> Result<bool, StorageError> {
+fn node_has_type(
+    node: NodeId,
+    expected_type: &str,
+    snapshot: &Snapshot,
+) -> Result<bool, StorageError> {
     let triples = snapshot.scan_by_subject_predicate(&node, "__type")?;
-    Ok(triples.iter().any(|t| matches!(
-        t,
-        Triple::Property { value: Value::Text(v), .. } if v == expected_type
-    )))
+    Ok(triples.iter().any(|t| {
+        matches!(
+            t,
+            Triple::Property { value: Value::Text(v), .. } if v == expected_type
+        )
+    }))
 }
 
 /// Evaluate a pattern against storage, then overlay pending (uncommitted)
@@ -106,7 +115,9 @@ fn triple_matches_pattern(triple: &Triple, pattern: &Pattern) -> bool {
                 }
             }
             // Property/annotation triples carry a scalar value, not a NodeId object.
-            Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => return false,
+            Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => {
+                return false
+            }
         }
     }
     true
@@ -118,14 +129,32 @@ fn triple_matches_pattern(triple: &Triple, pattern: &Pattern) -> bool {
 /// - Property: (subject, predicate)
 fn results_contain_key(results: &[Triple], candidate: &Triple) -> bool {
     results.iter().any(|r| match (r, candidate) {
-        (Triple::Relation { subject: rs, predicate: rp, object: ro, .. },
-         Triple::Relation { subject: cs, predicate: cp, object: co, .. }) => {
-            rs == cs && rp.0 == cp.0 && ro == co
-        }
-        (Triple::Property { subject: rs, predicate: rp, .. },
-         Triple::Property { subject: cs, predicate: cp, .. }) => {
-            rs == cs && rp.0 == cp.0
-        }
+        (
+            Triple::Relation {
+                subject: rs,
+                predicate: rp,
+                object: ro,
+                ..
+            },
+            Triple::Relation {
+                subject: cs,
+                predicate: cp,
+                object: co,
+                ..
+            },
+        ) => rs == cs && rp.0 == cp.0 && ro == co,
+        (
+            Triple::Property {
+                subject: rs,
+                predicate: rp,
+                ..
+            },
+            Triple::Property {
+                subject: cs,
+                predicate: cp,
+                ..
+            },
+        ) => rs == cs && rp.0 == cp.0,
         _ => false,
     })
 }
@@ -145,7 +174,10 @@ pub fn evaluate_annotations(
         AnnotationIndexChoice::EpaByEdgePred { edge, predicate } => {
             // Scan edge annotations and filter to the requested predicate.
             let all = snapshot.scan_edge_annotations_as_triples(edge)?;
-            Ok(all.into_iter().filter(|t| t.predicate().0 == predicate).collect())
+            Ok(all
+                .into_iter()
+                .filter(|t| t.predicate().0 == predicate)
+                .collect())
         }
         AnnotationIndexChoice::PeaByPred { predicate } => {
             snapshot.scan_annotations_by_predicate(&predicate)
@@ -160,7 +192,11 @@ pub fn evaluate_annotations(
 fn execute(choice: IndexChoice, snap: &Snapshot) -> Result<Vec<Triple>, StorageError> {
     match choice {
         // ── exact lookup ──────────────────────────────────────────────────────
-        IndexChoice::SpoExact { subject, predicate, object } => {
+        IndexChoice::SpoExact {
+            subject,
+            predicate,
+            object,
+        } => {
             // Use SP prefix scan then filter to exact object.
             let candidates = snap.scan_by_subject_predicate(&subject, &predicate)?;
             Ok(candidates
@@ -175,9 +211,7 @@ fn execute(choice: IndexChoice, snap: &Snapshot) -> Result<Vec<Triple>, StorageE
         }
 
         // ── SPO prefix (S) — object unbound ──────────────────────────────────
-        IndexChoice::SpoPrefixS { subject } => {
-            snap.scan_by_subject(&subject)
-        }
+        IndexChoice::SpoPrefixS { subject } => snap.scan_by_subject(&subject),
 
         // ── SOP prefix (S, O) ─────────────────────────────────────────────────
         IndexChoice::SopPrefixSO { subject, object } => {
@@ -211,7 +245,9 @@ fn execute(choice: IndexChoice, snap: &Snapshot) -> Result<Vec<Triple>, StorageE
 fn object_matches(triple: &Triple, expected: &NodeId) -> bool {
     match triple {
         Triple::Relation { object, .. } => object == expected,
-        Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => false,
+        Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => {
+            false
+        }
     }
 }
 
@@ -272,16 +308,16 @@ mod tests {
         let bob = NodeId::new();
         let carol = NodeId::new();
 
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "knows", bob),
-            rel(alice, "manages", carol),
-            rel(bob, "knows", carol), // different subject — should not appear
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![
+                rel(alice, "knows", bob),
+                rel(alice, "manages", carol),
+                rel(bob, "knows", carol), // different subject — should not appear
+            ],
+        );
 
-        let results = evaluate(
-            &Pattern::new().with_subject(alice),
-            &snap,
-        ).unwrap();
+        let results = evaluate(&Pattern::new().with_subject(alice), &snap).unwrap();
 
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|t| t.subject() == alice));
@@ -294,16 +330,20 @@ mod tests {
         let bob = NodeId::new();
         let carol = NodeId::new();
 
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "knows", bob),
-            rel(alice, "knows", carol),
-            rel(alice, "manages", bob), // different predicate
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![
+                rel(alice, "knows", bob),
+                rel(alice, "knows", carol),
+                rel(alice, "manages", bob), // different predicate
+            ],
+        );
 
         let results = evaluate(
             &Pattern::new().with_subject(alice).with_predicate("knows"),
             &snap,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|t| t.predicate().0 == "knows"));
@@ -316,15 +356,19 @@ mod tests {
         let bob = NodeId::new();
         let carol = NodeId::new();
 
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "knows", bob),
-            rel(alice, "knows", carol),
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![rel(alice, "knows", bob), rel(alice, "knows", carol)],
+        );
 
         let results = evaluate(
-            &Pattern::new().with_subject(alice).with_predicate("knows").with_object(bob),
+            &Pattern::new()
+                .with_subject(alice)
+                .with_predicate("knows")
+                .with_object(bob),
             &snap,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(results.len(), 1);
         match &results[0] {
@@ -340,11 +384,10 @@ mod tests {
         let b = NodeId::new();
         let c = NodeId::new();
 
-        let snap = commit_and_snap(&store, vec![
-            rel(a, "knows", b),
-            rel(c, "knows", b),
-            rel(a, "manages", c),
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![rel(a, "knows", b), rel(c, "knows", b), rel(a, "manages", c)],
+        );
 
         let results = evaluate(&Pattern::new().with_predicate("knows"), &snap).unwrap();
         assert_eq!(results.len(), 2);
@@ -358,16 +401,20 @@ mod tests {
         let bob = NodeId::new();
         let carol = NodeId::new();
 
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "reports-to", bob),
-            rel(carol, "reports-to", bob),
-            rel(alice, "reports-to", carol), // different object
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![
+                rel(alice, "reports-to", bob),
+                rel(carol, "reports-to", bob),
+                rel(alice, "reports-to", carol), // different object
+            ],
+        );
 
         let results = evaluate(
             &Pattern::new().with_predicate("reports-to").with_object(bob),
             &snap,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(results.len(), 2);
         let subjects: Vec<NodeId> = results.iter().map(|t| t.subject()).collect();
@@ -382,11 +429,14 @@ mod tests {
         let bob = NodeId::new();
         let carol = NodeId::new();
 
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "knows", bob),
-            rel(carol, "manages", bob),
-            rel(alice, "knows", carol), // different object
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![
+                rel(alice, "knows", bob),
+                rel(carol, "manages", bob),
+                rel(alice, "knows", carol), // different object
+            ],
+        );
 
         let results = evaluate(&Pattern::new().with_object(bob), &snap).unwrap();
         assert_eq!(results.len(), 2);
@@ -399,22 +449,25 @@ mod tests {
         let bob = NodeId::new();
         let carol = NodeId::new();
 
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "knows", bob),
-            rel(alice, "knows", carol),
-            rel(alice, "manages", bob), // same object bob, different pred
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![
+                rel(alice, "knows", bob),
+                rel(alice, "knows", carol),
+                rel(alice, "manages", bob), // same object bob, different pred
+            ],
+        );
 
         // S=alice, O=bob: should return both "knows" and "manages" to bob
-        let results = evaluate(
-            &Pattern::new().with_subject(alice).with_object(bob),
-            &snap,
-        ).unwrap();
+        let results =
+            evaluate(&Pattern::new().with_subject(alice).with_object(bob), &snap).unwrap();
 
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|t| t.subject() == alice));
         // Carol-directed triple must not appear
-        assert!(results.iter().all(|t| matches!(t, Triple::Relation { object, .. } if *object == bob)));
+        assert!(results
+            .iter()
+            .all(|t| matches!(t, Triple::Relation { object, .. } if *object == bob)));
     }
 
     #[test]
@@ -424,11 +477,14 @@ mod tests {
         let bob = NodeId::new();
         let carol = NodeId::new();
 
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "knows", bob),
-            rel(bob, "knows", carol),
-            rel(carol, "manages", alice),
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![
+                rel(alice, "knows", bob),
+                rel(bob, "knows", carol),
+                rel(carol, "manages", alice),
+            ],
+        );
 
         let results = evaluate(&Pattern::new(), &snap).unwrap();
         assert_eq!(results.len(), 3);
@@ -440,10 +496,10 @@ mod tests {
         let alice = NodeId::new();
         let bob = NodeId::new();
 
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "knows", bob),
-            prop(alice, "name", "Alice"),
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![rel(alice, "knows", bob), prop(alice, "name", "Alice")],
+        );
 
         // Subject-only — should return both relation and property.
         let results = evaluate(&Pattern::new().with_subject(alice), &snap).unwrap();
@@ -461,16 +517,14 @@ mod tests {
         let alice = NodeId::new();
         let bob = NodeId::new();
 
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "knows", bob),
-            prop(alice, "name", "Alice"),
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![rel(alice, "knows", bob), prop(alice, "name", "Alice")],
+        );
 
         // Object bound to a NodeId — property triples can't match.
-        let results = evaluate(
-            &Pattern::new().with_subject(alice).with_object(bob),
-            &snap,
-        ).unwrap();
+        let results =
+            evaluate(&Pattern::new().with_subject(alice).with_object(bob), &snap).unwrap();
 
         assert!(results.iter().all(|t| matches!(t, Triple::Relation { .. })));
     }
@@ -490,7 +544,11 @@ mod tests {
 
     // ── schema-aware pruning ──────────────────────────────────────────────────
 
-    fn open_with_edge_registry() -> (TripleStore, polargraph_storage::registry::EdgeTypeRegistry, TempDir) {
+    fn open_with_edge_registry() -> (
+        TripleStore,
+        polargraph_storage::registry::EdgeTypeRegistry,
+        TempDir,
+    ) {
         let dir = TempDir::new().unwrap();
         let store = TripleStore::open(dir.path()).unwrap();
         let reg = polargraph_storage::registry::EdgeTypeRegistry::new(store.clone()).unwrap();
@@ -509,23 +567,32 @@ mod tests {
             Some("Person"),
             Some("Company"),
             vec![],
-        )).unwrap();
+        ))
+        .unwrap();
 
         let alice = NodeId::new();
-        let acme  = NodeId::new();
+        let acme = NodeId::new();
 
         // alice has __type=Robot (not Person) — works_at is constrained to Person subjects
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "works_at", acme),
-            prop(alice, "__type", "Robot"),
-            prop(acme,  "__type", "Company"),
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![
+                rel(alice, "works_at", acme),
+                prop(alice, "__type", "Robot"),
+                prop(acme, "__type", "Company"),
+            ],
+        );
 
-        let pattern = Pattern::new().with_subject(alice).with_predicate("works_at");
+        let pattern = Pattern::new()
+            .with_subject(alice)
+            .with_predicate("works_at");
         let results = evaluate_with_registry(&pattern, &snap, Some(&reg)).unwrap();
 
         // Domain mismatch: alice is Robot, not Person → pruned to empty
-        assert!(results.is_empty(), "domain mismatch should prune the result set");
+        assert!(
+            results.is_empty(),
+            "domain mismatch should prune the result set"
+        );
     }
 
     #[test]
@@ -539,21 +606,31 @@ mod tests {
             Some("Person"),
             Some("Company"),
             vec![],
-        )).unwrap();
+        ))
+        .unwrap();
 
         let alice = NodeId::new();
-        let acme  = NodeId::new();
+        let acme = NodeId::new();
 
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "works_at", acme),
-            prop(alice, "__type", "Person"),
-            prop(acme,  "__type", "Company"),
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![
+                rel(alice, "works_at", acme),
+                prop(alice, "__type", "Person"),
+                prop(acme, "__type", "Company"),
+            ],
+        );
 
-        let pattern = Pattern::new().with_subject(alice).with_predicate("works_at");
+        let pattern = Pattern::new()
+            .with_subject(alice)
+            .with_predicate("works_at");
         let results = evaluate_with_registry(&pattern, &snap, Some(&reg)).unwrap();
 
-        assert_eq!(results.len(), 1, "correct domain should not prune the result");
+        assert_eq!(
+            results.len(),
+            1,
+            "correct domain should not prune the result"
+        );
     }
 
     #[test]
@@ -567,17 +644,21 @@ mod tests {
             Some("Person"),
             Some("Company"),
             vec![],
-        )).unwrap();
+        ))
+        .unwrap();
 
         let alice = NodeId::new();
-        let acme  = NodeId::new();
+        let acme = NodeId::new();
 
         // acme has __type=Project (not Company)
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "works_at", acme),
-            prop(alice, "__type", "Person"),
-            prop(acme,  "__type", "Project"),
-        ]);
+        let snap = commit_and_snap(
+            &store,
+            vec![
+                rel(alice, "works_at", acme),
+                prop(alice, "__type", "Person"),
+                prop(acme, "__type", "Project"),
+            ],
+        );
 
         let pattern = Pattern::new()
             .with_subject(alice)
@@ -585,7 +666,10 @@ mod tests {
             .with_object(acme);
         let results = evaluate_with_registry(&pattern, &snap, Some(&reg)).unwrap();
 
-        assert!(results.is_empty(), "range mismatch should prune the result set");
+        assert!(
+            results.is_empty(),
+            "range mismatch should prune the result set"
+        );
     }
 
     #[test]
@@ -600,14 +684,13 @@ mod tests {
             Some("Person"),
             Some("Company"),
             vec![],
-        )).unwrap();
+        ))
+        .unwrap();
 
         let alice = NodeId::new();
-        let bob   = NodeId::new();
+        let bob = NodeId::new();
 
-        let snap = commit_and_snap(&store, vec![
-            rel(alice, "knows", bob),
-        ]);
+        let snap = commit_and_snap(&store, vec![rel(alice, "knows", bob)]);
 
         let pattern = Pattern::new().with_subject(alice).with_predicate("knows");
         let results = evaluate_with_registry(&pattern, &snap, Some(&reg)).unwrap();
@@ -620,7 +703,7 @@ mod tests {
     fn no_registry_behaves_identically_to_evaluate() {
         let (store, _dir) = open();
         let alice = NodeId::new();
-        let bob   = NodeId::new();
+        let bob = NodeId::new();
 
         let snap = commit_and_snap(&store, vec![rel(alice, "knows", bob)]);
         let pattern = Pattern::new().with_subject(alice).with_predicate("knows");

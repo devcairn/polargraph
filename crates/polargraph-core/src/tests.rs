@@ -240,14 +240,19 @@ mod triple_tests {
 #[cfg(test)]
 mod view_tests {
     use crate::view::{EdgePresentation, NodeFilter, View, ViewId};
-    
 
     fn make_view() -> View {
         let mut v = View::new("org-chart", "Org Chart");
-        v.visible_predicates = ["reports-to", "name"].iter().map(|s| s.to_string()).collect();
+        v.visible_predicates = ["reports-to", "name"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         v.edge_presentations.insert(
             "reports-to".into(),
-            EdgePresentation { label: "manages".into(), reverse_direction: true },
+            EdgePresentation {
+                label: "manages".into(),
+                reverse_direction: true,
+            },
         );
         v
     }

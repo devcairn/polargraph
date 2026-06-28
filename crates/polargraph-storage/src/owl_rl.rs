@@ -34,10 +34,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use polargraph_core::{
-    id::NodeId,
-    triple::Triple,
-};
+use polargraph_core::{id::NodeId, triple::Triple};
 
 use crate::{error::StorageError, keys::PredId, store::TripleStore};
 
@@ -174,7 +171,10 @@ fn build_bridge(store: &TripleStore) -> (HashMap<NodeId, String>, HashMap<String
 /// state and only adds incremental new facts.
 ///
 /// Returns statistics about the run.
-pub fn materialize(store: &TripleStore, clear_first: bool) -> Result<MaterializationStats, StorageError> {
+pub fn materialize(
+    store: &TripleStore,
+    clear_first: bool,
+) -> Result<MaterializationStats, StorageError> {
     if clear_first {
         store.clear_derived()?;
     }
@@ -195,7 +195,13 @@ pub fn materialize(store: &TripleStore, clear_first: bool) -> Result<Materializa
         // Build in-memory index of all Relation triples.
         let mut idx = TripleIndex::new();
         for triple in base.iter().chain(derived.iter()) {
-            if let Triple::Relation { subject, predicate, object, .. } = triple {
+            if let Triple::Relation {
+                subject,
+                predicate,
+                object,
+                ..
+            } = triple
+            {
                 if let Some(p_id) = store.predicate_id(&predicate.0) {
                     idx.insert(*subject, p_id, *object);
                 }
@@ -295,7 +301,10 @@ pub fn materialize(store: &TripleStore, clear_first: bool) -> Result<Materializa
         }
 
         // ── prp-symp: (?p rdf:type owl:SymmetricProperty), (?s ?p ?o) → (?o ?p ?s)
-        if let Some(sym_props) = idx.by_pred_obj.get(&(vocab.rdf_type, vocab.owl_symmetric_node)) {
+        if let Some(sym_props) = idx
+            .by_pred_obj
+            .get(&(vocab.rdf_type, vocab.owl_symmetric_node))
+        {
             let sym_props: Vec<NodeId> = sym_props.clone();
             for p_node in sym_props {
                 if let Some(p_name) = node_to_pred.get(&p_node) {
@@ -312,7 +321,10 @@ pub fn materialize(store: &TripleStore, clear_first: bool) -> Result<Materializa
 
         // ── prp-trp: (?p rdf:type owl:TransitiveProperty), (?s ?p ?m), (?m ?p ?o)
         //            → (?s ?p ?o)
-        if let Some(trp_props) = idx.by_pred_obj.get(&(vocab.rdf_type, vocab.owl_transitive_node)) {
+        if let Some(trp_props) = idx
+            .by_pred_obj
+            .get(&(vocab.rdf_type, vocab.owl_transitive_node))
+        {
             let trp_props: Vec<NodeId> = trp_props.clone();
             for p_node in trp_props {
                 if let Some(p_name) = node_to_pred.get(&p_node) {

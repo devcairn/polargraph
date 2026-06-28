@@ -41,8 +41,7 @@ use uuid::Uuid;
 /// The bytes spell "polargraph_schem" in ASCII — chosen to be unique and
 /// human-recognisable in a hex dump.
 pub const SCHEMA_REGISTRY_NODE: NodeId = NodeId(Uuid::from_bytes([
-    0x70, 0x6f, 0x6c, 0x61, 0x72, 0x67, 0x72, 0x61,
-    0x70, 0x68, 0x5f, 0x73, 0x63, 0x68, 0x65, 0x6d,
+    0x70, 0x6f, 0x6c, 0x61, 0x72, 0x67, 0x72, 0x61, 0x70, 0x68, 0x5f, 0x73, 0x63, 0x68, 0x65, 0x6d,
 ]));
 
 const SCHEMA_PREDICATE_PREFIX: &str = "__schema__/";
@@ -87,7 +86,7 @@ struct NodeSchemaJson {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct EdgeSchemaJson {
     domain: Option<String>,
-    range:  Option<String>,
+    range: Option<String>,
     fields: Vec<FieldDef>,
     #[serde(default)]
     cardinality: Cardinality,
@@ -106,7 +105,10 @@ pub struct ValidationError {
 
 impl ValidationError {
     fn missing(field: &str) -> Self {
-        Self { field: field.into(), message: format!("required field '{field}' is missing") }
+        Self {
+            field: field.into(),
+            message: format!("required field '{field}' is missing"),
+        }
     }
     fn wrong_kind(field: &str, expected: &str, got: &str) -> Self {
         Self {
@@ -170,7 +172,10 @@ impl NodeTypeRegistry {
             temporal: BiTemporalRange::assert_now(Timestamp::now()),
         };
         self.store.insert(&triple)?;
-        self.cache.write().unwrap().insert(def.type_name.clone(), def);
+        self.cache
+            .write()
+            .unwrap()
+            .insert(def.type_name.clone(), def);
         Ok(())
     }
 
@@ -189,13 +194,12 @@ impl NodeTypeRegistry {
     /// Returns the first `NodeTypeDef` whose `vector_space.space_name` matches,
     /// or `None` if no such space is registered.
     pub fn get_space_def(&self, space_name: &str) -> Option<VectorSpaceDef> {
-        self.cache
-            .read()
-            .unwrap()
-            .values()
-            .find_map(|def| {
-                def.vector_space.as_ref().filter(|vs| vs.space_name == space_name).cloned()
-            })
+        self.cache.read().unwrap().values().find_map(|def| {
+            def.vector_space
+                .as_ref()
+                .filter(|vs| vs.space_name == space_name)
+                .cloned()
+        })
     }
 
     /// Return all fields available on `type_name`, including inherited fields.
@@ -262,7 +266,11 @@ impl NodeTypeRegistry {
             }
         }
 
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -273,7 +281,12 @@ impl NodeTypeRegistry {
 
         let mut cache = HashMap::new();
         for triple in triples {
-            if let Triple::Property { predicate, value: Value::Text(json), .. } = triple {
+            if let Triple::Property {
+                predicate,
+                value: Value::Text(json),
+                ..
+            } = triple
+            {
                 if let Some(type_name) = type_name_from_predicate(predicate.0.as_str()) {
                     // Try new struct format first; fall back to bare Vec<FieldDef> for old records.
                     let def = if let Ok(wire) = serde_json::from_str::<NodeSchemaJson>(&json) {
@@ -309,7 +322,9 @@ impl NodeTypeRegistry {
         seen_names: &mut std::collections::HashSet<String>,
         out: &mut Vec<FieldDef>,
     ) {
-        let Some(def) = cache.get(type_name) else { return };
+        let Some(def) = cache.get(type_name) else {
+            return;
+        };
         for field in &def.fields {
             if seen_names.insert(field.name.clone()) {
                 out.push(field.clone());
@@ -327,12 +342,16 @@ impl NodeTypeRegistry {
         cache: &HashMap<String, NodeTypeDef>,
         visited: &mut std::collections::HashSet<String>,
     ) -> bool {
-        let Some(def) = cache.get(current) else { return false };
+        let Some(def) = cache.get(current) else {
+            return false;
+        };
         for parent in &def.parent_types {
             if parent == ancestor {
                 return true;
             }
-            if visited.insert(parent.clone()) && Self::walk_ancestors(parent, ancestor, cache, visited) {
+            if visited.insert(parent.clone())
+                && Self::walk_ancestors(parent, ancestor, cache, visited)
+            {
                 return true;
             }
         }
@@ -399,7 +418,10 @@ impl EdgeTypeRegistry {
     pub fn new(store: TripleStore) -> Result<Self, StorageError> {
         let cache = Self::load_from_store(&store)?;
         info!(edge_types = cache.len(), "EdgeTypeRegistry loaded");
-        Ok(Self { store, cache: Arc::new(RwLock::new(cache)) })
+        Ok(Self {
+            store,
+            cache: Arc::new(RwLock::new(cache)),
+        })
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -407,21 +429,24 @@ impl EdgeTypeRegistry {
     /// Register (or overwrite) an edge type schema.
     pub fn register_edge_type(&self, def: EdgeTypeDef) -> Result<(), StorageError> {
         let wire = EdgeSchemaJson {
-            domain:      def.domain.clone(),
-            range:       def.range.clone(),
-            fields:      def.fields.clone(),
+            domain: def.domain.clone(),
+            range: def.range.clone(),
+            fields: def.fields.clone(),
             cardinality: def.cardinality,
-            inverse_of:  def.inverse_of.clone(),
+            inverse_of: def.inverse_of.clone(),
         };
         let json = serde_json::to_string(&wire)?;
         let triple = Triple::Property {
-            subject:   SCHEMA_REGISTRY_NODE,
+            subject: SCHEMA_REGISTRY_NODE,
             predicate: Predicate::new(edge_schema_predicate(&def.predicate)),
-            value:     Value::Text(json),
-            temporal:  BiTemporalRange::assert_now(Timestamp::now()),
+            value: Value::Text(json),
+            temporal: BiTemporalRange::assert_now(Timestamp::now()),
         };
         self.store.insert(&triple)?;
-        self.cache.write().unwrap().insert(def.predicate.clone(), def);
+        self.cache
+            .write()
+            .unwrap()
+            .insert(def.predicate.clone(), def);
         Ok(())
     }
 
@@ -438,11 +463,7 @@ impl EdgeTypeRegistry {
     /// Return all predicate names whose domain and range both match the
     /// supplied node type names.  `None` in the stored schema means
     /// "unconstrained" — an unconstrained domain/range matches any type.
-    pub fn list_predicates_between(
-        &self,
-        domain_type: &str,
-        range_type: &str,
-    ) -> Vec<String> {
+    pub fn list_predicates_between(&self, domain_type: &str, range_type: &str) -> Vec<String> {
         self.cache
             .read()
             .unwrap()
@@ -473,7 +494,7 @@ impl EdgeTypeRegistry {
     ) -> Result<(), Vec<ValidationError>> {
         let def = match self.get_edge_type(predicate) {
             Some(d) => d,
-            None    => return Ok(()), // no schema → always valid
+            None => return Ok(()), // no schema → always valid
         };
 
         let mut errors = Vec::new();
@@ -533,7 +554,11 @@ impl EdgeTypeRegistry {
             }
         }
 
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     /// Check whether inserting `(subject, predicate, object)` would violate the
@@ -563,7 +588,9 @@ impl EdgeTypeRegistry {
                 let existing = store
                     .scan_by_subject_predicate(&subject, predicate)
                     .unwrap_or_default();
-                let has_relation = existing.iter().any(|t| matches!(t, Triple::Relation { .. }));
+                let has_relation = existing
+                    .iter()
+                    .any(|t| matches!(t, Triple::Relation { .. }));
                 if has_relation {
                     return Err(ValidationError {
                         field: "subject".into(),
@@ -578,7 +605,9 @@ impl EdgeTypeRegistry {
                 let existing = store
                     .scan_by_predicate_object(predicate, &object)
                     .unwrap_or_default();
-                let has_relation = existing.iter().any(|t| matches!(t, Triple::Relation { .. }));
+                let has_relation = existing
+                    .iter()
+                    .any(|t| matches!(t, Triple::Relation { .. }));
                 if has_relation {
                     return Err(ValidationError {
                         field: "object".into(),
@@ -595,7 +624,9 @@ impl EdgeTypeRegistry {
             let existing = store
                 .scan_by_predicate_object(predicate, &object)
                 .unwrap_or_default();
-            let has_relation = existing.iter().any(|t| matches!(t, Triple::Relation { .. }));
+            let has_relation = existing
+                .iter()
+                .any(|t| matches!(t, Triple::Relation { .. }));
             if has_relation {
                 return Err(ValidationError {
                     field: "object".into(),
@@ -611,7 +642,12 @@ impl EdgeTypeRegistry {
 
     /// Return the declared inverse predicate name for `predicate`, if any.
     pub fn inverse_predicate(&self, predicate: &str) -> Option<String> {
-        self.cache.read().unwrap().get(predicate)?.inverse_of.clone()
+        self.cache
+            .read()
+            .unwrap()
+            .get(predicate)?
+            .inverse_of
+            .clone()
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -622,7 +658,12 @@ impl EdgeTypeRegistry {
 
         let mut cache = HashMap::new();
         for triple in triples {
-            if let Triple::Property { predicate, value: Value::Text(json), .. } = triple {
+            if let Triple::Property {
+                predicate,
+                value: Value::Text(json),
+                ..
+            } = triple
+            {
                 if let Some(pred_name) = predicate_name_from_edge_schema(predicate.0.as_str()) {
                     match serde_json::from_str::<EdgeSchemaJson>(&json) {
                         Ok(wire) => {
@@ -677,11 +718,14 @@ mod tests {
     }
 
     fn person_def() -> NodeTypeDef {
-        NodeTypeDef::new("Person", vec![
-            FieldDef::required("name", FieldKind::Text),
-            FieldDef::optional("age", FieldKind::Int),
-            FieldDef::optional("embedding", FieldKind::Vector),
-        ])
+        NodeTypeDef::new(
+            "Person",
+            vec![
+                FieldDef::required("name", FieldKind::Text),
+                FieldDef::optional("age", FieldKind::Int),
+                FieldDef::optional("embedding", FieldKind::Vector),
+            ],
+        )
     }
 
     // ── register / get / list ─────────────────────────────────────────────────
@@ -704,12 +748,18 @@ mod tests {
     fn list_types_returns_all_registered() {
         let (reg, _dir) = open();
         reg.register_type(person_def()).unwrap();
-        reg.register_type(NodeTypeDef::new("Project", vec![
-            FieldDef::required("title", FieldKind::Text),
-        ])).unwrap();
+        reg.register_type(NodeTypeDef::new(
+            "Project",
+            vec![FieldDef::required("title", FieldKind::Text)],
+        ))
+        .unwrap();
 
         let names: Vec<String> = {
-            let mut v: Vec<_> = reg.list_types().iter().map(|d| d.type_name.clone()).collect();
+            let mut v: Vec<_> = reg
+                .list_types()
+                .iter()
+                .map(|d| d.type_name.clone())
+                .collect();
             v.sort();
             v
         };
@@ -719,13 +769,18 @@ mod tests {
     #[test]
     fn register_overwrites_previous_definition() {
         let (reg, _dir) = open();
-        reg.register_type(NodeTypeDef::new("Thing", vec![
-            FieldDef::required("x", FieldKind::Int),
-        ])).unwrap();
-        let updated = NodeTypeDef::new("Thing", vec![
-            FieldDef::required("x", FieldKind::Int),
-            FieldDef::optional("y", FieldKind::Float),
-        ]);
+        reg.register_type(NodeTypeDef::new(
+            "Thing",
+            vec![FieldDef::required("x", FieldKind::Int)],
+        ))
+        .unwrap();
+        let updated = NodeTypeDef::new(
+            "Thing",
+            vec![
+                FieldDef::required("x", FieldKind::Int),
+                FieldDef::optional("y", FieldKind::Float),
+            ],
+        );
         reg.register_type(updated.clone()).unwrap();
         assert_eq!(reg.get_type("Thing"), Some(updated));
     }
@@ -794,7 +849,9 @@ mod tests {
     #[test]
     fn validate_unknown_type_returns_error() {
         let (reg, _dir) = open();
-        let errs = reg.validate_properties("Ghost", &HashMap::new()).unwrap_err();
+        let errs = reg
+            .validate_properties("Ghost", &HashMap::new())
+            .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("Ghost"));
     }
@@ -817,22 +874,26 @@ mod tests {
         reg.register_type(person_def()).unwrap();
 
         // Only required "name" supplied; optional "age" and "embedding" absent.
-        let props = HashMap::from([
-            ("name".to_string(), Value::Text("Carol".into())),
-        ]);
+        let props = HashMap::from([("name".to_string(), Value::Text("Carol".into()))]);
         assert!(reg.validate_properties("Person", &props).is_ok());
     }
 
     #[test]
     fn validate_multiple_errors_collected() {
         let (reg, _dir) = open();
-        reg.register_type(NodeTypeDef::new("Item", vec![
-            FieldDef::required("title", FieldKind::Text),
-            FieldDef::required("count", FieldKind::Int),
-        ])).unwrap();
+        reg.register_type(NodeTypeDef::new(
+            "Item",
+            vec![
+                FieldDef::required("title", FieldKind::Text),
+                FieldDef::required("count", FieldKind::Int),
+            ],
+        ))
+        .unwrap();
 
         // Both required fields missing.
-        let errs = reg.validate_properties("Item", &HashMap::new()).unwrap_err();
+        let errs = reg
+            .validate_properties("Item", &HashMap::new())
+            .unwrap_err();
         assert_eq!(errs.len(), 2);
     }
 
@@ -872,9 +933,19 @@ mod tests {
     fn edge_list_returns_all_registered() {
         let (reg, _dir) = open_edge();
         reg.register_edge_type(works_at_def()).unwrap();
-        reg.register_edge_type(EdgeTypeDef::new("knows", None::<String>, None::<String>, vec![])).unwrap();
+        reg.register_edge_type(EdgeTypeDef::new(
+            "knows",
+            None::<String>,
+            None::<String>,
+            vec![],
+        ))
+        .unwrap();
 
-        let mut names: Vec<_> = reg.list_edge_types().iter().map(|d| d.predicate.clone()).collect();
+        let mut names: Vec<_> = reg
+            .list_edge_types()
+            .iter()
+            .map(|d| d.predicate.clone())
+            .collect();
         names.sort();
         assert_eq!(names, vec!["knows", "works_at"]);
     }
@@ -883,12 +954,7 @@ mod tests {
     fn edge_register_overwrites() {
         let (reg, _dir) = open_edge();
         reg.register_edge_type(works_at_def()).unwrap();
-        let updated = EdgeTypeDef::new(
-            "works_at",
-            Some("Employee"),
-            Some("Company"),
-            vec![],
-        );
+        let updated = EdgeTypeDef::new("works_at", Some("Employee"), Some("Company"), vec![]);
         reg.register_edge_type(updated.clone()).unwrap();
         assert_eq!(reg.get_edge_type("works_at"), Some(updated));
     }
@@ -915,7 +981,9 @@ mod tests {
         reg.register_edge_type(works_at_def()).unwrap();
 
         let props = HashMap::from([("since".to_string(), Value::Int(2020))]);
-        assert!(reg.validate_edge("works_at", Some("Person"), Some("Company"), &props).is_ok());
+        assert!(reg
+            .validate_edge("works_at", Some("Person"), Some("Company"), &props)
+            .is_ok());
     }
 
     #[test]
@@ -924,7 +992,9 @@ mod tests {
         reg.register_edge_type(works_at_def()).unwrap();
 
         let props = HashMap::from([("since".to_string(), Value::Int(2020))]);
-        let errs = reg.validate_edge("works_at", Some("Robot"), Some("Company"), &props).unwrap_err();
+        let errs = reg
+            .validate_edge("works_at", Some("Robot"), Some("Company"), &props)
+            .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("Person"));
         assert!(errs[0].message.contains("Robot"));
@@ -936,7 +1006,9 @@ mod tests {
         reg.register_edge_type(works_at_def()).unwrap();
 
         let props = HashMap::from([("since".to_string(), Value::Int(2020))]);
-        let errs = reg.validate_edge("works_at", Some("Person"), Some("Project"), &props).unwrap_err();
+        let errs = reg
+            .validate_edge("works_at", Some("Person"), Some("Project"), &props)
+            .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("Company"));
         assert!(errs[0].message.contains("Project"));
@@ -948,7 +1020,9 @@ mod tests {
         reg.register_edge_type(works_at_def()).unwrap();
 
         // "since" is required but absent.
-        let errs = reg.validate_edge("works_at", Some("Person"), Some("Company"), &HashMap::new()).unwrap_err();
+        let errs = reg
+            .validate_edge("works_at", Some("Person"), Some("Company"), &HashMap::new())
+            .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("since"));
     }
@@ -959,7 +1033,9 @@ mod tests {
         reg.register_edge_type(works_at_def()).unwrap();
 
         let props = HashMap::from([("since".to_string(), Value::Text("2020".into()))]);
-        let errs = reg.validate_edge("works_at", Some("Person"), Some("Company"), &props).unwrap_err();
+        let errs = reg
+            .validate_edge("works_at", Some("Person"), Some("Company"), &props)
+            .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("since"));
         assert!(errs[0].message.contains("int"));
@@ -969,7 +1045,9 @@ mod tests {
     fn edge_validate_unknown_predicate_is_valid() {
         let (reg, _dir) = open_edge();
         // No schema registered → open-world, always valid.
-        assert!(reg.validate_edge("anything", Some("A"), Some("B"), &HashMap::new()).is_ok());
+        assert!(reg
+            .validate_edge("anything", Some("A"), Some("B"), &HashMap::new())
+            .is_ok());
     }
 
     #[test]
@@ -978,7 +1056,9 @@ mod tests {
         reg.register_edge_type(works_at_def()).unwrap();
 
         let props = HashMap::from([("since".to_string(), Value::Int(2020))]);
-        let errs = reg.validate_edge("works_at", None, Some("Company"), &props).unwrap_err();
+        let errs = reg
+            .validate_edge("works_at", None, Some("Company"), &props)
+            .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("unknown"));
     }
@@ -992,7 +1072,8 @@ mod tests {
             Some("Person"),
             Some("Person"),
             vec![],
-        )).unwrap();
+        ))
+        .unwrap();
         // No unconstrained predicates — test focuses on constrained filtering.
 
         // Exact match Person → Company should return only "works_at".
@@ -1016,7 +1097,8 @@ mod tests {
             None::<String>,
             None::<String>,
             vec![],
-        )).unwrap();
+        ))
+        .unwrap();
 
         // Unconstrained predicate matches any pair.
         let preds = reg.list_predicates_between("Foo", "Bar");

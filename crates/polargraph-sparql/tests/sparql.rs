@@ -124,8 +124,7 @@ fn translate_distinct() {
 
 #[test]
 fn translate_ask_query() {
-    let q =
-        spargebra::Query::parse("ASK { ?s <http://example.org/knows> ?o }", None).unwrap();
+    let q = spargebra::Query::parse("ASK { ?s <http://example.org/knows> ?o }", None).unwrap();
     let t = translate_query(&q).unwrap();
     assert!(t.is_ask);
 }
@@ -179,7 +178,11 @@ fn translate_optional_produces_optional_branch() {
         "expected optional_branches from OPTIONAL clause"
     );
     let opt = &main_branch.optional_branches[0];
-    assert_eq!(opt.patterns.len(), 1, "optional branch should have one pattern");
+    assert_eq!(
+        opt.patterns.len(),
+        1,
+        "optional branch should have one pattern"
+    );
     assert_eq!(
         opt.patterns[0].predicate.as_deref(),
         Some("http://example.org/age")
@@ -316,9 +319,18 @@ fn group_by_avg_execution() {
     let g_b = node("018e8c1e-0000-7000-8000-000000000002");
 
     let bindings: Vec<SparqlBindings> = vec![
-        bind_map(&[("g", SparqlValue::Uri(g_a)), ("val", SparqlValue::LiteralInt(10))]),
-        bind_map(&[("g", SparqlValue::Uri(g_a)), ("val", SparqlValue::LiteralInt(20))]),
-        bind_map(&[("g", SparqlValue::Uri(g_b)), ("val", SparqlValue::LiteralInt(30))]),
+        bind_map(&[
+            ("g", SparqlValue::Uri(g_a)),
+            ("val", SparqlValue::LiteralInt(10)),
+        ]),
+        bind_map(&[
+            ("g", SparqlValue::Uri(g_a)),
+            ("val", SparqlValue::LiteralInt(20)),
+        ]),
+        bind_map(&[
+            ("g", SparqlValue::Uri(g_b)),
+            ("val", SparqlValue::LiteralInt(30)),
+        ]),
     ];
     let specs = vec![SparqlAggregateSpec {
         alias: "avg_val".to_string(),
@@ -362,7 +374,11 @@ fn having_filter_execution() {
     let result =
         execute_sparql_aggregations(bindings, &["type".to_string()], &specs, Some(&having));
 
-    assert_eq!(result.len(), 1, "only one group should pass HAVING count > 1");
+    assert_eq!(
+        result.len(),
+        1,
+        "only one group should pass HAVING count > 1"
+    );
     assert_eq!(result[0].get("type"), Some(&SparqlValue::Uri(type_a)));
     assert_eq!(result[0].get("n"), Some(&SparqlValue::LiteralInt(2)));
 }
@@ -428,8 +444,14 @@ fn filter_less_than_int() {
 fn filter_bound_and_unbound() {
     let bound_b = bind_map(&[("x", SparqlValue::LiteralInt(1))]);
     let unbound_b: SparqlBindings = HashMap::new();
-    assert!(apply_sparql_filter(&bound_b, &SparqlFilter::Bound("x".into())));
-    assert!(!apply_sparql_filter(&unbound_b, &SparqlFilter::Bound("x".into())));
+    assert!(apply_sparql_filter(
+        &bound_b,
+        &SparqlFilter::Bound("x".into())
+    ));
+    assert!(!apply_sparql_filter(
+        &unbound_b,
+        &SparqlFilter::Bound("x".into())
+    ));
 }
 
 // ── Phase 2: additional aggregation edge cases ────────────────────────────────
@@ -477,13 +499,19 @@ fn min_and_max_integers() {
 #[test]
 fn malformed_sparql_fails_to_parse() {
     let result = spargebra::Query::parse("SELECT ?s WHERE { NOT VALID SPARQL }", None);
-    assert!(result.is_err(), "malformed SPARQL should fail at the parse level");
+    assert!(
+        result.is_err(),
+        "malformed SPARQL should fail at the parse level"
+    );
 }
 
 #[test]
 fn malformed_sparql_missing_where_fails() {
     let result = spargebra::Query::parse("SELECT ?s", None);
-    assert!(result.is_err(), "SPARQL without WHERE clause should fail to parse");
+    assert!(
+        result.is_err(),
+        "SPARQL without WHERE clause should fail to parse"
+    );
 }
 
 // ── empty result set serialization ───────────────────────────────────────────
@@ -492,10 +520,17 @@ fn malformed_sparql_missing_where_fails() {
 fn serialize_json_empty_bindings_is_valid_sparql_json() {
     let json_str = serialize_json(&["s".to_string(), "o".to_string()], &[]);
     let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-    let vars = v["head"]["vars"].as_array().expect("head.vars should be an array");
+    let vars = v["head"]["vars"]
+        .as_array()
+        .expect("head.vars should be an array");
     assert_eq!(vars.len(), 2);
-    let bindings = v["results"]["bindings"].as_array().expect("results.bindings should be an array");
-    assert!(bindings.is_empty(), "empty input should produce empty bindings array");
+    let bindings = v["results"]["bindings"]
+        .as_array()
+        .expect("results.bindings should be an array");
+    assert!(
+        bindings.is_empty(),
+        "empty input should produce empty bindings array"
+    );
 }
 
 #[test]
@@ -503,7 +538,11 @@ fn serialize_csv_empty_bindings_has_header_only() {
     let empty: Vec<SparqlBindings> = vec![];
     let csv = serialize_csv(&["s".to_string()], &empty);
     let lines: Vec<&str> = csv.lines().collect();
-    assert_eq!(lines.len(), 1, "CSV with no results should have only the header row");
+    assert_eq!(
+        lines.len(),
+        1,
+        "CSV with no results should have only the header row"
+    );
     assert_eq!(lines[0], "s");
 }
 
@@ -546,8 +585,15 @@ fn translate_construct_basic() {
     .unwrap();
     let ct = translate_construct(&q).unwrap();
     assert!(!ct.is_describe);
-    assert!(!ct.branches.is_empty(), "CONSTRUCT should produce WHERE branches");
-    assert_eq!(ct.templates.len(), 1, "should have one CONSTRUCT template triple");
+    assert!(
+        !ct.branches.is_empty(),
+        "CONSTRUCT should produce WHERE branches"
+    );
+    assert_eq!(
+        ct.templates.len(),
+        1,
+        "should have one CONSTRUCT template triple"
+    );
     let tmpl = &ct.templates[0];
     assert_eq!(tmpl.predicate, "http://example.org/knows");
     assert!(tmpl.subject_var.is_some(), "subject should be a variable");
@@ -572,7 +618,10 @@ fn translate_construct_bound_subject_iri() {
     assert!(!ct.is_describe);
     assert_eq!(ct.templates.len(), 1);
     let tmpl = &ct.templates[0];
-    assert!(tmpl.subject_var.is_none(), "subject should be a bound IRI, not a var");
+    assert!(
+        tmpl.subject_var.is_none(),
+        "subject should be a bound IRI, not a var"
+    );
     assert!(tmpl.subject_iri.is_some(), "subject_iri should be set");
     assert!(tmpl.subject_iri.as_deref().unwrap().contains("018e8c1e"));
 }
@@ -600,11 +649,7 @@ fn translate_construct_literal_object() {
 /// CONSTRUCT: translate_query returns an error for CONSTRUCT (use translate_construct instead).
 #[test]
 fn translate_query_rejects_construct() {
-    let q = spargebra::Query::parse(
-        "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
-        None,
-    )
-    .unwrap();
+    let q = spargebra::Query::parse("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", None).unwrap();
     assert!(
         translate_query(&q).is_err(),
         "translate_query should reject CONSTRUCT — use translate_construct()"
@@ -621,8 +666,14 @@ fn translate_describe_with_where() {
     .unwrap();
     let ct = translate_construct(&q).unwrap();
     assert!(ct.is_describe, "should be marked as DESCRIBE");
-    assert!(ct.templates.is_empty(), "DESCRIBE has no CONSTRUCT templates");
-    assert!(!ct.branches.is_empty(), "branches from WHERE clause expected");
+    assert!(
+        ct.templates.is_empty(),
+        "DESCRIBE has no CONSTRUCT templates"
+    );
+    assert!(
+        !ct.branches.is_empty(),
+        "branches from WHERE clause expected"
+    );
 }
 
 /// DESCRIBE <iri>: bare DESCRIBE stores the IRI in describe_iri.
@@ -638,7 +689,10 @@ fn translate_describe_bare_iri() {
     // The describe_iri may or may not be populated depending on how spargebra represents this.
     // If it is populated it must contain the UUID.
     if let Some(ref iri) = ct.describe_iri {
-        assert!(iri.contains("018e8c1e"), "describe_iri should contain the IRI");
+        assert!(
+            iri.contains("018e8c1e"),
+            "describe_iri should contain the IRI"
+        );
     }
 }
 
@@ -737,9 +791,15 @@ fn turtle_multiple_subjects_appear_separately() {
 fn turtle_empty_input_has_only_prefixes() {
     let ttl = serialize_turtle(&[]);
     // No trailing newline after prefixes when triples is empty.
-    assert!(ttl.contains("@prefix xsd:"), "prefix declarations always present");
+    assert!(
+        ttl.contains("@prefix xsd:"),
+        "prefix declarations always present"
+    );
     // No subject blocks.
-    assert!(!ttl.contains("<urn:uuid:"), "no subject blocks in empty output");
+    assert!(
+        !ttl.contains("<urn:uuid:"),
+        "no subject blocks in empty output"
+    );
 }
 
 // ── Phase 3: value_to_nt_literal ─────────────────────────────────────────────
@@ -795,7 +855,10 @@ fn nt_literal_blob_hex_encoded() {
 #[test]
 fn nt_literal_null_is_empty_string() {
     let lit = value_to_nt_literal(&Value::Null);
-    assert!(lit.starts_with("\"\""), "Null should produce empty string literal");
+    assert!(
+        lit.starts_with("\"\""),
+        "Null should produce empty string literal"
+    );
     assert!(lit.contains("XMLSchema#string"));
 }
 
@@ -857,7 +920,10 @@ fn sparql_update_delete_insert_where_parses() {
         INSERT { ?s <http://example.org/new> ?o } \
         WHERE  { ?s <http://example.org/old> ?o }";
     let update = spargebra::Update::parse(update_str, None);
-    assert!(update.is_ok(), "DELETE/INSERT WHERE should parse successfully");
+    assert!(
+        update.is_ok(),
+        "DELETE/INSERT WHERE should parse successfully"
+    );
     let ops = update.unwrap().operations;
     assert_eq!(ops.len(), 1);
     assert!(
@@ -870,7 +936,10 @@ fn sparql_update_delete_insert_where_parses() {
 #[test]
 fn sparql_update_malformed_fails() {
     let result = spargebra::Update::parse("INSERT GARBAGE", None);
-    assert!(result.is_err(), "malformed SPARQL Update should fail to parse");
+    assert!(
+        result.is_err(),
+        "malformed SPARQL Update should fail to parse"
+    );
 }
 
 // ── Phase 3: gRPC integration placeholder ────────────────────────────────────
@@ -963,14 +1032,20 @@ fn sparql_star_turtle_output() {
         nt.contains("<< ") && nt.contains(" >>"),
         "N-Triples-star output should contain << >> syntax, got: {nt}"
     );
-    assert!(nt.contains("http://example.org/since"), "should contain annotation predicate");
+    assert!(
+        nt.contains("http://example.org/since"),
+        "should contain annotation predicate"
+    );
 
     let ttl = serialize_turtle_star(&triples);
     assert!(
         ttl.contains("<< ") && ttl.contains(" >>"),
         "Turtle-star output should contain << >> syntax, got: {ttl}"
     );
-    assert!(ttl.contains("http://example.org/since"), "should contain annotation predicate");
+    assert!(
+        ttl.contains("http://example.org/since"),
+        "should contain annotation predicate"
+    );
 }
 
 /// Gap 4 (INSERT): SPARQL Update `INSERT DATA` with an embedded-triple subject.

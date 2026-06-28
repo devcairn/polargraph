@@ -33,7 +33,9 @@ use polargraph_core::{
     triple::{Predicate, Triple},
     value::Value,
 };
-use polargraph_query::{datalog::execute_query, datalog::Query, datalog::Term, datalog::VarPattern};
+use polargraph_query::{
+    datalog::execute_query, datalog::Query, datalog::Term, datalog::VarPattern,
+};
 use polargraph_storage::TripleStore;
 use std::time::{Duration, Instant};
 
@@ -68,13 +70,27 @@ pub fn bsbm_node_id(iri: &str) -> NodeId {
     NodeId(uuid::Uuid::from_u128(hash))
 }
 
-fn product_id(i: usize) -> NodeId { bsbm_node_id(&format!("urn:bsbm:product:{i}")) }
-fn product_type_id(i: usize) -> NodeId { bsbm_node_id(&format!("urn:bsbm:productType:{i}")) }
-fn feature_id(i: usize) -> NodeId { bsbm_node_id(&format!("urn:bsbm:feature:{i}")) }
-fn vendor_id(i: usize) -> NodeId { bsbm_node_id(&format!("urn:bsbm:vendor:{i}")) }
-fn offer_id(i: usize) -> NodeId { bsbm_node_id(&format!("urn:bsbm:offer:{i}")) }
-fn review_id(i: usize) -> NodeId { bsbm_node_id(&format!("urn:bsbm:review:{i}")) }
-fn reviewer_id(i: usize) -> NodeId { bsbm_node_id(&format!("urn:bsbm:reviewer:{i}")) }
+fn product_id(i: usize) -> NodeId {
+    bsbm_node_id(&format!("urn:bsbm:product:{i}"))
+}
+fn product_type_id(i: usize) -> NodeId {
+    bsbm_node_id(&format!("urn:bsbm:productType:{i}"))
+}
+fn feature_id(i: usize) -> NodeId {
+    bsbm_node_id(&format!("urn:bsbm:feature:{i}"))
+}
+fn vendor_id(i: usize) -> NodeId {
+    bsbm_node_id(&format!("urn:bsbm:vendor:{i}"))
+}
+fn offer_id(i: usize) -> NodeId {
+    bsbm_node_id(&format!("urn:bsbm:offer:{i}"))
+}
+fn review_id(i: usize) -> NodeId {
+    bsbm_node_id(&format!("urn:bsbm:review:{i}"))
+}
+fn reviewer_id(i: usize) -> NodeId {
+    bsbm_node_id(&format!("urn:bsbm:reviewer:{i}"))
+}
 
 // ── Triple constructors ───────────────────────────────────────────────────────
 
@@ -196,9 +212,21 @@ pub fn generate_dataset(store: &TripleStore, scale: usize) -> BsbmDataset {
         for (i, &pid) in products.iter().enumerate() {
             // Basic text properties (indexed for trigram search)
             triples.push(prop_text(pid, BSBM_LABEL, &format!("Product {i} label")));
-            triples.push(prop_text(pid, BSBM_COMMENT, &format!("Product {i} description text")));
-            triples.push(prop_text(pid, BSBM_TEXT1, &format!("textual property one for product {i}")));
-            triples.push(prop_text(pid, BSBM_TEXT2, &format!("textual property two for product {i}")));
+            triples.push(prop_text(
+                pid,
+                BSBM_COMMENT,
+                &format!("Product {i} description text"),
+            ));
+            triples.push(prop_text(
+                pid,
+                BSBM_TEXT1,
+                &format!("textual property one for product {i}"),
+            ));
+            triples.push(prop_text(
+                pid,
+                BSBM_TEXT2,
+                &format!("textual property two for product {i}"),
+            ));
 
             // Numeric properties: deterministic values in [0, 500)
             let base = (i * 7 + 13) as i64;
@@ -206,7 +234,11 @@ pub fn generate_dataset(store: &TripleStore, scale: usize) -> BsbmDataset {
             triples.push(prop_int(pid, BSBM_NUM2, (base * 3 + 17) % 500));
 
             // Product type (leaf type, round-robin)
-            let type_idx = if n_types <= 5 { 0 } else { 5 + (i % (n_types - 5)) };
+            let type_idx = if n_types <= 5 {
+                0
+            } else {
+                5 + (i % (n_types - 5))
+            };
             triples.push(rel(pid, BSBM_TYPE, product_types[type_idx]));
 
             // Features: 2–4 features per product
@@ -292,7 +324,10 @@ fn commit_batch(store: &TripleStore, triples: Vec<Triple>, batch_size: usize) ->
 /// Extract the i64 value from a property triple, if it is a BSBM numeric prop.
 fn int_val(t: &Triple) -> Option<i64> {
     match t {
-        Triple::Property { value: Value::Int(n), .. } => Some(*n),
+        Triple::Property {
+            value: Value::Int(n),
+            ..
+        } => Some(*n),
         _ => None,
     }
 }
@@ -300,7 +335,10 @@ fn int_val(t: &Triple) -> Option<i64> {
 /// Extract the f64 value from a property triple.
 fn float_val(t: &Triple) -> Option<f64> {
     match t {
-        Triple::Property { value: Value::Float(f), .. } => Some(*f),
+        Triple::Property {
+            value: Value::Float(f),
+            ..
+        } => Some(*f),
         _ => None,
     }
 }
@@ -318,10 +356,7 @@ fn float_val(t: &Triple) -> Option<f64> {
 ///   FILTER(?n1 > ?threshold)
 /// }
 /// ```
-pub fn q1(
-    ds: &BsbmDataset,
-    snap: &polargraph_storage::Snapshot,
-) -> Vec<NodeId> {
+pub fn q1(ds: &BsbmDataset, snap: &polargraph_storage::Snapshot) -> Vec<NodeId> {
     // Parameterisation: leaf type (index ≥5), feature[0], threshold=100.
     // Products are assigned to leaf types (indices 5+), never to root/mid types.
     let leaf_start = if ds.product_types.len() > 5 { 5 } else { 0 };
@@ -364,10 +399,7 @@ pub fn q1(
 /// ```sparql
 /// DESCRIBE <product>
 /// ```
-pub fn q2(
-    ds: &BsbmDataset,
-    snap: &polargraph_storage::Snapshot,
-) -> Vec<Triple> {
+pub fn q2(ds: &BsbmDataset, snap: &polargraph_storage::Snapshot) -> Vec<Triple> {
     let product = ds.products[ds.products.len() / 2];
     snap.scan_by_subject(&product).unwrap_or_default()
 }
@@ -383,10 +415,7 @@ pub fn q2(
 ///   FILTER(?n1 >= 100 && ?n1 <= 400)
 /// }
 /// ```
-pub fn q3(
-    ds: &BsbmDataset,
-    snap: &polargraph_storage::Snapshot,
-) -> Vec<NodeId> {
+pub fn q3(ds: &BsbmDataset, snap: &polargraph_storage::Snapshot) -> Vec<NodeId> {
     // Features [0] and [7] are co-assigned to product indices 0, 20, 40, …
     let f1 = ds.features[0];
     let f2 = ds.features[7 % ds.features.len()];
@@ -430,10 +459,7 @@ pub fn q3(
 ///   { ?product bsbm:feature <F2> }
 /// }
 /// ```
-pub fn q4(
-    ds: &BsbmDataset,
-    snap: &polargraph_storage::Snapshot,
-) -> Vec<NodeId> {
+pub fn q4(ds: &BsbmDataset, snap: &polargraph_storage::Snapshot) -> Vec<NodeId> {
     use std::collections::HashSet;
 
     let f1 = ds.features[0];
@@ -455,7 +481,8 @@ pub fn q4(
             .object(Term::Bound(f2)),
     );
 
-    for b in execute_query(&branch1, snap, None, None).unwrap_or_default()
+    for b in execute_query(&branch1, snap, None, None)
+        .unwrap_or_default()
         .into_iter()
         .chain(execute_query(&branch2, snap, None, None).unwrap_or_default())
     {
@@ -478,10 +505,7 @@ pub fn q4(
 ///   FILTER(?similar != <product>)
 /// }
 /// ```
-pub fn q5(
-    ds: &BsbmDataset,
-    snap: &polargraph_storage::Snapshot,
-) -> Vec<NodeId> {
+pub fn q5(ds: &BsbmDataset, snap: &polargraph_storage::Snapshot) -> Vec<NodeId> {
     use std::collections::HashSet;
 
     let product = ds.products[0];
@@ -518,10 +542,7 @@ pub fn q5(
 ///   FILTER(CONTAINS(?label, "label"))
 /// }
 /// ```
-pub fn q6(
-    _ds: &BsbmDataset,
-    snap: &polargraph_storage::Snapshot,
-) -> Vec<NodeId> {
+pub fn q6(_ds: &BsbmDataset, snap: &polargraph_storage::Snapshot) -> Vec<NodeId> {
     snap.text_search(BSBM_LABEL, "label").unwrap_or_default()
 }
 
@@ -538,10 +559,7 @@ pub fn q6(
 /// }
 /// ORDER BY ?price LIMIT 1
 /// ```
-pub fn q7(
-    ds: &BsbmDataset,
-    snap: &polargraph_storage::Snapshot,
-) -> Option<(NodeId, f64, NodeId)> {
+pub fn q7(ds: &BsbmDataset, snap: &polargraph_storage::Snapshot) -> Option<(NodeId, f64, NodeId)> {
     let product = ds.products[ds.products.len() / 3];
 
     // Offers for this product
@@ -580,7 +598,8 @@ pub fn q7(
     let mut cheapest: Option<(NodeId, f64)> = None;
     for b in &offers {
         if let Some(&oid) = b.get("offer") {
-            let price = snap.scan_by_subject_predicate(&oid, BSBM_PRICE)
+            let price = snap
+                .scan_by_subject_predicate(&oid, BSBM_PRICE)
                 .ok()
                 .and_then(|ts| ts.into_iter().find_map(|t| float_val(&t)))
                 .unwrap_or(f64::MAX);
@@ -605,10 +624,7 @@ pub fn q7(
 ///   ?review bsbm:reviewer  ?reviewer .
 /// }
 /// ```
-pub fn q8(
-    ds: &BsbmDataset,
-    snap: &polargraph_storage::Snapshot,
-) -> Vec<(NodeId, NodeId)> {
+pub fn q8(ds: &BsbmDataset, snap: &polargraph_storage::Snapshot) -> Vec<(NodeId, NodeId)> {
     let product = ds.products[1 % ds.products.len()];
     let query = Query::new()
         .pattern(
@@ -640,10 +656,7 @@ pub fn q8(
 /// ```sparql
 /// DESCRIBE <review>
 /// ```
-pub fn q9(
-    ds: &BsbmDataset,
-    snap: &polargraph_storage::Snapshot,
-) -> Vec<Triple> {
+pub fn q9(ds: &BsbmDataset, snap: &polargraph_storage::Snapshot) -> Vec<Triple> {
     let review = ds.reviews[0];
     snap.scan_by_subject(&review).unwrap_or_default()
 }
@@ -657,10 +670,7 @@ pub fn q9(
 ///   ?offer bsbm:offerFor ?product .
 /// }
 /// ```
-pub fn q10(
-    ds: &BsbmDataset,
-    snap: &polargraph_storage::Snapshot,
-) -> Vec<NodeId> {
+pub fn q10(ds: &BsbmDataset, snap: &polargraph_storage::Snapshot) -> Vec<NodeId> {
     let vendor = ds.vendors[0];
     let query = Query::new()
         .pattern(
@@ -690,10 +700,7 @@ pub fn q10(
 ///   ?review bsbm:reviewFor <product> .
 /// }
 /// ```
-pub fn q11(
-    ds: &BsbmDataset,
-    snap: &polargraph_storage::Snapshot,
-) -> usize {
+pub fn q11(ds: &BsbmDataset, snap: &polargraph_storage::Snapshot) -> usize {
     let product = ds.products[ds.products.len() / 4];
     let query = Query::new().pattern(
         VarPattern::new()
@@ -715,10 +722,7 @@ pub fn q11(
 ///   ?review bsbm:reviewFor ?product .
 /// }
 /// ```
-pub fn q12(
-    ds: &BsbmDataset,
-    snap: &polargraph_storage::Snapshot,
-) -> Vec<NodeId> {
+pub fn q12(ds: &BsbmDataset, snap: &polargraph_storage::Snapshot) -> Vec<NodeId> {
     let reviewer = ds.reviewers[0];
     let query = Query::new()
         .pattern(
@@ -752,21 +756,24 @@ impl LatencyUs {
         let us = d.as_micros().min(u64::MAX as u128) as u64;
         let _ = self.0.record(us);
     }
-    fn p50(&self) -> u64 { self.0.value_at_quantile(0.50) }
-    fn p95(&self) -> u64 { self.0.value_at_quantile(0.95) }
-    fn p99(&self) -> u64 { self.0.value_at_quantile(0.99) }
-    fn mean_us(&self) -> f64 { self.0.mean() }
+    fn p50(&self) -> u64 {
+        self.0.value_at_quantile(0.50)
+    }
+    fn p95(&self) -> u64 {
+        self.0.value_at_quantile(0.95)
+    }
+    fn p99(&self) -> u64 {
+        self.0.value_at_quantile(0.99)
+    }
+    fn mean_us(&self) -> f64 {
+        self.0.mean()
+    }
 }
 
 // ── Scenario entry point ──────────────────────────────────────────────────────
 
 /// Run the full BSBM suite and print results.
-pub fn run_bsbm(
-    store: &TripleStore,
-    scale: usize,
-    warmup: usize,
-    measure: usize,
-) {
+pub fn run_bsbm(store: &TripleStore, scale: usize, warmup: usize, measure: usize) {
     println!("\n[bsbm] generating scale-factor-{scale} dataset …");
     let t0 = Instant::now();
     let ds = generate_dataset(store, scale);
@@ -837,4 +844,3 @@ pub fn run_bsbm(
     println!();
     println!("BSBM TOTAL: avg_qps={avg_qps:.0}");
 }
-

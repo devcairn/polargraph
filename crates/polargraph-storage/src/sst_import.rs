@@ -34,14 +34,7 @@ use polargraph_core::{
 };
 use rocksdb::{Options, SstFileWriter, WriteBatch};
 
-use crate::{
-    cf,
-    codec,
-    error::StorageError,
-    keys,
-    mvcc::META_ORACLE_CTR,
-    store::TripleStore,
-};
+use crate::{cf, codec, error::StorageError, keys, mvcc::META_ORACLE_CTR, store::TripleStore};
 
 /// Statistics returned by a successful `SstImporter::finish()` call.
 #[derive(Debug, Clone)]
@@ -98,7 +91,10 @@ impl SstImporter {
         let n = self.triples.len();
 
         if n == 0 {
-            return Ok(ImportStats { triples_imported: 0, duration_ms: 0 });
+            return Ok(ImportStats {
+                triples_imported: 0,
+                duration_ms: 0,
+            });
         }
 
         // ── 1. Intern predicates (outside commit lock to avoid contention) ──────
@@ -149,7 +145,14 @@ impl SstImporter {
         }
 
         // Sort each CF's entries; dedup on key (same triple in same batch).
-        for buf in [&mut spo_buf, &mut sop_buf, &mut pso_buf, &mut pos_buf, &mut osp_buf, &mut ops_buf] {
+        for buf in [
+            &mut spo_buf,
+            &mut sop_buf,
+            &mut pso_buf,
+            &mut pos_buf,
+            &mut osp_buf,
+            &mut ops_buf,
+        ] {
             buf.sort_unstable_by_key(|a| a.0);
             buf.dedup_by_key(|item| item.0);
         }
@@ -181,7 +184,9 @@ impl SstImporter {
                 writer.finish()?;
             }
             let cf = store.cf_handle(cf_name)?;
-            store.db_ref().ingest_external_file_cf(&cf, vec![sst_path])?;
+            store
+                .db_ref()
+                .ingest_external_file_cf(&cf, vec![sst_path])?;
         }
 
         // ── 5. Write trigram + EPA/EPO entries via WriteBatch ────────────────
@@ -189,16 +194,36 @@ impl SstImporter {
         for triple in &self.triples {
             let p = *pred_ids.get(triple.predicate().0.as_str()).unwrap();
             match triple {
-                Triple::Property { subject, value: polargraph_core::value::Value::Text(text), .. } => {
+                Triple::Property {
+                    subject,
+                    value: polargraph_core::value::Value::Text(text),
+                    ..
+                } => {
                     store.batch_text_trigrams(&mut tri_batch, subject, p, text)?;
                 }
-                Triple::EdgeProperty { edge, value, temporal, .. } => {
-                    let temporal_stamped = BiTemporalRange { tt: commit_ts, ..*temporal };
+                Triple::EdgeProperty {
+                    edge,
+                    value,
+                    temporal,
+                    ..
+                } => {
+                    let temporal_stamped = BiTemporalRange {
+                        tt: commit_ts,
+                        ..*temporal
+                    };
                     let value_bytes = codec::encode_property(value, &temporal_stamped)?;
                     store.batch_epa(&mut tri_batch, *edge, p, commit_ts, &value_bytes)?;
                 }
-                Triple::EdgeRelation { edge, object, temporal, .. } => {
-                    let temporal_stamped = BiTemporalRange { tt: commit_ts, ..*temporal };
+                Triple::EdgeRelation {
+                    edge,
+                    object,
+                    temporal,
+                    ..
+                } => {
+                    let temporal_stamped = BiTemporalRange {
+                        tt: commit_ts,
+                        ..*temporal
+                    };
                     let epo_val = crate::store::encode_epo_value(&temporal_stamped);
                     store.batch_epo(&mut tri_batch, *edge, p, *object, commit_ts, &epo_val)?;
                 }

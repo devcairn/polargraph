@@ -32,15 +32,13 @@ use uuid::Uuid;
 // ── proto imports ─────────────────────────────────────────────────────────────
 
 use polargraph_server::proto::{
-    self,
-    polar_graph_service_client::PolarGraphServiceClient,
-    search_vector_filtered_request::Filter as SvfFilter,
-    BatchInsertVectorsRequest, BatchInsertVectorsResponse, InsertRequest,
-    NodeTypeFilter, PropertyTriple, QueryRequest, QueryResponse, RelationTriple,
-    SearchVectorFilteredRequest, SearchVectorFilteredResponse, Triple as ProtoTriple,
-    Value as ProtoValue, VarPattern, VectorItem,
-    NodeId as ProtoNodeId, Term, VectorSpaceDef as ProtoVectorSpaceDef,
-    RegisterNodeTypeRequest, NodeTypeDef as ProtoNodeTypeDef,
+    self, polar_graph_service_client::PolarGraphServiceClient,
+    search_vector_filtered_request::Filter as SvfFilter, BatchInsertVectorsRequest,
+    BatchInsertVectorsResponse, InsertRequest, NodeId as ProtoNodeId,
+    NodeTypeDef as ProtoNodeTypeDef, NodeTypeFilter, PropertyTriple, QueryRequest, QueryResponse,
+    RegisterNodeTypeRequest, RelationTriple, SearchVectorFilteredRequest,
+    SearchVectorFilteredResponse, Term, Triple as ProtoTriple, Value as ProtoValue, VarPattern,
+    VectorItem, VectorSpaceDef as ProtoVectorSpaceDef,
 };
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -136,7 +134,9 @@ fn proto_node_id(bytes: Vec<u8>) -> ProtoNodeId {
 }
 
 fn proto_node_id_ref(bytes: &[u8]) -> ProtoNodeId {
-    ProtoNodeId { bytes: bytes.to_vec() }
+    ProtoNodeId {
+        bytes: bytes.to_vec(),
+    }
 }
 
 // ── vector helpers ────────────────────────────────────────────────────────────
@@ -204,11 +204,21 @@ impl LatencyUs {
         let _ = self.0.record(us);
     }
 
-    fn p50(&self) -> u64 { self.0.value_at_quantile(0.50) }
-    fn p95(&self) -> u64 { self.0.value_at_quantile(0.95) }
-    fn p99(&self) -> u64 { self.0.value_at_quantile(0.99) }
-    fn mean(&self) -> f64 { self.0.mean() }
-    fn count(&self) -> u64 { self.0.len() }
+    fn p50(&self) -> u64 {
+        self.0.value_at_quantile(0.50)
+    }
+    fn p95(&self) -> u64 {
+        self.0.value_at_quantile(0.95)
+    }
+    fn p99(&self) -> u64 {
+        self.0.value_at_quantile(0.99)
+    }
+    fn mean(&self) -> f64 {
+        self.0.mean()
+    }
+    fn count(&self) -> u64 {
+        self.0.len()
+    }
 }
 
 // ── results printing ──────────────────────────────────────────────────────────
@@ -220,7 +230,10 @@ fn print_row(label: &str, val: &str) {
 fn print_latency(label: &str, h: &LatencyUs) {
     println!(
         "  {label:<30} p50={:>7}µs  p95={:>7}µs  p99={:>7}µs  (n={})",
-        h.p50(), h.p95(), h.p99(), h.count()
+        h.p50(),
+        h.p95(),
+        h.p99(),
+        h.count()
     );
 }
 
@@ -251,7 +264,10 @@ async fn run_write(mut client: PolarGraphServiceClient<Channel>, args: &GrpcArgs
             .collect();
         let t0 = Instant::now();
         client
-            .insert(InsertRequest { triples, ..Default::default() })
+            .insert(InsertRequest {
+                triples,
+                ..Default::default()
+            })
             .await
             .context("insert properties")?;
         prop_hist.record(t0.elapsed());
@@ -274,7 +290,10 @@ async fn run_write(mut client: PolarGraphServiceClient<Channel>, args: &GrpcArgs
         }
         let t0 = Instant::now();
         client
-            .insert(InsertRequest { triples, ..Default::default() })
+            .insert(InsertRequest {
+                triples,
+                ..Default::default()
+            })
             .await
             .context("insert relations")?;
         edge_hist.record(t0.elapsed());
@@ -313,7 +332,10 @@ async fn run_read(mut client: PolarGraphServiceClient<Channel>, args: &GrpcArgs)
             .map(|id| text_prop(id.clone(), "name", "bench"))
             .collect();
         client
-            .insert(InsertRequest { triples, ..Default::default() })
+            .insert(InsertRequest {
+                triples,
+                ..Default::default()
+            })
             .await
             .context("pre-populate")?;
     }
@@ -368,9 +390,12 @@ async fn run_mixed(client: PolarGraphServiceClient<Channel>, args: &GrpcArgs) ->
                 .iter()
                 .map(|id| text_prop(id.clone(), "name", "bench"))
                 .collect();
-            cl.insert(InsertRequest { triples, ..Default::default() })
-                .await
-                .context("pre-populate")?;
+            cl.insert(InsertRequest {
+                triples,
+                ..Default::default()
+            })
+            .await
+            .context("pre-populate")?;
         }
         ids
     };
@@ -558,7 +583,10 @@ async fn run_filtered_search(
             node_ids.push(id);
         }
         client
-            .insert(InsertRequest { triples, ..Default::default() })
+            .insert(InsertRequest {
+                triples,
+                ..Default::default()
+            })
             .await
             .context("insert nodes")?;
 
@@ -632,7 +660,11 @@ async fn run_filtered_search(
         total_recall += recall;
 
         if q == 0 {
-            info!("first query: {} ANN results, recall@{K}={:.2}", ann_ids.len(), recall);
+            info!(
+                "first query: {} ANN results, recall@{K}={:.2}",
+                ann_ids.len(),
+                recall
+            );
         }
     }
 
@@ -702,8 +734,7 @@ async fn run_vector_near_graph() -> Result<()> {
                 .iter()
                 .map(|&id| (id, make_vec(&mut seed, DIMS)))
                 .collect();
-            store
-                .batch_insert_vectors(SPACE, &items, StorageMode::Memory);
+            store.batch_insert_vectors(SPACE, &items, StorageMode::Memory);
         }
 
         for chunk_start in (0..n).step_by(TRI_BATCH) {
@@ -760,9 +791,8 @@ async fn run_vector_near_graph() -> Result<()> {
                     .collect();
 
                 let t_graph = Instant::now();
-                let _results =
-                    execute_query_seeded(&query, &snapshot, seed_bindings, None, None)
-                        .context("execute_query_seeded")?;
+                let _results = execute_query_seeded(&query, &snapshot, seed_bindings, None, None)
+                    .context("execute_query_seeded")?;
                 graph_hist.record(t_graph.elapsed());
 
                 total_hist.record(t_total.elapsed());
@@ -771,7 +801,10 @@ async fn run_vector_near_graph() -> Result<()> {
             println!(
                 "  vector-near-graph | nodes={n:<7} k={k:<3} | \
                  p50={:>6}µs  p95={:>6}µs  p99={:>6}µs  mean={:>6.0}µs",
-                total_hist.p50(), total_hist.p95(), total_hist.p99(), total_hist.mean(),
+                total_hist.p50(),
+                total_hist.p95(),
+                total_hist.p99(),
+                total_hist.mean(),
             );
             println!(
                 "                    |               ann:  p50={:>6}µs  p95={:>6}µs  mean={:>6.0}µs  \
@@ -800,7 +833,12 @@ async fn run_bsbm_scenario(args: &BsbmArgs) -> Result<()> {
     };
 
     let store = TripleStore::open(&data_path).context("open store for bsbm")?;
-    bsbm::run_bsbm(&store, args.scale_factor, args.warmup_runs, args.measure_runs);
+    bsbm::run_bsbm(
+        &store,
+        args.scale_factor,
+        args.warmup_runs,
+        args.measure_runs,
+    );
     Ok(())
 }
 
@@ -812,8 +850,7 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
 
