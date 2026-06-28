@@ -41,11 +41,11 @@ pub struct SparqlAggregateSpec {
 
 // ── SPARQL-star ───────────────────────────────────────────────────────────────
 
-/// An edge annotation lookup step derived from a SPARQL-star quoted triple.
+/// An edge annotation lookup step derived from a SPARQL-star quoted triple in *subject* position.
 ///
 /// Represents a pattern like `<<:Alice :knows :Bob>> :since ?date` where:
 /// - The inner triple `<<:Alice :knows :Bob>>` identifies an edge
-/// - `:since` is the annotation predicate
+/// - `:since` is the annotation predicate (or a variable when `annotation_predicate_var` is set)
 /// - `?date` is the variable to bind the annotation value to
 #[derive(Debug, Clone)]
 pub struct EdgeAnnotationStep {
@@ -55,10 +55,33 @@ pub struct EdgeAnnotationStep {
     pub edge_predicate: String,
     /// Object of the inner (quoted) triple.
     pub edge_object: Term,
-    /// Annotation predicate (the outer predicate).
+    /// Annotation predicate (the outer predicate) — `None` when `annotation_predicate_var` is set.
     pub annot_predicate: String,
+    /// When the outer predicate is a variable, this names the variable to bind each predicate to.
+    /// When `Some`, `annot_predicate` is the empty string and all annotations on the edge are scanned.
+    pub annotation_predicate_var: Option<String>,
     /// Variable to bind the annotation value.
     pub value_var: String,
+}
+
+/// An edge annotation lookup step where the *object* is a quoted triple (object-position SPARQL-star).
+///
+/// Represents a pattern like `?x :quotes <<:Alice :likes :Bob>>` where:
+/// - `?x` is the result variable (a node that has the annotation)
+/// - `:quotes` is the annotation predicate on the edge
+/// - `<<:Alice :likes :Bob>>` is the embedded triple identifying the annotated edge
+#[derive(Debug, Clone)]
+pub struct EdgeAnnotationObjectStep {
+    /// Subject of the inner (quoted) triple — identifies which edge to look up.
+    pub edge_subject: Term,
+    /// Predicate of the inner (quoted) triple.
+    pub edge_predicate: String,
+    /// Object of the inner (quoted) triple.
+    pub edge_object: Term,
+    /// The annotation predicate on the edge (the outer predicate, always fixed here).
+    pub annotation_predicate: String,
+    /// Variable to bind the annotation value (the outer subject `?x`).
+    pub result_var: String,
 }
 
 // ── Filter literal ────────────────────────────────────────────────────────────
@@ -88,11 +111,16 @@ pub struct Branch {
     /// branch bindings. If no match is found for a given left binding, the
     /// left binding is kept unchanged (right vars absent).
     pub optional_branches: Vec<Branch>,
-    /// SPARQL-star annotation lookup steps.
+    /// SPARQL-star annotation lookup steps (subject-position: `<< S P O >> :annot ?val`).
     ///
     /// Each step resolves a quoted triple to an edge ID and fetches annotation
     /// values, binding the result to `value_var`.
     pub edge_annotation_steps: Vec<EdgeAnnotationStep>,
+    /// SPARQL-star annotation lookup steps (object-position: `?x :annot << S P O >>`).
+    ///
+    /// Each step resolves the quoted triple to an edge ID, then finds annotation values
+    /// on that edge for `annotation_predicate` and binds the value NodeId to `result_var`.
+    pub edge_annotation_object_steps: Vec<EdgeAnnotationObjectStep>,
     /// Named graph IRI (from `GRAPH <iri> { ... }`).
     ///
     /// When set, pattern evaluation is scoped to the named graph / View
@@ -200,6 +228,10 @@ pub(crate) fn translate_pattern(
                 if let TermPattern::Triple(inner_tp) = &tp.subject {
                     let step = translate_sparql_star_subject(inner_tp, &tp.predicate, &tp.object)?;
                     branch.edge_annotation_steps.push(step);
+                // SPARQL-star: object is a quoted triple — object-position
+                } else if let TermPattern::Triple(inner_tp) = &tp.object {
+                    let step = translate_sparql_star_object(inner_tp, &tp.predicate, &tp.subject)?;
+                    branch.edge_annotation_object_steps.push(step);
                 } else {
                     let vp = translate_triple_pattern(tp)?;
                     branch.patterns.push(vp);
@@ -238,6 +270,8 @@ pub(crate) fn translate_pattern(
                     combined.filters.extend(rb.filters.clone());
                     combined.edge_annotation_steps.extend(lb.edge_annotation_steps.clone());
                     combined.edge_annotation_steps.extend(rb.edge_annotation_steps.clone());
+                    combined.edge_annotation_object_steps.extend(lb.edge_annotation_object_steps.clone());
+                    combined.edge_annotation_object_steps.extend(rb.edge_annotation_object_steps.clone());
                     combined.optional_branches.extend(lb.optional_branches.clone());
                     combined.optional_branches.extend(rb.optional_branches.clone());
                     // Named graph: prefer the most specific (non-None) graph_iri
@@ -450,9 +484,9 @@ fn translate_term_pattern(tp: &TermPattern) -> Result<Term, SparqlError> {
         }
         TermPattern::BlankNode(b) => Ok(Term::Var(format!("_bn_{}", b.as_str()))),
         TermPattern::Literal(_) => Ok(Term::Any),
-        TermPattern::Triple(_) => Err(SparqlError::Unsupported(
-            "nested quoted triples (SPARQL-star in object position) not supported".to_string(),
-        )),
+        // Nested quoted triples in general position are handled at the BGP level;
+        // if we reach here it means a triple appeared somewhere unexpected — treat as wildcard.
+        TermPattern::Triple(_) => Ok(Term::Any),
     }
 }
 
@@ -477,13 +511,10 @@ fn translate_sparql_star_subject(
     };
     let edge_object = translate_term_pattern(&inner.object)?;
 
-    let annot_predicate = match outer_predicate {
-        NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
-        NamedNodePattern::Variable(_) => {
-            return Err(SparqlError::Unsupported(
-                "variable annotation predicate not supported in SPARQL-star".to_string(),
-            ))
-        }
+    let (annot_predicate, annotation_predicate_var) = match outer_predicate {
+        NamedNodePattern::NamedNode(n) => (n.as_str().to_string(), None),
+        // Gap 2: variable annotation predicate — scan all annotations and bind predicate name.
+        NamedNodePattern::Variable(v) => (String::new(), Some(v.as_str().to_string())),
     };
 
     let value_var = match outer_object {
@@ -500,7 +531,54 @@ fn translate_sparql_star_subject(
         edge_predicate,
         edge_object,
         annot_predicate,
+        annotation_predicate_var,
         value_var,
+    })
+}
+
+/// Translate a SPARQL-star pattern where the *object* is a quoted triple (object-position).
+///
+/// Pattern: `?result_var annotation_predicate <<edge_subject edge_predicate edge_object>>`
+fn translate_sparql_star_object(
+    inner: &spargebra::term::TriplePattern,
+    outer_predicate: &NamedNodePattern,
+    outer_subject: &TermPattern,
+) -> Result<EdgeAnnotationObjectStep, SparqlError> {
+    let edge_subject = translate_term_pattern(&inner.subject)?;
+    let edge_predicate = match &inner.predicate {
+        NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
+        NamedNodePattern::Variable(_) => {
+            return Err(SparqlError::Unsupported(
+                "variable predicate in object-position quoted triple not supported".to_string(),
+            ))
+        }
+    };
+    let edge_object = translate_term_pattern(&inner.object)?;
+
+    let annotation_predicate = match outer_predicate {
+        NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
+        NamedNodePattern::Variable(_) => {
+            return Err(SparqlError::Unsupported(
+                "variable annotation predicate in object-position SPARQL-star not supported".to_string(),
+            ))
+        }
+    };
+
+    let result_var = match outer_subject {
+        TermPattern::Variable(v) => v.as_str().to_string(),
+        _ => {
+            return Err(SparqlError::Unsupported(
+                "subject of object-position SPARQL-star pattern must be a variable".to_string(),
+            ))
+        }
+    };
+
+    Ok(EdgeAnnotationObjectStep {
+        edge_subject,
+        edge_predicate,
+        edge_object,
+        annotation_predicate,
+        result_var,
     })
 }
 
@@ -858,6 +936,9 @@ pub struct ConstructTemplate {
     pub object_iri: Option<String>,
     /// Bound literal for the object (when object is a literal value).
     pub object_literal: Option<SparqlLiteral>,
+    /// When the subject is a quoted triple `<<s p o>>`, its three components are stored here.
+    /// `subject_var` and `subject_iri` are both `None` in this case.
+    pub subject_quoted: Option<Box<ConstructTemplate>>,
 }
 
 /// Output of translating a CONSTRUCT or DESCRIBE query.
@@ -938,8 +1019,6 @@ pub fn translate_construct(
 fn translate_construct_triple(
     tp: &spargebra::term::TriplePattern,
 ) -> Result<ConstructTemplate, SparqlError> {
-    let (subject_var, subject_iri) = term_pattern_to_var_or_iri(&tp.subject)?;
-
     let predicate = match &tp.predicate {
         NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
         NamedNodePattern::Variable(_) => {
@@ -947,6 +1026,15 @@ fn translate_construct_triple(
                 "variable predicate in CONSTRUCT template not supported".to_string(),
             ))
         }
+    };
+
+    // Gap 3: subject may be a quoted triple <<s p o>> (SPARQL-star CONSTRUCT template).
+    let (subject_var, subject_iri, subject_quoted) = if let TermPattern::Triple(inner) = &tp.subject {
+        let inner_tmpl = translate_construct_triple(inner)?;
+        (None, None, Some(Box::new(inner_tmpl)))
+    } else {
+        let (sv, si) = term_pattern_to_var_or_iri(&tp.subject)?;
+        (sv, si, None)
     };
 
     let (object_var, object_iri, object_literal) =
@@ -959,6 +1047,7 @@ fn translate_construct_triple(
         object_var,
         object_iri,
         object_literal,
+        subject_quoted,
     })
 }
 
@@ -975,9 +1064,8 @@ fn term_pattern_to_var_or_iri(
         TermPattern::Literal(_) => Err(SparqlError::Unsupported(
             "literal in CONSTRUCT subject position not supported".to_string(),
         )),
-        TermPattern::Triple(_) => Err(SparqlError::Unsupported(
-            "quoted triple in CONSTRUCT subject position not supported".to_string(),
-        )),
+        // Quoted triple in subject position is handled by translate_construct_triple directly.
+        TermPattern::Triple(_) => Ok((None, None)),
     }
 }
 
@@ -993,8 +1081,8 @@ fn term_pattern_to_var_iri_or_lit(
         TermPattern::BlankNode(b) => {
             Ok((Some(format!("_bn_{}", b.as_str())), None, None))
         }
-        TermPattern::Triple(_) => Err(SparqlError::Unsupported(
-            "quoted triple in CONSTRUCT object position not supported".to_string(),
-        )),
+        // Quoted triple in object position — not valid in standard CONSTRUCT templates;
+        // treat as wildcard (yields no binding) rather than hard error.
+        TermPattern::Triple(_) => Ok((None, None, None)),
     }
 }

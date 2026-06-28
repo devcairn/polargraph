@@ -357,6 +357,15 @@ pub fn spo_prefix_sp(s: &NodeId, p: PredId) -> [u8; 20] {
     k
 }
 
+/// SPO prefix: exactly the triple (subject, predicate, object) — all tt variants.
+pub fn spo_prefix_spo(s: &NodeId, p: PredId, o: &NodeId) -> [u8; 36] {
+    let mut k = [0u8; 36];
+    k[0..16].copy_from_slice(s.as_bytes());
+    k[16..20].copy_from_slice(&p.to_be_bytes());
+    k[20..36].copy_from_slice(o.as_bytes());
+    k
+}
+
 /// SOP prefix: all triples with given (subject, object).
 pub fn sop_prefix_so(s: &NodeId, o: &NodeId) -> [u8; 32] {
     let mut k = [0u8; 32];

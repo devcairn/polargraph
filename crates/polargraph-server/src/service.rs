@@ -59,6 +59,7 @@ use crate::{
         VectorSearchResult, VectorSeedQueryRequest, VectorSeedQueryResponse,
         DeleteTriplesRequest, DeleteTriplesResponse,
         RunMaterializationRequest, RunMaterializationResponse,
+        GetEdgeIdsByTripleRequest, GetEdgeIdsByTripleResponse,
     },
 };
 use dashmap::DashMap;
@@ -2545,6 +2546,48 @@ impl PolarGraphService for PolarGraphServer {
             .collect();
 
         Ok(Response::new(GetEdgeAnnotationsResponse { annotations: proto_annotations }))
+    }
+
+    async fn get_edge_ids_by_triple(
+        &self,
+        request: Request<GetEdgeIdsByTripleRequest>,
+    ) -> Result<Response<GetEdgeIdsByTripleResponse>, Status> {
+        let req = request.into_inner();
+
+        let subj_bytes: [u8; 16] = req
+            .subject_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("subject_id must be exactly 16 bytes"))?;
+        let obj_bytes: [u8; 16] = req
+            .object_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("object_id must be exactly 16 bytes"))?;
+
+        let subject = NodeId(uuid::Uuid::from_bytes(subj_bytes));
+        let object = NodeId(uuid::Uuid::from_bytes(obj_bytes));
+        let predicate = &req.predicate;
+
+        let snapshot_ts = self.store.begin().read_ts;
+
+        // Look up the predicate ID. If it doesn't exist, the triple can't exist.
+        let pred_id = match self.store.lookup_predicate(predicate) {
+            Some(id) => id,
+            None => return Ok(Response::new(GetEdgeIdsByTripleResponse { edge_ids: vec![] })),
+        };
+
+        // Scan the SPO CF with prefix [subject:16][pred_id:4][object:16] to find
+        // all MVCC versions. The CF value bytes contain the edge_id.
+        let edge_ids = self
+            .store
+            .scan_spo_for_edge_ids(subject, pred_id, object, snapshot_ts)
+            .map_err(storage_err_to_status)?
+            .into_iter()
+            .map(|eid: EdgeId| eid.as_bytes().to_vec())
+            .collect();
+
+        Ok(Response::new(GetEdgeIdsByTripleResponse { edge_ids }))
     }
 
     // ── API key management ────────────────────────────────────────────────────

@@ -816,6 +816,61 @@ impl TripleStore {
         self.inner.fwd.read().unwrap().get(pred).copied()
     }
 
+    /// Public version of [`predicate_id`] — returns `None` if the predicate has never been interned.
+    pub fn lookup_predicate(&self, pred: &str) -> Option<PredId> {
+        self.inner.fwd.read().unwrap().get(pred).copied()
+    }
+
+    /// Scan the SPO CF for all MVCC-visible EdgeIds matching exactly (subject, pred_id, object).
+    ///
+    /// Used by the SPARQL-star executor to resolve a quoted triple `<< S P O >>` to its
+    /// stored edge UUID(s) so that edge annotations can be retrieved via
+    /// [`scan_edge_annotations`].
+    pub fn scan_spo_for_edge_ids(
+        &self,
+        subject: NodeId,
+        pred_id: PredId,
+        object: NodeId,
+        snapshot_ts: Timestamp,
+    ) -> Result<Vec<EdgeId>, StorageError> {
+        use rocksdb::{Direction, IteratorMode};
+
+        let prefix = keys::spo_prefix_spo(&subject, pred_id, &object);
+        let cf = self.cf_handle(cf::SPO)?;
+        let iter = self
+            .inner
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+
+        // Collect edge_ids from all MVCC versions visible at snapshot_ts,
+        // keeping the latest per (S, pred, O) key group (same semantics as snapshot_scan_cf).
+        let mut best: Option<(Timestamp, EdgeId)> = None;
+
+        for item in iter {
+            let (key, value) = item?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if key.len() < 8 {
+                continue;
+            }
+            let raw_tt = i64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
+            let tt = Timestamp(raw_tt);
+            if tt > snapshot_ts {
+                continue;
+            }
+            if let Ok(DecodedValue::Relation { edge_id, .. }) = codec::decode_value(&value) {
+                match best {
+                    None => best = Some((tt, edge_id)),
+                    Some((prev_tt, _)) if tt > prev_tt => best = Some((tt, edge_id)),
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(best.map(|(_, eid)| eid).into_iter().collect())
+    }
+
     // ── snapshot scans ────────────────────────────────────────────────────────
 
     /// All triples for `subject` visible at `snapshot_ts`.

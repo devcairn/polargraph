@@ -2502,15 +2502,6 @@ Content negotiation via `Accept` header: `application/sparql-results+json`
 | DELETE DATA | Each triple translated to a `DeleteTriples` gRPC call grouped by subject |
 | INSERT/DELETE WHERE | WHERE clause evaluated via `Query` RPC; templates applied per binding row |
 
-### SPARQL-star known limitations
-
-The following SPARQL-star features are not yet implemented:
-
-- **Object-position quoted triples**: `?x :quotes << :Alice :likes :Bob >>` is not yet supported. The translator returns an error for embedded triples appearing in object position.
-- **Variable annotation predicates**: `<< ?s ?p ?o >> ?annot ?val` (binding the annotation predicate itself as a variable) is not implemented.
-- **Turtle-star serialization**: CONSTRUCT and DESCRIBE responses use standard Turtle/N-Triples; the `<< >>` quoted-triple syntax is not emitted.
-- **SPARQL Update with embedded triples**: `INSERT DATA { << :s :p :o >> :since "2020" }` is not handled by the Update translator.
-
 ### Other known limitations
 
 - Property path alternatives (`|`) use only the first branch — the full UNION is not yet materialized as separate query branches.

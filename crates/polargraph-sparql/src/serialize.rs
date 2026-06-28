@@ -73,6 +73,119 @@ pub struct RdfTriple {
     pub object: String,
 }
 
+// ── RDF-star: quoted-triple subject ──────────────────────────────────────────
+
+/// The subject component of an RDF-star triple, which may itself be a quoted triple.
+#[derive(Clone)]
+pub enum RdfStarSubject {
+    /// An ordinary IRI or blank node already rendered with angle brackets, e.g. `<urn:uuid:…>`.
+    Iri(String),
+    /// A quoted triple `<< s p o >>` used as the subject of an outer statement.
+    QuotedTriple {
+        s: String,
+        p: String,
+        o: String,
+    },
+}
+
+impl RdfStarSubject {
+    /// Render to the N-Triples-star text form: either `<iri>` or `<< s p o >>`.
+    pub fn to_ntriples(&self) -> String {
+        match self {
+            RdfStarSubject::Iri(iri) => iri.clone(),
+            RdfStarSubject::QuotedTriple { s, p, o } => format!("<< {s} {p} {o} >>"),
+        }
+    }
+}
+
+/// An RDF-star triple whose subject may be a quoted triple.
+pub struct RdfStarTriple {
+    pub subject: RdfStarSubject,
+    pub predicate: String,
+    pub object: String,
+}
+
+// ── N-Triples-star serializer ─────────────────────────────────────────────────
+
+/// Serialize a slice of RDF-star triples to [N-Triples-star](https://w3c.github.io/rdf-star/cg-spec/) format.
+///
+/// Subjects that are quoted triples emit as `<< s p o >> predicate object .`
+pub fn serialize_ntriples_star(triples: &[RdfStarTriple]) -> String {
+    let mut out = String::new();
+    for t in triples {
+        out.push_str(&t.subject.to_ntriples());
+        out.push(' ');
+        out.push_str(&t.predicate);
+        out.push(' ');
+        out.push_str(&t.object);
+        out.push_str(" .\n");
+    }
+    out
+}
+
+// ── Turtle-star serializer ─────────────────────────────────────────────────────
+
+/// Serialize a slice of RDF-star triples to [Turtle-star](https://w3c.github.io/rdf-star/cg-spec/2021-12-17.html) format.
+///
+/// Quoted-triple subjects are emitted as `<< s p o >>` inline. Triples with plain IRI subjects
+/// are grouped by subject the same as in regular Turtle.
+pub fn serialize_turtle_star(triples: &[RdfStarTriple]) -> String {
+    use std::collections::BTreeMap;
+
+    let prefixes = [
+        ("xsd:", "http://www.w3.org/2001/XMLSchema#"),
+        ("rdf:", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+        ("rdfs:", "http://www.w3.org/2000/01/rdf-schema#"),
+        ("owl:", "http://www.w3.org/2002/07/owl#"),
+    ];
+
+    let mut out = String::new();
+    for (prefix, iri) in &prefixes {
+        out.push_str(&format!("@prefix {} <{}> .\n", prefix, iri));
+    }
+    if !triples.is_empty() {
+        out.push('\n');
+    }
+
+    // Separate quoted-subject triples (emitted inline) from plain-IRI-subject triples (grouped).
+    let mut plain: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    let mut quoted_lines: Vec<String> = Vec::new();
+
+    for t in triples {
+        match &t.subject {
+            RdfStarSubject::Iri(iri) => {
+                plain
+                    .entry(iri.as_str())
+                    .or_default()
+                    .push((t.predicate.as_str(), t.object.as_str()));
+            }
+            RdfStarSubject::QuotedTriple { s, p, o } => {
+                quoted_lines.push(format!(
+                    "<< {s} {p} {o} >> {} {} .\n",
+                    t.predicate, t.object,
+                    s = s, p = p, o = o,
+                ));
+            }
+        }
+    }
+
+    for (subj, preds) in &plain {
+        out.push_str(subj);
+        out.push('\n');
+        for (i, (pred, obj)) in preds.iter().enumerate() {
+            let terminator = if i == preds.len() - 1 { " ." } else { " ;" };
+            out.push_str(&format!("    {} {}{}\n", pred, obj, terminator));
+        }
+        out.push('\n');
+    }
+
+    for line in &quoted_lines {
+        out.push_str(line);
+    }
+
+    out
+}
+
 // ── N-Triples serializer ──────────────────────────────────────────────────────
 
 /// Serialize a slice of RDF triples to [N-Triples](https://www.w3.org/TR/n-triples/) format.

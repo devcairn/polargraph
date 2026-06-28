@@ -879,3 +879,148 @@ fn sparql_update_malformed_fails() {
 //   crates/polargraph-server/tests/
 // and require a running polargraphd. The unit tests above cover the library
 // layer exhaustively without network I/O.
+
+// ── SPARQL-star (RDF-star) tests ──────────────────────────────────────────────
+
+/// Gap 1: object-position embedded triple — `?x <:ann> << <:Alice> <:likes> <:Bob> >>`.
+/// The translator should produce an `edge_annotation_object_steps` entry.
+#[test]
+fn sparql_star_object_position() {
+    use polargraph_sparql::translate_query;
+
+    let sparql = "SELECT ?x WHERE { \
+        ?x <http://example.org/annotates> << <urn:uuid:018e8c1e-0000-7000-8000-000000000001> <http://example.org/likes> <urn:uuid:018e8c1e-0000-7000-8000-000000000002> >> \
+    }";
+    let q = spargebra::Query::parse(sparql, None).expect("query should parse");
+    let translation = translate_query(&q).expect("query should translate");
+
+    let object_steps: Vec<_> = translation
+        .branches
+        .iter()
+        .flat_map(|b| b.edge_annotation_object_steps.iter())
+        .collect();
+
+    assert!(
+        !object_steps.is_empty(),
+        "expected at least one edge_annotation_object_step for object-position embedded triple"
+    );
+    let step = &object_steps[0];
+    assert_eq!(step.annotation_predicate, "http://example.org/annotates");
+    assert_eq!(step.edge_predicate, "http://example.org/likes");
+}
+
+/// Gap 2: variable annotation predicate — `<< <:Alice> <:likes> <:Bob> >> ?annot ?val`.
+/// The translator should produce an `edge_annotation_steps` entry with
+/// `annotation_predicate_var = Some("annot")`.
+#[test]
+fn sparql_star_variable_predicate() {
+    use polargraph_sparql::translate_query;
+
+    let sparql = "SELECT ?annot ?val WHERE { \
+        << <urn:uuid:018e8c1e-0000-7000-8000-000000000001> <http://example.org/likes> <urn:uuid:018e8c1e-0000-7000-8000-000000000002> >> ?annot ?val \
+    }";
+    let q = spargebra::Query::parse(sparql, None).expect("query should parse");
+    let translation = translate_query(&q).expect("query should translate");
+
+    let ann_steps: Vec<_> = translation
+        .branches
+        .iter()
+        .flat_map(|b| b.edge_annotation_steps.iter())
+        .collect();
+
+    assert!(
+        !ann_steps.is_empty(),
+        "expected at least one edge_annotation_step for variable predicate"
+    );
+    let step = &ann_steps[0];
+    assert_eq!(
+        step.annotation_predicate_var,
+        Some("annot".to_string()),
+        "annotation_predicate_var should capture the ?annot variable"
+    );
+}
+
+/// Gap 3: Turtle-star serialization — `RdfStarTriple` with `QuotedTriple` subject
+/// should emit `<< s p o >> pred obj .` syntax.
+#[test]
+fn sparql_star_turtle_output() {
+    use polargraph_sparql::{
+        serialize_ntriples_star, serialize_turtle_star, RdfStarSubject, RdfStarTriple,
+    };
+
+    let triples = vec![RdfStarTriple {
+        subject: RdfStarSubject::QuotedTriple {
+            s: "<urn:uuid:018e8c1e-0000-7000-8000-000000000001>".to_string(),
+            p: "<http://example.org/likes>".to_string(),
+            o: "<urn:uuid:018e8c1e-0000-7000-8000-000000000002>".to_string(),
+        },
+        predicate: "<http://example.org/since>".to_string(),
+        object: "\"2020\"^^<http://www.w3.org/2001/XMLSchema#string>".to_string(),
+    }];
+
+    let nt = serialize_ntriples_star(&triples);
+    assert!(
+        nt.contains("<< ") && nt.contains(" >>"),
+        "N-Triples-star output should contain << >> syntax, got: {nt}"
+    );
+    assert!(nt.contains("http://example.org/since"), "should contain annotation predicate");
+
+    let ttl = serialize_turtle_star(&triples);
+    assert!(
+        ttl.contains("<< ") && ttl.contains(" >>"),
+        "Turtle-star output should contain << >> syntax, got: {ttl}"
+    );
+    assert!(ttl.contains("http://example.org/since"), "should contain annotation predicate");
+}
+
+/// Gap 4 (INSERT): SPARQL Update `INSERT DATA` with an embedded-triple subject.
+/// spargebra should parse it and produce a `Subject::Triple` in the quad.
+#[test]
+fn sparql_star_update_insert() {
+    let update_str = "INSERT DATA { \
+        << <urn:uuid:018e8c1e-0000-7000-8000-000000000001> \
+           <http://example.org/likes> \
+           <urn:uuid:018e8c1e-0000-7000-8000-000000000002> >> \
+        <http://example.org/since> \"2020\" \
+    }";
+    let update = spargebra::Update::parse(update_str, None)
+        .expect("INSERT DATA with quoted triple should parse");
+    let ops = update.operations;
+    assert_eq!(ops.len(), 1);
+    if let spargebra::GraphUpdateOperation::InsertData { data } = &ops[0] {
+        assert!(!data.is_empty(), "should have at least one quad");
+        let quad = &data[0];
+        assert!(
+            matches!(quad.subject, spargebra::term::Subject::Triple(_)),
+            "subject should be a quoted triple"
+        );
+    } else {
+        panic!("expected InsertData operation");
+    }
+}
+
+/// Gap 4 (DELETE): SPARQL Update `DELETE DATA` with an embedded-triple subject.
+/// spargebra should parse it and produce a `GroundSubject::Triple` in the quad.
+#[test]
+fn sparql_star_update_delete() {
+    let update_str = "DELETE DATA { \
+        << <urn:uuid:018e8c1e-0000-7000-8000-000000000001> \
+           <http://example.org/likes> \
+           <urn:uuid:018e8c1e-0000-7000-8000-000000000002> >> \
+        <http://example.org/since> \"2020\" \
+    }";
+    let update = spargebra::Update::parse(update_str, None)
+        .expect("DELETE DATA with quoted triple should parse");
+    let ops = update.operations;
+    assert_eq!(ops.len(), 1);
+    if let spargebra::GraphUpdateOperation::DeleteData { data } = &ops[0] {
+        assert!(!data.is_empty(), "should have at least one quad");
+        let quad = &data[0];
+        assert!(
+            matches!(quad.subject, spargebra::term::GroundSubject::Triple(_)),
+            "subject should be a quoted triple"
+        );
+    } else {
+        panic!("expected DeleteData operation");
+    }
+}

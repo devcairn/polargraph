@@ -1371,6 +1371,230 @@ async fn handle_sparql_post(
     execute_sparql_query(state, headers, query_string).await
 }
 
+// ── SPARQL-star runtime execution helpers ────────────────────────────────────
+
+fn sparql_annotation_to_value(
+    ann_value: &Option<proto::edge_annotation::Value>,
+) -> Option<polargraph_sparql::SparqlValue> {
+    use polargraph_sparql::SparqlValue;
+    match ann_value {
+        Some(proto::edge_annotation::Value::NodeId(bytes)) if bytes.len() == 16 => {
+            let arr: [u8; 16] = bytes[..16].try_into().ok()?;
+            Some(SparqlValue::Uri(NodeId(uuid::Uuid::from_bytes(arr))))
+        }
+        Some(proto::edge_annotation::Value::Scalar(v)) => match &v.kind {
+            Some(proto::value::Kind::TextVal(s)) => Some(SparqlValue::Literal(s.clone())),
+            Some(proto::value::Kind::IntVal(n)) => Some(SparqlValue::LiteralInt(*n)),
+            Some(proto::value::Kind::FloatVal(f)) => Some(SparqlValue::LiteralFloat(*f)),
+            Some(proto::value::Kind::BoolVal(b)) => Some(SparqlValue::LiteralBool(*b)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Look up the edge UUID(s) for a specific (S, P, O) triple via the gRPC service.
+async fn resolve_edge_ids(
+    client: &mut GrpcClient,
+    subject_bytes: Vec<u8>,
+    predicate: &str,
+    object_bytes: Vec<u8>,
+) -> Vec<Vec<u8>> {
+    let req = proto::GetEdgeIdsByTripleRequest {
+        subject_id: subject_bytes,
+        predicate: predicate.to_string(),
+        object_id: object_bytes,
+    };
+    match client.get_edge_ids_by_triple(tonic::Request::new(req)).await {
+        Ok(r) => r.into_inner().edge_ids,
+        Err(_) => vec![],
+    }
+}
+
+/// Execute subject-position SPARQL-star annotation steps.
+///
+/// For each binding in `bindings` and each `EdgeAnnotationStep`, resolves the embedded
+/// triple to an edge ID and fetches annotations, extending the binding with the annotation value.
+async fn execute_annotation_steps(
+    client: &mut GrpcClient,
+    bindings: Vec<polargraph_sparql::SparqlBindings>,
+    steps: &[polargraph_sparql::EdgeAnnotationStep],
+) -> Vec<polargraph_sparql::SparqlBindings> {
+    use polargraph_sparql::SparqlValue;
+
+    let mut result = Vec::new();
+
+    // When there are no input bindings but we have bound-subject steps, seed with one empty binding.
+    let seed: Vec<polargraph_sparql::SparqlBindings> = if bindings.is_empty() {
+        vec![std::collections::HashMap::new()]
+    } else {
+        bindings
+    };
+
+    for binding in seed {
+        let mut extended = vec![binding.clone()];
+
+        for step in steps {
+            let mut next = Vec::new();
+            for b in &extended {
+                // Resolve subject and object terms (may be variable or bound).
+                let subj_bytes = match &step.edge_subject {
+                    polargraph_query::Term::Bound(id) => id.0.as_bytes().to_vec(),
+                    polargraph_query::Term::Var(v) => {
+                        if let Some(SparqlValue::Uri(id)) = b.get(v.as_str()) {
+                            id.0.as_bytes().to_vec()
+                        } else { continue; }
+                    }
+                    _ => continue,
+                };
+                let obj_bytes = match &step.edge_object {
+                    polargraph_query::Term::Bound(id) => id.0.as_bytes().to_vec(),
+                    polargraph_query::Term::Var(v) => {
+                        if let Some(SparqlValue::Uri(id)) = b.get(v.as_str()) {
+                            id.0.as_bytes().to_vec()
+                        } else { continue; }
+                    }
+                    _ => continue,
+                };
+
+                let edge_ids = resolve_edge_ids(
+                    client,
+                    subj_bytes,
+                    &step.edge_predicate,
+                    obj_bytes,
+                )
+                .await;
+
+                for edge_id_bytes in &edge_ids {
+                    let ann_req = proto::GetEdgeAnnotationsRequest {
+                        edge_id: edge_id_bytes.clone(),
+                    };
+                    let annotations = match client
+                        .get_edge_annotations(tonic::Request::new(ann_req))
+                        .await
+                    {
+                        Ok(r) => r.into_inner().annotations,
+                        Err(_) => continue,
+                    };
+
+                    for ann in &annotations {
+                        // Filter by annotation predicate (unless variable).
+                        let pred_matches = step.annotation_predicate_var.is_some()
+                            || ann.predicate == step.annot_predicate;
+                        if !pred_matches {
+                            continue;
+                        }
+
+                        // Extract annotation value as SparqlValue.
+                        let val_opt = sparql_annotation_to_value(&ann.value);
+
+                        if let Some(val) = val_opt {
+                            let mut new_b = b.clone();
+                            new_b.insert(step.value_var.clone(), val);
+                            if let Some(pred_var) = &step.annotation_predicate_var {
+                                new_b.insert(
+                                    pred_var.clone(),
+                                    SparqlValue::Literal(ann.predicate.clone()),
+                                );
+                            }
+                            next.push(new_b);
+                        }
+                    }
+                }
+            }
+            extended = next;
+        }
+        result.extend(extended);
+    }
+    result
+}
+
+/// Execute object-position SPARQL-star annotation steps.
+///
+/// Pattern: `?x :annot << S P O >>` — looks up edge by (S, P, O) then returns
+/// annotation values for `:annot` as bindings for `?x`.
+async fn execute_annotation_object_steps(
+    client: &mut GrpcClient,
+    bindings: Vec<polargraph_sparql::SparqlBindings>,
+    steps: &[polargraph_sparql::EdgeAnnotationObjectStep],
+) -> Vec<polargraph_sparql::SparqlBindings> {
+    use polargraph_sparql::SparqlValue;
+
+    let seed: Vec<polargraph_sparql::SparqlBindings> = if bindings.is_empty() {
+        vec![std::collections::HashMap::new()]
+    } else {
+        bindings
+    };
+
+    let mut result = Vec::new();
+
+    for binding in seed {
+        let mut extended = vec![binding.clone()];
+
+        for step in steps {
+            let mut next = Vec::new();
+            for b in &extended {
+                let subj_bytes = match &step.edge_subject {
+                    polargraph_query::Term::Bound(id) => id.0.as_bytes().to_vec(),
+                    polargraph_query::Term::Var(v) => {
+                        if let Some(SparqlValue::Uri(id)) = b.get(v.as_str()) {
+                            id.0.as_bytes().to_vec()
+                        } else { continue; }
+                    }
+                    _ => continue,
+                };
+                let obj_bytes = match &step.edge_object {
+                    polargraph_query::Term::Bound(id) => id.0.as_bytes().to_vec(),
+                    polargraph_query::Term::Var(v) => {
+                        if let Some(SparqlValue::Uri(id)) = b.get(v.as_str()) {
+                            id.0.as_bytes().to_vec()
+                        } else { continue; }
+                    }
+                    _ => continue,
+                };
+
+                let edge_ids = resolve_edge_ids(
+                    client,
+                    subj_bytes,
+                    &step.edge_predicate,
+                    obj_bytes,
+                )
+                .await;
+
+                for edge_id_bytes in &edge_ids {
+                    let ann_req = proto::GetEdgeAnnotationsRequest {
+                        edge_id: edge_id_bytes.clone(),
+                    };
+                    let annotations = match client
+                        .get_edge_annotations(tonic::Request::new(ann_req))
+                        .await
+                    {
+                        Ok(r) => r.into_inner().annotations,
+                        Err(_) => continue,
+                    };
+
+                    for ann in &annotations {
+                        if ann.predicate != step.annotation_predicate {
+                            continue;
+                        }
+                        // The annotation VALUE is what we bind to `result_var`.
+                        let val_opt: Option<SparqlValue> = sparql_annotation_to_value(&ann.value);
+
+                        if let Some(val) = val_opt {
+                            let mut new_b = b.clone();
+                            new_b.insert(step.result_var.clone(), val);
+                            next.push(new_b);
+                        }
+                    }
+                }
+            }
+            extended = next;
+        }
+        result.extend(extended);
+    }
+    result
+}
+
 async fn execute_sparql_query(
     state: Arc<AppState>,
     headers: axum::http::HeaderMap,
@@ -1512,16 +1736,26 @@ async fn execute_sparql_query(
                 polargraph_sparql::execute::left_join(branch_bindings, right, None);
         }
 
-        // 3b. SPARQL-star annotation steps are recorded in the translation but
-        // resolving them via gRPC requires a separate edge-lookup round-trip
-        // (no single RPC currently exposes edge IDs from SPO patterns).
-        // Phase 2 captures the step metadata; full execution requires a future
-        // QueryEdgeId RPC or Cypher-based lookup.
+        // 3b. Execute SPARQL-star subject-position annotation steps.
+        // Each step: resolve the quoted triple to an edge ID then fetch annotations.
         if !branch.edge_annotation_steps.is_empty() {
-            tracing::debug!(
-                steps = branch.edge_annotation_steps.len(),
-                "SPARQL-star annotation steps present; runtime resolution pending QueryEdgeId RPC"
-            );
+            branch_bindings = execute_annotation_steps(
+                &mut client,
+                branch_bindings,
+                &branch.edge_annotation_steps,
+            )
+            .await;
+        }
+
+        // 3c. Execute SPARQL-star object-position annotation steps.
+        // Pattern: `?x :annot << S P O >>` — find edge then bind annotation value to ?x.
+        if !branch.edge_annotation_object_steps.is_empty() {
+            branch_bindings = execute_annotation_object_steps(
+                &mut client,
+                branch_bindings,
+                &branch.edge_annotation_object_steps,
+            )
+            .await;
         }
 
         all_bindings.extend(branch_bindings);
@@ -1677,8 +1911,8 @@ async fn execute_sparql_construct(
     query: spargebra::Query,
 ) -> Response {
     use polargraph_sparql::{
-        node_id_to_iri, serialize_ntriples, serialize_turtle, translate_construct,
-        RdfTriple, SparqlValue,
+        node_id_to_iri, serialize_ntriples_star, serialize_turtle_star, translate_construct,
+        RdfStarSubject, RdfStarTriple, SparqlValue,
     };
     use std::collections::HashSet;
 
@@ -1738,7 +1972,7 @@ async fn execute_sparql_construct(
     }
 
     // Build RDF triples.
-    let rdf_triples: Vec<RdfTriple> = if is_describe {
+    let rdf_triples: Vec<RdfStarTriple> = if is_describe {
         // Collect unique NodeIds from all bound values, plus any bare DESCRIBE <iri>.
         let mut node_ids: HashSet<NodeId> = HashSet::new();
         for b in &all_bindings {
@@ -1789,8 +2023,8 @@ async fn execute_sparql_construct(
                             if let Ok(arr) = obj_val.bytes[..16].try_into() {
                                 let obj_uuid = uuid::Uuid::from_bytes(arr);
                                 // Predicate unknown — use a placeholder IRI.
-                                result.push(RdfTriple {
-                                    subject: node_id_to_iri(id),
+                                result.push(RdfStarTriple {
+                                    subject: RdfStarSubject::Iri(node_id_to_iri(id)),
                                     predicate: "<urn:polargraph:unknownPredicate>".to_string(),
                                     object: node_id_to_iri(&NodeId(obj_uuid)),
                                 });
@@ -1820,9 +2054,9 @@ async fn execute_sparql_construct(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let (content_type, body) = if accept.contains("application/n-triples") {
-        ("application/n-triples", serialize_ntriples(&rdf_triples))
+        ("application/n-triples", serialize_ntriples_star(&rdf_triples))
     } else {
-        ("text/turtle", serialize_turtle(&rdf_triples))
+        ("text/turtle", serialize_turtle_star(&rdf_triples))
     };
 
     axum::response::Response::builder()
@@ -1835,16 +2069,25 @@ async fn execute_sparql_construct(
 fn substitute_construct_template(
     tmpl: &polargraph_sparql::ConstructTemplate,
     binding: &polargraph_sparql::SparqlBindings,
-) -> Option<polargraph_sparql::RdfTriple> {
-    use polargraph_sparql::{node_id_to_iri, RdfTriple, SparqlLiteral, SparqlValue};
+) -> Option<polargraph_sparql::RdfStarTriple> {
+    use polargraph_sparql::{node_id_to_iri, RdfStarSubject, RdfStarTriple, SparqlLiteral, SparqlValue};
 
-    let subject = if let Some(ref var) = tmpl.subject_var {
+    // Gap 3: subject may be a quoted triple.
+    let star_subject = if let Some(ref inner) = tmpl.subject_quoted {
+        // Resolve the inner triple's three components.
+        let inner_triple = substitute_construct_template(inner, binding)?;
+        let (s, p, o) = match inner_triple.subject {
+            RdfStarSubject::Iri(iri) => (iri, inner_triple.predicate, inner_triple.object),
+            RdfStarSubject::QuotedTriple { .. } => return None, // deeply nested — not supported
+        };
+        RdfStarSubject::QuotedTriple { s, p, o }
+    } else if let Some(ref var) = tmpl.subject_var {
         match binding.get(var)? {
-            SparqlValue::Uri(id) => node_id_to_iri(id),
+            SparqlValue::Uri(id) => RdfStarSubject::Iri(node_id_to_iri(id)),
             _ => return None,
         }
     } else {
-        format!("<{}>", tmpl.subject_iri.as_deref()?)
+        RdfStarSubject::Iri(format!("<{}>", tmpl.subject_iri.as_deref()?))
     };
 
     let predicate = format!("<{}>", &tmpl.predicate);
@@ -1890,7 +2133,7 @@ fn substitute_construct_template(
         return None;
     };
 
-    Some(RdfTriple { subject, predicate, object })
+    Some(RdfStarTriple { subject: star_subject, predicate, object })
 }
 
 // ── POST /sparql/update ───────────────────────────────────────────────────────
@@ -1927,8 +2170,30 @@ async fn handle_sparql_update(
     for operation in update.operations {
         match operation {
             spargebra::GraphUpdateOperation::InsertData { data } => {
-                for quad in data {
-                    if let Some(triple) = sparql_quad_to_proto_triple(&quad) {
+                for quad in &data {
+                    // Gap 4: handle quoted-triple subjects `<< S P O >> :annot :val`.
+                    if let spargebra::term::Subject::Triple(inner) = &quad.subject {
+                        // Resolve (S, P, O) to an edge_id, then insert annotation.
+                        if let Some(ann) = sparql_star_quad_to_annotation(
+                            inner,
+                            quad.predicate.as_str(),
+                            &quad.object,
+                            &mut state.client.clone(),
+                        )
+                        .await
+                        {
+                            let mut client = state.client.clone();
+                            let req = proto::InsertRequest {
+                                edge_annotations: vec![ann],
+                                ..Default::default()
+                            };
+                            if client.insert(tonic::Request::new(req)).await.is_ok() {
+                                inserted += 1;
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some(triple) = sparql_quad_to_proto_triple(quad) {
                         let mut client = state.client.clone();
                         let req = proto::InsertRequest {
                             triples: vec![triple],
@@ -1941,21 +2206,41 @@ async fn handle_sparql_update(
                 }
             }
             spargebra::GraphUpdateOperation::DeleteData { data } => {
-                // Group GroundQuads by subject for DeleteTriples RPC.
-                // We soft-delete all triples for each unique subject (predicate filter not used
-                // here because GroundQuad has a specific object too, but DeleteTriples closes
-                // whole valid-time windows for a subject+predicate combination).
+                // Group plain GroundQuads by subject for DeleteTriples RPC.
+                // Gap 4: quoted-triple subjects are handled in a separate pre-pass.
                 let mut by_subject: std::collections::HashMap<String, Vec<String>> =
                     std::collections::HashMap::new();
                 for gq in &data {
-                    let subj_iri = match &gq.subject {
-                        spargebra::term::GroundSubject::NamedNode(n) => n.as_str().to_string(),
-                        // rdf-star triples as subjects not supported
+                    match &gq.subject {
+                        spargebra::term::GroundSubject::Triple(inner) => {
+                            // Gap 4: DELETE DATA { << S P O >> :annot :val }
+                            // Resolve inner triple to edge_id and delete the annotation.
+                            if let Some(s_iri) = ground_triple_subject_iri(inner) {
+                                if let Some(s_uuid_str) = s_iri.strip_prefix("urn:uuid:") {
+                                    if let Ok(s_uuid) = uuid::Uuid::parse_str(s_uuid_str) {
+                                        // Use the inner triple's subject as a proxy to soft-delete
+                                        // the annotation predicate on all edges from that subject.
+                                        let mut client = state.client.clone();
+                                        let req = proto::DeleteTriplesRequest {
+                                            subject_ids: vec![s_uuid.as_bytes().to_vec()],
+                                            predicate: gq.predicate.as_str().to_string(),
+                                            vt_end: 0,
+                                        };
+                                        if let Ok(r) = client.delete_triples(tonic::Request::new(req)).await {
+                                            deleted += r.into_inner().deleted_count;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        spargebra::term::GroundSubject::NamedNode(n) => {
+                            let subj_iri = n.as_str().to_string();
+                            let pred = gq.predicate.as_str().to_string();
+                            by_subject.entry(subj_iri).or_default().push(pred);
+                        }
                         #[allow(unreachable_patterns)]
-                        _ => continue,
-                    };
-                    let pred = gq.predicate.as_str().to_string();
-                    by_subject.entry(subj_iri).or_default().push(pred);
+                        _ => {}
+                    }
                 }
 
                 for (subj_iri, _preds) in by_subject {
@@ -2162,11 +2447,83 @@ async fn handle_materialize(
     }
 }
 
+// ── SPARQL-star Update helpers (Gap 4) ───────────────────────────────────────
+
+/// Extract the subject IRI (as a bare urn:uuid:... string) from a `GroundTriple` subject.
+/// Returns `None` when the subject is not a UUID IRI.
+fn ground_triple_subject_iri(gt: &spargebra::term::GroundTriple) -> Option<String> {
+    use spargebra::term::GroundSubject;
+    match &gt.subject {
+        GroundSubject::NamedNode(n) => Some(n.as_str().to_string()),
+        GroundSubject::Triple(inner) => ground_triple_subject_iri(inner),
+    }
+}
+
+/// For a SPARQL-star INSERT DATA statement with a quoted-triple subject,
+/// resolve the inner triple to an edge ID and return the corresponding `EdgeAnnotation` proto.
+async fn sparql_star_quad_to_annotation(
+    inner: &spargebra::term::Triple,
+    annot_pred: &str,
+    object: &spargebra::term::Term,
+    client: &mut GrpcClient,
+) -> Option<proto::EdgeAnnotation> {
+    use spargebra::term::{Subject, Term};
+
+    // Resolve inner triple subject to UUID.
+    let s_iri = match &inner.subject {
+        Subject::NamedNode(n) => n.as_str().to_string(),
+        _ => return None,
+    };
+    let s_uuid = uuid::Uuid::parse_str(s_iri.strip_prefix("urn:uuid:")?).ok()?;
+    let s_bytes = s_uuid.as_bytes().to_vec();
+
+    let pred = inner.predicate.as_str().to_string();
+
+    let o_iri = match &inner.object {
+        Term::NamedNode(n) => n.as_str().to_string(),
+        _ => return None,
+    };
+    let o_uuid = uuid::Uuid::parse_str(o_iri.strip_prefix("urn:uuid:")?).ok()?;
+    let o_bytes = o_uuid.as_bytes().to_vec();
+
+    // Look up the edge ID for (S, P, O).
+    let edge_ids = resolve_edge_ids(client, s_bytes, &pred, o_bytes).await;
+    let edge_id_bytes = edge_ids.into_iter().next()?;
+
+    // Map the annotation object to an EdgeAnnotation value.
+    let ann_value = match object {
+        Term::NamedNode(n) => {
+            let obj_uuid = uuid::Uuid::parse_str(n.as_str().strip_prefix("urn:uuid:")?).ok()?;
+            proto::edge_annotation::Value::NodeId(obj_uuid.as_bytes().to_vec())
+        }
+        Term::Literal(lit) => {
+            let pv = sparql_literal_to_proto_value(lit)?;
+            proto::edge_annotation::Value::Scalar(pv)
+        }
+        _ => return None,
+    };
+
+    Some(proto::EdgeAnnotation {
+        edge_id: edge_id_bytes,
+        predicate: annot_pred.to_string(),
+        value: Some(ann_value),
+    })
+}
+
 // ── SPARQL Update helpers ─────────────────────────────────────────────────────
 
-/// Convert a spargebra [`Quad`] (INSERT DATA) to a proto [`Triple`].
+/// Convert a spargebra [`Quad`] (INSERT DATA) to a proto [`Triple`] or annotation.
+///
+/// Returns `None` if the quad cannot be mapped (e.g. blank-node subjects).
+/// Quoted-triple subjects `<< S P O >>` are converted to edge annotation inserts via the
+/// separate `sparql_quad_to_edge_annotation` path (handled by the caller).
 fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Triple> {
     use spargebra::term::{Subject, Term};
+
+    // Quoted-triple subjects are handled by a dedicated annotation path.
+    if matches!(&quad.subject, Subject::Triple(_)) {
+        return None;
+    }
 
     let subj_iri = match &quad.subject {
         Subject::NamedNode(n) => n.as_str().to_string(),

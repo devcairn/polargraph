@@ -129,6 +129,21 @@ message GetEdgeAnnotationsResponse {
     repeated EdgeAnnotation annotations = 1;
 }
 
+/// Resolve the edge UUID(s) for a specific (subject, predicate, object) relation triple.
+/// Returns one edge_id per MVCC version currently visible in the store. For most
+/// applications a single version is expected; SPARQL-star annotation lookup uses
+/// the most-recent entry.
+message GetEdgeIdsByTripleRequest {
+    bytes  subject_id = 1;
+    string predicate  = 2;
+    bytes  object_id  = 3;
+}
+
+message GetEdgeIdsByTripleResponse {
+    /// Each entry is a 16-byte UUID (big-endian) identifying one edge instance.
+    repeated bytes edge_ids = 1;
+}
+
 message InsertRequest {
     repeated Triple triples = 1;
     /// Optional open-transaction ID. When set, triples are buffered into the
@@ -1081,6 +1096,10 @@ service PolarGraphService {
     /// Return all RDF-star annotations on the edge identified by `edge_id`.
     /// Returns an empty list if the edge has no annotations or does not exist.
     rpc GetEdgeAnnotations(GetEdgeAnnotationsRequest) returns (GetEdgeAnnotationsResponse);
+
+    /// Resolve the edge UUID(s) for a specific (subject, predicate, object) relation triple.
+    /// Used by the SPARQL-star executor to look up edge IDs before fetching annotations.
+    rpc GetEdgeIdsByTriple(GetEdgeIdsByTripleRequest) returns (GetEdgeIdsByTripleResponse);
 
     /// Add a new API key to the live key store. Takes effect immediately.
     /// Returns FAILED_PRECONDITION when the server was started without any

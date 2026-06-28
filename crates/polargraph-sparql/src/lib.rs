@@ -18,12 +18,13 @@ pub use response::{
     SparqlValue,
 };
 pub use serialize::{
-    node_id_to_iri, serialize_ntriples, serialize_turtle, value_to_nt_literal, RdfTriple,
+    node_id_to_iri, serialize_ntriples, serialize_ntriples_star, serialize_turtle,
+    serialize_turtle_star, value_to_nt_literal, RdfStarSubject, RdfStarTriple, RdfTriple,
 };
 pub use translate::{
     translate_construct, translate_pattern_pub, translate_query, Branch, ConstructTemplate,
-    ConstructTranslation, EdgeAnnotationStep, SparqlAggFunc, SparqlAggregateSpec, SparqlFilter,
-    SparqlLiteral, SparqlTranslation,
+    ConstructTranslation, EdgeAnnotationObjectStep, EdgeAnnotationStep, SparqlAggFunc,
+    SparqlAggregateSpec, SparqlFilter, SparqlLiteral, SparqlTranslation,
 };
 
 #[derive(Debug, thiserror::Error)]
