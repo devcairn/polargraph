@@ -126,7 +126,7 @@ no value decode needed to discard invisible entries.
 
 ### Column families
 
-PolarGraph opens eight RocksDB column families:
+PolarGraph opens twelve RocksDB column families:
 
 | CF | Purpose |
 |----|---------|
@@ -136,10 +136,14 @@ PolarGraph opens eight RocksDB column families:
 | `pos` | Predicate → Object → Subject index |
 | `osp` | Object → Subject → Predicate index |
 | `ops` | Object → Predicate → Subject index |
-| `meta` | Predicate intern table, timestamp oracle counter |
-| `hnsw` | HNSW vector index nodes and entry-point record |
+| `meta` | Predicate intern table, timestamp oracle counter, migration version |
+| `hnsw` | HNSW vector index nodes and entry-point records (per named space) |
+| `tri` | Trigram full-text index (key: `[trigram:3][pred_id:4][subject_id:16]`) |
+| `drv` | OWL 2 RL derived (materialized) facts — same SPO key layout, separate CF |
+| `epa` | Edge property annotations (key: `[edge_id:16][pred_id:4][tt:8]`) |
+| `epo` | Edge relation annotations (key: `[edge_id:16][pred_id:4][obj_id:16][tt:8]`) |
 
-The six triple-index CFs implement the **hexastore** pattern. Every insert
+The six `spo`/`sop`/`pso`/`pos`/`osp`/`ops` CFs implement the **hexastore** pattern. Every insert
 writes atomically to all six via a single `WriteBatch`. This makes every
 read O(log n) with no secondary lookups, at the cost of 6× write amplification.
 
@@ -640,13 +644,20 @@ readable graph queries without constructing `VarPattern` lists by hand.
 | Node label match | `MATCH (a:Person)` |
 | Relationship traversal | `MATCH (a)-[:knows]->(b)` |
 | Property filter | `WHERE a.name = "Alice"` |
+| Comparison filter | `WHERE a.age > 18` |
+| Text predicates | `WHERE a.name CONTAINS "Ali"` / `STARTS WITH` / `=~` (regex) |
 | Transitive closure | `MATCH (a)-[:knows*]->(b)` |
+| Bounded path | `MATCH (a)-[:knows*1..3]->(b)` |
 | Vector predicate | `WHERE VECTOR_NEAR(a, "space", k)` or `WHERE VECTOR_NEAR(a, "space", k, ef=100)` |
 | Result projection | `RETURN a, b` |
-| Row limit | `LIMIT 20` |
+| Aggregations | `RETURN a, COUNT(*) AS cnt ORDER BY cnt DESC` |
+| WITH clause | `WITH a ORDER BY a.name MATCH (a)-[:knows]->(b) RETURN b` |
+| Write operations | `CREATE`, `MERGE`, `SET`, `DELETE` (via `CypherWrite` RPC) |
+| Named parameters | `WHERE a.name = $name` |
+| Row limit / skip | `LIMIT 20`, `SKIP 5` |
 
-Unsupported Cypher features (aggregations, `CREATE`/`MERGE`, `WITH`, multiple
-`MATCH` clauses, `OPTIONAL MATCH`) are rejected with `INVALID_ARGUMENT`.
+Unsupported Cypher features (multiple `MATCH` clauses in a single statement,
+`OPTIONAL MATCH`) are rejected with `INVALID_ARGUMENT`.
 
 ### How it compiles to Datalog IR
 
@@ -2425,8 +2436,284 @@ re-compiling the same query string on every request.
 
 ---
 
-## Planned extensions
+## SPARQL 1.1 endpoint
+
+PolarGraph exposes a SPARQL 1.1 HTTP protocol endpoint in the REST gateway
+(`polargraph-rest`), implemented by the `polargraph-sparql` library crate.
+
+### Architecture
+
+```
+SPARQL query string
+  → spargebra::Query::parse()           # third-party SPARQL parser
+  → polargraph_sparql::translate_query()  # algebra walker
+  → SparqlTranslation { branches, filters, aggregates, … }
+  → REST gateway: serialize to QueryRequest proto
+  → polargraphd gRPC Query / ExplainQuery
+  → bind results back to SparqlBindings
+  → serialize_json() / serialize_csv()   # SPARQL 1.1 results formats
+```
+
+The translation layer (`polargraph-sparql`) has no dependency on
+`polargraph-server` or `polargraph-storage`. It converts parsed SPARQL algebra
+nodes into `VarPattern`, `Rule`, and `Branch` structs that the gRPC API already
+understands.
+
+### HTTP endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/sparql?query=…` | SPARQL query via URL parameter |
+| `POST` | `/sparql` | SPARQL query; body can be `application/sparql-query`, `application/x-www-form-urlencoded` (with `query=` key), or raw query string |
+| `POST` | `/sparql/update` | SPARQL 1.1 Update |
+
+Content negotiation via `Accept` header: `application/sparql-results+json`
+(default) or `text/csv`.
+
+### Supported query features
 
 | Feature | Notes |
 |---------|-------|
-| Replication | Log-structured writes, follower replay; oracle becomes distributed (Hybrid Logical Clocks) |
+| SELECT, ASK | Full support |
+| CONSTRUCT | WHERE clause evaluated; template triples assembled from bindings; output in N-Triples or Turtle |
+| DESCRIBE | Fetches all triples for the described subjects; output in N-Triples or Turtle |
+| BGP (Basic Graph Patterns) | Translated to `VarPattern` lists |
+| UNION | Each branch translated independently; results merged |
+| OPTIONAL / LEFT JOIN | Implemented in `polargraph_sparql::execute::left_join()` |
+| FILTER | BOUND, equality, comparison (`>`, `<`, `>=`, `<=`), NOT, AND, OR, `isIRI()` |
+| Property paths: simple | Named node paths translated to a single `VarPattern` |
+| Property paths: sequence | `a/b` — translated to two patterns with an intermediate variable |
+| Property paths: `+`, `*`, `?` | `+` and `*` compile to recursive Datalog rules; `?` treated as single-hop |
+| Property paths: reverse | `^pred` — subject/object swapped |
+| Property paths: alternative | First alternative only (full UNION requires separate branches; see limitations) |
+| GROUP BY + aggregates | COUNT, SUM, AVG, MIN, MAX, GROUP_CONCAT, SAMPLE via `execute_sparql_aggregations()` |
+| HAVING | Applied as a post-filter after aggregation |
+| ORDER BY | Passthrough to aggregation ordering |
+| LIMIT / OFFSET | Passthrough |
+| DISTINCT | Deduplicated after projection |
+| GRAPH (named graphs) | Graph IRI recorded; mapped to PolarGraph `View` for pattern scoping |
+| SPARQL-star (subject position) | `<< :s :p :o >> :annot ?val` resolves the inner triple to an `EdgeId` and fetches edge annotations |
+
+### Supported Update operations
+
+| Operation | Notes |
+|-----------|-------|
+| INSERT DATA | Each triple translated to an `InsertRequest` gRPC call |
+| DELETE DATA | Each triple translated to a `DeleteTriples` gRPC call grouped by subject |
+| INSERT/DELETE WHERE | WHERE clause evaluated via `Query` RPC; templates applied per binding row |
+
+### SPARQL-star known limitations
+
+The following SPARQL-star features are not yet implemented:
+
+- **Object-position quoted triples**: `?x :quotes << :Alice :likes :Bob >>` is not yet supported. The translator returns an error for embedded triples appearing in object position.
+- **Variable annotation predicates**: `<< ?s ?p ?o >> ?annot ?val` (binding the annotation predicate itself as a variable) is not implemented.
+- **Turtle-star serialization**: CONSTRUCT and DESCRIBE responses use standard Turtle/N-Triples; the `<< >>` quoted-triple syntax is not emitted.
+- **SPARQL Update with embedded triples**: `INSERT DATA { << :s :p :o >> :since "2020" }` is not handled by the Update translator.
+
+### Other known limitations
+
+- Property path alternatives (`|`) use only the first branch — the full UNION is not yet materialized as separate query branches.
+- `VALUES` inline data, `MINUS`, and `SERVICE` federation are not supported.
+- Variable graph names in the `GRAPH` clause are rejected.
+- `GRAPH` clause runtime scoping (restricting scans to the named View) is recorded in the translation but not enforced during pattern evaluation.
+
+---
+
+## OWL 2 RL materialization
+
+PolarGraph implements OWL 2 RL Phase 1 forward-chaining materialization via
+the `polargraph-storage::owl_rl` module. Materialized (derived) facts are
+stored in the `DRV` column family, separate from the base hexastore, so they
+can be cleared and re-derived independently.
+
+### DRV column family
+
+The `DRV` CF uses the same 44-byte SPO key layout as the hexastore CFs. On a
+hexastore read the caller chooses whether to include derived facts by also
+scanning DRV, or reads only the base CFs for the authoritative fact set.
+
+### Implemented rules
+
+`polargraph_storage::owl_rl::materialize()` applies 12 forward-chaining rules:
+
+| Rule | Semantics |
+|------|-----------|
+| `rdfs2` | `P domain C`, `s P o` → `s type C` |
+| `rdfs3` | `P range C`, `s P o` → `o type C` |
+| `rdfs5` | `P subPropertyOf Q`, `Q subPropertyOf R` → `P subPropertyOf R` |
+| `rdfs7 / prp-spo1` | `P subPropertyOf Q`, `s P o` → `s Q o` |
+| `rdfs9` | `C subClassOf D`, `s type C` → `s type D` |
+| `rdfs11` | `C subClassOf D`, `D subClassOf E` → `C subClassOf E` |
+| `prp-symp` | `P type SymmetricProperty`, `s P o` → `o P s` |
+| `prp-trp` | `P type TransitiveProperty`, `s P o`, `o P x` → `s P x` |
+| `prp-inv1` | `P inverseOf Q`, `s P o` → `o Q s` |
+| `prp-inv2` | `P inverseOf Q`, `s Q o` → `o P s` |
+| `eq-sym` | `s sameAs o` → `o sameAs s` |
+| `eq-trans` | `s sameAs o`, `o sameAs x` → `s sameAs x` |
+
+Predicates are represented as `NodeId` values via `uri_to_node_id(uri)` (a
+stable xxHash3-128 of the predicate URI string). `predicate_node(pred)` is
+the public helper that converts a predicate string to its node representation.
+
+### API
+
+**Storage layer:**
+- `store.insert_derived_batch(triples)` — write derived triples to `DRV`
+- `store.clear_derived()` — truncate the DRV CF
+- `store.scan_derived(snapshot_ts)` — iterate all derived triples
+- `store.estimate_derived_count()` — approximate DRV entry count
+
+**gRPC RPC:**
+```
+rpc RunMaterialization(RunMaterializationRequest) returns (RunMaterializationResponse)
+```
+Runs in `spawn_blocking` (CPU-intensive), guarded against replicas.
+Returns `RunMaterializationResponse { derived_count }`.
+
+**Prometheus gauge:** `polargraph_materialization_derived_total`
+
+**Startup flag:** `--auto-materialize` / `POLARGRAPH_AUTO_MATERIALIZE` / `[storage] auto_materialize`
+runs materialization at startup before accepting connections.
+
+**REST endpoint:** `POST /materialize` — calls `RunMaterialization` and returns
+`{"derived_count": N}`.
+
+---
+
+## RDF-star edge annotations
+
+PolarGraph supports RDF-star-style annotations on edges (relation triples) via
+two dedicated column families: `EPA` (edge property annotations) and `EPO`
+(edge relation annotations).
+
+### Data model
+
+Three `Triple` variants handle edge-level data:
+
+| Variant | Meaning |
+|---------|---------|
+| `Triple::Relation { subject, predicate, object, edge_id, temporal }` | A directed edge; `edge_id` is stable across MVCC versions |
+| `Triple::EdgeProperty { edge, predicate, value, temporal }` | A scalar property on an edge (subject = `EdgeId`, maps to `NodeId(edge_id.0)`) |
+| `Triple::EdgeRelation { edge, predicate, object, temporal }` | A relation from an edge to another node |
+
+`EdgeProperty` triples are stored in the `EPA` CF with key `[edge_id:16][pred_id:4][tt:8]`.
+`EdgeRelation` triples are stored in the `EPO` CF with key `[edge_id:16][pred_id:4][obj_id:16][tt:8]`.
+
+The base hexastore CFs are unchanged — existing `Triple::Relation` and
+`Triple::Property` storage is unaffected.
+
+### API
+
+**Storage:**
+```rust
+store.scan_edge_annotations(edge: EdgeId, snapshot_ts: Timestamp) -> Vec<EdgeAnnotation>
+store.get_edge_annotation(edge: EdgeId, predicate: &str, snapshot_ts: Timestamp) -> Option<EdgeAnnotation>
+```
+
+**Insert:** `InsertRequest.edge_annotations` carries a `repeated EdgeAnnotation`; each is
+converted by `edge_annotation_from_proto` and written in the same batch as the main triples.
+`InsertResponse.edge_ids` returns the assigned `EdgeId` UUIDs.
+
+**gRPC RPC:**
+```
+rpc GetEdgeAnnotations(GetEdgeAnnotationsRequest) returns (GetEdgeAnnotationsResponse)
+```
+
+**REST endpoints:**
+- `POST /edge-annotations` — insert edge annotations
+- `GET /edge-annotations/:edge_id` — retrieve all annotations for an edge
+
+**SPARQL-star integration:** In the SPARQL endpoint, a subject-position quoted
+triple `<< :Alice :knows :Bob >> :since ?date` is translated by
+`polargraph_sparql::translate::translate_sparql_star_subject()` into an
+`EdgeAnnotationStep`, which the REST gateway resolves by calling
+`GetEdgeAnnotations`.
+
+---
+
+## Property version history
+
+Every triple write creates a new MVCC entry (keyed by transaction time `tt`).
+`scan_property_history` makes the full history accessible without MVCC
+deduplication.
+
+### Storage
+
+```rust
+store.scan_property_history(
+    subject: &NodeId,
+    predicate: &str,
+    limit: usize,
+) -> Vec<(Value, i64)>
+```
+
+Scans the SPO CF with a 36-byte prefix `[subject:16][pred_id:4][sentinel:16]`
+(bypassing MVCC's latest-version selection) and returns all historical values
+with their `tt` timestamps, ordered newest-first. `limit` caps the result.
+
+### gRPC RPC
+
+```
+rpc GetPropertyHistory(GetPropertyHistoryRequest) returns (GetPropertyHistoryResponse)
+```
+
+Request: `subject_id`, `predicate`, `limit`. Response:
+`repeated PropertyVersion { value_json, transaction_time }`.
+
+### REST endpoint
+
+```
+GET /property-history?subject=<uuid>&predicate=<string>&limit=<n>
+```
+
+---
+
+## BSBM benchmark suite
+
+The `polargraph-bench::bsbm` module implements the Berlin SPARQL Benchmark
+adapted to PolarGraph's native query API.
+
+### Dataset generator
+
+`polargraph-bench bsbm --scale-factor N` generates a deterministic e-commerce
+dataset of `N×100` products, `N×10` product types (3-level hierarchy), `N×20`
+features, `N×5` vendors, `N×50` offers, and `N×20` reviews. All entity IDs
+are deterministic xxHash3-128 values so datasets are reproducible across runs.
+
+### 12 query templates
+
+Each query template exercises a different index access pattern:
+
+| Query | Key operation |
+|-------|---------------|
+| Q1 | Type + feature filter + numeric property range |
+| Q2 | Full subject scan (detail lookup) |
+| Q3 | Two-feature join + numeric range |
+| Q4 | UNION of two feature branches |
+| Q5 | Two-hop star join (similar products via shared features) |
+| Q6 | Trigram full-text search on product label |
+| Q7 | Five-way join (offers + vendors + reviews + reviewers) |
+| Q8 | Two-hop join (product → reviews → reviewer info) |
+| Q9 | Single subject scan (review detail) |
+| Q10 | Two-hop join (vendor → offer → product) |
+| Q11 | COUNT aggregate |
+| Q12 | Two-hop join (reviewer → review → product) |
+
+### Running
+
+```bash
+# In-process (no polargraphd required)
+cargo run -p polargraph-bench --release -- bsbm --scale-factor 1
+
+# Criterion micro-benchmarks for Q1 and Q7
+cargo bench -p polargraph-storage -- bsbm
+```
+
+See `BENCHMARKS.md` Part 3 for measured results (scale factor 1, Apple M-series).
+
+### Criterion benchmarks
+
+`polargraph-storage/benches/storage.rs` adds a `bsbm` group containing:
+- `bsbm/q1_product_search` — PSO + SPO feature filter + property scan
+- `bsbm/q7_five_way_join` — POS × 2 + SPO × 4 join at scale 1

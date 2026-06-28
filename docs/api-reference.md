@@ -112,6 +112,20 @@ pub enum Triple {
         value:     Value,
         temporal:  BiTemporalRange,
     },
+    // RDF-star edge annotations (stored in EPA CF)
+    EdgeProperty {
+        edge:      EdgeId,
+        predicate: Predicate,
+        value:     Value,
+        temporal:  BiTemporalRange,
+    },
+    // RDF-star edge relations (stored in EPO CF)
+    EdgeRelation {
+        edge:      EdgeId,
+        predicate: Predicate,
+        object:    NodeId,
+        temporal:  BiTemporalRange,
+    },
 }
 ```
 
@@ -175,14 +189,16 @@ pub enum Value {
     Float(f64),
     Text(String),
     Blob(Vec<u8>),
+    Vector(Vec<f32>),   // dense embedding; binary codec (not JSON)
 }
 ```
 
 `From<bool>`, `From<i64>`, `From<f64>`, `From<String>`, `From<&str>` are
-all implemented. A `Vector(Vec<f32>)` variant is planned for embedding
-support.
+all implemented.
 
-Serialization uses tagged JSON: `{ "type": "Int", "v": 42 }`.
+Non-vector variants serialize to tagged JSON: `{ "type": "Int", "v": 42 }`.
+`Vector` uses a dedicated binary codec (discriminant `0x03` + little-endian
+`u32` length + raw IEEE 754 floats) to avoid JSON overhead on large arrays.
 
 ---
 
@@ -730,3 +746,134 @@ Request body: `{"tx_id": "<uuid>"}`. Returns
 ### `POST /tx/rollback`
 
 Request body: `{"tx_id": "<uuid>"}`. Returns `{}`.
+
+---
+
+## Additional gRPC RPCs
+
+### `GetEdgeAnnotations`
+
+```
+rpc GetEdgeAnnotations(GetEdgeAnnotationsRequest) returns (GetEdgeAnnotationsResponse)
+```
+
+Returns all RDF-star annotations (properties and relations) stored on an edge
+identified by its `edge_id` UUID. Annotations are MVCC-filtered to the latest
+version at the current snapshot timestamp.
+
+**Request fields:** `edge_id` (bytes, 16-byte UUID), optional `snapshot_ts`.
+
+**Response fields:** `repeated EdgeAnnotation { predicate, value, object_id, transaction_time }`.
+
+---
+
+### `RunMaterialization`
+
+```
+rpc RunMaterialization(RunMaterializationRequest) returns (RunMaterializationResponse)
+```
+
+Runs OWL 2 RL forward-chaining materialization over the current triple store,
+writing derived facts to the `DRV` column family. Returns
+`RunMaterializationResponse { derived_count }`. Returns `FAILED_PRECONDITION`
+on a read replica.
+
+---
+
+### `DeleteTriples`
+
+```
+rpc DeleteTriples(DeleteTriplesRequest) returns (DeleteTriplesResponse)
+```
+
+Soft-deletes triples by closing their valid-time window (`vt_end = now`). Used
+by the SPARQL Update DELETE DATA handler and available directly.
+
+**Request fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `subject_ids` | `repeated bytes` | UUIDs of the subjects whose triples to close |
+| `predicate` | `string` | Predicate to filter on (empty = all predicates) |
+| `vt_end` | `int64` | Valid-time end to write (0 = current timestamp) |
+
+**Response fields:** `deleted_count` — number of entries closed.
+
+---
+
+### `GetPropertyHistory`
+
+```
+rpc GetPropertyHistory(GetPropertyHistoryRequest) returns (GetPropertyHistoryResponse)
+```
+
+Returns the full MVCC history of a scalar property without deduplication,
+ordered newest-first. Useful for audit trails.
+
+**Request fields:** `subject_id`, `predicate`, `limit` (max versions to return).
+
+**Response fields:** `repeated PropertyVersion { value_json, transaction_time }`.
+
+---
+
+### `AddApiKey` / `RevokeApiKey` / `ListApiKeys`
+
+```
+rpc AddApiKey(AddApiKeyRequest) returns (AddApiKeyResponse)
+rpc RevokeApiKey(RevokeApiKeyRequest) returns (RevokeApiKeyResponse)
+rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse)
+```
+
+Runtime API key management without server restart. Keys added/revoked via these
+RPCs take effect immediately on the running server. Require an existing valid key.
+
+---
+
+### `ValidateOntology`
+
+```
+rpc ValidateOntology(ValidateOntologyRequest) returns (ValidateOntologyResponse)
+```
+
+Validates that a set of triples is internally consistent with the registered
+node and edge type schemas. Returns a list of validation errors (empty = valid).
+
+---
+
+## REST gateway — SPARQL endpoints
+
+### `GET /sparql?query=<encoded>`
+
+Executes a SPARQL 1.1 SELECT, ASK, CONSTRUCT, or DESCRIBE query supplied as a
+URL-encoded `query` parameter. Content negotiation via `Accept` header:
+`application/sparql-results+json` (default) or `text/csv`.
+
+### `POST /sparql`
+
+Body can be:
+- `Content-Type: application/sparql-query` — raw SPARQL string
+- `Content-Type: application/x-www-form-urlencoded` — `query=<encoded>` form body
+- Anything else — treated as a raw SPARQL string
+
+Response format negotiated via `Accept` header, same as `GET /sparql`.
+
+### `POST /sparql/update`
+
+Executes a SPARQL 1.1 Update request. Body is a raw SPARQL Update string.
+Supports `INSERT DATA`, `DELETE DATA`, and `INSERT/DELETE WHERE`. Returns
+`{"inserted": N, "deleted": N}`.
+
+---
+
+## REST gateway — additional endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/materialize` | Run OWL 2 RL materialization; returns `{"derived_count": N}` |
+| `GET` | `/property-history` | Property version history; params: `subject`, `predicate`, `limit` |
+| `POST` | `/edge-annotations` | Insert RDF-star edge annotations |
+| `GET` | `/edge-annotations/:edge_id` | Retrieve all annotations for an edge |
+| `POST` | `/access/grant` | Grant a group access to a node or type |
+| `POST` | `/access/revoke` | Revoke group access |
+| `POST` | `/access/add-user` | Add a user to a group |
+| `GET` | `/access/user/:user_id` | Return expanded access set for a user |

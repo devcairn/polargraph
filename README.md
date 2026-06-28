@@ -7,23 +7,31 @@ PolarGraph is a purpose-built, Rust graph database engine. The core abstraction 
 ## Feature highlights
 
 - **Hexastore index** — six RocksDB column families give O(log n) lookups on any (S, P, O) bind pattern without secondary scans
-- **Bitemporal versioning** — valid time (world truth) and transaction time (record time) independently queryable on every triple
+- **Bitemporal versioning** — valid time (world truth) and transaction time (record time) independently queryable on every triple; time-travel queries on both axes
 - **Optimistic MVCC** — snapshot-isolated reads; conflict-detected writes; timestamps are real wall-clock µs for meaningful time-travel
-- **Datalog queries** — conjunctive pattern joins, recursive rules, transitive reachability, hybrid vector-seed queries
-- **Cypher surface** — readable graph queries compiled to Datalog IR; supports `MATCH`, `WHERE`, `RETURN`, `LIMIT`, transitive closure `[:pred*]`, and `VECTOR_NEAR`
+- **Datalog queries** — conjunctive pattern joins, recursive rules, transitive reachability, hybrid vector-seed queries, named parameters
+- **Cypher surface** — readable graph queries compiled to Datalog IR; `MATCH`, `WHERE`, `RETURN`, `LIMIT`, `ORDER BY`, `SKIP`, `WITH`, aggregations (`COUNT`, `SUM`, `AVG`, etc.), `CREATE`/`MERGE`/`SET`/`DELETE`, transitive closure `[:pred*]`, bounded paths `[:pred*1..n]`, and `VECTOR_NEAR`; plan cache
+- **SPARQL 1.1 endpoint** — `polargraph-sparql` library; `GET /sparql`, `POST /sparql`, `POST /sparql/update`; SELECT, ASK, CONSTRUCT, DESCRIBE; UNION, OPTIONAL, FILTER, property paths, GROUP BY, HAVING; SPARQL-star subject-position quoted triples; INSERT/DELETE WHERE
 - **HNSW vector index** — pure-Rust; named spaces with independent dimensionality; Memory and Mmap storage modes; batch insert; configurable exploration factor (`ef`) for recall/latency tuning
-- **gRPC API** — full-featured `polargraph.v1.PolarGraphService` via tonic
+- **OWL 2 RL materialization** — forward-chaining engine; 12 rules (rdfs2, rdfs3, rdfs5, rdfs7/prp-spo1, rdfs9, rdfs11, prp-symp, prp-trp, prp-inv1/2, eq-sym/trans); derived facts in dedicated `DRV` CF; `RunMaterialization` RPC + `POST /materialize`
+- **RDF-star edge annotations** — `EdgeProperty` and `EdgeRelation` triple variants; `EPA`/`EPO` column families; `GetEdgeAnnotations` RPC; SPARQL-star subject-position integration
+- **gRPC API** — full-featured `polargraph.v1.PolarGraphService` via tonic; server-streaming variants for large result sets
 - **REST gateway** — standalone `polargraph-rest` binary; HTTP/JSON → gRPC proxy; no client stub required
 - **Schema registry** — optional advisory node and edge type schemas with field validation; stored as triples with bitemporal versioning
+- **Graph-native access control** — permissions as triples (`User`, `Group`, `HAS_ACCESS`, `HAS_ACCESS_TYPE`); access cache; identity via request field or HTTP header
+- **Full-text trigram search** — `TRI` column family; `CONTAINS`, `STARTS WITH`, `=~` in Cypher WHERE automatically routed to trigram index
+- **Property version history** — `GetPropertyHistory` RPC and `GET /property-history` expose full MVCC history of any scalar property
 - **Bulk import** — `polargraph-import` binary ingests N-Triples via RocksDB SST file ingestion (10–100× faster than streaming inserts)
 - **WAL streaming replication** — `--replica-of` enables read replicas with automatic reconnect and exponential backoff
 - **TLS** — server-side TLS on gRPC, management UI, and Prometheus; replica CA cert for mutual chain verification
-- **API key authentication** — tower middleware; constant-time key comparison; multi-key rotation without downtime
+- **API key authentication** — tower middleware; constant-time key comparison; multi-key rotation without downtime; runtime key management RPCs
 - **Rate limiting** — per-client-IP token bucket; configurable RPS; stale-entry cleanup
-- **Prometheus metrics** — per-RPC counters and histograms; vector space, WAL, backup, and compaction gauges
-- **Management UI** — embedded SPA with Query, Schema, Insert, Search, and Status tabs; auth overlay
+- **Prometheus metrics** — per-RPC counters and histograms; vector space, WAL, backup, compaction, retention, materialization, and query cache gauges
+- **Management UI** — embedded SPA with Query, Schema, Insert, Search, and Status tabs; query history; Mermaid schema diagram; auth overlay
 - **Backup & restore** — incremental RocksDB `BackupEngine` with hard-linked SST files
 - **Schema migrations** — versioned, auto-applied at startup; `MigrateSchema` / `MigrationStatus` RPCs
+- **Scheduled retention** — background periodic retention task; configurable interval; separate Prometheus counters
+- **Wire transactions** — multi-RPC atomic transactions via `BeginTransaction` / `CommitTransaction`; idle-TTL cleanup
 - **Query timeouts** — deadline propagated through all evaluator layers; `DEADLINE_EXCEEDED` on breach
 - **Slow query logging** — structured `WARN` + Prometheus counter when any query exceeds the threshold
 - **Graceful shutdown** — `CancellationToken`-coordinated drain on SIGTERM/SIGINT; force-exit watchdog

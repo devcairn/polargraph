@@ -12,7 +12,7 @@ PolarGraph is a purpose-built, Rust-based graph database engine. The core
 data model is a **triple store** (subject → predicate → object) with:
 
 - **Bitemporal versioning** on every fact (valid time + transaction time)
-- A **hexastore index** (6 RocksDB column families) for O(log n) lookups on
+- A **hexastore index** (6 RocksDB column families + ancillary CFs) for O(log n) lookups on
   any (S, P, O) bind pattern
 - **Optimistic MVCC** for snapshot-isolated reads and conflict-detected writes
 - A **View** system for projecting subsets of the graph with label overrides
@@ -38,17 +38,18 @@ polargraph/
 └── crates/
     ├── polargraph-core/        # primitive types, no I/O
     ├── polargraph-storage/     # RocksDB triple store + MVCC
-    ├── polargraph-query/       # query planner + projection (stubs)
-    ├── polargraph-server/      # gRPC binary (skeleton)
+    ├── polargraph-query/       # query planner + Datalog + Cypher + aggregations
+    ├── polargraph-sparql/      # SPARQL 1.1 translation layer (library, no server dep)
+    ├── polargraph-server/      # gRPC binary (polargraphd)
     ├── polargraph-bench/       # end-to-end benchmark scenarios (binary)
     ├── polargraph-import/      # bulk N-Triples importer via SST ingestion (binary)
     └── polargraph-rest/        # HTTP/JSON REST gateway — proxies to polargraphd over gRPC (binary)
 ```
 
 Dependency order (no cycles): `core` ← `storage` ← `query` ← `server` ← `bench`
-                                                    ↑
-                                           `polargraph-import` also depends only on `core` + `storage`
-                                           `polargraph-rest` depends only on the proto file (tonic client, no storage deps)
+                                                    ↑              ↑
+                                           `polargraph-import`   `polargraph-sparql` ← `polargraph-rest`
+                                           (core + storage only)   (query + core, no server dep)
 
 ---
 
@@ -116,17 +117,20 @@ RocksDB-backed persistence. Owns the hexastore layout and MVCC layer.
 
 | Module | Contents |
 |--------|----------|
-| `store` | `TripleStore` — main handle, insert, scan, predicate interning, named HNSW spaces |
+| `store` | `TripleStore` — main handle, insert, scan, predicate interning, named HNSW spaces; `StoreMode` (`Primary`/`Secondary`), `open_secondary`, `try_catch_up_with_primary` |
 | `mvcc` | `TimestampOracle`, `Transaction`, `Snapshot`, `ConflictError` |
-| `keys` | Fixed-width key encoding/decoding for all 6 CFs |
+| `keys` | Fixed-width key encoding/decoding for all hexastore CFs |
 | `codec` | Value serialization (discriminant + temporal + payload) |
-| `cf` | Column family name constants |
+| `cf` | Column family name constants (SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, DRV, EPA, EPO) |
 | `error` | `StorageError` |
-| `hnsw` | `HnswIndex` — pure-Rust HNSW, named-space key helpers, serialize/deserialize |
+| `hnsw` | `HnswIndex` — pure-Rust HNSW, named-space key helpers, serialize/deserialize, mmap storage |
 | `registry` | `NodeTypeRegistry`, `EdgeTypeRegistry`, `ValidationError` |
 | `sst_import` | `SstImporter`, `ImportStats` — bulk triple import via RocksDB SST file ingestion |
 | `compaction` | `CompactionManager`, `RetentionStats` — bitemporal retention scan + RocksDB compaction |
-| `store` | `StoreMode` (`Primary`/`Secondary`); `TripleStore::open_secondary` + `try_catch_up_with_primary` — read-only secondary instance |
+| `backup` | `BackupManager` — incremental RocksDB `BackupEngine` wrapper |
+| `migrations` | `MigrationRunner`, `Migration`, `AppliedMigration` — versioned schema migrations |
+| `wal_stream` | `WalStreamer`, `WalEntry` — WAL streaming for replication |
+| `owl_rl` | `materialize()` — OWL 2 RL forward-chaining engine, 12 rules, DRV CF |
 
 `TripleStore` is `Clone` (Arc-backed). Prefer passing it by clone rather
 than wrapping it again in Arc.
@@ -141,8 +145,9 @@ Pattern-based query evaluation and view projection.
 | `eval` | `evaluate(pattern, snapshot)` — drives the storage scan the planner chose; `evaluate_with_registry()` prunes patterns using `EdgeTypeRegistry` domain/range hints |
 | `projection` | `ProjectedTriple`, `apply_view` — filters and label-remaps triples for a View |
 | `datalog` | `Query`, `VarPattern`, `Term`, `Bindings`, `execute_query` — conjunctive query evaluator; `Rule`, `DerivedFacts`, `execute_recursive`, `reachable_from` — recursive / transitive-closure queries |
-| `cypher` | `CypherQuery`, `CypherCompiler`, `compile_cypher()` — Cypher→Datalog compiler; MATCH/WHERE/RETURN pipeline; property equality, comparison, text predicates (CONTAINS, STARTS WITH, =~); `VECTOR_NEAR` function |
-| `aggregation` | `AggregationPlan`, `apply_aggregations()` — COUNT(*), COUNT(var), COLLECT(); ORDER BY (multi-key, ASC/DESC); SKIP N; WITH clause pipeline |
+| `cypher` | `CypherQuery`, `CypherCompiler`, `compile_cypher()` — Cypher→Datalog compiler; MATCH/WHERE/RETURN/WITH pipeline; property equality, comparison, text predicates (CONTAINS, STARTS WITH, =~); `VECTOR_NEAR` function; CREATE/MERGE/SET/DELETE write ops |
+| `aggregation` | `AggregationPlan`, `apply_aggregations()` — COUNT(*), COUNT(var), COLLECT(), SUM, AVG, MIN, MAX; ORDER BY (multi-key, ASC/DESC); SKIP N; WITH clause pipeline |
+| `explain` | `explain_query()` — static query plan analysis, index selection, plan text output |
 
 ### `polargraph-server`
 
@@ -152,13 +157,15 @@ query layers over gRPC.
 | Module | Contents |
 |--------|----------|
 | `proto` | Generated types from `polargraph.proto` (tonic/prost) |
-| `service` | `PolarGraphServer` — implements all RPCs; carries `NodeTypeRegistry` and `EdgeTypeRegistry` |
+| `service` | `PolarGraphServer` — implements all RPCs; carries `NodeTypeRegistry`, `EdgeTypeRegistry`, `AccessCache`, query plan cache |
 | `convert` | Conversions between proto wire types and Rust domain types |
 | `auth` | `ApiKeyLayer` / `ApiKeyService` — tower middleware for gRPC auth; `check_bearer_auth` shared with UI |
 | `config` | `Config` structs + `load_config` — TOML config file parsing and auto-detection |
 | `telemetry` | `TelemetryLayer` — per-RPC structured logging and Prometheus counters |
 | `ui_api` | `UiState`, `build_ui_router` — axum REST handlers + embedded SPA for the management UI |
 | `wal_client` | `run_replication` — WAL streaming client (replica mode) |
+| `rate_limit` | `RateLimitLayer` / `RateLimitService` — per-IP token-bucket rate limiting tower middleware |
+| `retention_scheduler` | `run_retention_scheduler()` — background task that fires `CompactionManager::run_retention()` on a configurable interval |
 
 Configuration priority: **CLI flag > environment variable > config file > built-in default**
 
@@ -187,8 +194,15 @@ See `polargraph.example.toml` in the repo root for a fully-commented example.
 | `--slow-query-ms MS` | `POLARGRAPH_SLOW_QUERY_MS` | `1000` | Log warn + increment counter when query exceeds this (ms); 0 = disabled |
 | `--tls-cert PATH` | `POLARGRAPH_TLS_CERT` | *(none)* | PEM certificate — enables TLS on gRPC + HTTP when combined with `--tls-key` |
 | `--tls-key PATH` | `POLARGRAPH_TLS_KEY` | *(none)* | PEM private key — must be supplied with `--tls-cert` |
+| `--replica-of URL` | `POLARGRAPH_REPLICA_OF` | *(none)* | gRPC address of primary; enables WAL streaming replica mode |
 | `--replica-tls-ca PATH` | `POLARGRAPH_REPLICA_TLS_CA` | *(none)* | CA cert for verifying the primary's TLS certificate (replica mode only) |
 | `--rate-limit-rps N` | `POLARGRAPH_RATE_LIMIT_RPS` | `0` | Max requests/sec per client IP (token bucket); 0 = disabled |
+| `--retention-tx-age-secs N` | `POLARGRAPH_RETENTION_TX_AGE_SECS` | *(none)* | Delete triples older than N seconds (transaction time); runs once at startup |
+| `--retention-vt-lookback-secs N` | `POLARGRAPH_RETENTION_VT_LOOKBACK_SECS` | *(none)* | Also delete triples whose valid-time end is more than N seconds in the past |
+| `--retention-schedule` | `POLARGRAPH_RETENTION_SCHEDULE` | `false` | Enable background periodic retention task |
+| `--default-vector-ef N` | `POLARGRAPH_DEFAULT_VECTOR_EF` | `50` | Default HNSW exploration factor for vector searches |
+| `--query-cache-size N` | `POLARGRAPH_QUERY_CACHE_SIZE` | `1000` | Max Cypher query plans to cache |
+| `--auto-materialize` | `POLARGRAPH_AUTO_MATERIALIZE` | `false` | Run OWL 2 RL materialization at startup |
 
 ### `polargraph-import`
 
@@ -218,9 +232,27 @@ the generated proto client code via `tonic`.
 | `--api-key KEY` | `POLARGRAPH_REST_API_KEY` | *(none)* | Forwarded as `Authorization: Bearer` to upstream |
 | `--tls-ca PATH` | `POLARGRAPH_REST_TLS_CA` | *(none)* | PEM CA cert for upstream TLS verification |
 
-Endpoints: `POST /query`, `POST /insert`, `GET /triples`, `POST /vector/search`,
-`GET /health`, `POST /explain`. See `docs/architecture.md` (REST gateway section)
-for full documentation including the pattern string format.
+Endpoints include: `POST /query`, `POST /query/stream`, `POST /insert`, `GET /triples`,
+`POST /vector/search`, `GET /health`, `POST /explain`, `POST /cypher`, `POST /cypher/write`,
+`POST /cypher/stream`, `GET /sparql`, `POST /sparql`, `POST /sparql/update`,
+`POST /tx/begin`, `POST /tx/commit`, `POST /tx/rollback`, `GET /indexes`, `GET /stats`,
+`POST /materialize`, `GET /property-history`, `POST /edge-annotations`, `GET /edge-annotations/:id`,
+`POST /access/grant`, `POST /access/revoke`, `POST /access/add-user`, `GET /access/user/:id`.
+See `docs/architecture.md` for full documentation including the pattern string format.
+
+### `polargraph-sparql`
+
+Library crate. Translates SPARQL 1.1 queries into PolarGraph native query types
+(`VarPattern`, `Rule`) for execution via the gRPC API. No storage dependency —
+used exclusively by `polargraph-rest`.
+
+| Module | Contents |
+|--------|----------|
+| `translate` | `translate_query()`, `translate_construct()`, `translate_pattern_pub()` — SPARQL algebra walker; `SparqlTranslation`, `Branch`, `SparqlFilter`, `EdgeAnnotationStep`, CONSTRUCT/DESCRIBE types |
+| `execute` | `left_join()`, `execute_sparql_aggregations()` — in-process SPARQL semantics for OPTIONAL and GROUP BY |
+| `response` | `serialize_json()`, `serialize_csv()`, `node_bindings_to_sparql()` — SPARQL results serializers |
+| `serialize` | `serialize_ntriples()`, `serialize_turtle()`, `node_id_to_iri()` — RDF output for CONSTRUCT/DESCRIBE |
+| `protocol` | `negotiate_format()`, `extract_query_from_form()` — HTTP content negotiation and form-encoded body parsing |
 
 ---
 
@@ -236,10 +268,25 @@ Everything is a `Triple`. There are two variants:
 Property triples use a 16-byte sentinel (`0xFF × 16`) in the object slot of
 every index key, so both variants share the same index structure.
 
-### Hexastore (6-CF index)
+### Column families
 
-Every triple is written atomically to all 6 column families via a single
-`WriteBatch`. Each CF supports a different bind pattern:
+PolarGraph uses 12 RocksDB column families. Every triple is written atomically
+to all 6 hexastore CFs via a single `WriteBatch`; the others are written in the
+same batch or separately as appropriate:
+
+| CF | Purpose |
+|----|---------|
+| SPO, SOP, PSO, POS, OSP, OPS | Hexastore triple index (6 CFs, see below) |
+| META | Predicate intern table, timestamp oracle, migration version |
+| HNSW | HNSW vector index nodes and entry points (per named space) |
+| TRI | Trigram full-text index (key: `[trigram:3][pred_id:4][subject:16]`) |
+| DRV | OWL 2 RL derived facts (same SPO key layout as hexastore, separate CF) |
+| EPA | Edge property annotations (key: `[edge_id:16][pred_id:4][tt:8]`) |
+| EPO | Edge relation annotations (key: `[edge_id:16][pred_id:4][obj_id:16][tt:8]`) |
+
+### Hexastore (6-CF sub-index)
+
+Each CF supports a different bind pattern:
 
 | CF | Prefix scan gives you |
 |----|-----------------------|
@@ -376,6 +423,7 @@ sort order and is cluster-safe without a central sequence generator.
 - [x] Query plan cache — `Arc<DashMap<String, Arc<CompiledQuery>>>` on `PolarGraphServer`; caches pre-substitution compiled plans keyed by raw Cypher string; `query_cache_size: usize` (default 1 000); `with_query_cache_size()` builder; `query_cache_hits` / `query_cache_misses` `Arc<AtomicU64>` counters; increments `polargraph_query_cache_hits_total` / `polargraph_query_cache_misses_total` Prometheus counters; `ShowStatsResponse` gains `query_cache_hits`, `query_cache_misses`, `query_cache_size` fields; cache applied in `cypher_query()` and `cypher_query_stream()`; `--query-cache-size N` CLI flag + `POLARGRAPH_QUERY_CACHE_SIZE` env var + `[query] cache_size` TOML key; "Query plan cache" section in `docs/architecture.md`
 - [x] Property version history — `scan_property_history(subject, predicate, limit) -> Vec<(Value, i64)>` on `TripleStore`; scans SPO CF with 36-byte prefix `[subject:16][pred_id:4][sentinel:16]` bypassing MVCC deduplication to return all historical `tt` values newest-first; `GetPropertyHistory(GetPropertyHistoryRequest) returns (GetPropertyHistoryResponse)` gRPC RPC; `PropertyVersion { value_json, transaction_time }` proto message; REST `GET /property-history?subject=<uuid>&predicate=<string>&limit=<n>`; 5 storage integration tests in `crates/polargraph-storage/tests/property_history.rs`; 3 gRPC integration tests
 - [x] OWL 2 RL Phase 1 — `DRV` column family for derived facts (same SPO key layout, separate from base hexastore); `polargraph-storage::owl_rl` module with `materialize(store, clear_first)` forward-chaining engine; 12 rules: rdfs2, rdfs3, rdfs5, rdfs7/prp-spo1, rdfs9, rdfs11, prp-symp, prp-trp, prp-inv1, prp-inv2, eq-sym, eq-trans; `uri_to_node_id(uri)` xxHash3-128 predicate bridge (predicate string → stable `NodeId` for schema triples); `predicate_node(pred)` public helper; `insert_derived_batch`, `clear_derived`, `scan_derived`, `scan_derived_at`, `estimate_derived_count` on `TripleStore`; `RunMaterializationRequest/Response` proto messages; `RunMaterialization` gRPC RPC (runs in `spawn_blocking`, replica-guarded); `polargraph_materialization_derived_total` Prometheus gauge; `--auto-materialize` CLI flag + `POLARGRAPH_AUTO_MATERIALIZE` env var + `[storage] auto_materialize` TOML key; startup materialization on primary when flag is set; `POST /materialize` REST endpoint; 9 storage integration tests in `crates/polargraph-storage/tests/owl_rl.rs`; 3 gRPC integration tests
+- [x] SPARQL 1.1 endpoint — `polargraph-sparql` library crate; `polargraph-rest` exposes `GET /sparql`, `POST /sparql`, `POST /sparql/update`; SELECT, ASK, CONSTRUCT, DESCRIBE; UNION, OPTIONAL, FILTER (comparison, BOUND, isIRI, boolean ops), property paths (sequence, alternative-first-branch, `+`/`*`/`?`, reverse), GROUP BY + aggregates (COUNT, SUM, AVG, MIN, MAX, GROUP_CONCAT, SAMPLE), HAVING, LIMIT/OFFSET, DISTINCT; SPARQL-star subject-position quoted triples mapped to edge annotation lookups; named graphs (GRAPH clause, runtime enforcement pending); SPARQL Update: INSERT DATA, DELETE DATA, INSERT/DELETE WHERE; content negotiation (JSON / CSV); SPARQL-star known limitations documented in `docs/architecture.md`
 - [x] BSBM benchmark suite — `polargraph-bench::bsbm` module; deterministic e-commerce dataset generator (scale-factor-N: N×100 products, N×10 types in 3-level hierarchy, N×20 features, N×5 vendors, N×50 offers, N×20 reviews; generated via xxHash3-128 deterministic NodeIds); 12 BSBM query templates implemented via native `execute_query` + `Snapshot` scans: Q1 (type+feature+numeric), Q2 (detail), Q3 (2-feature+range), Q4 (UNION), Q5 (similar products), Q6 (trigram full-text), Q7 (5-way join), Q8 (reviews), Q9 (review detail), Q10 (vendor offers), Q11 (COUNT), Q12 (reviewer products); `polargraph-bench bsbm` subcommand with `--scale-factor`, `--warmup-runs`, `--measure-runs`, `--data-dir` flags; CLI restructured to `clap::Subcommand` pattern; Criterion `bsbm/q1_product_search` and `bsbm/q7_five_way_join` micro-benchmarks in `polargraph-storage/benches/storage.rs` using storage-layer primitives only; `BENCHMARKS.md` Part 3 with scale-1 measured results (35,682 avg QPS across 12 queries on Apple M-series, Q6 full-text slowest at 0.158 ms avg, Q9/Q11 fastest at ~0.001 ms)
 
 ---
