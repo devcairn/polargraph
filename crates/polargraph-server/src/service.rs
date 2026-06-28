@@ -2979,20 +2979,18 @@ impl PolarGraphService for PolarGraphServer {
                         predicate: p,
                         value: v,
                         temporal,
-                    } => {
-                        if temporal.vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME {
-                            tx.insert(Triple::Property {
-                                subject: *s,
-                                predicate: p.clone(),
-                                value: v.clone(),
-                                temporal: polargraph_core::temporal::BiTemporalRange {
-                                    vt_start: temporal.vt_start,
-                                    vt_end: vt_end_ts,
-                                    tt: polargraph_core::temporal::Timestamp::now(),
-                                },
-                            });
-                            deleted_count += 1;
-                        }
+                    } if temporal.vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME => {
+                        tx.insert(Triple::Property {
+                            subject: *s,
+                            predicate: p.clone(),
+                            value: v.clone(),
+                            temporal: polargraph_core::temporal::BiTemporalRange {
+                                vt_start: temporal.vt_start,
+                                vt_end: vt_end_ts,
+                                tt: polargraph_core::temporal::Timestamp::now(),
+                            },
+                        });
+                        deleted_count += 1;
                     }
                     // EdgeProperty / EdgeRelation — not soft-deleted here.
                     _ => {}
