@@ -88,8 +88,8 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: polargraph-server-linux-amd64
-          path: target/release/polargraph-server
+          name: polargraphd-linux-amd64
+          path: target/release/polargraphd
           if-no-files-found: error
 
   # Builds and pushes the Docker image to ghcr.io.
