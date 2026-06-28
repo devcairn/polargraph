@@ -5583,3 +5583,131 @@ async fn cypher_stream_edge_prop_filter() {
 
     assert_eq!(total_rows, 1, "only the edge with weight >= 10 should pass");
 }
+
+// ── OWL 2 RL materialization tests ───────────────────────────────────────────
+
+use polargraph_server::proto::{RunMaterializationRequest, RunMaterializationResponse};
+
+const RDF_TYPE_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const RDFS_SUBCLASS_OF_IRI: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+const OWL_SAME_AS_IRI: &str = "http://www.w3.org/2002/07/owl#sameAs";
+
+/// Helper: build a RelationTriple proto with no edge_id or vt.
+fn owl_rel(s: &NodeId, pred: &str, o: &NodeId) -> Triple {
+    Triple {
+        kind: Some(TripleKind::Relation(polargraph_server::proto::RelationTriple {
+            subject: Some(s.clone()),
+            predicate: pred.to_string(),
+            object: Some(o.clone()),
+            vt_start: 0,
+            vt_end: i64::MAX,
+            properties: vec![],
+        })),
+    }
+}
+
+/// NodeId helper from a core NodeId.
+fn core_to_proto(id: &polargraph_core::id::NodeId) -> NodeId {
+    NodeId { bytes: id.as_bytes().to_vec() }
+}
+
+/// After materializing rdfs9 (subClassOf + type), the derived CF should
+/// contain the inherited rdf:type triple.
+#[tokio::test]
+async fn run_materialization_rdfs9_subclass_propagation() {
+    let (svc, _dir) = open();
+
+    let (dog_class, _) = new_node();
+    let (animal_class, _) = new_node();
+    let (fido, _) = new_node();
+
+    let dog_proto = core_to_proto(&dog_class);
+    let animal_proto = core_to_proto(&animal_class);
+    let fido_proto = core_to_proto(&fido);
+
+    // Dog rdfs:subClassOf Animal
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![owl_rel(&dog_proto, RDFS_SUBCLASS_OF_IRI, &animal_proto)],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    // Fido rdf:type Dog
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![owl_rel(&fido_proto, RDF_TYPE_IRI, &dog_proto)],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    // Run materialization (clear_first=true)
+    let resp: RunMaterializationResponse = svc
+        .run_materialization(Request::new(RunMaterializationRequest { clear_first: true }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp.rules_fired > 0, "at least one rule should have fired");
+    assert!(resp.derived_triples > 0, "at least one derived triple expected");
+    assert!(resp.iterations > 0, "at least one fixpoint iteration expected");
+}
+
+/// eq-sym: materializing owl:sameAs produces the symmetric inverse.
+#[tokio::test]
+async fn run_materialization_eq_sym_sameas() {
+    let (svc, _dir) = open();
+
+    let (alice_core, alice_proto) = new_node();
+    let (alice2_core, alice2_proto) = new_node();
+    let _ = alice_core;
+    let _ = alice2_core;
+
+    // Alice owl:sameAs Alice2
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![owl_rel(&alice_proto, OWL_SAME_AS_IRI, &alice2_proto)],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .run_materialization(Request::new(RunMaterializationRequest { clear_first: true }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp.rules_fired > 0, "eq-sym should fire at least once");
+}
+
+/// Second materialization run (clear_first=false) reaches fixpoint in 0 iterations
+/// when the DRV CF is already up-to-date.
+#[tokio::test]
+async fn run_materialization_incremental_reaches_fixpoint() {
+    let (svc, _dir) = open();
+
+    let (_, alice_proto) = new_node();
+    let (_, alice2_proto) = new_node();
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![owl_rel(&alice_proto, OWL_SAME_AS_IRI, &alice2_proto)],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    // Full run
+    svc.run_materialization(Request::new(RunMaterializationRequest { clear_first: true }))
+        .await
+        .unwrap();
+
+    // Incremental run: should fire 0 new rules
+    let resp = svc
+        .run_materialization(Request::new(RunMaterializationRequest { clear_first: false }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.rules_fired, 0, "incremental run on converged state should fire 0 rules");
+    assert_eq!(resp.iterations, 0, "incremental run on converged state should need 0 iterations");
+}

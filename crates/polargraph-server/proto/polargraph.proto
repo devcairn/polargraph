@@ -904,6 +904,25 @@ message DeleteTriplesResponse {
     uint64 deleted_count = 1;
 }
 
+// ── RunMaterialization ────────────────────────────────────────────────────────────
+
+/// Request to run OWL 2 RL forward-chaining materialization.
+message RunMaterializationRequest {
+    /// When true (default), clear the DRV column family before re-materializing.
+    /// When false, perform an incremental run starting from current DRV state.
+    bool clear_first = 1;
+}
+
+/// Statistics from a materialization run.
+message RunMaterializationResponse {
+    /// Number of new derived triples inserted across all fixpoint iterations.
+    uint64 rules_fired = 1;
+    /// Total unique derived triples now in the DRV CF (approximate).
+    uint64 derived_triples = 2;
+    /// Number of fixpoint iterations performed before convergence.
+    uint32 iterations = 3;
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 service PolarGraphService {
@@ -1110,4 +1129,14 @@ service PolarGraphService {
     /// the requested timestamp (or server clock when vt_end == 0).
     /// Returns FAILED_PRECONDITION on a read replica.
     rpc DeleteTriples(DeleteTriplesRequest) returns (DeleteTriplesResponse);
+
+    /// Run OWL 2 RL forward-chaining materialization to fixpoint.
+    ///
+    /// Derives new Relation triples according to the RDFS entailment and OWL
+    /// property characteristic rules and writes them to the DRV column family.
+    /// The DRV CF is separate from the base hexastore so derived triples can be
+    /// wiped and rebuilt cleanly without touching user data.
+    ///
+    /// Returns FAILED_PRECONDITION on a read replica.
+    rpc RunMaterialization(RunMaterializationRequest) returns (RunMaterializationResponse);
 }

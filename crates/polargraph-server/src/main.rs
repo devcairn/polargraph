@@ -281,6 +281,15 @@ struct Cli {
         value_name = "PATH"
     )]
     replica_tls_ca: Option<PathBuf>,
+
+    /// Run OWL 2 RL forward-chaining materialization at startup (primary only).
+    /// Derives RDFS/OWL entailments and writes them to the DRV column family.
+    #[arg(
+        long = "auto-materialize",
+        env = "POLARGRAPH_AUTO_MATERIALIZE",
+        default_value_t = false
+    )]
+    auto_materialize: bool,
 }
 
 // ── Merge helpers ─────────────────────────────────────────────────────────────
@@ -362,6 +371,7 @@ async fn main() -> Result<()> {
     let default_vector_ef = resolve(cli.default_vector_ef, cfg.query.default_vector_ef, 50u32);
     let tx_idle_timeout_ms = resolve(cli.tx_idle_timeout_ms, None::<u64>, 300_000u64);
     let query_cache_size = resolve(cli.query_cache_size, cfg.query.cache_size, 1000usize);
+    let auto_materialize = cli.auto_materialize || cfg.storage.auto_materialize.unwrap_or(false);
 
     // ── Tracing ───────────────────────────────────────────────────────────────
     let filter = EnvFilter::try_new(&log_level)
@@ -490,6 +500,19 @@ async fn main() -> Result<()> {
         } else {
             info!(applied = ?stats.applied, "schema migrations applied");
         }
+    }
+
+    // ── Startup OWL 2 RL materialization (primary only) ──────────────────────
+    if replica_address.is_none() && auto_materialize {
+        info!("running OWL 2 RL materialization at startup");
+        let mat_stats = polargraph_storage::owl_rl::materialize(&store, true)
+            .context("startup OWL 2 RL materialization failed")?;
+        info!(
+            rules_fired = mat_stats.rules_fired,
+            derived_triples = mat_stats.derived_triples,
+            iterations = mat_stats.iterations,
+            "startup OWL 2 RL materialization complete"
+        );
     }
 
     // ── Startup retention (primary only) ──────────────────────────────────────
