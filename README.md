@@ -11,10 +11,11 @@ PolarGraph is a purpose-built, Rust graph database engine. The core abstraction 
 - **Optimistic MVCC** — snapshot-isolated reads; conflict-detected writes; timestamps are real wall-clock µs for meaningful time-travel
 - **Datalog queries** — conjunctive pattern joins, recursive rules, transitive reachability, hybrid vector-seed queries, named parameters
 - **Cypher surface** — readable graph queries compiled to Datalog IR; `MATCH`, `WHERE`, `RETURN`, `LIMIT`, `ORDER BY`, `SKIP`, `WITH`, aggregations (`COUNT`, `SUM`, `AVG`, etc.), `CREATE`/`MERGE`/`SET`/`DELETE`, transitive closure `[:pred*]`, bounded paths `[:pred*1..n]`, and `VECTOR_NEAR`; plan cache
-- **SPARQL 1.1 endpoint** — `polargraph-sparql` library; `GET /sparql`, `POST /sparql`, `POST /sparql/update`; SELECT, ASK, CONSTRUCT, DESCRIBE; UNION, OPTIONAL, FILTER, property paths, GROUP BY, HAVING; SPARQL-star subject-position quoted triples; INSERT/DELETE WHERE
+- **SPARQL 1.1 endpoint** — `polargraph-sparql` library; `GET /sparql`, `POST /sparql`, `POST /sparql/update`; SELECT, ASK, CONSTRUCT, DESCRIBE; UNION, OPTIONAL, FILTER, property paths, GROUP BY, HAVING; full SPARQL-star (subject and object position, variable predicates, Turtle-star/N-Triples-star serialization, Update with embedded triples); INSERT/DELETE WHERE
 - **HNSW vector index** — pure-Rust; named spaces with independent dimensionality; Memory and Mmap storage modes; batch insert; configurable exploration factor (`ef`) for recall/latency tuning
 - **OWL 2 RL materialization** — forward-chaining engine; 12 rules (rdfs2, rdfs3, rdfs5, rdfs7/prp-spo1, rdfs9, rdfs11, prp-symp, prp-trp, prp-inv1/2, eq-sym/trans); derived facts in dedicated `DRV` CF; `RunMaterialization` RPC + `POST /materialize`
-- **RDF-star edge annotations** — `EdgeProperty` and `EdgeRelation` triple variants; `EPA`/`EPO` column families; `GetEdgeAnnotations` RPC; SPARQL-star subject-position integration
+- **RDF interoperability** — multi-format import (`POST /import/rdf`): N-Triples, Turtle, JSON-LD with `Content-Type` detection; JSON-LD export (`GET`/`POST /export/jsonld`); Accept-negotiated subgraph export (`GET /export/subgraph`): N-Triples, Turtle, or JSON-LD; PolarGraph-to-PolarGraph transfer via `POST /import/subgraph`; OWL/RDFS schema round-trip (`GET /schema/rdf`, `POST /schema/rdf`); `polargraph-import --format ntriples|turtle|jsonld`
+- **RDF-star edge annotations** — `EdgeProperty` and `EdgeRelation` triple variants; `EPA`/`EPO` column families; `GetEdgeAnnotations` and `GetEdgeIdsByTriple` RPCs; full SPARQL-star integration (subject and object position)
 - **gRPC API** — full-featured `polargraph.v1.PolarGraphService` via tonic; server-streaming variants for large result sets
 - **REST gateway** — standalone `polargraph-rest` binary; HTTP/JSON → gRPC proxy; no client stub required
 - **Schema registry** — optional advisory node and edge type schemas with field validation; stored as triples with bitemporal versioning
@@ -774,7 +775,7 @@ grpcurl -plaintext \
 
 ## Bulk import
 
-`polargraph-import` ingests N-Triples files directly into RocksDB via SST file ingestion — bypassing gRPC, the WAL write path, and per-insert MVCC overhead. Expected throughput: 10–100× faster than streaming inserts over gRPC.
+`polargraph-import` ingests RDF files (N-Triples, Turtle, or JSON-LD) directly into RocksDB via SST file ingestion — bypassing gRPC, the WAL write path, and per-insert MVCC overhead. Expected throughput: 10–100× faster than streaming inserts over gRPC.
 
 **The server must be stopped first** — SST ingestion requires exclusive DB access.
 
@@ -802,11 +803,16 @@ polargraphd --data-dir /var/lib/polargraph
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--data-dir PATH` | *(required)* | RocksDB data directory |
-| `--input FILE` | *(required)* | N-Triples input file |
+| `--input FILE` | *(required)* | Input file |
+| `--format FORMAT` | `ntriples` | Input format: `ntriples` (default), `turtle`, `jsonld` |
 | `--batch-size N` | `100000` | Triples per SST import batch |
 | `--temp-dir PATH` | `<data-dir>/sst_tmp` | Temporary SST file directory |
 
-### N-Triples support
+### Supported input formats
+
+Pass `--format turtle` or `--format jsonld` to switch parsers; default is `ntriples`.
+
+### N-Triples specifics
 
 | Input form | Storage result |
 |---|---|
@@ -1141,6 +1147,9 @@ Service: `polargraph.v1.PolarGraphService` — full proto at `crates/polargraph-
 | `RollbackTransaction` | Discard a wire transaction |
 | `ShowIndexes` | CF key counts, estimated sizes, HNSW space metadata |
 | `ShowStats` | RocksDB properties, oracle timestamp, open transaction count |
+| `GetEdgeAnnotations` | RDF-star annotations on an edge (MVCC-filtered) |
+| `GetEdgeIdsByTriple` | Resolve `(subject, predicate, object)` tuples to `EdgeId` UUIDs |
+| `RunMaterialization` | OWL 2 RL forward-chaining materialization; writes derived facts to `DRV` CF |
 
 ### Authentication
 

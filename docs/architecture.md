@@ -2492,7 +2492,7 @@ Content negotiation via `Accept` header: `application/sparql-results+json`
 | LIMIT / OFFSET | Passthrough |
 | DISTINCT | Deduplicated after projection |
 | GRAPH (named graphs) | Graph IRI recorded; mapped to PolarGraph `View` for pattern scoping |
-| SPARQL-star (subject position) | `<< :s :p :o >> :annot ?val` resolves the inner triple to an `EdgeId` and fetches edge annotations |
+| SPARQL-star (full support) | Subject-position `<< :s :p :o >> :annot ?val` → `EdgeAnnotationStep`; object-position `?s :p << :a :b :c >>` → `GetEdgeIdsByTriple` lookup; variable predicate `<< :s ?p :o >> :annot ?val`; Turtle-star / N-Triples-star serialization in CONSTRUCT/DESCRIBE; SPARQL Update with embedded triples (`INSERT DATA { << s p o >> :annot val }`) |
 
 ### Supported Update operations
 
@@ -2615,11 +2615,12 @@ rpc GetEdgeAnnotations(GetEdgeAnnotationsRequest) returns (GetEdgeAnnotationsRes
 - `POST /edge-annotations` — insert edge annotations
 - `GET /edge-annotations/:edge_id` — retrieve all annotations for an edge
 
-**SPARQL-star integration:** In the SPARQL endpoint, a subject-position quoted
-triple `<< :Alice :knows :Bob >> :since ?date` is translated by
-`polargraph_sparql::translate::translate_sparql_star_subject()` into an
-`EdgeAnnotationStep`, which the REST gateway resolves by calling
-`GetEdgeAnnotations`.
+**SPARQL-star integration:** The SPARQL endpoint supports full SPARQL-star:
+- **Subject position** `<< :Alice :knows :Bob >> :since ?date` — translated by `translate_sparql_star_subject()` into an `EdgeAnnotationStep`, resolved via `GetEdgeAnnotations`.
+- **Object position** `?s :p << :a :b :c >>` — resolved via `GetEdgeIdsByTriple` to obtain the `EdgeId`, then used as an object term in the main pattern.
+- **Variable predicate** `<< :s ?p :o >> :annot ?val` — enumerates annotations across predicates.
+- **Turtle-star / N-Triples-star** — CONSTRUCT and DESCRIBE results serialize quoted triples in star format when the result contains edge annotations.
+- **SPARQL Update** `INSERT DATA { << s p o >> :annot val }` — parses the embedded triple, resolves or creates the edge ID, and writes the annotation.
 
 ---
 

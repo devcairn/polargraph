@@ -767,6 +767,24 @@ version at the current snapshot timestamp.
 
 ---
 
+### `GetEdgeIdsByTriple`
+
+```
+rpc GetEdgeIdsByTriple(GetEdgeIdsByTripleRequest) returns (GetEdgeIdsByTripleResponse)
+```
+
+Resolves one or more base relation triples `(subject, predicate, object)` to their
+stable `EdgeId` UUIDs. Used by the SPARQL-star translator to map object-position
+quoted triples (`?s :p << :a :b :c >>`) to edge annotation lookups, and available
+directly for callers that need the edge ID for a known triple.
+
+**Request fields:** `repeated TripleRef { subject_id (bytes), predicate (string), object_id (bytes) }`.
+
+**Response fields:** `repeated EdgeIdResult { triple_ref, edge_id (bytes) }` — one entry per
+resolved triple; triples not found in the store are omitted rather than returned as errors.
+
+---
+
 ### `RunMaterialization`
 
 ```
