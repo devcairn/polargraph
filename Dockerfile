@@ -31,10 +31,11 @@ COPY crates/polargraph-bench/Cargo.toml     crates/polargraph-bench/Cargo.toml
 COPY crates/polargraph-import/Cargo.toml    crates/polargraph-import/Cargo.toml
 COPY crates/polargraph-rest/Cargo.toml      crates/polargraph-rest/Cargo.toml
 COPY crates/polargraph-rest/build.rs        crates/polargraph-rest/build.rs
+COPY crates/polargraph-sparql/Cargo.toml   crates/polargraph-sparql/Cargo.toml
 
 # Stub out every crate's source so `cargo fetch` / dependency compilation
 # succeeds without the real source files.
-RUN for crate in polargraph-core polargraph-storage polargraph-query polargraph-rest; do \
+RUN for crate in polargraph-core polargraph-storage polargraph-query polargraph-rest polargraph-sparql; do \
         mkdir -p crates/$crate/src && \
         printf 'pub fn _stub() {}' > crates/$crate/src/lib.rs; \
     done && \
