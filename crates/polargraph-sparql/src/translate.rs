@@ -138,8 +138,12 @@ pub enum SparqlFilter {
     Bound(String),
     /// `FILTER(?x = ?y)` — two variables
     VarEq(String, String),
-    /// `FILTER(isIRI(?x))`
+    /// `FILTER(isIRI(?x))` / `FILTER(isURI(?x))` — both map here (SPARQL 1.1 synonyms)
     IsIri(String),
+    /// `FILTER(isLiteral(?x))`
+    IsLiteral(String),
+    /// `FILTER(isBlank(?x))` — always false; PolarGraph has no blank nodes
+    IsBlank(String),
     /// `FILTER(!...)`
     Not(Box<SparqlFilter>),
     /// `FILTER(... && ...)`
@@ -647,7 +651,23 @@ pub(crate) fn translate_filter(expr: &Expression) -> Result<SparqlFilter, Sparql
                         return Ok(SparqlFilter::IsIri(v.as_str().to_string()));
                     }
                     Err(SparqlError::Unsupported(
-                        "isIRI with non-variable argument not supported".to_string(),
+                        "isIRI/isURI with non-variable argument not supported".to_string(),
+                    ))
+                }
+                Function::IsLiteral => {
+                    if let Some(Expression::Variable(v)) = args.first() {
+                        return Ok(SparqlFilter::IsLiteral(v.as_str().to_string()));
+                    }
+                    Err(SparqlError::Unsupported(
+                        "isLiteral with non-variable argument not supported".to_string(),
+                    ))
+                }
+                Function::IsBlank => {
+                    if let Some(Expression::Variable(v)) = args.first() {
+                        return Ok(SparqlFilter::IsBlank(v.as_str().to_string()));
+                    }
+                    Err(SparqlError::Unsupported(
+                        "isBlank with non-variable argument not supported".to_string(),
                     ))
                 }
                 _ => Err(SparqlError::Unsupported(format!(

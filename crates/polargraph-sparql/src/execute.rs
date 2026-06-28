@@ -290,6 +290,18 @@ pub fn apply_sparql_filter(binding: &SparqlBindings, filter: &SparqlFilter) -> b
             matches!(binding.get(var), Some(SparqlValue::Uri(_)))
         }
 
+        SparqlFilter::IsLiteral(var) => matches!(
+            binding.get(var),
+            Some(
+                SparqlValue::Literal(_)
+                    | SparqlValue::LiteralInt(_)
+                    | SparqlValue::LiteralFloat(_)
+                    | SparqlValue::LiteralBool(_)
+            )
+        ),
+
+        SparqlFilter::IsBlank(_var) => false,
+
         SparqlFilter::Not(inner) => !apply_sparql_filter(binding, inner),
         SparqlFilter::And(a, b) => {
             apply_sparql_filter(binding, a) && apply_sparql_filter(binding, b)

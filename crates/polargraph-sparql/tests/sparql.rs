@@ -1099,3 +1099,161 @@ fn sparql_star_update_delete() {
         panic!("expected DeleteData operation");
     }
 }
+
+// ── Type-testing filter built-ins ─────────────────────────────────────────────
+
+fn mixed_bindings() -> (SparqlBindings, SparqlBindings) {
+    let uri_row = bind_map(&[("o", SparqlValue::Uri(node("018e8c1e-0000-7000-8000-000000000001")))]);
+    let lit_row = bind_map(&[("o", SparqlValue::LiteralInt(42))]);
+    (uri_row, lit_row)
+}
+
+#[test]
+fn filter_is_literal_accepts_string_literal() {
+    let b = bind_map(&[("o", SparqlValue::Literal("hello".into()))]);
+    assert!(apply_sparql_filter(&b, &SparqlFilter::IsLiteral("o".into())));
+}
+
+#[test]
+fn filter_is_literal_accepts_int_literal() {
+    let b = bind_map(&[("o", SparqlValue::LiteralInt(99))]);
+    assert!(apply_sparql_filter(&b, &SparqlFilter::IsLiteral("o".into())));
+}
+
+#[test]
+fn filter_is_literal_accepts_float_literal() {
+    let b = bind_map(&[("o", SparqlValue::LiteralFloat(3.14))]);
+    assert!(apply_sparql_filter(&b, &SparqlFilter::IsLiteral("o".into())));
+}
+
+#[test]
+fn filter_is_literal_accepts_bool_literal() {
+    let b = bind_map(&[("o", SparqlValue::LiteralBool(true))]);
+    assert!(apply_sparql_filter(&b, &SparqlFilter::IsLiteral("o".into())));
+}
+
+#[test]
+fn filter_is_literal_rejects_uri() {
+    let (uri_row, _) = mixed_bindings();
+    assert!(!apply_sparql_filter(&uri_row, &SparqlFilter::IsLiteral("o".into())));
+}
+
+#[test]
+fn filter_is_literal_rejects_unbound() {
+    let empty: SparqlBindings = HashMap::new();
+    assert!(!apply_sparql_filter(&empty, &SparqlFilter::IsLiteral("o".into())));
+}
+
+#[test]
+fn filter_is_iri_accepts_uri() {
+    let (uri_row, _) = mixed_bindings();
+    assert!(apply_sparql_filter(&uri_row, &SparqlFilter::IsIri("o".into())));
+}
+
+#[test]
+fn filter_is_iri_rejects_literal() {
+    let (_, lit_row) = mixed_bindings();
+    assert!(!apply_sparql_filter(&lit_row, &SparqlFilter::IsIri("o".into())));
+}
+
+#[test]
+fn filter_is_blank_always_false() {
+    let (uri_row, lit_row) = mixed_bindings();
+    let empty: SparqlBindings = HashMap::new();
+    assert!(!apply_sparql_filter(&uri_row, &SparqlFilter::IsBlank("o".into())));
+    assert!(!apply_sparql_filter(&lit_row, &SparqlFilter::IsBlank("o".into())));
+    assert!(!apply_sparql_filter(&empty, &SparqlFilter::IsBlank("o".into())));
+}
+
+#[test]
+fn translate_filter_is_literal_from_sparql() {
+    let q = spargebra::Query::parse(
+        "SELECT ?s ?o WHERE { ?s <http://example.org/p> ?o . FILTER(isLiteral(?o)) }",
+        None,
+    )
+    .expect("query should parse");
+    let t = translate_query(&q).expect("query should translate");
+    let filters: Vec<_> = t.branches.iter().flat_map(|b| b.filters.iter()).collect();
+    assert!(
+        filters.iter().any(|f| matches!(f, SparqlFilter::IsLiteral(_))),
+        "expected IsLiteral filter, got: {:?}",
+        filters
+    );
+}
+
+#[test]
+fn translate_filter_is_iri_from_sparql() {
+    let q = spargebra::Query::parse(
+        "SELECT ?s ?o WHERE { ?s <http://example.org/p> ?o . FILTER(isIRI(?o)) }",
+        None,
+    )
+    .expect("query should parse");
+    let t = translate_query(&q).expect("query should translate");
+    let filters: Vec<_> = t.branches.iter().flat_map(|b| b.filters.iter()).collect();
+    assert!(
+        filters.iter().any(|f| matches!(f, SparqlFilter::IsIri(_))),
+        "expected IsIri filter, got: {:?}",
+        filters
+    );
+}
+
+#[test]
+fn translate_filter_is_uri_maps_to_is_iri() {
+    // isURI is a SPARQL 1.1 synonym for isIRI — both should produce IsIri.
+    let q = spargebra::Query::parse(
+        "SELECT ?s ?o WHERE { ?s <http://example.org/p> ?o . FILTER(isURI(?o)) }",
+        None,
+    )
+    .expect("query should parse");
+    let t = translate_query(&q).expect("query should translate");
+    let filters: Vec<_> = t.branches.iter().flat_map(|b| b.filters.iter()).collect();
+    assert!(
+        filters.iter().any(|f| matches!(f, SparqlFilter::IsIri(_))),
+        "isURI should map to IsIri filter, got: {:?}",
+        filters
+    );
+}
+
+#[test]
+fn translate_filter_is_blank_from_sparql() {
+    let q = spargebra::Query::parse(
+        "SELECT ?s ?o WHERE { ?s <http://example.org/p> ?o . FILTER(isBlank(?o)) }",
+        None,
+    )
+    .expect("query should parse");
+    let t = translate_query(&q).expect("query should translate");
+    let filters: Vec<_> = t.branches.iter().flat_map(|b| b.filters.iter()).collect();
+    assert!(
+        filters.iter().any(|f| matches!(f, SparqlFilter::IsBlank(_))),
+        "expected IsBlank filter, got: {:?}",
+        filters
+    );
+}
+
+#[test]
+fn filter_is_literal_applied_to_mixed_rows_keeps_only_literals() {
+    let rows = vec![
+        bind_map(&[("o", SparqlValue::Uri(node("018e8c1e-0000-7000-8000-000000000001")))]),
+        bind_map(&[("o", SparqlValue::LiteralInt(1))]),
+        bind_map(&[("o", SparqlValue::Literal("text".into()))]),
+        bind_map(&[("o", SparqlValue::LiteralBool(false))]),
+    ];
+    let filtered: Vec<_> = rows
+        .into_iter()
+        .filter(|b| apply_sparql_filter(b, &SparqlFilter::IsLiteral("o".into())))
+        .collect();
+    assert_eq!(filtered.len(), 3, "URI row should be excluded");
+}
+
+#[test]
+fn filter_is_blank_applied_to_mixed_rows_returns_empty() {
+    let rows = vec![
+        bind_map(&[("o", SparqlValue::Uri(node("018e8c1e-0000-7000-8000-000000000001")))]),
+        bind_map(&[("o", SparqlValue::LiteralInt(1))]),
+    ];
+    let filtered: Vec<_> = rows
+        .into_iter()
+        .filter(|b| apply_sparql_filter(b, &SparqlFilter::IsBlank("o".into())))
+        .collect();
+    assert!(filtered.is_empty(), "isBlank is always false — no rows expected");
+}
