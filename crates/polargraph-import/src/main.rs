@@ -207,11 +207,9 @@ fn main() -> Result<()> {
     }
 
     let total_ms = total_start.elapsed().as_millis() as u64;
-    let triples_per_sec = if total_ms > 0 {
-        (total_imported as u64 * 1000) / total_ms
-    } else {
-        total_imported as u64
-    };
+    let triples_per_sec = (total_imported as u64 * 1000)
+        .checked_div(total_ms)
+        .unwrap_or(total_imported as u64);
 
     println!(
         "Total: {} triples in {}ms ({} triples/sec)",
