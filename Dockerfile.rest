@@ -5,14 +5,16 @@
 # Stage 2 (runtime): slim image shipping only the binary.
 
 # ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM rust:1.78-bookworm AS builder
+FROM rust:1-bookworm AS builder
 
 WORKDIR /build
 
 # protobuf-compiler — tonic-build compiles polargraph.proto at build time.
-# No clang/cmake/libclang-dev needed: polargraph-rest has no RocksDB dep.
+# clang/libclang-dev — required by zstd-sys bindgen (transitive dep).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         protobuf-compiler \
+        clang \
+        libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Workspace manifests ───────────────────────────────────────────────────────
@@ -45,10 +47,11 @@ RUN for crate in polargraph-core polargraph-storage polargraph-query polargraph-
     for crate in polargraph-bench polargraph-import polargraph-rest; do \
         mkdir -p crates/$crate/src && \
         printf 'fn main() {}'  > crates/$crate/src/main.rs; \
-    done
+    done && \
+    mkdir -p crates/polargraph-storage/benches && \
+    printf 'fn main() {}'  > crates/polargraph-storage/benches/storage.rs
 
-# Pre-compile dependencies (cached as long as Cargo.toml/lock don't change).
-RUN cargo build --release -p polargraph-rest 2>&1 || true
+# Pre-fetch dependencies (cached as long as Cargo.toml/lock don't change).
 RUN cargo fetch
 
 # ── Real build ────────────────────────────────────────────────────────────────
