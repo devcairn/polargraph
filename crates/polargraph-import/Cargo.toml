@@ -21,3 +21,6 @@ tracing      = { workspace = true }
 tracing-subscriber  = { workspace = true }
 uuid         = { workspace = true }
 xxhash-rust  = { workspace = true }
+rio_api      = { workspace = true }
+rio_turtle   = { workspace = true }
+serde_json   = { workspace = true }

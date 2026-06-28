@@ -18,4 +18,7 @@ thiserror        = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 uuid             = { workspace = true }
+xxhash-rust      = { workspace = true }
+rio_api          = { workspace = true }
+rio_turtle       = { workspace = true }
 http             = { version = "0.2" }

@@ -2683,6 +2683,752 @@ fn resolve_quad_pattern_to_proto(
 
 // ── GET /stats ────────────────────────────────────────────────────────────────
 
+// ── RDF interoperability helpers ──────────────────────────────────────────────
+
+/// Convert a PolarGraph [`polargraph_core::id::NodeId`] to proto bytes.
+fn pg_node_id_to_proto(id: polargraph_core::id::NodeId) -> proto::NodeId {
+    proto::NodeId { bytes: id.0.as_bytes().to_vec() }
+}
+
+/// Convert a polargraph_core Value to a proto Value.
+fn pg_value_to_proto(v: &polargraph_core::value::Value) -> proto::Value {
+    use polargraph_core::value::Value as V;
+    proto::Value {
+        kind: Some(match v {
+            V::Text(s) => proto::value::Kind::TextVal(s.clone()),
+            V::Int(n) => proto::value::Kind::IntVal(*n),
+            V::Float(f) => proto::value::Kind::FloatVal(*f),
+            V::Bool(b) => proto::value::Kind::BoolVal(*b),
+            V::Blob(b) => proto::value::Kind::BlobVal(b.clone()),
+            V::Vector(vs) => proto::value::Kind::VecVal(proto::FloatArray { values: vs.clone() }),
+            V::Null => return proto::Value { kind: None },
+        }),
+    }
+}
+
+/// Convert a batch of [`polargraph_sparql::ImportedTriple`] objects to `proto::Triple` objects.
+///
+/// Each Relation becomes one `proto::Triple::Relation`; each Literal becomes a Property.
+fn imported_triples_to_proto(
+    triples: &[polargraph_sparql::ImportedTriple],
+) -> Vec<proto::Triple> {
+    use polargraph_sparql::{uri_to_node_id, bnode_to_node_id, ImportedObject};
+
+    triples
+        .iter()
+        .map(|t| {
+            let subj_node_id = if t.subject_is_bnode {
+                bnode_to_node_id(&t.subject)
+            } else {
+                uri_to_node_id(&t.subject)
+            };
+            let subject_proto = pg_node_id_to_proto(subj_node_id);
+
+            match &t.object {
+                ImportedObject::Iri(obj_iri) => {
+                    let obj_node_id = uri_to_node_id(obj_iri);
+                    proto::Triple {
+                        kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
+                            subject: Some(subject_proto),
+                            predicate: t.predicate.clone(),
+                            object: Some(pg_node_id_to_proto(obj_node_id)),
+                            vt_start: 0,
+                            vt_end: i64::MAX,
+                            properties: vec![],
+                        })),
+                    }
+                }
+                ImportedObject::BlankNode(bnode) => {
+                    let obj_node_id = bnode_to_node_id(bnode);
+                    proto::Triple {
+                        kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
+                            subject: Some(subject_proto),
+                            predicate: t.predicate.clone(),
+                            object: Some(pg_node_id_to_proto(obj_node_id)),
+                            vt_start: 0,
+                            vt_end: i64::MAX,
+                            properties: vec![],
+                        })),
+                    }
+                }
+                ImportedObject::Literal { value, .. } => {
+                    let proto_val = pg_value_to_proto(value);
+                    proto::Triple {
+                        kind: Some(proto::triple::Kind::Property(proto::PropertyTriple {
+                            subject: Some(subject_proto),
+                            predicate: t.predicate.clone(),
+                            value: Some(proto_val),
+                            vt_start: 0,
+                            vt_end: i64::MAX,
+                        })),
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+/// Insert a batch of proto triples via the gRPC Insert RPC.
+async fn insert_proto_triples(
+    client: &mut GrpcClient,
+    triples: Vec<proto::Triple>,
+) -> Result<usize, tonic::Status> {
+    let n = triples.len();
+    client
+        .insert(tonic::Request::new(proto::InsertRequest {
+            triples,
+            ..Default::default()
+        }))
+        .await?;
+    Ok(n)
+}
+
+// ── POST /import/rdf ──────────────────────────────────────────────────────────
+//
+// Accept RDF data in multiple serialization formats and batch-insert via gRPC.
+// Format is determined by the Content-Type header:
+//   application/n-triples  → N-Triples
+//   text/turtle             → Turtle
+//   application/ld+json    → JSON-LD
+
+async fn handle_import_rdf(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    use polargraph_sparql::{parse_jsonld, parse_ntriples, parse_turtle};
+    use std::time::Instant;
+
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let start = Instant::now();
+
+    let imported_triples = if content_type.contains("application/n-triples") {
+        match parse_ntriples(&body) {
+            Ok(t) => t,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+                    .into_response()
+            }
+        }
+    } else if content_type.contains("text/turtle") {
+        match parse_turtle(&body) {
+            Ok(t) => t,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+                    .into_response()
+            }
+        }
+    } else if content_type.contains("application/ld+json") {
+        let text = match std::str::from_utf8(&body) {
+            Ok(s) => s,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "body is not valid UTF-8" })),
+                )
+                    .into_response()
+            }
+        };
+        match parse_jsonld(text) {
+            Ok(t) => t,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+                    .into_response()
+            }
+        }
+    } else if content_type.contains("application/rdf+xml")
+        || content_type.contains("application/owl+xml")
+    {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(serde_json::json!({ "error": "RDF/XML and OWL/XML formats are not supported; use application/n-triples, text/turtle, or application/ld+json" })),
+        )
+            .into_response();
+    } else {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(serde_json::json!({ "error": format!("unsupported Content-Type: {}; supported: application/n-triples, text/turtle, application/ld+json", content_type) })),
+        )
+            .into_response();
+    };
+
+    let total = imported_triples.len();
+    let proto_triples = imported_triples_to_proto(&imported_triples);
+
+    // Insert in batches of 1 000.
+    const BATCH: usize = 1_000;
+    let mut imported = 0usize;
+    let mut client = state.client.clone();
+    for chunk in proto_triples.chunks(BATCH) {
+        match insert_proto_triples(&mut client, chunk.to_vec()).await {
+            Ok(n) => imported += n,
+            Err(e) => return grpc_error(e),
+        }
+    }
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+    Json(serde_json::json!({
+        "imported": imported,
+        "total_parsed": total,
+        "duration_ms": duration_ms,
+    }))
+    .into_response()
+}
+
+// ── POST /export/jsonld ───────────────────────────────────────────────────────
+//
+// Export triples for a list of subjects as JSON-LD.
+// For each subject × predicate combination, queries the gRPC service.
+// Subjects can be IRI strings (mapped via uri_to_node_id) or UUID strings.
+
+#[derive(Deserialize)]
+struct ExportJsonLdBody {
+    /// Subject IRIs or UUID strings to export.
+    #[serde(default)]
+    subjects: Vec<String>,
+    /// Predicate IRIs to include. If empty, returns an empty @graph (predicates
+    /// must be known; variable-predicate scan is not yet supported via gRPC).
+    #[serde(default)]
+    predicates: Vec<String>,
+        /// Optional view/namespace label (informational, not yet enforced).
+    #[serde(default)]
+    #[allow(dead_code)]
+    view_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExportJsonLdParams {
+    /// Single subject IRI or UUID (GET shorthand).
+    subject: Option<String>,
+    /// Comma-separated predicate IRIs (GET shorthand).
+    predicates: Option<String>,
+}
+
+async fn export_jsonld_for(
+    state: Arc<AppState>,
+    subjects: Vec<String>,
+    predicates: Vec<String>,
+) -> Response {
+    use polargraph_sparql::{
+        node_id_to_iri, serialize_jsonld, uri_to_node_id, RdfTriple,
+    };
+
+    if subjects.is_empty() {
+        let empty = serialize_jsonld(&[]);
+        return axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/ld+json")
+            .body(axum::body::boxed(axum::body::Full::from(empty)))
+            .unwrap();
+    }
+
+    let mut all_rdf: Vec<RdfTriple> = Vec::new();
+    let mut client = state.client.clone();
+
+    for subject_iri in &subjects {
+        // Resolve the subject to a NodeId: try UUID first, then IRI hash.
+        let subj_node_id = if let Ok(u) = uuid::Uuid::parse_str(subject_iri) {
+            polargraph_core::id::NodeId(u)
+        } else {
+            uri_to_node_id(subject_iri)
+        };
+        let subj_bytes = subj_node_id.0.as_bytes().to_vec();
+        let subject_iri_str = format!("<urn:uuid:{}>", subj_node_id.0);
+
+        if predicates.is_empty() {
+            // Query all relation triples with this subject (predicates unknown).
+            let req = proto::QueryRequest {
+                patterns: vec![proto::VarPattern {
+                    subject: Some(proto::Term {
+                        kind: Some(proto::term::Kind::Bound(proto::NodeId {
+                            bytes: subj_bytes.clone(),
+                        })),
+                    }),
+                    predicate: String::new(),
+                    object: Some(proto::Term {
+                        kind: Some(proto::term::Kind::Var("_o".to_string())),
+                    }),
+                }],
+                ..Default::default()
+            };
+            if let Ok(resp) = client.query(tonic::Request::new(req)).await {
+                for pb in resp.into_inner().bindings {
+                    if let Some(obj_val) = pb.vars.get("_o") {
+                        if obj_val.bytes.len() == 16 {
+                            if let Ok(arr) = obj_val.bytes[..16].try_into() {
+                                let obj_id = polargraph_core::id::NodeId(uuid::Uuid::from_bytes(arr));
+                                all_rdf.push(RdfTriple {
+                                    subject: subject_iri_str.clone(),
+                                    predicate: "<urn:polargraph:unknownPredicate>".to_string(),
+                                    object: node_id_to_iri(&obj_id),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            for pred in &predicates {
+                // Query for relation triples.
+                let rel_req = proto::QueryRequest {
+                    patterns: vec![proto::VarPattern {
+                        subject: Some(proto::Term {
+                            kind: Some(proto::term::Kind::Bound(proto::NodeId {
+                                bytes: subj_bytes.clone(),
+                            })),
+                        }),
+                        predicate: pred.clone(),
+                        object: Some(proto::Term {
+                            kind: Some(proto::term::Kind::Var("_o".to_string())),
+                        }),
+                    }],
+                    ..Default::default()
+                };
+                if let Ok(resp) = client.query(tonic::Request::new(rel_req)).await {
+                    for pb in resp.into_inner().bindings {
+                        if let Some(obj_val) = pb.vars.get("_o") {
+                            if obj_val.bytes.len() == 16 {
+                                if let Ok(arr) = obj_val.bytes[..16].try_into() {
+                                    let obj_id =
+                                        polargraph_core::id::NodeId(uuid::Uuid::from_bytes(arr));
+                                    all_rdf.push(RdfTriple {
+                                        subject: subject_iri_str.clone(),
+                                        predicate: format!("<{}>", pred),
+                                        object: node_id_to_iri(&obj_id),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Query for property triples via SPARQL (handles scalar values).
+                let sparql = format!(
+                    "SELECT ?v WHERE {{ <urn:uuid:{}> <{}> ?v }}",
+                    subj_node_id.0, pred
+                );
+                if let Ok(sparql_parsed) = spargebra::Query::parse(&sparql, None) {
+                    if let Ok(translation) = polargraph_sparql::translate_query(&sparql_parsed) {
+                        for branch in &translation.branches {
+                            let patterns: Vec<proto::VarPattern> =
+                                branch.patterns.iter().map(sparql_varpat_to_proto).collect();
+                            let prop_req =
+                                proto::QueryRequest { patterns, ..Default::default() };
+                            if let Ok(resp) =
+                                client.query(tonic::Request::new(prop_req)).await
+                            {
+                                for pb in resp.into_inner().bindings {
+                                    // Node bindings only — property values come via
+                                    // annotation steps (not in scope here).
+                                    if let Some(obj_val) = pb.vars.get("v") {
+                                        if obj_val.bytes.len() == 16 {
+                                            if let Ok(arr) = obj_val.bytes[..16].try_into() {
+                                                let obj_id = polargraph_core::id::NodeId(
+                                                    uuid::Uuid::from_bytes(arr),
+                                                );
+                                                all_rdf.push(RdfTriple {
+                                                    subject: subject_iri_str.clone(),
+                                                    predicate: format!("<{}>", pred),
+                                                    object: node_id_to_iri(&obj_id),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let body = serialize_jsonld(&all_rdf);
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/ld+json")
+        .body(axum::body::boxed(axum::body::Full::from(body)))
+        .unwrap()
+}
+
+async fn handle_export_jsonld_get(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<ExportJsonLdParams>,
+) -> Response {
+    let subjects: Vec<String> = params.subject.into_iter().collect();
+    let predicates: Vec<String> = params
+        .predicates
+        .map(|s| s.split(',').map(str::trim).map(str::to_string).collect())
+        .unwrap_or_default();
+    export_jsonld_for(state, subjects, predicates).await
+}
+
+async fn handle_export_jsonld_post(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ExportJsonLdBody>,
+) -> Response {
+    export_jsonld_for(state, body.subjects, body.predicates).await
+}
+
+// ── GET /export/subgraph ──────────────────────────────────────────────────────
+//
+// Export a set of nodes and their outgoing Relation edges as a self-contained
+// RDF document (N-Triples, Turtle, or JSON-LD based on Accept header).
+//
+// Also exports edge annotations (EPA/EPO) as additional triples where the edge
+// node id is the subject.
+
+#[derive(Deserialize)]
+struct ExportSubgraphParams {
+    /// Comma-separated UUID strings identifying the subjects to export.
+    subjects: Option<String>,
+    /// Comma-separated predicate IRIs to include (if omitted: all, unknown).
+    predicates: Option<String>,
+}
+
+async fn handle_export_subgraph(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    QueryParams(params): QueryParams<ExportSubgraphParams>,
+) -> Response {
+    use polargraph_sparql::{
+        node_id_to_iri, serialize_ntriples, serialize_turtle, RdfTriple,
+    };
+
+    let subject_uuids: Vec<uuid::Uuid> = params
+        .subjects
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .filter_map(|s| uuid::Uuid::parse_str(s.trim()).ok())
+        .collect();
+
+    let predicates: Vec<String> = params
+        .predicates
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    let mut all_rdf: Vec<RdfTriple> = Vec::new();
+    let mut client = state.client.clone();
+
+    for subj_uuid in &subject_uuids {
+        let subj_node_id = polargraph_core::id::NodeId(*subj_uuid);
+        let subj_bytes = subj_uuid.as_bytes().to_vec();
+        let subject_iri = node_id_to_iri(&subj_node_id);
+
+        let query_predicates = if predicates.is_empty() {
+            vec![String::new()] // empty = wildcard
+        } else {
+            predicates.clone()
+        };
+
+        for pred in &query_predicates {
+            let req = proto::QueryRequest {
+                patterns: vec![proto::VarPattern {
+                    subject: Some(proto::Term {
+                        kind: Some(proto::term::Kind::Bound(proto::NodeId {
+                            bytes: subj_bytes.clone(),
+                        })),
+                    }),
+                    predicate: pred.clone(),
+                    object: Some(proto::Term {
+                        kind: Some(proto::term::Kind::Var("_o".to_string())),
+                    }),
+                }],
+                ..Default::default()
+            };
+            if let Ok(resp) = client.query(tonic::Request::new(req)).await {
+                for pb in resp.into_inner().bindings {
+                    if let Some(obj_val) = pb.vars.get("_o") {
+                        if obj_val.bytes.len() == 16 {
+                            if let Ok(arr) = obj_val.bytes[..16].try_into() {
+                                let obj_id =
+                                    polargraph_core::id::NodeId(uuid::Uuid::from_bytes(arr));
+                                let pred_iri = if pred.is_empty() {
+                                    "<urn:polargraph:unknownPredicate>".to_string()
+                                } else {
+                                    format!("<{}>", pred)
+                                };
+                                all_rdf.push(RdfTriple {
+                                    subject: subject_iri.clone(),
+                                    predicate: pred_iri,
+                                    object: node_id_to_iri(&obj_id),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Fetch edge annotations: for each relation triple, also export annotations.
+            // We derive the edge_id from the GetEdgeIdsByTriple RPC.
+            if !pred.is_empty() {
+                let req2 = proto::GetEdgeIdsByTripleRequest {
+                    subject_id: subj_bytes.clone(),
+                    predicate: pred.clone(),
+                    object_id: vec![],
+                };
+                if let Ok(resp) = client.get_edge_ids_by_triple(tonic::Request::new(req2)).await {
+                    for edge_id_bytes in resp.into_inner().edge_ids {
+                        if edge_id_bytes.len() == 16 {
+                            if let Ok(arr) = edge_id_bytes[..16].try_into() {
+                                let edge_uuid: uuid::Uuid = uuid::Uuid::from_bytes(arr);
+                                let edge_node_id = polargraph_core::id::NodeId(edge_uuid);
+                                let edge_subject_iri = node_id_to_iri(&edge_node_id);
+                                // Fetch annotations for this edge.
+                                let ann_req = proto::GetEdgeAnnotationsRequest {
+                                    edge_id: edge_id_bytes.clone(),
+                                };
+                                if let Ok(ann_resp) =
+                                    client.get_edge_annotations(tonic::Request::new(ann_req)).await
+                                {
+                                    for ann in ann_resp.into_inner().annotations {
+                                        let pred_iri = format!("<{}>", ann.predicate);
+                                        let obj_str = match ann.value {
+                                            Some(proto::edge_annotation::Value::NodeId(
+                                                bytes,
+                                            )) if bytes.len() == 16 => {
+                                                if let Ok(a) = bytes[..16].try_into() {
+                                                    let nid = polargraph_core::id::NodeId(
+                                                        uuid::Uuid::from_bytes(a),
+                                                    );
+                                                    node_id_to_iri(&nid)
+                                                } else {
+                                                    continue;
+                                                }
+                                            }
+                                            Some(proto::edge_annotation::Value::Scalar(v)) => {
+                                                use polargraph_core::value::Value as V;
+                                                let pg_val = match v.kind {
+                                                    Some(proto::value::Kind::TextVal(s)) => {
+                                                        V::Text(s)
+                                                    }
+                                                    Some(proto::value::Kind::IntVal(n)) => {
+                                                        V::Int(n)
+                                                    }
+                                                    Some(proto::value::Kind::FloatVal(f)) => {
+                                                        V::Float(f)
+                                                    }
+                                                    Some(proto::value::Kind::BoolVal(b)) => {
+                                                        V::Bool(b)
+                                                    }
+                                                    _ => continue,
+                                                };
+                                                polargraph_sparql::value_to_nt_literal(&pg_val)
+                                            }
+                                            _ => continue,
+                                        };
+                                        all_rdf.push(RdfTriple {
+                                            subject: edge_subject_iri.clone(),
+                                            predicate: pred_iri,
+                                            object: obj_str,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let accept = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if accept.contains("application/ld+json") {
+        let body = polargraph_sparql::serialize_jsonld(&all_rdf);
+        return axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/ld+json")
+            .body(axum::body::boxed(axum::body::Full::from(body)))
+            .unwrap();
+    }
+
+    if accept.contains("text/turtle") {
+        let body = serialize_turtle(&all_rdf);
+        return axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/turtle")
+            .body(axum::body::boxed(axum::body::Full::from(body)))
+            .unwrap();
+    }
+
+    // Default: N-Triples.
+    let body = serialize_ntriples(&all_rdf);
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/n-triples")
+        .body(axum::body::boxed(axum::body::Full::from(body)))
+        .unwrap()
+}
+
+// ── POST /import/subgraph ─────────────────────────────────────────────────────
+//
+// Accept the same formats as /import/rdf. Functionally identical — the
+// separate endpoint exists to allow point-to-point PolarGraph transfer without
+// callers needing to know the Content-Type routing logic.
+
+async fn handle_import_subgraph(
+    state: State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    handle_import_rdf(state, headers, body).await
+}
+
+// ── GET /schema/rdf ───────────────────────────────────────────────────────────
+//
+// Export registered node types and edge types as OWL/RDFS Turtle.
+
+async fn handle_schema_rdf_get(State(state): State<Arc<AppState>>) -> Response {
+    use polargraph_sparql::{serialize_schema_rdf, SchemaEdgeType, SchemaField, SchemaNodeType};
+
+    let mut client = state.client.clone();
+
+    let node_types_resp =
+        match client.list_node_types(tonic::Request::new(proto::ListNodeTypesRequest {})).await {
+            Ok(r) => r.into_inner(),
+            Err(e) => return grpc_error(e),
+        };
+
+    let edge_types_resp =
+        match client.list_edge_types(tonic::Request::new(proto::ListEdgeTypesRequest {})).await {
+            Ok(r) => r.into_inner(),
+            Err(e) => return grpc_error(e),
+        };
+
+    let schema_nodes: Vec<SchemaNodeType> = node_types_resp
+        .definitions
+        .into_iter()
+        .map(|nt| SchemaNodeType {
+            type_name: nt.type_name,
+            fields: nt
+                .fields
+                .into_iter()
+                .map(|f| SchemaField { name: f.field_name, kind: f.kind, required: f.required })
+                .collect(),
+            parent_types: nt.parent_types,
+        })
+        .collect();
+
+    let schema_edges: Vec<SchemaEdgeType> = edge_types_resp
+        .definitions
+        .into_iter()
+        .map(|et| SchemaEdgeType {
+            predicate: et.predicate,
+            domain: et.domain,
+            range: et.range,
+            fields: et
+                .fields
+                .into_iter()
+                .map(|f| SchemaField { name: f.field_name, kind: f.kind, required: f.required })
+                .collect(),
+        })
+        .collect();
+
+    let turtle = serialize_schema_rdf(&schema_nodes, &schema_edges);
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/turtle")
+        .body(axum::body::boxed(axum::body::Full::from(turtle)))
+        .unwrap()
+}
+
+// ── POST /schema/rdf ──────────────────────────────────────────────────────────
+//
+// Accept OWL/RDFS Turtle and register node/edge types.
+
+async fn handle_schema_rdf_post(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Response {
+    use polargraph_sparql::parse_schema_rdf;
+
+    let (schema_nodes, schema_edges) = match parse_schema_rdf(&body) {
+        Ok(pair) => pair,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+                .into_response()
+        }
+    };
+
+    let mut client = state.client.clone();
+    let mut registered_nodes = 0usize;
+    let mut registered_edges = 0usize;
+
+    for sn in &schema_nodes {
+        let req = proto::RegisterNodeTypeRequest {
+            definition: Some(proto::NodeTypeDef {
+                type_name: sn.type_name.clone(),
+                fields: sn
+                    .fields
+                    .iter()
+                    .map(|f| proto::FieldDef {
+                        field_name: f.name.clone(),
+                        kind: f.kind.clone(),
+                        required: f.required,
+                    })
+                    .collect(),
+                parent_types: sn.parent_types.clone(),
+                vector_space: None,
+            }),
+        };
+        match client.register_node_type(tonic::Request::new(req)).await {
+            Ok(_) => registered_nodes += 1,
+            Err(e) => return grpc_error(e),
+        }
+    }
+
+    for se in &schema_edges {
+        let req = proto::RegisterEdgeTypeRequest {
+            definition: Some(proto::EdgeTypeDef {
+                predicate: se.predicate.clone(),
+                domain: se.domain.clone(),
+                range: se.range.clone(),
+                fields: se
+                    .fields
+                    .iter()
+                    .map(|f| proto::FieldDef {
+                        field_name: f.name.clone(),
+                        kind: f.kind.clone(),
+                        required: f.required,
+                    })
+                    .collect(),
+                cardinality: String::new(),
+                inverse_of: String::new(),
+            }),
+        };
+        match client.register_edge_type(tonic::Request::new(req)).await {
+            Ok(_) => registered_edges += 1,
+            Err(e) => return grpc_error(e),
+        }
+    }
+
+    Json(serde_json::json!({
+        "ok": true,
+        "registered_node_types": registered_nodes,
+        "registered_edge_types": registered_edges,
+    }))
+    .into_response()
+}
+
+// ── GET /stats ────────────────────────────────────────────────────────────────
+
 async fn handle_stats(State(state): State<Arc<AppState>>) -> Response {
     let mut client = state.client.clone();
     match client.show_stats(tonic::Request::new(proto::ShowStatsRequest {})).await {
@@ -2758,6 +3504,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/sparql/update", post(handle_sparql_update))
         .route("/delete", post(handle_delete_triples))
         .route("/materialize", post(handle_materialize))
+        .route("/import/rdf", post(handle_import_rdf))
+        .route("/import/subgraph", post(handle_import_subgraph))
+        .route("/export/jsonld", get(handle_export_jsonld_get).post(handle_export_jsonld_post))
+        .route("/export/subgraph", get(handle_export_subgraph))
+        .route("/schema/rdf", get(handle_schema_rdf_get).post(handle_schema_rdf_post))
         .with_state(state);
 
     info!(addr = %args.listen, upstream = %args.upstream, "polargraph-rest listening");

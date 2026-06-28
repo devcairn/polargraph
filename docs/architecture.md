@@ -2708,3 +2708,163 @@ See `BENCHMARKS.md` Part 3 for measured results (scale factor 1, Apple M-series)
 `polargraph-storage/benches/storage.rs` adds a `bsbm` group containing:
 - `bsbm/q1_product_search` — PSO + SPO feature filter + property scan
 - `bsbm/q7_five_way_join` — POS × 2 + SPO × 4 join at scale 1
+
+---
+
+## RDF interoperability
+
+PolarGraph supports multi-format RDF import and export through the REST gateway
+and the offline bulk importer.
+
+### Supported formats
+
+| Format | MIME type | Import | Export |
+|--------|-----------|--------|--------|
+| N-Triples | `application/n-triples` | ✓ | ✓ |
+| Turtle | `text/turtle` | ✓ | ✓ |
+| JSON-LD | `application/ld+json` | ✓ | ✓ |
+| RDF/XML | `application/rdf+xml` | — | — |
+| OWL/XML | `application/owl+xml` | — | — |
+
+RDF/XML and OWL/XML are not supported; `POST /import/rdf` returns HTTP 415 for
+those content types.
+
+### Parsing pipeline (`polargraph-sparql::rdf_import`)
+
+All RDF parsing lives in `crates/polargraph-sparql/src/rdf_import.rs` and uses
+the [rio_api 0.8 / rio_turtle 0.8](https://github.com/oxigraph/rio) Oxigraph
+parser family.
+
+```
+RDF bytes
+  │
+  ├─ parse_ntriples()   ──┐
+  ├─ parse_turtle()     ──┼──► Vec<ImportedTriple>
+  └─ parse_jsonld()     ──┘          │
+                                     ▼
+                           ImportedObject:
+                             Iri(String)        → RelationTriple
+                             BlankNode(String)  → RelationTriple (bnode NodeId)
+                             Literal{Value,dt}  → PropertyTriple
+```
+
+IRIs are mapped to deterministic `NodeId`s via xxHash3-128:
+
+```
+uri_to_node_id("http://example.org/Alice")  →  stable NodeId
+bnode_to_node_id("b0")  →  NodeId from "_:bnode_b0"
+edge_id_for(s, p, o)    →  stable EdgeId for a Relation triple
+```
+
+RDF-star quoted triples (as subject or object) are stored as the N-Triples-star
+string representation.
+
+### Import endpoints
+
+#### `POST /import/rdf`
+
+Accepts N-Triples, Turtle, or JSON-LD based on `Content-Type`.
+Triples are bulk-inserted via the gRPC `Insert` RPC in batches of 1 000.
+
+```
+POST /import/rdf
+Content-Type: text/turtle
+
+@prefix ex: <http://example.org/> .
+ex:Alice ex:knows ex:Bob .
+```
+
+Response:
+```json
+{ "imported": 1, "total_parsed": 1, "duration_ms": 12 }
+```
+
+#### `POST /import/subgraph`
+
+Identical to `POST /import/rdf`; provided as a semantic alias for
+PolarGraph-to-PolarGraph subgraph transfers.
+
+### Export endpoints
+
+#### `GET /export/jsonld?subject=<uri>&predicates=p1,p2`
+#### `POST /export/jsonld`  body: `{ "subjects": [...], "predicates": [...], "view_id": "..." }`
+
+Returns a JSON-LD document grouping triples by subject:
+
+```json
+{
+  "@context": { "xsd": "http://www.w3.org/2001/XMLSchema#", ... },
+  "@graph": [
+    {
+      "@id": "http://example.org/Alice",
+      "http://schema.org/knows": { "@id": "http://example.org/Bob" },
+      "http://schema.org/age":   { "@value": "30", "@type": "xsd:integer" }
+    }
+  ]
+}
+```
+
+When `predicates` is empty, a wildcard relation scan is performed.
+**Known limitation**: the Query RPC's `VarPattern.predicate` is a string filter,
+not a variable, so predicate names cannot be retrieved generically.
+Exports with no predicate list use `<urn:polargraph:unknownPredicate>` as the
+predicate IRI for relation triples whose predicate is not specified.
+
+#### `GET /export/subgraph?subjects=uuid1,uuid2&predicates=p1,p2`
+
+Exports a subgraph rooted at the given subjects, including edge annotations.
+Accept-header negotiation:
+
+| Accept | Response type |
+|--------|---------------|
+| `application/ld+json` | JSON-LD |
+| `text/turtle` | Turtle |
+| `application/n-triples` (default) | N-Triples |
+
+### Schema RDF import/export
+
+#### `GET /schema/rdf`
+
+Exports all registered `NodeTypeDef` and `EdgeTypeDef` records as OWL/RDFS Turtle.
+Uses the following IRI namespaces:
+
+| Concept | IRI prefix |
+|---------|-----------|
+| Node type | `urn:polargraph:type:<TypeName>` |
+| Property | `urn:polargraph:prop:<TypeName>/<fieldName>` |
+| Edge relation | `urn:polargraph:rel:<predicateName>` |
+
+```turtle
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+<urn:polargraph:type:Person> a owl:Class .
+<urn:polargraph:prop:Person/name>
+    a owl:DatatypeProperty ;
+    rdfs:domain <urn:polargraph:type:Person> ;
+    rdfs:range  xsd:string .
+<urn:polargraph:rel:works_at>
+    a owl:ObjectProperty ;
+    rdfs:domain <urn:polargraph:type:Person> ;
+    rdfs:range  <urn:polargraph:type:Company> .
+```
+
+#### `POST /schema/rdf`
+
+Parses OWL/RDFS Turtle (or N-Triples) and calls `RegisterNodeType` /
+`RegisterEdgeType` for each discovered class and property/relation.
+
+### Offline bulk importer (multi-format)
+
+`polargraph-import` accepts a `--format` flag to switch RDF parsers:
+
+```bash
+polargraph-import \
+  --data-dir /data \
+  --input data.ttl \
+  --format turtle   # ntriples (default) | turtle | jsonld
+```
+
+The binary must run while `polargraphd` is stopped (SST ingestion requires
+exclusive DB access).

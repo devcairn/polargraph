@@ -1758,6 +1758,9 @@ dependencies = [
  "clap",
  "polargraph-core",
  "polargraph-storage",
+ "rio_api",
+ "rio_turtle",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -1848,11 +1851,14 @@ dependencies = [
  "http 0.2.12",
  "polargraph-core",
  "polargraph-query",
+ "rio_api",
+ "rio_turtle",
  "serde",
  "serde_json",
  "spargebra",
  "thiserror",
  "uuid",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -2155,6 +2161,23 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rio_api"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb24af4f2e3226a44cb6f31f547bba67710ddaf7104af89f254ede509b8f26a4"
+
+[[package]]
+name = "rio_turtle"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3f3dc0af61ab4b8e03bbe987dffeadd35eb7233c6e38314679da3a382428838"
+dependencies = [
+ "oxilangtag",
+ "oxiri",
+ "rio_api",
 ]
 
 [[package]]

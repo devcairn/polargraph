@@ -80,5 +80,9 @@ tokio-util   = { version = "0.7" }
 # SPARQL parser (Oxigraph project)
 spargebra    = { version = "0.3", features = ["rdf-star"] }
 
+# RDF parsing (Oxigraph / Rio project) — N-Triples, Turtle
+rio_api    = { version = "0.8" }
+rio_turtle = { version = "0.8" }
+
 # testing
 tempfile     = { version = "3" }

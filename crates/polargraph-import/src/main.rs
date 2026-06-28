@@ -31,7 +31,7 @@
 //! ```
 
 use std::{
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::PathBuf,
     time::Instant,
 };
@@ -82,6 +82,14 @@ struct Cli {
     #[arg(long = "temp-dir", value_name = "PATH")]
     temp_dir: Option<PathBuf>,
 
+    /// RDF serialization format of the input file.
+    ///
+    /// `ntriples` (default) — one triple per line, no prefixes.
+    /// `turtle`             — Turtle / Turtle-star with prefix declarations.
+    /// `jsonld`             — JSON-LD @graph format.
+    #[arg(long = "format", default_value = "ntriples", value_name = "FORMAT")]
+    format: String,
+
     /// Log filter directive (same syntax as `RUST_LOG`).
     #[arg(long = "log", env = "RUST_LOG", default_value = "info", value_name = "FILTER")]
     log_filter: String,
@@ -112,43 +120,90 @@ fn main() -> Result<()> {
     let file = std::fs::File::open(&cli.input)
         .with_context(|| format!("failed to open input file: {}", cli.input.display()))?;
 
-    let reader = BufReader::new(file);
-
     let total_start = Instant::now();
     let mut total_imported = 0usize;
     let mut batch_num = 0usize;
-    let mut current_batch: Vec<Triple> = Vec::with_capacity(cli.batch_size);
-    let mut line_num = 0usize;
-    let mut skipped = 0usize;
 
-    for line in reader.lines() {
-        line_num = line_num.wrapping_add(1);
-        let line = line.with_context(|| format!("I/O error reading line {line_num}"))?;
-
-        match parse_line(&line) {
-            Some(triple) => current_batch.push(triple),
-            None => {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                    skipped += 1;
+    match cli.format.as_str() {
+        "turtle" | "ttl" => {
+            // Read entire file into memory (rio_turtle needs BufRead internally).
+            let mut buf = Vec::new();
+            BufReader::new(file).read_to_end(&mut buf)?;
+            let triples = parse_input_turtle(&buf)?;
+            let mut current_batch: Vec<Triple> = Vec::with_capacity(cli.batch_size);
+            for t in triples {
+                current_batch.push(t);
+                if current_batch.len() >= cli.batch_size {
+                    batch_num += 1;
+                    total_imported +=
+                        flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                    current_batch.clear();
                 }
-                continue;
+            }
+            if !current_batch.is_empty() {
+                batch_num += 1;
+                total_imported +=
+                    flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
             }
         }
-
-        if current_batch.len() >= cli.batch_size {
-            batch_num += 1;
-            let imported = flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
-            total_imported += imported;
-            current_batch.clear();
+        "jsonld" | "json-ld" => {
+            let mut text = String::new();
+            BufReader::new(file).read_to_string(&mut text)?;
+            let triples = parse_input_jsonld(&text)?;
+            let mut current_batch: Vec<Triple> = Vec::with_capacity(cli.batch_size);
+            for t in triples {
+                current_batch.push(t);
+                if current_batch.len() >= cli.batch_size {
+                    batch_num += 1;
+                    total_imported +=
+                        flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                    current_batch.clear();
+                }
+            }
+            if !current_batch.is_empty() {
+                batch_num += 1;
+                total_imported +=
+                    flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+            }
         }
-    }
+        _ => {
+            let reader = BufReader::new(file);
+            let mut current_batch: Vec<Triple> = Vec::with_capacity(cli.batch_size);
+            let mut line_num = 0usize;
+            let mut skipped = 0usize;
 
-    // Flush the final (possibly partial) batch.
-    if !current_batch.is_empty() {
-        batch_num += 1;
-        let imported = flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
-        total_imported += imported;
+            for line in reader.lines() {
+                line_num = line_num.wrapping_add(1);
+                let line =
+                    line.with_context(|| format!("I/O error reading line {line_num}"))?;
+
+                match parse_line(&line) {
+                    Some(triple) => current_batch.push(triple),
+                    None => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                            skipped += 1;
+                        }
+                        continue;
+                    }
+                }
+
+                if current_batch.len() >= cli.batch_size {
+                    batch_num += 1;
+                    total_imported +=
+                        flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                    current_batch.clear();
+                }
+            }
+            if !current_batch.is_empty() {
+                batch_num += 1;
+                total_imported +=
+                    flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+            }
+            if skipped > 0 {
+                info!(skipped, "lines skipped (unparseable — not blank/comment)");
+            }
+        }
     }
 
     let total_ms = total_start.elapsed().as_millis() as u64;
@@ -162,10 +217,6 @@ fn main() -> Result<()> {
         "Total: {} triples in {}ms ({} triples/sec)",
         total_imported, total_ms, triples_per_sec,
     );
-
-    if skipped > 0 {
-        info!(skipped, "lines skipped (unparseable — not blank/comment)");
-    }
 
     Ok(())
 }
@@ -287,6 +338,177 @@ fn edge_id_for(subject: &str, predicate: &str, object: &str) -> EdgeId {
     buf.extend_from_slice(object.as_bytes());
     let hash: u128 = xxhash_rust::xxh3::xxh3_128(&buf);
     EdgeId(uuid::Uuid::from_bytes(hash.to_le_bytes()))
+}
+
+// ── Turtle / JSON-LD parsers ──────────────────────────────────────────────────
+
+/// Parse a Turtle document into PolarGraph triples using rio_turtle.
+fn parse_input_turtle(input: &[u8]) -> Result<Vec<Triple>> {
+    use rio_api::{
+        model::{Literal, Subject, Term, Triple as RioTriple},
+        parser::TriplesParser,
+    };
+    use rio_turtle::TurtleParser;
+
+    let cursor = std::io::Cursor::new(input);
+    let mut parser = TurtleParser::new(cursor, None);
+    let mut triples = Vec::new();
+
+    let now = Timestamp::now();
+    let temporal_template = BiTemporalRange {
+        vt_start: now,
+        vt_end: Timestamp::END_OF_TIME,
+        tt: Timestamp(0),
+    };
+
+    parser
+        .parse_all(&mut |t: RioTriple<'_>| -> Result<(), rio_turtle::TurtleError> {
+            let subject_str = match &t.subject {
+                Subject::NamedNode(n) => n.iri.to_string(),
+                Subject::BlankNode(b) => format!("_:bnode_{}", b.id),
+                Subject::Triple(_) => return Ok(()), // skip quoted triple subjects
+            };
+            let subject = uri_to_node_id(&subject_str);
+            let predicate = Predicate::new(t.predicate.iri);
+
+            let triple = match &t.object {
+                Term::NamedNode(n) => Triple::Relation {
+                    subject,
+                    predicate,
+                    object: uri_to_node_id(n.iri),
+                    edge_id: edge_id_for(&subject_str, t.predicate.iri, n.iri),
+                    temporal: temporal_template,
+                },
+                Term::BlankNode(b) => {
+                    let bnode_uri = format!("_:bnode_{}", b.id);
+                    Triple::Relation {
+                        subject,
+                        predicate,
+                        object: uri_to_node_id(&bnode_uri),
+                        edge_id: edge_id_for(&subject_str, t.predicate.iri, &bnode_uri),
+                        temporal: temporal_template,
+                    }
+                }
+                Term::Literal(lit) => {
+                    let value = match lit {
+                        Literal::Simple { value } | Literal::LanguageTaggedString { value, .. } => {
+                            Value::Text(value.to_string())
+                        }
+                        Literal::Typed { value, datatype } => {
+                            xsd_to_value(value, datatype.iri)
+                        }
+                    };
+                    Triple::Property { subject, predicate, value, temporal: temporal_template }
+                }
+                Term::Triple(_) => return Ok(()), // skip quoted triple objects
+            };
+            triples.push(triple);
+            Ok(())
+        })
+        .map_err(|e| anyhow::anyhow!("Turtle parse error: {}", e))?;
+
+    Ok(triples)
+}
+
+/// Parse a JSON-LD document into PolarGraph triples.
+fn parse_input_jsonld(input: &str) -> Result<Vec<Triple>> {
+    let doc: serde_json::Value =
+        serde_json::from_str(input).context("JSON parse error")?;
+
+    let graph = doc
+        .get("@graph")
+        .and_then(|v: &serde_json::Value| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("JSON-LD document missing @graph array"))?;
+
+    let now = Timestamp::now();
+    let temporal_template = BiTemporalRange {
+        vt_start: now,
+        vt_end: Timestamp::END_OF_TIME,
+        tt: Timestamp(0),
+    };
+
+    let mut triples = Vec::new();
+
+    for node in graph.iter() {
+        let obj = match node.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        let subject_iri = match obj.get("@id").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let subject = uri_to_node_id(&subject_iri);
+
+        for (key, val) in obj {
+            if key.starts_with('@') {
+                continue;
+            }
+            let predicate = Predicate::new(key.as_str());
+
+            let items: Vec<&serde_json::Value> = if val.is_array() {
+                val.as_array().unwrap().iter().collect()
+            } else {
+                vec![val]
+            };
+
+            for item in items {
+                if let Some(id) = item.get("@id").and_then(|v| v.as_str()) {
+                    triples.push(Triple::Relation {
+                        subject,
+                        predicate: predicate.clone(),
+                        object: uri_to_node_id(id),
+                        edge_id: edge_id_for(&subject_iri, key, id),
+                        temporal: temporal_template,
+                    });
+                } else if let Some(raw) = item.get("@value") {
+                    let type_str = item
+                        .get("@type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("xsd:string");
+                    let full_dt = expand_xsd_prefix(type_str);
+                    let value =
+                        xsd_to_value(raw.as_str().unwrap_or(&raw.to_string()), &full_dt);
+                    triples.push(Triple::Property {
+                        subject,
+                        predicate: predicate.clone(),
+                        value,
+                        temporal: temporal_template,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(triples)
+}
+
+/// Convert an XSD literal value string to a PolarGraph [`Value`].
+fn xsd_to_value(s: &str, datatype: &str) -> Value {
+    match datatype {
+        "http://www.w3.org/2001/XMLSchema#integer"
+        | "http://www.w3.org/2001/XMLSchema#long"
+        | "http://www.w3.org/2001/XMLSchema#int" => {
+            s.parse::<i64>().map(Value::Int).unwrap_or_else(|_| Value::Text(s.to_string()))
+        }
+        "http://www.w3.org/2001/XMLSchema#double"
+        | "http://www.w3.org/2001/XMLSchema#float"
+        | "http://www.w3.org/2001/XMLSchema#decimal" => {
+            s.parse::<f64>().map(Value::Float).unwrap_or_else(|_| Value::Text(s.to_string()))
+        }
+        "http://www.w3.org/2001/XMLSchema#boolean" => {
+            Value::Bool(matches!(s, "true" | "1"))
+        }
+        _ => Value::Text(s.to_string()),
+    }
+}
+
+fn expand_xsd_prefix(dt: &str) -> String {
+    if let Some(local) = dt.strip_prefix("xsd:") {
+        format!("http://www.w3.org/2001/XMLSchema#{}", local)
+    } else {
+        dt.to_string()
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

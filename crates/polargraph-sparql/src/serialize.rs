@@ -248,6 +248,441 @@ pub fn serialize_turtle(triples: &[RdfTriple]) -> String {
     out
 }
 
+// ── JSON-LD serializer ────────────────────────────────────────────────────────
+
+/// Serialize a slice of RDF triples to [JSON-LD](https://www.w3.org/TR/json-ld11/)
+/// `@graph` format.
+///
+/// Triples are grouped by subject. Relation objects become `{ "@id": "…" }`;
+/// property objects are parsed from N-Triples literal syntax into
+/// `{ "@value": …, "@type": "xsd:…" }`.
+pub fn serialize_jsonld(triples: &[RdfTriple]) -> String {
+    use std::collections::BTreeMap;
+
+    let context = serde_json::json!({
+        "xsd": "http://www.w3.org/2001/XMLSchema#",
+        "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+        "owl": "http://www.w3.org/2002/07/owl#"
+    });
+
+    // Group by subject (BTreeMap for deterministic output).
+    let mut by_subject: BTreeMap<String, Vec<(&str, &str)>> = BTreeMap::new();
+    for t in triples {
+        by_subject
+            .entry(t.subject.clone())
+            .or_default()
+            .push((&t.predicate, &t.object));
+    }
+
+    let mut graph: Vec<serde_json::Value> = Vec::new();
+
+    for (subject, preds) in &by_subject {
+        let mut node = serde_json::Map::new();
+        // Strip angle brackets from IRI subjects.
+        let id = strip_brackets(subject);
+        node.insert("@id".to_string(), serde_json::Value::String(id.to_string()));
+
+        for (pred, obj) in preds {
+            let pred_iri = strip_brackets(pred).to_string();
+            let obj_val = nt_object_to_jsonld(obj);
+            // Collect multiple objects for the same predicate into an array.
+            match node.get_mut(&pred_iri) {
+                Some(existing) if existing.is_array() => {
+                    existing.as_array_mut().unwrap().push(obj_val);
+                }
+                Some(existing) => {
+                    let prev = existing.clone();
+                    *existing = serde_json::Value::Array(vec![prev, obj_val]);
+                }
+                None => {
+                    node.insert(pred_iri, obj_val);
+                }
+            }
+        }
+
+        graph.push(serde_json::Value::Object(node));
+    }
+
+    serde_json::json!({
+        "@context": context,
+        "@graph": graph,
+    })
+    .to_string()
+}
+
+/// Convert an N-Triples-syntax object string to a JSON-LD value.
+///
+/// - `<iri>` → `{ "@id": "iri" }`
+/// - `"lit"^^<type>` → `{ "@value": lit, "@type": "xsd:…" }`
+/// - `"lit"` → `{ "@value": lit, "@type": "xsd:string" }`
+fn nt_object_to_jsonld(obj: &str) -> serde_json::Value {
+    if obj.starts_with('<') {
+        // IRI
+        let iri = strip_brackets(obj);
+        return serde_json::json!({ "@id": iri });
+    }
+    if let Some(rest) = obj.strip_prefix('"') {
+        // Literal — find closing quote
+        if let Some(close) = rest.find('"') {
+            let value_str = &rest[..close];
+            let after = &rest[close + 1..];
+            // Datatype or language tag
+            let (type_str, coerced) = if let Some(dt_part) = after.strip_prefix("^^<") {
+                // Typed literal: ^^<http://...>
+                let dt_iri = dt_part.trim_end_matches('>');
+                let xsd_prefix = "http://www.w3.org/2001/XMLSchema#";
+                let short = if let Some(local) = dt_iri.strip_prefix(xsd_prefix) {
+                    format!("xsd:{}", local)
+                } else {
+                    dt_iri.to_string()
+                };
+                let json_val = coerce_xsd_value(value_str, dt_iri);
+                (short, json_val)
+            } else if let Some(lang_part) = after.strip_prefix('@') {
+                let lang = lang_part.trim();
+                (format!("rdf:langString@{}", lang), serde_json::Value::String(value_str.to_string()))
+            } else {
+                ("xsd:string".to_string(), serde_json::Value::String(value_str.to_string()))
+            };
+            return serde_json::json!({ "@value": coerced, "@type": type_str });
+        }
+    }
+    // Fallback: return as plain string
+    serde_json::Value::String(obj.to_string())
+}
+
+/// Attempt to coerce an XSD literal string into a native JSON type.
+fn coerce_xsd_value(s: &str, dt_iri: &str) -> serde_json::Value {
+    match dt_iri {
+        "http://www.w3.org/2001/XMLSchema#integer"
+        | "http://www.w3.org/2001/XMLSchema#long"
+        | "http://www.w3.org/2001/XMLSchema#int"
+        | "http://www.w3.org/2001/XMLSchema#short"
+        | "http://www.w3.org/2001/XMLSchema#byte" => {
+            if let Ok(n) = s.parse::<i64>() {
+                return serde_json::Value::Number(serde_json::Number::from(n));
+            }
+        }
+        "http://www.w3.org/2001/XMLSchema#double"
+        | "http://www.w3.org/2001/XMLSchema#float"
+        | "http://www.w3.org/2001/XMLSchema#decimal" => {
+            if let Ok(f) = s.parse::<f64>() {
+                if let Some(n) = serde_json::Number::from_f64(f) {
+                    return serde_json::Value::Number(n);
+                }
+            }
+        }
+        "http://www.w3.org/2001/XMLSchema#boolean" => {
+            match s {
+                "true" | "1" => return serde_json::Value::Bool(true),
+                "false" | "0" => return serde_json::Value::Bool(false),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    serde_json::Value::String(s.to_string())
+}
+
+/// Strip surrounding angle brackets from an IRI string: `<iri>` → `iri`.
+pub fn strip_brackets(s: &str) -> &str {
+    s.strip_prefix('<').and_then(|s| s.strip_suffix('>')).unwrap_or(s)
+}
+
+// ── Schema RDF serializer / parser ────────────────────────────────────────────
+
+/// A simplified view of a node type for schema RDF serialization.
+#[derive(Debug, Clone)]
+pub struct SchemaNodeType {
+    pub type_name: String,
+    pub fields: Vec<SchemaField>,
+    pub parent_types: Vec<String>,
+}
+
+/// A simplified view of an edge type for schema RDF serialization.
+#[derive(Debug, Clone)]
+pub struct SchemaEdgeType {
+    pub predicate: String,
+    pub domain: String,
+    pub range: String,
+    pub fields: Vec<SchemaField>,
+}
+
+/// A field within a node or edge type.
+#[derive(Debug, Clone)]
+pub struct SchemaField {
+    pub name: String,
+    /// One of: "bool", "int", "float", "text", "blob", "vector".
+    pub kind: String,
+    pub required: bool,
+}
+
+const TYPE_BASE: &str = "urn:polargraph:type:";
+const PROP_BASE: &str = "urn:polargraph:prop:";
+const REL_BASE: &str = "urn:polargraph:rel:";
+
+fn field_kind_to_xsd(kind: &str) -> &str {
+    match kind {
+        "int" | "integer" => "http://www.w3.org/2001/XMLSchema#integer",
+        "float" | "double" => "http://www.w3.org/2001/XMLSchema#double",
+        "bool" | "boolean" => "http://www.w3.org/2001/XMLSchema#boolean",
+        "blob" => "http://www.w3.org/2001/XMLSchema#hexBinary",
+        _ => "http://www.w3.org/2001/XMLSchema#string",
+    }
+}
+
+fn xsd_to_field_kind(xsd: &str) -> &str {
+    match xsd {
+        "http://www.w3.org/2001/XMLSchema#integer" => "int",
+        "http://www.w3.org/2001/XMLSchema#double"
+        | "http://www.w3.org/2001/XMLSchema#float"
+        | "http://www.w3.org/2001/XMLSchema#decimal" => "float",
+        "http://www.w3.org/2001/XMLSchema#boolean" => "bool",
+        "http://www.w3.org/2001/XMLSchema#hexBinary" => "blob",
+        _ => "text",
+    }
+}
+
+/// Serialize PolarGraph node/edge type definitions as OWL/RDFS Turtle.
+///
+/// The Turtle can be re-imported via [`parse_schema_rdf`] to register the same
+/// types on another PolarGraph instance (schema round-trip).
+pub fn serialize_schema_rdf(
+    node_types: &[SchemaNodeType],
+    edge_types: &[SchemaEdgeType],
+) -> String {
+    let mut out = String::new();
+    out.push_str("@prefix owl:  <http://www.w3.org/2002/07/owl#> .\n");
+    out.push_str("@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n");
+    out.push_str("@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .\n");
+    out.push_str("@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n");
+    out.push('\n');
+
+    for nt in node_types {
+        let class_iri = format!("<{}{}>", TYPE_BASE, nt.type_name);
+        out.push_str(&format!("{} a owl:Class", class_iri));
+        if !nt.parent_types.is_empty() {
+            let parents: Vec<String> = nt
+                .parent_types
+                .iter()
+                .map(|p| format!("<{}{}>", TYPE_BASE, p))
+                .collect();
+            out.push_str(&format!(" ;\n    rdfs:subClassOf {}", parents.join(", ")));
+        }
+        out.push_str(" .\n");
+
+        for field in &nt.fields {
+            let prop_iri = format!("<{}{}/{}>", PROP_BASE, nt.type_name, field.name);
+            let xsd_range = field_kind_to_xsd(&field.kind);
+            out.push_str(&format!(
+                "{} a owl:DatatypeProperty ;\n    rdfs:domain {} ;\n    rdfs:range <{}> .\n",
+                prop_iri, class_iri, xsd_range
+            ));
+        }
+    }
+
+    for et in edge_types {
+        let rel_iri = format!("<{}{}>", REL_BASE, et.predicate);
+        let mut parts = Vec::new();
+        if !et.domain.is_empty() {
+            parts.push(format!("    rdfs:domain <{}{}>", TYPE_BASE, et.domain));
+        }
+        if !et.range.is_empty() {
+            parts.push(format!("    rdfs:range <{}{}>", TYPE_BASE, et.range));
+        }
+        if parts.is_empty() {
+            out.push_str(&format!("{} a owl:ObjectProperty .\n", rel_iri));
+        } else {
+            out.push_str(&format!(
+                "{} a owl:ObjectProperty ;\n{} .\n",
+                rel_iri,
+                parts.join(" ;\n")
+            ));
+        }
+
+        for field in &et.fields {
+            let prop_iri = format!("<{}{}/{}>", PROP_BASE, et.predicate, field.name);
+            let xsd_range = field_kind_to_xsd(&field.kind);
+            out.push_str(&format!(
+                "{} a owl:DatatypeProperty ;\n    rdfs:domain {} ;\n    rdfs:range <{}> .\n",
+                prop_iri, rel_iri, xsd_range
+            ));
+        }
+    }
+
+    out
+}
+
+/// Parse OWL/RDFS Turtle (as produced by [`serialize_schema_rdf`]) into
+/// [`SchemaNodeType`] and [`SchemaEdgeType`] structures.
+///
+/// Recognised triple patterns:
+/// - `<urn:polargraph:type:X> rdf:type owl:Class` → NodeType X
+/// - `<urn:polargraph:rel:P> rdf:type owl:ObjectProperty` → EdgeType P
+/// - `<urn:polargraph:prop:X/F> rdf:type owl:DatatypeProperty ; rdfs:domain … ; rdfs:range xsd:…`
+pub fn parse_schema_rdf(
+    input: &[u8],
+) -> Result<(Vec<SchemaNodeType>, Vec<SchemaEdgeType>), String> {
+    use crate::rdf_import::parse_turtle;
+    use std::collections::HashMap;
+
+    let triples = parse_turtle(input)?;
+
+    // Collect raw triples as (subject_iri, predicate_iri, object_iri_or_str)
+    let owl_class = "http://www.w3.org/2002/07/owl#Class";
+    let owl_obj_prop = "http://www.w3.org/2002/07/owl#ObjectProperty";
+    let owl_dt_prop = "http://www.w3.org/2002/07/owl#DatatypeProperty";
+    let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    let rdfs_domain = "http://www.w3.org/2000/01/rdf-schema#domain";
+    let rdfs_range = "http://www.w3.org/2000/01/rdf-schema#range";
+    let rdfs_subclass = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+
+    // Collect rdf:type declarations.
+    let mut class_iris: Vec<String> = Vec::new();
+    let mut obj_prop_iris: Vec<String> = Vec::new();
+    let mut dt_prop_domains: HashMap<String, String> = HashMap::new();
+    let mut dt_prop_ranges: HashMap<String, String> = HashMap::new();
+    let mut obj_prop_domains: HashMap<String, String> = HashMap::new();
+    let mut obj_prop_ranges: HashMap<String, String> = HashMap::new();
+    let mut class_parents: HashMap<String, Vec<String>> = HashMap::new();
+
+    for t in &triples {
+        let obj_iri = match &t.object {
+            crate::rdf_import::ImportedObject::Iri(s) => s.as_str(),
+            _ => continue,
+        };
+        if t.predicate == rdf_type {
+            match obj_iri {
+                s if s == owl_class => class_iris.push(t.subject.clone()),
+                s if s == owl_obj_prop => obj_prop_iris.push(t.subject.clone()),
+                s if s == owl_dt_prop => { /* collected via domain/range */ }
+                _ => {}
+            }
+        } else if t.predicate == rdfs_domain {
+            if t.subject.starts_with(PROP_BASE) {
+                dt_prop_domains.insert(t.subject.clone(), obj_iri.to_string());
+            } else if t.subject.starts_with(REL_BASE) {
+                obj_prop_domains.insert(t.subject.clone(), obj_iri.to_string());
+            }
+        } else if t.predicate == rdfs_range {
+            if t.subject.starts_with(PROP_BASE) {
+                dt_prop_ranges.insert(t.subject.clone(), obj_iri.to_string());
+            } else if t.subject.starts_with(REL_BASE) {
+                obj_prop_ranges.insert(t.subject.clone(), obj_iri.to_string());
+            }
+        } else if t.predicate == rdfs_subclass && t.subject.starts_with(TYPE_BASE) {
+            if let Some(parent_name) = obj_iri.strip_prefix(TYPE_BASE) {
+                class_parents
+                    .entry(t.subject.clone())
+                    .or_default()
+                    .push(parent_name.to_string());
+            }
+        }
+    }
+
+    // Build node types.
+    let mut node_types: Vec<SchemaNodeType> = class_iris
+        .iter()
+        .filter_map(|iri| {
+            let type_name = iri.strip_prefix(TYPE_BASE)?.to_string();
+            Some(SchemaNodeType {
+                type_name: type_name.clone(),
+                fields: Vec::new(),
+                parent_types: class_parents.get(iri).cloned().unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    // Attach DataypeProperty fields to node types.
+    for t in &triples {
+        if t.predicate != rdf_type {
+            continue;
+        }
+        let obj_iri = match &t.object {
+            crate::rdf_import::ImportedObject::Iri(s) => s.as_str(),
+            _ => continue,
+        };
+        if obj_iri != owl_dt_prop {
+            continue;
+        }
+        // t.subject is the property IRI, e.g. urn:polargraph:prop:Person/name
+        let prop_iri = &t.subject;
+        if let Some(rest) = prop_iri.strip_prefix(PROP_BASE) {
+            // rest is "TypeName/fieldName" or "predicate/fieldName"
+            if let Some(slash) = rest.find('/') {
+                let owner = &rest[..slash];
+                let field_name = &rest[slash + 1..];
+                let range = dt_prop_ranges
+                    .get(prop_iri)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let kind = xsd_to_field_kind(range).to_string();
+                let field = SchemaField { name: field_name.to_string(), kind, required: false };
+
+                // Try to attach to a matching node type first.
+                if let Some(nt) = node_types.iter_mut().find(|n| n.type_name == owner) {
+                    nt.fields.push(field);
+                }
+                // (Edge type fields are handled in the edge type loop below.)
+            }
+        }
+    }
+
+    // Build edge types.
+    let mut edge_types: Vec<SchemaEdgeType> = obj_prop_iris
+        .iter()
+        .filter_map(|iri| {
+            let predicate = iri.strip_prefix(REL_BASE)?.to_string();
+            let domain = obj_prop_domains
+                .get(iri)
+                .and_then(|d| d.strip_prefix(TYPE_BASE))
+                .unwrap_or("")
+                .to_string();
+            let range = obj_prop_ranges
+                .get(iri)
+                .and_then(|r| r.strip_prefix(TYPE_BASE))
+                .unwrap_or("")
+                .to_string();
+            Some(SchemaEdgeType { predicate: predicate.clone(), domain, range, fields: Vec::new() })
+        })
+        .collect();
+
+    // Attach DatatypeProperty fields to edge types.
+    for t in &triples {
+        if t.predicate != rdf_type {
+            continue;
+        }
+        let obj_iri = match &t.object {
+            crate::rdf_import::ImportedObject::Iri(s) => s.as_str(),
+            _ => continue,
+        };
+        if obj_iri != owl_dt_prop {
+            continue;
+        }
+        let prop_iri = &t.subject;
+        if let Some(rest) = prop_iri.strip_prefix(PROP_BASE) {
+            if let Some(slash) = rest.find('/') {
+                let owner = &rest[..slash];
+                let field_name = &rest[slash + 1..];
+                if let Some(et) = edge_types.iter_mut().find(|e| e.predicate == owner) {
+                    let range = dt_prop_ranges
+                        .get(prop_iri)
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    et.fields.push(SchemaField {
+                        name: field_name.to_string(),
+                        kind: xsd_to_field_kind(range).to_string(),
+                        required: false,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok((node_types, edge_types))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

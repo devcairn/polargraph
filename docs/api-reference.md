@@ -877,3 +877,113 @@ Supports `INSERT DATA`, `DELETE DATA`, and `INSERT/DELETE WHERE`. Returns
 | `POST` | `/access/revoke` | Revoke group access |
 | `POST` | `/access/add-user` | Add a user to a group |
 | `GET` | `/access/user/:user_id` | Return expanded access set for a user |
+
+---
+
+## REST gateway — RDF interoperability endpoints
+
+### `POST /import/rdf`
+
+Import RDF triples into PolarGraph. Accepts N-Triples, Turtle, or JSON-LD
+determined by the `Content-Type` header.
+
+| Content-Type | Format |
+|---|---|
+| `application/n-triples` | N-Triples |
+| `text/turtle` | Turtle |
+| `application/ld+json` | JSON-LD (`@graph` array) |
+| `application/rdf+xml` | Not supported — returns 415 |
+| `application/owl+xml` | Not supported — returns 415 |
+
+Triples are inserted in batches of 1 000. Relations become `RelationTriple`s;
+literals become `PropertyTriple`s. IRIs map to `NodeId`s via deterministic
+xxHash3-128 (`uri_to_node_id`).
+
+**Response:**
+```json
+{ "imported": 42, "total_parsed": 42, "duration_ms": 18 }
+```
+
+### `POST /import/subgraph`
+
+Semantic alias for `POST /import/rdf`. Accepts the same formats and behaves
+identically; provided to make PolarGraph-to-PolarGraph subgraph transfer
+workflows self-documenting.
+
+### `GET /export/jsonld`
+
+Query parameters:
+
+| Parameter | Required | Description |
+|---|---|---|
+| `subject` | No | Subject URI to export |
+| `predicates` | No | Comma-separated predicate IRIs to include |
+
+### `POST /export/jsonld`
+
+Body:
+```json
+{
+  "subjects":   ["http://example.org/Alice"],
+  "predicates": ["http://schema.org/knows"],
+  "view_id":    "optional-view-id"
+}
+```
+
+Both GET and POST return a JSON-LD document:
+
+```json
+{
+  "@context": { "xsd": "http://www.w3.org/2001/XMLSchema#", "rdf": "...", "rdfs": "...", "owl": "..." },
+  "@graph": [
+    {
+      "@id": "http://example.org/Alice",
+      "http://schema.org/knows": { "@id": "http://example.org/Bob" },
+      "http://schema.org/age":   { "@value": "30", "@type": "xsd:integer" }
+    }
+  ]
+}
+```
+
+### `GET /export/subgraph`
+
+Query parameters:
+
+| Parameter | Required | Description |
+|---|---|---|
+| `subjects` | Yes | Comma-separated subject UUIDs or URIs |
+| `predicates` | No | Comma-separated predicate IRIs |
+
+Response format negotiated via `Accept` header:
+
+| Accept | Format |
+|---|---|
+| `application/ld+json` | JSON-LD |
+| `text/turtle` | Turtle |
+| `application/n-triples` (default) | N-Triples |
+
+Includes edge annotations as property triples on the edge NodeId.
+
+### `GET /schema/rdf`
+
+Exports all registered node types and edge types as OWL/RDFS Turtle.
+Node types become `owl:Class` declarations; property fields become
+`owl:DatatypeProperty` with `rdfs:domain`/`rdfs:range`; edge types become
+`owl:ObjectProperty` with domain and range.
+
+IRI namespaces:
+- `urn:polargraph:type:<TypeName>` — node types
+- `urn:polargraph:prop:<TypeName>/<field>` — property fields
+- `urn:polargraph:rel:<predicate>` — edge predicates
+
+### `POST /schema/rdf`
+
+Body: OWL/RDFS Turtle (or N-Triples). Parses `owl:Class`,
+`owl:DatatypeProperty`, and `owl:ObjectProperty` declarations (with
+`rdfs:domain`/`rdfs:range`) and calls `RegisterNodeType` / `RegisterEdgeType`
+for each discovered type.
+
+**Response:**
+```json
+{ "node_types_registered": 2, "edge_types_registered": 1 }
+```
