@@ -240,7 +240,7 @@ mod triple_tests {
 #[cfg(test)]
 mod view_tests {
     use crate::view::{EdgePresentation, NodeFilter, View, ViewId};
-    use std::collections::HashSet;
+    
 
     fn make_view() -> View {
         let mut v = View::new("org-chart", "Org Chart");
