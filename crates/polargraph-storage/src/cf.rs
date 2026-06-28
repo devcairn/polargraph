@@ -33,4 +33,10 @@ pub const EPO: &str = "epo";
 /// Value: same bytes as the corresponding EPA entry.
 pub const PEA: &str = "pea";
 
-pub const ALL: &[&str] = &[SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, EPA, EPO, PEA];
+/// Derived triple store for OWL 2 RL materialized facts.
+/// Key layout: same as SPO — [subject(16)][pred_id BE(4)][object(16)][tt BE(8)] = 44 bytes.
+/// Value: same codec as SPO relation entries.
+/// Derived triples are kept separate from base data and can be wiped and rebuilt cleanly.
+pub const DRV: &str = "drv";
+
+pub const ALL: &[&str] = &[SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, EPA, EPO, PEA, DRV];

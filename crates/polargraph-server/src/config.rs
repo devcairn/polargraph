@@ -83,6 +83,9 @@ pub struct StorageConfig {
     /// Scheduled (periodic) retention configuration.
     #[serde(default)]
     pub retention_schedule: RetentionScheduleConfig,
+    /// Run OWL 2 RL materialization at startup (primary only).
+    /// Equivalent to `--auto-materialize` / `POLARGRAPH_AUTO_MATERIALIZE`.
+    pub auto_materialize: Option<bool>,
 }
 
 /// Configuration for the periodic scheduled retention task.

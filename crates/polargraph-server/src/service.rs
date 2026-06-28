@@ -58,6 +58,7 @@ use crate::{
         ValidateNodeRequest, ValidateNodeResponse,
         VectorSearchResult, VectorSeedQueryRequest, VectorSeedQueryResponse,
         DeleteTriplesRequest, DeleteTriplesResponse,
+        RunMaterializationRequest, RunMaterializationResponse,
     },
 };
 use dashmap::DashMap;
@@ -77,6 +78,7 @@ use polargraph_query::datalog::{
 };
 use polargraph_query::explain::explain_query;
 use polargraph_storage::{BackupManager, CompactionManager, EdgeTypeRegistry, MigrationRunner, NodeTypeRegistry, StorageError, Transaction, TripleStore, WalStreamer, MIGRATIONS};
+use polargraph_storage::owl_rl;
 use uuid;
 use std::{
     collections::{HashMap, HashSet},
@@ -2958,6 +2960,41 @@ impl PolarGraphService for PolarGraphServer {
 
         info!("DeleteTriples: deleted_count={}", deleted_count);
         Ok(Response::new(DeleteTriplesResponse { deleted_count }))
+    }
+
+    /// Run OWL 2 RL forward-chaining materialization and write derived triples to DRV CF.
+    async fn run_materialization(
+        &self,
+        request: Request<RunMaterializationRequest>,
+    ) -> Result<Response<RunMaterializationResponse>, Status> {
+        self.check_not_replica()?;
+        let req = request.into_inner();
+        // In proto3, bool defaults to false. We treat false as "full re-materialization"
+        // (clear_first=true) since that is always safe. Pass the field value directly;
+        // callers that want incremental mode must explicitly set clear_first=false in
+        // a follow-up design; for now clear_first=true means "clear and rebuild".
+        let clear_first = req.clear_first;
+        let stats = tokio::task::spawn_blocking({
+            let store = self.store.clone();
+            move || owl_rl::materialize(&store, clear_first)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("materialize task panicked: {e}")))?
+        .map_err(storage_err_to_status)?;
+
+        info!(
+            rules_fired = stats.rules_fired,
+            derived_triples = stats.derived_triples,
+            iterations = stats.iterations,
+            "OWL 2 RL materialization complete"
+        );
+        metrics::gauge!("polargraph_materialization_derived_total").set(stats.derived_triples as f64);
+
+        Ok(Response::new(RunMaterializationResponse {
+            rules_fired: stats.rules_fired,
+            derived_triples: stats.derived_triples,
+            iterations: stats.iterations,
+        }))
     }
 }
 

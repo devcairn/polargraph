@@ -2130,6 +2130,38 @@ async fn handle_delete_triples(
     }
 }
 
+// ── OWL 2 RL materialization endpoint ────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct MaterializeBody {
+    /// When true, clear the DRV column family before re-materializing.
+    /// When absent/false, performs an incremental run.
+    #[serde(default)]
+    clear_first: bool,
+}
+
+async fn handle_materialize(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<MaterializeBody>>,
+) -> Response {
+    let clear_first = body.map(|b| b.clear_first).unwrap_or(false);
+    let req = proto::RunMaterializationRequest { clear_first };
+    let mut client = state.client.clone();
+    match client.run_materialization(tonic::Request::new(req)).await {
+        Ok(r) => {
+            let inner = r.into_inner();
+            Json(serde_json::json!({
+                "ok": true,
+                "rules_fired": inner.rules_fired,
+                "derived_triples": inner.derived_triples,
+                "iterations": inner.iterations,
+            }))
+            .into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
 // ── SPARQL Update helpers ─────────────────────────────────────────────────────
 
 /// Convert a spargebra [`Quad`] (INSERT DATA) to a proto [`Triple`].
@@ -2368,6 +2400,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/sparql", get(handle_sparql_get).post(handle_sparql_post))
         .route("/sparql/update", post(handle_sparql_update))
         .route("/delete", post(handle_delete_triples))
+        .route("/materialize", post(handle_materialize))
         .with_state(state);
 
     info!(addr = %args.listen, upstream = %args.upstream, "polargraph-rest listening");
