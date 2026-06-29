@@ -2258,6 +2258,58 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
         }
     }
 
+    // Ensure every filter variable has a corresponding binding pattern.
+    // `MATCH (n) WHERE n.job = 'val' RETURN n` generates no patterns for `n`
+    // because the standalone node has no label or props in the MATCH clause itself.
+    // Without a pattern, execute_query returns one empty binding and the filter
+    // drops it because "n" is unbound. Fix: for each filter variable that isn't
+    // already bound by a pattern, add a property-scan pattern using the filter's
+    // predicate. This is more selective than a full wildcard scan.
+    {
+        let bound_vars: HashSet<String> = patterns
+            .iter()
+            .flat_map(|p| {
+                let mut vars: Vec<String> = Vec::new();
+                if let Term::Var(v) = &p.subject {
+                    vars.push(v.clone());
+                }
+                if let Term::Var(v) = &p.object {
+                    vars.push(v.clone());
+                }
+                vars
+            })
+            .collect();
+        let mut extra_scan_added: HashSet<String> = HashSet::new();
+        for vf in &value_filters {
+            if !bound_vars.contains(&vf.var)
+                && extra_scan_added.insert(vf.var.clone())
+            {
+                patterns.push(VarPattern {
+                    subject: Term::Var(vf.var.clone()),
+                    predicate: Some(vf.predicate.clone()),
+                    predicate_var: None,
+                    object: Term::Any,
+                    edge_var: None,
+                    max_hops: None,
+                });
+            }
+        }
+        for tf in &text_filters {
+            if !bound_vars.contains(&tf.var)
+                && extra_scan_added.insert(tf.var.clone())
+            {
+                patterns.push(VarPattern {
+                    subject: Term::Var(tf.var.clone()),
+                    predicate: Some(tf.predicate.clone()),
+                    predicate_var: None,
+                    object: Term::Any,
+                    edge_var: None,
+                    max_hops: None,
+                });
+            }
+        }
+    }
+
     // Split return_items into plain variables, property projections, aggregations, and ID projections.
     let mut return_vars: Vec<String> = Vec::new();
     let mut aggregations: Vec<AggregationSpec> = Vec::new();
