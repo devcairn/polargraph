@@ -2281,9 +2281,7 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
             .collect();
         let mut extra_scan_added: HashSet<String> = HashSet::new();
         for vf in &value_filters {
-            if !bound_vars.contains(&vf.var)
-                && extra_scan_added.insert(vf.var.clone())
-            {
+            if !bound_vars.contains(&vf.var) && extra_scan_added.insert(vf.var.clone()) {
                 patterns.push(VarPattern {
                     subject: Term::Var(vf.var.clone()),
                     predicate: Some(vf.predicate.clone()),
@@ -2295,9 +2293,7 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
             }
         }
         for tf in &text_filters {
-            if !bound_vars.contains(&tf.var)
-                && extra_scan_added.insert(tf.var.clone())
-            {
+            if !bound_vars.contains(&tf.var) && extra_scan_added.insert(tf.var.clone()) {
                 patterns.push(VarPattern {
                     subject: Term::Var(tf.var.clone()),
                     predicate: Some(tf.predicate.clone()),
