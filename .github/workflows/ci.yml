@@ -92,9 +92,9 @@ jobs:
           path: target/release/polargraphd
           if-no-files-found: error
 
-  # Builds and pushes the Docker image to ghcr.io.
-  # On version tags (v*): pushes ghcr.io/<owner>/polargraph:<version> + latest.
-  # On main: pushes ghcr.io/<owner>/polargraph:main for staging use.
+  # Builds and pushes Docker images to ghcr.io on every push to main.
+  # polargraph-db  — core storage daemon  (Dockerfile)
+  # polargraph-rest — HTTP gateway        (Dockerfile.rest)
   docker:
     name: Docker publish
     runs-on: ubuntu-latest
@@ -112,29 +112,29 @@ jobs:
       - name: Log in to ghcr.io
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=ref,event=branch
-
-      - name: Build and push
+      - name: Build and push polargraph-db
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ghcr.io/polarops/polargraph-db:latest
+          cache-from: type=gha,scope=polargraph-db
+          cache-to: type=gha,mode=max,scope=polargraph-db
+
+      - name: Build and push polargraph-rest
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.rest
+          push: true
+          tags: ghcr.io/polarops/polargraph-rest:latest
+          cache-from: type=gha,scope=polargraph-rest
+          cache-to: type=gha,mode=max,scope=polargraph-rest
 
   # Spins up polargraphd + REST gateway in Docker and runs the Python E2E suite.
   e2e:
