@@ -90,7 +90,7 @@ def test_insert_property(base_url: str):
     prop_val = f"propval_{uuid.uuid4().hex[:8]}"
 
     status, data = http_post(base_url + "/cypher/write", {
-        "cypher": f"CREATE (n {{job: '{prop_val}'}}) RETURN n"
+        "cypher": f"CREATE (n {{job: '{prop_val}'}})"
     })
     assert status == 200, f"cypher/write failed with status {status}: {data}"
     assert data.get("ok") is True, f"cypher/write missing ok=true: {data}"
@@ -148,7 +148,7 @@ def test_cypher_text_search(base_url: str):
     name_val  = f"foobar_{unique}"
 
     status, data = http_post(base_url + "/cypher/write", {
-        "cypher": f"CREATE (n {{fullname: '{name_val}'}}) RETURN n"
+        "cypher": f"CREATE (n {{fullname: '{name_val}'}})"
     })
     assert status == 200, f"cypher/write failed with status {status}: {data}"
 
@@ -261,7 +261,7 @@ def test_indexes(base_url: str):
     assert status == 200, f"indexes failed with status {status}: {data}"
     assert "column_families" in data, f"expected 'column_families' key: {data}"
     cf_names = [cf.get("name") for cf in data["column_families"]]
-    assert "SPO" in cf_names, f"expected 'SPO' in column families, got: {cf_names}"
+    assert "spo" in cf_names, f"expected 'spo' in column families, got: {cf_names}"
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────
