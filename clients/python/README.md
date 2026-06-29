@@ -1,6 +1,6 @@
 # polargraph-client — Python SDK
 
-Official Python client for the [PolarGraph DB Engine](https://github.com/polarops/polargraph).
+Official Python client for the [PolarGraph DB Engine](https://github.com/devcairn/polargraph).
 
 ## Installation
 

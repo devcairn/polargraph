@@ -20,7 +20,7 @@ async = ["grpcio>=1.54"]
 dev = ["grpcio-tools>=1.54", "pytest>=7.0"]
 
 [project.urls]
-Repository = "https://github.com/polarops/polargraph"
+Repository = "https://github.com/devcairn/polargraph"
 
 [tool.hatch.build.targets.wheel]
 packages = ["polargraph"]

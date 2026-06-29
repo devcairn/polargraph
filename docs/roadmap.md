@@ -544,7 +544,7 @@ Dual CJS + ESM output via `tsup`.  Types bundled.
 
 ```
 clients/go/
-  go.mod               # module: github.com/polarops/polargraph/clients/go
+  go.mod               # module: github.com/devcairn/polargraph/clients/go
   polargraph/
     client.go          # PolarGraphClient struct
     types.go           # idiomatic Go types wrapping proto

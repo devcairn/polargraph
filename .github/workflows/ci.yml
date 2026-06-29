@@ -122,7 +122,7 @@ jobs:
           context: .
           file: Dockerfile
           push: true
-          tags: ghcr.io/polarops/polargraph-db:latest
+          tags: ghcr.io/devcairn/polargraph-db:latest
           cache-from: type=gha,scope=polargraph-db
           cache-to: type=gha,mode=max,scope=polargraph-db
 
@@ -132,7 +132,7 @@ jobs:
           context: .
           file: Dockerfile.rest
           push: true
-          tags: ghcr.io/polarops/polargraph-rest:latest
+          tags: ghcr.io/devcairn/polargraph-rest:latest
           cache-from: type=gha,scope=polargraph-rest
           cache-to: type=gha,mode=max,scope=polargraph-rest
 

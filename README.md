@@ -1196,7 +1196,7 @@ An async variant (`AsyncPolarGraphClient`) is available for use with `asyncio`. 
 ### Go
 
 ```bash
-go get github.com/polarops/polargraph-go
+go get github.com/devcairn/polargraph-go
 ```
 
 ```go

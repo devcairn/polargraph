@@ -1,11 +1,11 @@
 # polargraph-go — Go SDK
 
-Official Go client for the [PolarGraph DB Engine](https://github.com/polarops/polargraph).
+Official Go client for the [PolarGraph DB Engine](https://github.com/devcairn/polargraph).
 
 ## Installation
 
 ```bash
-go get github.com/polarops/polargraph-go
+go get github.com/devcairn/polargraph-go
 ```
 
 ## Quickstart
@@ -18,7 +18,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/polarops/polargraph-go/polargraph"
+    "github.com/devcairn/polargraph-go/polargraph"
 )
 
 func main() {

@@ -53,8 +53,8 @@ jobs:
           file: Dockerfile
           push: true
           tags: |
-            ghcr.io/polarops/polargraph-db:latest
-            ghcr.io/polarops/polargraph-db:${{ steps.vars.outputs.sha_short }}
+            ghcr.io/devcairn/polargraph-db:latest
+            ghcr.io/devcairn/polargraph-db:${{ steps.vars.outputs.sha_short }}
           cache-from: type=gha,scope=polargraph-db
           cache-to: type=gha,mode=max,scope=polargraph-db
 
@@ -66,8 +66,8 @@ jobs:
           file: Dockerfile.rest
           push: true
           tags: |
-            ghcr.io/polarops/polargraph-rest:latest
-            ghcr.io/polarops/polargraph-rest:${{ steps.vars.outputs.sha_short }}
+            ghcr.io/devcairn/polargraph-rest:latest
+            ghcr.io/devcairn/polargraph-rest:${{ steps.vars.outputs.sha_short }}
           cache-from: type=gha,scope=polargraph-rest
           cache-to: type=gha,mode=max,scope=polargraph-rest
 

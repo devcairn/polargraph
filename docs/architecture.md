@@ -2228,7 +2228,7 @@ Package name: `polargraph-client` (PyPI).
 
 ### Go (`clients/go/`)
 
-Module: `github.com/polarops/polargraph-go`.
+Module: `github.com/devcairn/polargraph-go`.
 
 - `polargraph.New(addr, ...Option) (*Client, error)` — constructor
 - Functional options: `WithAPIKey(key)`, `WithTLSCA(path)`

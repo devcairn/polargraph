@@ -1,6 +1,6 @@
 services:
   polargraphd:
-    image: ghcr.io/polarops/polargraph-db:latest
+    image: ghcr.io/devcairn/polargraph-db:latest
     container_name: polargraphd
     ports:
       - "50051:50051"
@@ -16,7 +16,7 @@ services:
     restart: unless-stopped
 
   polargraph-rest:
-    image: ghcr.io/polarops/polargraph-rest:latest
+    image: ghcr.io/devcairn/polargraph-rest:latest
     container_name: polargraph-rest
     ports:
       - "8000:8000"
