@@ -1,0 +1,32 @@
+services:
+  polargraphd:
+    image: ghcr.io/polarops/polargraph-db:latest
+    container_name: polargraphd
+    ports:
+      - "50051:50051"
+      - "9090:9090"
+    volumes:
+      - polargraph_data:/data
+    environment:
+      POLARGRAPH_DATA_DIR: /data
+      POLARGRAPH_LISTEN_ADDR: "0.0.0.0:50051"
+      POLARGRAPH_METRICS_PORT: "9090"
+      RUST_LOG: info
+      LOG_FORMAT: json
+    restart: unless-stopped
+
+  polargraph-rest:
+    image: ghcr.io/polarops/polargraph-rest:latest
+    container_name: polargraph-rest
+    ports:
+      - "8000:8000"
+    environment:
+      POLARGRAPH_UPSTREAM: "http://polargraphd:50051"
+      POLARGRAPH_REST_LISTEN: "0.0.0.0:8000"
+    depends_on:
+      - polargraphd
+    restart: unless-stopped
+
+volumes:
+  polargraph_data:
+    driver: local

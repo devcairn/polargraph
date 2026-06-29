@@ -1,0 +1,94 @@
+# Deploy to ghcr.io + EC2
+#
+# Required GitHub secrets:
+#   SSH_PRIVATE_KEY  — PEM private key for ec2-user@18.237.183.240
+#
+# Images are public on ghcr.io; no registry credentials needed on the server.
+
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [main]
+    types: [completed]
+
+jobs:
+  build-and-push:
+    name: Build & push to ghcr.io
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      sha_short: ${{ steps.vars.outputs.sha_short }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # workflow_run doesn't carry the triggering SHA automatically
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Set short SHA
+        id: vars
+        run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── polargraph-db (Dockerfile) ─────────────────────────────────────────
+      - name: Build and push polargraph-db
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ghcr.io/polarops/polargraph-db:latest
+            ghcr.io/polarops/polargraph-db:${{ steps.vars.outputs.sha_short }}
+          cache-from: type=gha,scope=polargraph-db
+          cache-to: type=gha,mode=max,scope=polargraph-db
+
+      # ── polargraph-rest (Dockerfile.rest) ──────────────────────────────────
+      - name: Build and push polargraph-rest
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.rest
+          push: true
+          tags: |
+            ghcr.io/polarops/polargraph-rest:latest
+            ghcr.io/polarops/polargraph-rest:${{ steps.vars.outputs.sha_short }}
+          cache-from: type=gha,scope=polargraph-rest
+          cache-to: type=gha,mode=max,scope=polargraph-rest
+
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: SSH deploy
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 18.237.183.240
+          username: ec2-user
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+
+            # Pull latest public images and restart containers
+            docker compose pull
+            docker compose up -d
+
+            # Wait for services to initialise
+            sleep 5
+
+            # Health check against the REST gateway
+            curl --fail --silent --show-error --retry 5 --retry-delay 3 \
+              http://localhost:8000/health
