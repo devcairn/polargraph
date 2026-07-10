@@ -209,11 +209,16 @@ pub fn var_pattern_from_proto(proto: &proto::VarPattern) -> Result<VarPattern, S
     } else {
         Some(proto.predicate.clone())
     };
+    let predicate_var = if proto.predicate_var.is_empty() {
+        None
+    } else {
+        Some(proto.predicate_var.clone())
+    };
 
     Ok(VarPattern {
         subject,
         predicate,
-        predicate_var: None,
+        predicate_var,
         object,
         edge_var: None,
         max_hops: None,
@@ -228,6 +233,20 @@ pub fn binding_to_proto(bindings: &Bindings) -> proto::Binding {
             .iter()
             .map(|(k, &v)| (k.clone(), node_id_to_proto(v)))
             .collect(),
+        predicates: std::collections::HashMap::new(),
+    }
+}
+
+pub fn binding_to_proto_full(
+    bindings: &Bindings,
+    pred_bindings: &polargraph_query::datalog::PredBindings,
+) -> proto::Binding {
+    proto::Binding {
+        vars: bindings
+            .iter()
+            .map(|(k, &v)| (k.clone(), node_id_to_proto(v)))
+            .collect(),
+        predicates: pred_bindings.clone(),
     }
 }
 

@@ -85,6 +85,10 @@ message VarPattern {
     Term   subject   = 1;
     string predicate = 2;
     Term   object    = 3;
+    /// Optional variable name that receives the matched predicate string for
+    /// each binding (see `Binding.predicates`). Empty string or omitted means
+    /// the matched predicate is not captured.
+    string predicate_var = 4;
 }
 
 /// A Datalog rule used in recursive queries.
@@ -196,6 +200,9 @@ message QueryRequest {
 /// One satisfying assignment of all variables in the query.
 message Binding {
     map<string, NodeId> vars = 1;
+    /// Predicate strings bound via `VarPattern.predicate_var`, keyed by
+    /// variable name.
+    map<string, string> predicates = 2;
 }
 
 message QueryResponse {

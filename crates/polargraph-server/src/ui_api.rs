@@ -454,6 +454,7 @@ async fn api_query(
             subject,
             predicate: p.p.clone(),
             object,
+            predicate_var: String::new(),
         });
     }
 

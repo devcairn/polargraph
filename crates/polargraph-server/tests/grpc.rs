@@ -104,6 +104,7 @@ fn pattern(sub: Term, pred: &str, obj: Term) -> VarPattern {
         subject: Some(sub),
         predicate: pred.into(),
         object: Some(obj),
+        predicate_var: String::new(),
     }
 }
 
@@ -4638,6 +4639,7 @@ async fn wire_tx_commit_makes_triples_visible() {
                 object: Some(Term {
                     kind: Some(TermKind::Var("v".to_string())),
                 }),
+                predicate_var: String::new(),
             }],
             ..Default::default()
         }))
@@ -4666,6 +4668,7 @@ async fn wire_tx_commit_makes_triples_visible() {
                 object: Some(Term {
                     kind: Some(TermKind::Var("v".to_string())),
                 }),
+                predicate_var: String::new(),
             }],
             ..Default::default()
         }))
@@ -4709,6 +4712,7 @@ async fn wire_tx_rollback_discards_triples() {
                 object: Some(Term {
                     kind: Some(TermKind::Var("v".to_string())),
                 }),
+                predicate_var: String::new(),
             }],
             ..Default::default()
         }))
@@ -4753,6 +4757,7 @@ async fn wire_tx_write_your_own_reads() {
                 object: Some(Term {
                     kind: Some(TermKind::Var("v".to_string())),
                 }),
+                predicate_var: String::new(),
             }],
             tx_id: tx_id.clone(),
             ..Default::default()

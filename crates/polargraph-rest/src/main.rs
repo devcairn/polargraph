@@ -216,6 +216,7 @@ pub fn parse_pattern(s: &str) -> Result<proto::VarPattern, String> {
         subject: Some(subject),
         predicate,
         object: Some(object),
+        predicate_var: String::new(),
     })
 }
 
@@ -552,9 +553,9 @@ async fn handle_insert(
 // ── GET /triples ──────────────────────────────────────────────────────────────
 //
 // Builds a single VarPattern from query params and runs a Query RPC.
-// Because VarPattern.predicate is a filter string (not a variable), the predicate
-// is not included in bindings — the response echoes back the provided predicate
-// or an empty string when none was supplied.
+// The pattern's predicate_var is set to "__p" so the actual matched predicate
+// string comes back on each binding, regardless of whether a predicate filter
+// was supplied.
 
 async fn handle_triples(
     State(state): State<Arc<AppState>>,
@@ -603,6 +604,7 @@ async fn handle_triples(
             subject: Some(subject_term),
             predicate: predicate_filter.clone(),
             object: Some(object_term),
+            predicate_var: "__p".to_string(),
         }],
         snapshot_ts: 0,
         as_of_valid_time: 0,
@@ -627,7 +629,11 @@ async fn handle_triples(
                     .map(node_id_to_uuid_string)
                     .unwrap_or_default()
             }),
-            predicate: predicate_filter.clone(),
+            predicate: b
+                .predicates
+                .get("__p")
+                .cloned()
+                .unwrap_or_else(|| predicate_filter.clone()),
             object: params.object.clone().unwrap_or_else(|| {
                 b.vars
                     .get("__o")
@@ -2038,6 +2044,7 @@ fn sparql_varpat_to_proto(vp: &polargraph_query::VarPattern) -> proto::VarPatter
         subject: Some(sparql_term_to_proto(&vp.subject)),
         predicate: vp.predicate.clone().unwrap_or_default(),
         object: Some(sparql_term_to_proto(&vp.object)),
+        predicate_var: vp.predicate_var.clone().unwrap_or_default(),
     }
 }
 
@@ -2181,23 +2188,27 @@ async fn execute_sparql_construct(
                     object: Some(proto::Term {
                         kind: Some(proto::term::Kind::Var("_o".to_string())),
                     }),
+                    predicate_var: "_p".to_string(),
                 }],
                 ..Default::default()
             };
             let mut client = state.client.clone();
             if let Ok(resp) = client.query(tonic::Request::new(req)).await {
                 for pb in resp.into_inner().bindings {
-                    // We get ?_o bindings (NodeId). We don't get the predicate name
-                    // from the current Query RPC (predicates are strings, not NodeIds).
-                    // Emit what we have: subject known, object known, predicate unknown.
                     if let Some(obj_val) = pb.vars.get("_o") {
                         if obj_val.bytes.len() == 16 {
                             if let Ok(arr) = obj_val.bytes[..16].try_into() {
                                 let obj_uuid = uuid::Uuid::from_bytes(arr);
-                                // Predicate unknown — use a placeholder IRI.
+                                let predicate = pb
+                                    .predicates
+                                    .get("_p")
+                                    .map(|p| format!("<{}>", p))
+                                    .unwrap_or_else(|| {
+                                        "<urn:polargraph:unknownPredicate>".to_string()
+                                    });
                                 result.push(RdfStarTriple {
                                     subject: RdfStarSubject::Iri(node_id_to_iri(id)),
-                                    predicate: "<urn:polargraph:unknownPredicate>".to_string(),
+                                    predicate,
                                     object: node_id_to_iri(&NodeId(obj_uuid)),
                                 });
                             }
@@ -3163,6 +3174,7 @@ async fn export_jsonld_for(
                     object: Some(proto::Term {
                         kind: Some(proto::term::Kind::Var("_o".to_string())),
                     }),
+                    predicate_var: "_p".to_string(),
                 }],
                 ..Default::default()
             };
@@ -3173,9 +3185,16 @@ async fn export_jsonld_for(
                             if let Ok(arr) = obj_val.bytes[..16].try_into() {
                                 let obj_id =
                                     polargraph_core::id::NodeId(uuid::Uuid::from_bytes(arr));
+                                let predicate = pb
+                                    .predicates
+                                    .get("_p")
+                                    .map(|p| format!("<{}>", p))
+                                    .unwrap_or_else(|| {
+                                        "<urn:polargraph:unknownPredicate>".to_string()
+                                    });
                                 all_rdf.push(RdfTriple {
                                     subject: subject_iri_str.clone(),
-                                    predicate: "<urn:polargraph:unknownPredicate>".to_string(),
+                                    predicate,
                                     object: node_id_to_iri(&obj_id),
                                 });
                             }
@@ -3197,6 +3216,7 @@ async fn export_jsonld_for(
                         object: Some(proto::Term {
                             kind: Some(proto::term::Kind::Var("_o".to_string())),
                         }),
+                        predicate_var: String::new(),
                     }],
                     ..Default::default()
                 };
@@ -3354,6 +3374,7 @@ async fn handle_export_subgraph(
                     object: Some(proto::Term {
                         kind: Some(proto::term::Kind::Var("_o".to_string())),
                     }),
+                    predicate_var: "_p".to_string(),
                 }],
                 ..Default::default()
             };
@@ -3364,10 +3385,12 @@ async fn handle_export_subgraph(
                             if let Ok(arr) = obj_val.bytes[..16].try_into() {
                                 let obj_id =
                                     polargraph_core::id::NodeId(uuid::Uuid::from_bytes(arr));
-                                let pred_iri = if pred.is_empty() {
-                                    "<urn:polargraph:unknownPredicate>".to_string()
-                                } else {
+                                let pred_iri = if !pred.is_empty() {
                                     format!("<{}>", pred)
+                                } else if let Some(p) = pb.predicates.get("_p") {
+                                    format!("<{}>", p)
+                                } else {
+                                    "<urn:polargraph:unknownPredicate>".to_string()
                                 };
                                 all_rdf.push(RdfTriple {
                                     subject: subject_iri.clone(),

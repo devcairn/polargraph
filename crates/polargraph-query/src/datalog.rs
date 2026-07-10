@@ -527,6 +527,23 @@ pub fn execute_query_with_pending(
     deadline: Option<Instant>,
     registry: Option<&EdgeTypeRegistry>,
 ) -> Result<Vec<Bindings>, QueryError> {
+    Ok(
+        execute_query_with_pending_full(query, snapshot, pending, deadline, registry)?
+            .into_iter()
+            .map(|(b, _pb)| b)
+            .collect(),
+    )
+}
+
+/// Like [`execute_query_with_pending`] but also returns predicate variable
+/// bindings — see [`execute_query_full`].
+pub fn execute_query_with_pending_full(
+    query: &Query,
+    snapshot: &Snapshot,
+    pending: &[Triple],
+    deadline: Option<Instant>,
+    registry: Option<&EdgeTypeRegistry>,
+) -> Result<Vec<(Bindings, PredBindings)>, QueryError> {
     let mut solutions: Vec<(Bindings, PredBindings)> = vec![(HashMap::new(), PredBindings::new())];
 
     for vp in &query.patterns {
@@ -554,7 +571,7 @@ pub fn execute_query_with_pending(
         }
     }
 
-    Ok(solutions.into_iter().map(|(b, _pb)| b).collect())
+    Ok(solutions)
 }
 
 // ── Recursive Datalog ─────────────────────────────────────────────────────────
@@ -817,6 +834,22 @@ pub fn execute_query_hybrid(
     derived: &DerivedFacts,
     deadline: Option<Instant>,
 ) -> Result<Vec<Bindings>, QueryError> {
+    Ok(
+        execute_query_hybrid_full(query, snapshot, derived, deadline)?
+            .into_iter()
+            .map(|(b, _pb)| b)
+            .collect(),
+    )
+}
+
+/// Like [`execute_query_hybrid`] but also returns predicate variable bindings
+/// — see [`execute_query_full`].
+pub fn execute_query_hybrid_full(
+    query: &Query,
+    snapshot: &Snapshot,
+    derived: &DerivedFacts,
+    deadline: Option<Instant>,
+) -> Result<Vec<(Bindings, PredBindings)>, QueryError> {
     let mut solutions: Vec<(Bindings, PredBindings)> = vec![(HashMap::new(), PredBindings::new())];
 
     for vp in &query.patterns {
@@ -843,7 +876,7 @@ pub fn execute_query_hybrid(
         }
     }
 
-    Ok(solutions.into_iter().map(|(b, _pb)| b).collect())
+    Ok(solutions)
 }
 
 /// Evaluate a single concrete `Pattern` against storage **or** `derived` facts.
