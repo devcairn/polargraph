@@ -1010,10 +1010,19 @@ impl TripleStore {
     ///
     /// 1. Prefix-scan the given CF.
     /// 2. Discard entries with `tt > snapshot_ts` (not yet committed at our snapshot).
-    /// 3. If `vt_as_of` is set, discard entries whose valid-time window does not
-    ///    cover the requested point (`vt_start <= vt_as_of < vt_end`).
-    /// 4. Group by (subject, pred_id, object): keep only the entry with the
-    ///    highest `tt` (latest committed version satisfying both filters).
+    /// 3. Group by (subject, pred_id, object): keep only the entry with the
+    ///    highest `tt` — i.e. the most recent transaction-time version we know
+    ///    about for that fact, regardless of its valid-time window. This step
+    ///    must run before the valid-time filter: a `DELETE` (or a value
+    ///    update) is recorded as a *new* version with a closed/adjusted
+    ///    valid-time window, and it must supersede the older version it
+    ///    corrects even once its own window no longer covers `vt_as_of` —
+    ///    otherwise an older, still-open-ended version of the same fact would
+    ///    incorrectly win, making deletes and updates invisible to present-time
+    ///    reads.
+    /// 4. If `vt_as_of` is set, apply it only to the winning (latest-tt)
+    ///    version of each key: keep the fact only if its valid-time window
+    ///    covers the requested point (`vt_start <= vt_as_of < vt_end`).
     /// 5. Reconstruct and return `Triple` values.
     fn snapshot_scan_cf(
         &self,
@@ -1034,8 +1043,9 @@ impl TripleStore {
             .iterator_cf(&cf, IteratorMode::From(prefix, Direction::Forward));
 
         // Map: (subject, pred_id, object) → (tt, value_bytes)
-        // We keep only the latest version visible at snapshot_ts that also
-        // satisfies the optional valid-time filter.
+        // We keep only the latest version visible at snapshot_ts; the
+        // valid-time filter (if any) is applied afterward to that single
+        // winning version.
         let mut latest: HashMap<(NodeId, PredId, NodeId), (Timestamp, Vec<u8>)> = HashMap::new();
 
         for item in iter {
@@ -1062,9 +1072,18 @@ impl TripleStore {
                 continue;
             }
 
-            // Valid-time filter: keep only entries whose vt window covers vt_as_of.
-            // Checked before updating the latest map so that we pick the highest-tt
-            // version that is actually valid at the requested point in time.
+            let slot = latest
+                .entry((subject, pred_id, object))
+                .or_insert((Timestamp(i64::MIN), vec![]));
+            if tt > slot.0 {
+                *slot = (tt, value_bytes);
+            }
+        }
+
+        // Apply the valid-time filter (if any) to each winning version, then
+        // reconstruct triples for the ones that pass.
+        let mut triples = Vec::with_capacity(latest.len());
+        for ((subject, pred_id, object), (tt, value_bytes)) in latest {
             if let Some(vt) = vt_as_of {
                 let pass = match codec::decode_value(&value_bytes) {
                     Ok(DecodedValue::Relation { temporal, .. }) => {
@@ -1080,17 +1099,6 @@ impl TripleStore {
                 }
             }
 
-            let slot = latest
-                .entry((subject, pred_id, object))
-                .or_insert((Timestamp(i64::MIN), vec![]));
-            if tt > slot.0 {
-                *slot = (tt, value_bytes);
-            }
-        }
-
-        // Reconstruct triples from the winning versions.
-        let mut triples = Vec::with_capacity(latest.len());
-        for ((subject, pred_id, object), (tt, value_bytes)) in latest {
             let triple = self.reconstruct(subject, pred_id, object, tt, &value_bytes)?;
             triples.push(triple);
         }

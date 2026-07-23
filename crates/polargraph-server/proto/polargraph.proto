@@ -174,8 +174,9 @@ message QueryRequest {
     /// 0 or omitted means "latest committed state".
     int64               snapshot_ts      = 2;
     /// Valid-time point-in-time filter (unix microseconds).
-    /// When non-zero, only triples whose valid-time window [vt_start, vt_end)
-    /// contains this value are returned. 0 = no valid-time filter.
+    /// Only triples whose valid-time window [vt_start, vt_end) contains this
+    /// value are returned. 0 = now (current state; deleted/closed triples are
+    /// hidden). Set to a past timestamp for historical/time-travel queries.
     int64               as_of_valid_time = 3;
     /// Transaction-time point-in-time filter (unix microseconds).
     /// When non-zero, overrides snapshot_ts — only triples committed at or
@@ -696,7 +697,8 @@ message CypherQueryRequest {
     ///   ORDER BY n DESC
     ///   SKIP 0 LIMIT 10
     string cypher = 1;
-    /// Valid-time point-in-time filter (unix microseconds). 0 = no filter.
+    /// Valid-time point-in-time filter (unix microseconds). 0 = now (current
+    /// state; deleted/closed triples are hidden). Past timestamp = time-travel.
     int64  as_of_valid_time = 2;
     /// Transaction-time snapshot override (unix microseconds). 0 = latest.
     int64  as_of_tx_time    = 3;

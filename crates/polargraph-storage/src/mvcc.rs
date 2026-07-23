@@ -361,14 +361,19 @@ impl Transaction {
 /// All scans return only triples committed at or before `ts`, with each
 /// (subject, predicate, object) deduplicated to its latest version.
 ///
-/// `vt_as_of`: when `Some(t)`, scans additionally filter to triples whose
-/// valid-time window covers `t` (`vt_start ≤ t < vt_end`).  `None` means no
-/// valid-time filter — all triples visible at `ts` are returned regardless of
-/// their valid-time range.
+/// `vt_as_of`: scans filter to triples whose valid-time window covers `t`
+/// (`vt_start ≤ t < vt_end`). Defaults to "now" at construction time, so a
+/// fresh `Snapshot` shows current state — triples closed by `DELETE` (which
+/// works by closing their valid-time window, see
+/// `polargraph_query::cypher::execute_write_ops`) are correctly hidden.
+/// Call `with_vt_as_of` to pin the snapshot to a different point in valid
+/// time for historical/time-travel queries.
 pub struct Snapshot {
     store: TripleStore,
     pub ts: Timestamp,
-    /// Optional valid-time point-in-time filter (unix µs).
+    /// Valid-time point-in-time filter (unix µs). Always `Some` — defaults to
+    /// "now" so closed (deleted) triples aren't visible unless a caller
+    /// explicitly asks for a historical point via `with_vt_as_of`.
     pub vt_as_of: Option<i64>,
 }
 
@@ -377,11 +382,12 @@ impl Snapshot {
         Self {
             store,
             ts,
-            vt_as_of: None,
+            vt_as_of: Some(Timestamp::now().0),
         }
     }
 
-    /// Set the valid-time filter for this snapshot.
+    /// Pin the valid-time filter to a specific point in time (for historical /
+    /// time-travel queries).
     ///
     /// All subsequent scans will restrict results to triples whose valid-time
     /// window `[vt_start, vt_end)` contains `vt` (i.e. `vt_start ≤ vt < vt_end`).
