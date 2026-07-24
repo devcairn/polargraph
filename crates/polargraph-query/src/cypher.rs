@@ -40,6 +40,7 @@ use polargraph_core::{
     value::Value,
 };
 use polargraph_storage::{Snapshot, StorageError, Transaction};
+use uuid::Uuid;
 
 use crate::aggregation::{AggFunc, AggregationSpec, OrderSpec, SortDir};
 use crate::datalog::{Bindings, Query, Rule, Term, VarPattern};
@@ -340,6 +341,27 @@ pub enum CypherWriteError {
     UnboundVariable(String),
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
+    #[error("'id' property must be a valid UUID string, got: {0}")]
+    InvalidNodeId(String),
+}
+
+/// Look for an `id` property in a node's property list and, if present,
+/// parse it as a UUID to use as the node's internal [`NodeId`] — the same
+/// identity space the RDF `/insert` path uses for caller-supplied ids. This
+/// keeps Cypher-created nodes addressable by the id the caller assigned them
+/// rather than a randomly minted one.
+fn node_id_from_props(props: &[(String, CypherValue)]) -> Result<Option<NodeId>, CypherWriteError> {
+    for (key, val) in props {
+        if key == "id" {
+            return match val {
+                CypherValue::Str(s) => Uuid::parse_str(s)
+                    .map(|u| Some(NodeId(u)))
+                    .map_err(|_| CypherWriteError::InvalidNodeId(s.clone())),
+                other => Err(CypherWriteError::InvalidNodeId(format!("{other:?}"))),
+            };
+        }
+    }
+    Ok(None)
 }
 
 pub struct WriteResult {
@@ -392,7 +414,7 @@ pub fn execute_write_ops(
     for op in ops {
         match op {
             WriteOp::CreateNode { var, label, props } => {
-                let node_id = NodeId::new();
+                let node_id = node_id_from_props(props)?.unwrap_or_else(NodeId::new);
                 let temporal = BiTemporalRange::assert_now(Timestamp::now());
 
                 if let Some(ref lbl) = label {
@@ -444,11 +466,22 @@ pub fn execute_write_ops(
             }
 
             WriteOp::Merge { var, label, props } => {
-                let found = find_matching_node(snapshot, label.as_deref(), props)?;
+                let id_node = node_id_from_props(props)?;
+                let found = if let Some(id_node) = id_node {
+                    // Caller supplied an explicit id: the node exists iff that
+                    // NodeId already has data, regardless of matching props.
+                    if snapshot.scan_by_subject(&id_node)?.is_empty() {
+                        None
+                    } else {
+                        Some(id_node)
+                    }
+                } else {
+                    find_matching_node(snapshot, label.as_deref(), props)?
+                };
                 let node_id = if let Some(existing) = found {
                     existing
                 } else {
-                    let node_id = NodeId::new();
+                    let node_id = id_node.unwrap_or_else(NodeId::new);
                     let temporal = BiTemporalRange::assert_now(Timestamp::now());
 
                     if let Some(ref lbl) = label {

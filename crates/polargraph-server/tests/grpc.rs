@@ -4582,6 +4582,93 @@ async fn cypher_write_merge_is_idempotent() {
     );
 }
 
+#[tokio::test]
+async fn cypher_create_with_id_prop_uses_it_as_node_id() {
+    let (svc, _dir) = open();
+
+    let caller_id = polargraph_core::id::NodeId::new().0;
+    let write_resp = svc
+        .cypher_write(Request::new(CypherWriteRequest {
+            cypher: format!(r#"CREATE (a:Person {{id: "{caller_id}", name: "Alice"}})"#),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(write_resp.created_node_ids.len(), 1);
+    let created_bytes = &write_resp.created_node_ids[0];
+    let created_uuid = uuid::Uuid::from_slice(created_bytes).unwrap();
+    assert_eq!(
+        created_uuid, caller_id,
+        "the node's internal NodeId should be the caller-supplied id, not a minted one"
+    );
+}
+
+#[tokio::test]
+async fn cypher_merge_with_id_prop_is_idempotent_on_that_id() {
+    let (svc, _dir) = open();
+
+    let caller_id = polargraph_core::id::NodeId::new().0;
+    let do_merge = || CypherWriteRequest {
+        cypher: format!(r#"MERGE (c:Company {{id: "{caller_id}", name: "Acme"}})"#),
+        ..Default::default()
+    };
+
+    let r1 = svc
+        .cypher_write(Request::new(do_merge()))
+        .await
+        .unwrap()
+        .into_inner();
+    let r2 = svc
+        .cypher_write(Request::new(do_merge()))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(
+        r1.created_node_ids.len(),
+        1,
+        "first MERGE should create the node"
+    );
+    let created_uuid = uuid::Uuid::from_slice(&r1.created_node_ids[0]).unwrap();
+    assert_eq!(created_uuid, caller_id);
+    assert_eq!(
+        r2.created_node_ids.len(),
+        0,
+        "second MERGE should be a no-op"
+    );
+
+    let query_resp = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: r#"MATCH (c:Company) RETURN c"#.to_string(),
+            as_of_valid_time: 0,
+            as_of_tx_time: 0,
+            vector: vec![],
+            ef: 0,
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(query_resp.rows.len(), 1);
+}
+
+#[tokio::test]
+async fn cypher_create_with_non_uuid_id_prop_is_rejected() {
+    let (svc, _dir) = open();
+
+    let result = svc
+        .cypher_write(Request::new(CypherWriteRequest {
+            cypher: r#"CREATE (a:Person {id: "not-a-uuid", name: "Alice"})"#.to_string(),
+            ..Default::default()
+        }))
+        .await;
+
+    assert!(result.is_err(), "non-UUID id property should be rejected");
+    assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+}
+
 // ── Wire transactions ─────────────────────────────────────────────────────────
 
 #[tokio::test]

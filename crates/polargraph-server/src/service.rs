@@ -2340,6 +2340,9 @@ impl PolarGraphService for PolarGraphServer {
             polargraph_query::cypher::CypherWriteError::Parse(pe) => {
                 Status::invalid_argument(format!("cypher parse error: {pe}"))
             }
+            polargraph_query::cypher::CypherWriteError::InvalidNodeId(v) => {
+                Status::invalid_argument(format!("'id' property must be a valid UUID string: {v}"))
+            }
         };
 
         // Helper closure to run the write ops given a mutable Transaction reference.
