@@ -1010,19 +1010,31 @@ impl TripleStore {
     ///
     /// 1. Prefix-scan the given CF.
     /// 2. Discard entries with `tt > snapshot_ts` (not yet committed at our snapshot).
-    /// 3. Group by (subject, pred_id, object): keep only the entry with the
-    ///    highest `tt` — i.e. the most recent transaction-time version we know
-    ///    about for that fact, regardless of its valid-time window. This step
-    ///    must run before the valid-time filter: a `DELETE` (or a value
-    ///    update) is recorded as a *new* version with a closed/adjusted
-    ///    valid-time window, and it must supersede the older version it
-    ///    corrects even once its own window no longer covers `vt_as_of` —
-    ///    otherwise an older, still-open-ended version of the same fact would
-    ///    incorrectly win, making deletes and updates invisible to present-time
-    ///    reads.
-    /// 4. If `vt_as_of` is set, apply it only to the winning (latest-tt)
-    ///    version of each key: keep the fact only if its valid-time window
-    ///    covers the requested point (`vt_start <= vt_as_of < vt_end`).
+    /// 3. If `vt_as_of` is `None` (no valid-time filtering requested — used
+    ///    internally by transactional reads), group by (subject, pred_id,
+    ///    object) and keep only the entry with the highest `tt`, ignoring
+    ///    valid-time windows entirely.
+    /// 4. If `vt_as_of` is `Some(vt)`, the winning version per key is chosen
+    ///    by *valid-time start*, not raw `tt`: among entries whose window has
+    ///    already begun as of `vt` (`vt_start <= vt`), keep the one with the
+    ///    latest `vt_start` (ties broken by highest `tt`). This correctly
+    ///    distinguishes two cases that both show up as a new row with a
+    ///    higher `tt`:
+    ///      - A **new temporal version** (e.g. a property changing from
+    ///        "active" to "retired" at t=2000) has a `vt_start` strictly
+    ///        after the previous version's `vt_start`, so it only takes over
+    ///        once its own window has begun — earlier `vt_as_of` points still
+    ///        correctly resolve to the older version.
+    ///      - A **DELETE** (or in-place correction) reuses the *same*
+    ///        `vt_start` as the version it corrects, just with an earlier
+    ///        `vt_end`. Because the `vt_start` ties, the higher-`tt` (i.e.
+    ///        the correcting) entry always wins the tie-break, so once its
+    ///        own window closes the fact is hidden rather than falling back
+    ///        to the older, still-open-ended version.
+    ///    The winning entry is then only returned if its own window actually
+    ///    covers `vt` (`vt < vt_end`); otherwise the key is dropped entirely
+    ///    (this is what makes DELETE hide data instead of resurrecting an
+    ///    older version).
     /// 5. Reconstruct and return `Triple` values.
     fn snapshot_scan_cf(
         &self,
@@ -1042,11 +1054,11 @@ impl TripleStore {
             .db
             .iterator_cf(&cf, IteratorMode::From(prefix, Direction::Forward));
 
-        // Map: (subject, pred_id, object) → (tt, value_bytes)
-        // We keep only the latest version visible at snapshot_ts; the
-        // valid-time filter (if any) is applied afterward to that single
-        // winning version.
-        let mut latest: HashMap<(NodeId, PredId, NodeId), (Timestamp, Vec<u8>)> = HashMap::new();
+        // Map: (subject, pred_id, object) → (vt_start, tt, vt_end, value_bytes)
+        // `vt_start`/`vt_end` are only meaningful (and only populated) when
+        // `vt_as_of` is `Some`; in the `None` case we only ever compare `tt`.
+        let mut latest: HashMap<(NodeId, PredId, NodeId), (i64, Timestamp, i64, Vec<u8>)> =
+            HashMap::new();
 
         for item in iter {
             let (key, value) = item?;
@@ -1072,29 +1084,46 @@ impl TripleStore {
                 continue;
             }
 
-            let slot = latest
-                .entry((subject, pred_id, object))
-                .or_insert((Timestamp(i64::MIN), vec![]));
-            if tt > slot.0 {
-                *slot = (tt, value_bytes);
+            let key_tuple = (subject, pred_id, object);
+
+            if let Some(vt) = vt_as_of {
+                let temporal = match codec::decode_value(&value_bytes) {
+                    Ok(DecodedValue::Relation { temporal, .. }) => temporal,
+                    Ok(DecodedValue::Property { temporal, .. }) => temporal,
+                    Err(_) => continue,
+                };
+
+                // This version hasn't started yet as of `vt` — it can't be
+                // the governing version for this point in valid time.
+                if temporal.vt_start.0 > vt {
+                    continue;
+                }
+
+                let slot = latest
+                    .entry(key_tuple)
+                    .or_insert((i64::MIN, Timestamp(i64::MIN), i64::MIN, vec![]));
+                if temporal.vt_start.0 > slot.0
+                    || (temporal.vt_start.0 == slot.0 && tt > slot.1)
+                {
+                    *slot = (temporal.vt_start.0, tt, temporal.vt_end.0, value_bytes);
+                }
+            } else {
+                let slot = latest
+                    .entry(key_tuple)
+                    .or_insert((0, Timestamp(i64::MIN), 0, vec![]));
+                if tt > slot.1 {
+                    *slot = (0, tt, 0, value_bytes);
+                }
             }
         }
 
-        // Apply the valid-time filter (if any) to each winning version, then
-        // reconstruct triples for the ones that pass.
         let mut triples = Vec::with_capacity(latest.len());
-        for ((subject, pred_id, object), (tt, value_bytes)) in latest {
+        for ((subject, pred_id, object), (_vt_start, tt, vt_end, value_bytes)) in latest {
             if let Some(vt) = vt_as_of {
-                let pass = match codec::decode_value(&value_bytes) {
-                    Ok(DecodedValue::Relation { temporal, .. }) => {
-                        temporal.vt_start.0 <= vt && vt < temporal.vt_end.0
-                    }
-                    Ok(DecodedValue::Property { temporal, .. }) => {
-                        temporal.vt_start.0 <= vt && vt < temporal.vt_end.0
-                    }
-                    Err(_) => false,
-                };
-                if !pass {
+                // The winning version's own window must actually cover `vt`;
+                // otherwise it was closed (e.g. by a DELETE) before this
+                // point and the key is not visible here.
+                if vt >= vt_end {
                     continue;
                 }
             }
