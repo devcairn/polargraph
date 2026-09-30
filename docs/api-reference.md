@@ -629,6 +629,7 @@ pub enum GraphTerm {
     Union,              // default
     Default,            // default graph only
     Bound(GraphId),
+    Iri(String),        // one named graph by IRI, resolved at evaluation
     Var(String),        // named graphs; binds the graph IRI node
     Set(Vec<GraphId>),
 }
@@ -638,7 +639,9 @@ VarPattern { subject, predicate: Some("pred".into()), object, ..VarPattern::new(
 ```
 
 Once a graph variable is bound, later patterns using it are restricted to
-that graph. Pending-transaction writes and rule-derived facts only match
+that graph. `scope_to_graph(&mut patterns, &mut rules, &term)` scopes every
+unscoped pattern (rule bodies included, patterns over rule-derived
+predicates excepted). Pending-transaction writes and rule-derived facts only match
 `Union` patterns; `max_hops` patterns ignore the graph term.
 
 ---
@@ -805,6 +808,10 @@ to Datalog IR and evaluated by the standard query pipeline.
 | `ef` | `uint32` | HNSW exploration factor override (0 = server default) |
 | `limit` | `uint32` | Result limit (overrides `LIMIT N` in the query string) |
 | `tx_id` | `string` | Optional wire transaction ID for consistent reads |
+| `graphs` | `repeated string` | Dataset: graph IRIs the MATCH reads (empty = every graph); a `USE GRAPH <iri>` clause wins |
+
+A leading `USE GRAPH <iri>` (or `USE <iri>`) scopes the MATCH to one graph.
+Property filters and projections read every graph.
 
 **Response fields:** `repeated CypherRow rows` where each row contains a
 `map<string, Value> columns` matching the `RETURN` clause variables.
@@ -834,8 +841,9 @@ Executes a Cypher write statement (CREATE, MERGE, SET, DELETE).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `cypher` | `string` | Write Cypher statement |
+| `cypher` | `string` | Write Cypher statement (optionally prefixed `USE GRAPH <iri>`) |
 | `tx_id` | `string` | Optional wire transaction ID; writes buffered until commit |
+| `graph` | `string` | Graph to write to and MATCH / MERGE / DELETE in (as `USE GRAPH`; interned on first use). Empty = writes to the default graph, reads every graph. Conflicting with `USE GRAPH` is `INVALID_ARGUMENT` |
 
 **Response fields:**
 
@@ -977,11 +985,11 @@ without a suffix.
 
 ### `POST /cypher`
 
-Request body mirrors `CypherQueryRequest`. Returns `{"rows": [{...}, ...]}`.
+Request body mirrors `CypherQueryRequest` (including `"graphs"`). Returns `{"rows": [{...}, ...]}`.
 
 ### `POST /cypher/write`
 
-Request body: `{"cypher": "...", "tx_id": "..."}`. Returns
+Request body: `{"cypher": "...", "tx_id": "...", "graph": "<iri>"}`. Returns
 `{"created_node_ids": [...], "triples_written": N, "commit_ts": N}`.
 
 ### `POST /query/stream` and `POST /cypher/stream`
@@ -1076,6 +1084,7 @@ by the SPARQL Update DELETE DATA handler and available directly.
 | `vt_end` | `int64` | Valid-time end to write (0 = current timestamp) |
 | `object_id` | `bytes` | Optional 16-byte object: only relations to this node are closed (properties untouched) |
 | `value` | `Value` | Optional: only properties with exactly this value are closed (relations untouched). Mutually exclusive with `object_id` |
+| `graph` | `GraphTerm` | Optional: unset = every graph (each copy closed in its own graph); `default_graph`, `iri` or `set` restrict it; a variable is `INVALID_ARGUMENT`, an unknown IRI `NOT_FOUND` |
 
 **Response fields:** `deleted_count` — number of entries closed.
 
@@ -1137,12 +1146,23 @@ Body can be:
 
 Response format negotiated via `Accept` header, same as `GET /sparql`.
 
+Datasets: `GRAPH <iri>`, `GRAPH ?g`, `FROM` and `FROM NAMED` follow SPARQL
+1.1, with the default graph being the union of all graphs when there is no
+dataset clause. The protocol parameters `default-graph-uri` and
+`named-graph-uri` (repeatable, in the URL or a form body) replace the
+query's dataset. See "SPARQL datasets and graph updates" in
+`docs/architecture.md`.
+
 ### `POST /sparql/update`
 
 Executes a SPARQL 1.1 Update request. Body is a raw SPARQL Update string.
-Supports `INSERT DATA`, `DELETE DATA`, and `INSERT/DELETE WHERE`. Returns
-`{"ok": bool, "inserted": N, "deleted": N, "failed": N}`. Each deleted quad
-closes exactly that triple. IRIs map to nodes the same way as `/import/rdf`
+Supports `INSERT DATA` / `DELETE DATA` (with `GRAPH`), `INSERT/DELETE WHERE`
+(graph templates, `USING`), `CLEAR` / `DROP` (graph, `DEFAULT`, `NAMED`,
+`ALL`, `SILENT`), `CREATE`, and `ADD` / `COPY` / `MOVE` (run as `CopyGraph`);
+`LOAD` is reported as unsupported. Returns
+`{"ok": bool, "inserted": N, "deleted": N, "failed": N, "errors": [...]}`.
+Each deleted quad closes exactly that triple — in the named graph, or in
+every graph when there is no `GRAPH`. IRIs map to nodes the same way as `/import/rdf`
 (`urn:uuid:` IRIs keep their UUID, others are hashed).
 
 ---
