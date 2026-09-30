@@ -120,6 +120,28 @@ message VarPattern {
     /// each binding (see `Binding.predicates`). Empty string or omitted means
     /// the matched predicate is not captured.
     string predicate_var = 4;
+    /// Which graph(s) the pattern matches in. Unset = every graph (union),
+    /// or the request's `graphs` dataset when one is given.
+    GraphTerm graph = 5;
+}
+
+/// The graph slot of a pattern.
+message GraphTerm {
+    oneof kind {
+        /// true = only the default graph.
+        bool     default_graph = 1;
+        /// One named graph, by IRI. An unknown IRI matches nothing.
+        string   iri           = 2;
+        /// A graph variable: binds the IRI node of each match's named graph
+        /// (never the default graph); restricts the match when already bound.
+        string   var           = 3;
+        /// A set of named graphs, by IRI.
+        GraphSet set           = 4;
+    }
+}
+
+message GraphSet {
+    repeated string iris = 1;
 }
 
 /// A Datalog rule used in recursive queries.
@@ -235,6 +257,9 @@ message QueryRequest {
     /// Named query parameters for use with `$param` syntax. Keys are parameter names
     /// (without the `$`); values are JSON-encoded `Value` objects.
     map<string, string> params = 8;
+    /// Dataset: graph IRIs that patterns without their own `graph` term match
+    /// in (like SPARQL FROM). Empty = every graph.
+    repeated string graphs = 9;
 }
 
 /// One satisfying assignment of all variables in the query.
@@ -996,6 +1021,108 @@ message RunMaterializationResponse {
 
 // ── Service ───────────────────────────────────────────────────────────────────
 
+// ── Named graphs ──────────────────────────────────────────────────────────────
+
+/// One metadata property of a graph (stored in the system graph
+/// `urn:pg:graph:meta` as a property of the graph's IRI node).
+message GraphMetadata {
+    string predicate = 1;
+    Value  value     = 2;
+}
+
+message GraphInfo {
+    string iri = 1;
+    /// Interned id (0 = default graph, which has no IRI).
+    uint32 id  = 2;
+    repeated GraphMetadata metadata = 3;
+}
+
+message CreateGraphRequest {
+    string iri = 1;
+    /// Set (replace) these metadata properties.
+    repeated GraphMetadata metadata = 2;
+}
+
+message CreateGraphResponse {
+    GraphInfo graph = 1;
+}
+
+message ListGraphsRequest {
+    /// Only graphs whose metadata has every one of these (predicate, value)
+    /// pairs. Empty = all named graphs.
+    repeated GraphMetadata filter = 1;
+    /// Include the system graph `urn:pg:graph:meta`.
+    bool include_system = 2;
+}
+
+message ListGraphsResponse {
+    repeated GraphInfo graphs = 1;
+}
+
+message GraphStatsRequest {
+    /// Graph IRI; empty = the default graph.
+    string iri = 1;
+}
+
+message GraphStatsResponse {
+    string iri = 1;
+    /// Quads valid now.
+    uint64 live_quads = 2;
+    /// Latest transaction time among live quads (µs since epoch); 0 if none.
+    int64 last_write_tt = 3;
+}
+
+message CopyGraphRequest {
+    /// Source / target graph IRIs; empty = the default graph.
+    string source = 1;
+    string target = 2;
+    /// true: drop the target's quads first (SPARQL COPY); false: add (ADD).
+    bool clear_target = 3;
+}
+
+message CopyGraphResponse {
+    uint64 quads = 1;
+}
+
+message MoveGraphRequest {
+    string source = 1;
+    string target = 2;
+}
+
+message DropGraphRequest {
+    /// Graph IRI; empty = the default graph.
+    string iri = 1;
+}
+
+message DropGraphResponse {
+    /// Quads closed (bitemporal: history remains queryable).
+    uint64 quads_closed = 1;
+}
+
+message ExportGraphRequest {
+    /// Graph IRI; empty = the default graph.
+    string iri = 1;
+    /// Export the default graph and every named graph (not the system
+    /// graph); `iri` is ignored.
+    bool all_graphs = 2;
+}
+
+/// One live quad. Relation quads set `node`, property quads set `value`.
+message ExportedQuad {
+    NodeId subject = 1;
+    string predicate = 2;
+    oneof object {
+        NodeId node = 3;
+        Value value = 4;
+    }
+    /// Graph IRI; empty = the default graph.
+    string graph = 5;
+}
+
+message ExportGraphChunk {
+    repeated ExportedQuad quads = 1;
+}
+
 message ResolveIrisRequest {
     /// Nodes to name. At most 10 000 per request.
     repeated NodeId nodes = 1;
@@ -1014,6 +1141,21 @@ service PolarGraphService {
 
     /// Map node IDs back to IRIs via the IRI dictionary.
     rpc ResolveIris(ResolveIrisRequest) returns (ResolveIrisResponse);
+
+    /// Register a named graph (idempotent) and set its metadata.
+    rpc CreateGraph(CreateGraphRequest) returns (CreateGraphResponse);
+    /// List named graphs with their metadata, optionally filtered.
+    rpc ListGraphs(ListGraphsRequest) returns (ListGraphsResponse);
+    /// Live-quad count and last write time of one graph.
+    rpc GraphStats(GraphStatsRequest) returns (GraphStatsResponse);
+    /// Copy a graph's live quads into another graph (COPY / ADD semantics).
+    rpc CopyGraph(CopyGraphRequest) returns (CopyGraphResponse);
+    /// Copy into the target (replacing it), then drop the source.
+    rpc MoveGraph(MoveGraphRequest) returns (CopyGraphResponse);
+    /// Close every live quad of a graph (bitemporal tombstones).
+    rpc DropGraph(DropGraphRequest) returns (DropGraphResponse);
+    /// Stream the live quads of one graph, or of the whole dataset.
+    rpc ExportGraph(ExportGraphRequest) returns (stream ExportGraphChunk);
 
     /// Execute a conjunctive query and return all satisfying variable bindings.
     rpc Query(QueryRequest) returns (QueryResponse);

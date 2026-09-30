@@ -199,22 +199,35 @@ pub fn serialize_ntriples(triples: &[RdfTriple]) -> String {
 ///
 /// Groups triples by subject and emits common prefix declarations.
 pub fn serialize_turtle(triples: &[RdfTriple]) -> String {
-    use std::collections::BTreeMap;
-
-    let prefixes = [
-        ("xsd:", "http://www.w3.org/2001/XMLSchema#"),
-        ("rdf:", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
-        ("rdfs:", "http://www.w3.org/2000/01/rdf-schema#"),
-        ("owl:", "http://www.w3.org/2002/07/owl#"),
-    ];
-
-    let mut out = String::new();
-    for (prefix, iri) in &prefixes {
-        out.push_str(&format!("@prefix {} <{}> .\n", prefix, iri));
-    }
+    let mut out = turtle_prefixes();
     if !triples.is_empty() {
         out.push('\n');
     }
+    write_turtle_body(&mut out, triples.iter(), "");
+    out
+}
+
+const TURTLE_PREFIXES: [(&str, &str); 4] = [
+    ("xsd:", "http://www.w3.org/2001/XMLSchema#"),
+    ("rdf:", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+    ("rdfs:", "http://www.w3.org/2000/01/rdf-schema#"),
+    ("owl:", "http://www.w3.org/2002/07/owl#"),
+];
+
+fn turtle_prefixes() -> String {
+    TURTLE_PREFIXES
+        .iter()
+        .map(|(prefix, iri)| format!("@prefix {} <{}> .\n", prefix, iri))
+        .collect()
+}
+
+/// Subject-grouped Turtle statements, each line prefixed with `indent`.
+fn write_turtle_body<'a>(
+    out: &mut String,
+    triples: impl Iterator<Item = &'a RdfTriple>,
+    indent: &str,
+) {
+    use std::collections::BTreeMap;
 
     // Group by subject (BTreeMap keeps output deterministic).
     let mut by_subject: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
@@ -226,13 +239,66 @@ pub fn serialize_turtle(triples: &[RdfTriple]) -> String {
     }
 
     for (subj, preds) in &by_subject {
+        out.push_str(indent);
         out.push_str(subj);
         out.push('\n');
         for (i, (pred, obj)) in preds.iter().enumerate() {
             let terminator = if i == preds.len() - 1 { " ." } else { " ;" };
-            out.push_str(&format!("    {} {}{}\n", pred, obj, terminator));
+            out.push_str(&format!("{indent}    {} {}{}\n", pred, obj, terminator));
         }
         out.push('\n');
+    }
+}
+
+// ── Quads: N-Quads and TriG ───────────────────────────────────────────────────
+
+/// An [`RdfTriple`] in a graph. `graph` is a rendered IRI (`<…>`) or blank
+/// node (`_:…`); `None` is the default graph.
+pub struct RdfQuad {
+    pub triple: RdfTriple,
+    pub graph: Option<String>,
+}
+
+/// Serialize quads to [N-Quads](https://www.w3.org/TR/n-quads/): one line per
+/// quad, with the graph label omitted for the default graph.
+pub fn serialize_nquads(quads: &[RdfQuad]) -> String {
+    let mut out = String::new();
+    for q in quads {
+        let t = &q.triple;
+        out.push_str(&format!("{} {} {}", t.subject, t.predicate, t.object));
+        if let Some(g) = &q.graph {
+            out.push(' ');
+            out.push_str(g);
+        }
+        out.push_str(" .\n");
+    }
+    out
+}
+
+/// Serialize quads to [TriG](https://www.w3.org/TR/trig/): default-graph
+/// triples first, then one `<graph> { … }` block per named graph (sorted).
+pub fn serialize_trig(quads: &[RdfQuad]) -> String {
+    use std::collections::BTreeMap;
+
+    let mut by_graph: BTreeMap<Option<&str>, Vec<&RdfTriple>> = BTreeMap::new();
+    for q in quads {
+        by_graph
+            .entry(q.graph.as_deref())
+            .or_default()
+            .push(&q.triple);
+    }
+    let mut out = turtle_prefixes();
+    for (graph, triples) in by_graph {
+        out.push('\n');
+        match graph {
+            None => write_turtle_body(&mut out, triples.into_iter(), ""),
+            Some(g) => {
+                out.push_str(g);
+                out.push_str(" {\n");
+                write_turtle_body(&mut out, triples.into_iter(), "    ");
+                out.push_str("}\n");
+            }
+        }
     }
     out
 }

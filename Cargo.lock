@@ -1785,6 +1785,7 @@ dependencies = [
  "rio_api",
  "rio_turtle",
  "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "uuid",

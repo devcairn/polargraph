@@ -24,3 +24,6 @@ xxhash-rust  = { workspace = true }
 rio_api      = { workspace = true }
 rio_turtle   = { workspace = true }
 serde_json   = { workspace = true }
+
+[dev-dependencies]
+tempfile     = { workspace = true }

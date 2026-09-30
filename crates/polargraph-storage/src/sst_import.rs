@@ -96,7 +96,7 @@ pub struct ImportStats {
 /// ```
 pub struct SstImporter {
     output_dir: PathBuf,
-    triples: Vec<Triple>,
+    triples: Vec<(Triple, GraphId)>,
     iris: Vec<String>,
 }
 
@@ -122,7 +122,13 @@ impl SstImporter {
     /// Buffer a triple for import. The triple's `tt` field is ignored;
     /// the actual commit timestamp is assigned during `finish()`.
     pub fn add_triple(&mut self, triple: &Triple) {
-        self.triples.push(triple.clone());
+        self.add_triple_in(triple, GraphId::DEFAULT);
+    }
+
+    /// Buffer a triple for import into graph `g` (intern graph IRIs with
+    /// `TripleStore::intern_graph` first).
+    pub fn add_triple_in(&mut self, triple: &Triple, g: GraphId) {
+        self.triples.push((triple.clone(), g));
     }
 
     /// Encode all buffered triples into SST files, ingest them, and advance
@@ -147,7 +153,7 @@ impl SstImporter {
 
         // ── 1. Intern predicates (outside commit lock to avoid contention) ──────
         let mut pred_ids: HashMap<String, u32> = HashMap::new();
-        for triple in &self.triples {
+        for (triple, _) in &self.triples {
             let pred_str = triple.predicate().0.clone();
             if let std::collections::hash_map::Entry::Vacant(e) = pred_ids.entry(pred_str) {
                 let id = store.intern_predicate(e.key())?;
@@ -169,9 +175,8 @@ impl SstImporter {
         // Bulk import only adds: existing values are never replaced.
         let mut batch = WriteBatch::default();
         let mut per_order: HashMap<Order, SortedEntries> = HashMap::new();
-        let g = GraphId::DEFAULT;
-
-        for triple in &self.triples {
+        for (triple, g) in &self.triples {
+            let g = *g;
             let p = *pred_ids.get(triple.predicate().0.as_str()).unwrap();
             let (q, value_bytes) = match triple {
                 Triple::Relation {

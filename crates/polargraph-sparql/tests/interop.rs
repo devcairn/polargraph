@@ -452,3 +452,57 @@ fn schema_rdf_roundtrip() {
     assert_eq!(edge.domain, "Person");
     assert_eq!(edge.range, "Company");
 }
+
+#[test]
+fn roundtrip_nquads_and_trig() {
+    use polargraph_sparql::{parse_nquads, parse_trig, serialize_nquads, serialize_trig, RdfQuad};
+
+    let quad = |s: &str, p: &str, o: &str, g: Option<&str>| RdfQuad {
+        triple: RdfTriple {
+            subject: format!("<{s}>"),
+            predicate: format!("<{p}>"),
+            object: o.to_string(),
+        },
+        graph: g.map(|g| format!("<{g}>")),
+    };
+    let quads = vec![
+        quad("http://ex/a", "http://ex/knows", "<http://ex/b>", None),
+        quad(
+            "http://ex/a",
+            "http://ex/name",
+            "\"A\"",
+            Some("http://ex/g1"),
+        ),
+        quad(
+            "http://ex/a",
+            "http://ex/knows",
+            "<http://ex/c>",
+            Some("http://ex/g1"),
+        ),
+        quad(
+            "http://ex/b",
+            "http://ex/knows",
+            "<http://ex/c>",
+            Some("http://ex/g2"),
+        ),
+    ];
+
+    let graphs = |parsed: Vec<polargraph_sparql::ImportedTriple>| {
+        let mut g: Vec<Option<String>> = parsed.into_iter().map(|t| t.graph).collect();
+        g.sort();
+        g
+    };
+    let expected = vec![
+        None,
+        Some("http://ex/g1".to_string()),
+        Some("http://ex/g1".to_string()),
+        Some("http://ex/g2".to_string()),
+    ];
+
+    let nq = serialize_nquads(&quads);
+    assert_eq!(graphs(parse_nquads(nq.as_bytes()).unwrap()), expected);
+
+    let trig = serialize_trig(&quads);
+    assert!(trig.contains("<http://ex/g1> {"));
+    assert_eq!(graphs(parse_trig(trig.as_bytes()).unwrap()), expected);
+}

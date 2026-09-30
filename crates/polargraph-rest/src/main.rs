@@ -148,6 +148,9 @@ struct QueryBody {
     /// Also forwarded from the `X-User-Id` HTTP header when this field is absent.
     #[serde(default)]
     user_id: Option<String>,
+    /// Dataset: graph IRIs for patterns without an `@graph` suffix.
+    #[serde(default)]
+    graphs: Vec<String>,
 }
 
 /// A scalar property to attach to an edge at insert time.
@@ -217,13 +220,19 @@ struct TripleJson {
 /// - `:predicate` or `predicate` → predicate string (leading `:` stripped)
 pub fn parse_pattern(s: &str) -> Result<proto::VarPattern, String> {
     let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() != 3 {
+    if !(parts.len() == 3 || (parts.len() == 4 && parts[3].starts_with('@'))) {
         return Err(format!(
-            "pattern must have exactly 3 whitespace-separated tokens (got {}): {:?}",
+            "pattern must be `subject predicate object [@graph]` (got {} tokens): {:?}",
             parts.len(),
             s
         ));
     }
+    let graph = match parts.get(3) {
+        Some(g) => {
+            Some(parse_graph_token(&g[1..]).map_err(|e| format!("graph in {:?}: {}", s, e))?)
+        }
+        None => None,
+    };
     let subject = parse_term(parts[0]).map_err(|e| format!("subject in {:?}: {}", s, e))?;
     let predicate = parts[1].trim_start_matches(':').to_string();
     let object = parse_term(parts[2]).map_err(|e| format!("object in {:?}: {}", s, e))?;
@@ -232,7 +241,32 @@ pub fn parse_pattern(s: &str) -> Result<proto::VarPattern, String> {
         predicate,
         object: Some(object),
         predicate_var: String::new(),
+        graph,
     })
+}
+
+/// The `@graph` suffix of a pattern string: `@default`, `@?g` (graph
+/// variable), or `@<iri>` / `@iri` (one named graph).
+fn parse_graph_token(s: &str) -> Result<proto::GraphTerm, String> {
+    use proto::graph_term::Kind;
+    let kind = if s == "default" {
+        Kind::DefaultGraph(true)
+    } else if let Some(var) = s.strip_prefix('?') {
+        if var.is_empty() {
+            return Err("empty graph variable".into());
+        }
+        Kind::Var(var.to_string())
+    } else {
+        let iri = s
+            .strip_prefix('<')
+            .and_then(|t| t.strip_suffix('>'))
+            .unwrap_or(s);
+        if iri.is_empty() {
+            return Err("empty graph IRI".into());
+        }
+        Kind::Iri(iri.to_string())
+    };
+    Ok(proto::GraphTerm { kind: Some(kind) })
 }
 
 fn parse_term(s: &str) -> Result<proto::Term, String> {
@@ -485,6 +519,7 @@ async fn handle_query(
         tx_id: body.tx_id.unwrap_or_default(),
         user_id: user_id.clone(),
         params: std::collections::HashMap::new(),
+        graphs: body.graphs.clone(),
     };
 
     let mut client = state.client.clone();
@@ -642,6 +677,7 @@ async fn handle_triples(
             predicate: predicate_filter.clone(),
             object: Some(object_term),
             predicate_var: "__p".to_string(),
+            graph: None,
         }],
         snapshot_ts: 0,
         as_of_valid_time: 0,
@@ -2092,6 +2128,7 @@ fn sparql_varpat_to_proto(vp: &polargraph_query::VarPattern) -> proto::VarPatter
         predicate: vp.predicate.clone().unwrap_or_default(),
         object: Some(sparql_term_to_proto(&vp.object)),
         predicate_var: vp.predicate_var.clone().unwrap_or_default(),
+        graph: None,
     }
 }
 
@@ -2235,6 +2272,7 @@ async fn execute_sparql_construct(
                         kind: Some(proto::term::Kind::Var("_o".to_string())),
                     }),
                     predicate_var: "_p".to_string(),
+                    graph: None,
                 }],
                 ..Default::default()
             };
@@ -3141,12 +3179,14 @@ async fn insert_proto_triples(
     client: &mut GrpcClient,
     triples: Vec<proto::Triple>,
     iris: Vec<String>,
+    graph: String,
 ) -> Result<usize, tonic::Status> {
     let n = triples.len();
     client
         .insert(tonic::Request::new(proto::InsertRequest {
             triples,
             iris,
+            graph,
             ..Default::default()
         }))
         .await?;
@@ -3185,6 +3225,9 @@ fn imported_iris(
 #[derive(Deserialize, Default)]
 struct ImportRdfParams {
     import_id: Option<String>,
+    /// Target graph (IRI) for triples that don't name one — all triples of
+    /// a triple format. Omitted = the default graph.
+    graph: Option<String>,
 }
 
 /// An `import_id` becomes a path segment of every skolem IRI, so keep it to
@@ -3228,7 +3271,29 @@ async fn handle_import_rdf(
 
     let start = Instant::now();
 
-    let imported_triples = if content_type.contains("application/n-triples") {
+    let imported_triples = if content_type.contains("application/n-quads") {
+        match polargraph_sparql::parse_nquads(&body) {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response()
+            }
+        }
+    } else if content_type.contains("application/trig") {
+        match polargraph_sparql::parse_trig(&body) {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response()
+            }
+        }
+    } else if content_type.contains("application/n-triples") {
         match parse_ntriples(&body) {
             Ok(t) => t,
             Err(e) => {
@@ -3282,23 +3347,36 @@ async fn handle_import_rdf(
     } else {
         return (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Json(serde_json::json!({ "error": format!("unsupported Content-Type: {}; supported: application/n-triples, text/turtle, application/ld+json", content_type) })),
+            Json(serde_json::json!({ "error": format!("unsupported Content-Type: {}; supported: application/n-triples, text/turtle, application/ld+json, application/n-quads, application/trig", content_type) })),
         )
             .into_response();
     };
 
     let total = imported_triples.len();
 
-    // Insert in batches of 1 000, each carrying the IRIs it names.
+    // Group by target graph (quad formats name it per triple; `?graph=` is
+    // the fallback), then insert in batches of 1 000, each carrying the IRIs
+    // it names.
+    let mut by_graph: std::collections::BTreeMap<String, Vec<polargraph_sparql::ImportedTriple>> =
+        std::collections::BTreeMap::new();
+    for t in imported_triples {
+        let graph = t
+            .graph_iri(&scope)
+            .or_else(|| params.graph.clone())
+            .unwrap_or_default();
+        by_graph.entry(graph).or_default().push(t);
+    }
     const BATCH: usize = 1_000;
     let mut imported = 0usize;
     let mut client = state.client.clone();
-    for chunk in imported_triples.chunks(BATCH) {
-        let triples = imported_triples_to_proto(chunk, &scope);
-        let iris = imported_iris(chunk, &scope);
-        match insert_proto_triples(&mut client, triples, iris).await {
-            Ok(n) => imported += n,
-            Err(e) => return grpc_error(e),
+    for (graph, triples_in_graph) in &by_graph {
+        for chunk in triples_in_graph.chunks(BATCH) {
+            let triples = imported_triples_to_proto(chunk, &scope);
+            let iris = imported_iris(chunk, &scope);
+            match insert_proto_triples(&mut client, triples, iris, graph.clone()).await {
+                Ok(n) => imported += n,
+                Err(e) => return grpc_error(e),
+            }
         }
     }
 
@@ -3391,6 +3469,7 @@ async fn export_jsonld_for(
                         kind: Some(proto::term::Kind::Var("_o".to_string())),
                     }),
                     predicate_var: "_p".to_string(),
+                    graph: None,
                 }],
                 ..Default::default()
             };
@@ -3433,6 +3512,7 @@ async fn export_jsonld_for(
                             kind: Some(proto::term::Kind::Var("_o".to_string())),
                         }),
                         predicate_var: String::new(),
+                        graph: None,
                     }],
                     ..Default::default()
                 };
@@ -3578,7 +3658,30 @@ async fn handle_export_subgraph(
         .map(str::to_string)
         .collect();
 
+    let accept = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // Quad formats query the default graph and each named graph (`?_g`)
+    // separately so every triple keeps its graph; otherwise one union query.
+    let quads = accept.contains("application/n-quads") || accept.contains("application/trig");
+    let graph_terms: Vec<Option<proto::GraphTerm>> = if quads {
+        vec![
+            Some(proto::GraphTerm {
+                kind: Some(proto::graph_term::Kind::DefaultGraph(true)),
+            }),
+            Some(proto::GraphTerm {
+                kind: Some(proto::graph_term::Kind::Var("_g".to_string())),
+            }),
+        ]
+    } else {
+        vec![None]
+    };
+
     let mut all_rdf: Vec<RdfTriple> = Vec::new();
+    // Graph of each `all_rdf` entry as a `<urn:uuid:…>` term (None = default).
+    let mut rdf_graphs: Vec<Option<String>> = Vec::new();
     let mut client = state.client.clone();
 
     for subj_uuid in &subject_uuids {
@@ -3593,40 +3696,49 @@ async fn handle_export_subgraph(
         };
 
         for pred in &query_predicates {
-            let req = proto::QueryRequest {
-                patterns: vec![proto::VarPattern {
-                    subject: Some(proto::Term {
-                        kind: Some(proto::term::Kind::Bound(proto::NodeId {
-                            bytes: subj_bytes.clone(),
-                        })),
-                    }),
-                    predicate: pred.clone(),
-                    object: Some(proto::Term {
-                        kind: Some(proto::term::Kind::Var("_o".to_string())),
-                    }),
-                    predicate_var: "_p".to_string(),
-                }],
-                ..Default::default()
-            };
-            if let Ok(resp) = client.query(tonic::Request::new(req)).await {
-                for pb in resp.into_inner().bindings {
-                    if let Some(obj_val) = pb.vars.get("_o") {
-                        if obj_val.bytes.len() == 16 {
-                            if let Ok(arr) = obj_val.bytes[..16].try_into() {
-                                let obj_id =
-                                    polargraph_core::id::NodeId(uuid::Uuid::from_bytes(arr));
-                                let pred_iri = if !pred.is_empty() {
-                                    format!("<{}>", pred)
-                                } else if let Some(p) = pb.predicates.get("_p") {
-                                    format!("<{}>", p)
-                                } else {
-                                    "<urn:polargraph:unknownPredicate>".to_string()
-                                };
-                                all_rdf.push(RdfTriple {
-                                    subject: subject_iri.clone(),
-                                    predicate: pred_iri,
-                                    object: node_id_to_iri(&obj_id),
-                                });
+            for graph in &graph_terms {
+                let req = proto::QueryRequest {
+                    patterns: vec![proto::VarPattern {
+                        subject: Some(proto::Term {
+                            kind: Some(proto::term::Kind::Bound(proto::NodeId {
+                                bytes: subj_bytes.clone(),
+                            })),
+                        }),
+                        predicate: pred.clone(),
+                        object: Some(proto::Term {
+                            kind: Some(proto::term::Kind::Var("_o".to_string())),
+                        }),
+                        predicate_var: "_p".to_string(),
+                        graph: graph.clone(),
+                    }],
+                    ..Default::default()
+                };
+                if let Ok(resp) = client.query(tonic::Request::new(req)).await {
+                    for pb in resp.into_inner().bindings {
+                        if let Some(obj_val) = pb.vars.get("_o") {
+                            if obj_val.bytes.len() == 16 {
+                                if let Ok(arr) = obj_val.bytes[..16].try_into() {
+                                    let obj_id =
+                                        polargraph_core::id::NodeId(uuid::Uuid::from_bytes(arr));
+                                    let pred_iri = if !pred.is_empty() {
+                                        format!("<{}>", pred)
+                                    } else if let Some(p) = pb.predicates.get("_p") {
+                                        format!("<{}>", p)
+                                    } else {
+                                        "<urn:polargraph:unknownPredicate>".to_string()
+                                    };
+                                    all_rdf.push(RdfTriple {
+                                        subject: subject_iri.clone(),
+                                        predicate: pred_iri,
+                                        object: node_id_to_iri(&obj_id),
+                                    });
+                                    rdf_graphs.push(
+                                        pb.vars
+                                            .get("_g")
+                                            .and_then(proto_node_id)
+                                            .map(|g| node_id_to_iri(&g)),
+                                    );
+                                }
                             }
                         }
                     }
@@ -3700,6 +3812,7 @@ async fn handle_export_subgraph(
                                             predicate: pred_iri,
                                             object: obj_str,
                                         });
+                                        rdf_graphs.push(None);
                                     }
                                 }
                             }
@@ -3710,18 +3823,48 @@ async fn handle_export_subgraph(
         }
     }
 
-    let names = resolve_names(
-        &mut state.client.clone(),
-        polargraph_sparql::node_ids_in_triples(&all_rdf),
-        params.deskolemize,
-    )
-    .await;
+    let mut ids = polargraph_sparql::node_ids_in_triples(&all_rdf);
+    ids.extend(
+        rdf_graphs
+            .iter()
+            .flatten()
+            .filter_map(|g| {
+                g.strip_prefix("<urn:uuid:")?
+                    .strip_suffix('>')?
+                    .parse()
+                    .ok()
+            })
+            .map(NodeId),
+    );
+    let names = resolve_names(&mut state.client.clone(), ids, params.deskolemize).await;
     names.rewrite_triples(&mut all_rdf);
 
-    let accept = headers
-        .get("accept")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    if quads {
+        let quads: Vec<polargraph_sparql::RdfQuad> = all_rdf
+            .into_iter()
+            .zip(rdf_graphs)
+            .map(|(triple, graph)| polargraph_sparql::RdfQuad {
+                triple,
+                graph: graph.map(|g| names.rewrite_term(&g)),
+            })
+            .collect();
+        let (content_type, body) = if accept.contains("application/trig") {
+            (
+                "application/trig",
+                polargraph_sparql::serialize_trig(&quads),
+            )
+        } else {
+            (
+                "application/n-quads",
+                polargraph_sparql::serialize_nquads(&quads),
+            )
+        };
+        return axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", content_type)
+            .body(axum::body::boxed(axum::body::Full::from(body)))
+            .unwrap();
+    }
 
     if accept.contains("application/ld+json") {
         let body = polargraph_sparql::serialize_jsonld(&all_rdf);
@@ -3917,6 +4060,357 @@ async fn handle_schema_rdf_post(
     .into_response()
 }
 
+// ── Named graphs ──────────────────────────────────────────────────────────────
+//
+// Graph IRIs travel in the body or the `iri` query parameter rather than the
+// path (IRIs contain slashes). An empty / missing IRI means the default graph
+// where that makes sense (stats, copy/move source or target, drop).
+
+#[derive(Deserialize)]
+struct CreateGraphBody {
+    iri: String,
+    /// Metadata properties: predicate → JSON value (same encoding as other
+    /// property values, incl. `{"@value", "@language"}` objects).
+    #[serde(default)]
+    metadata: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct GraphIriParams {
+    #[serde(default)]
+    iri: String,
+    #[serde(default)]
+    include_system: bool,
+}
+
+#[derive(Deserialize)]
+struct CopyGraphBody {
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    target: String,
+    /// true = COPY (replace the target), false = ADD.
+    #[serde(default = "default_true")]
+    clear_target: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn graph_info_json(g: &proto::GraphInfo) -> serde_json::Value {
+    let metadata: serde_json::Map<String, serde_json::Value> = g
+        .metadata
+        .iter()
+        .map(|m| {
+            (
+                m.predicate.clone(),
+                m.value
+                    .as_ref()
+                    .map(proto_value_to_json)
+                    .unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect();
+    serde_json::json!({ "iri": g.iri, "id": g.id, "metadata": metadata })
+}
+
+async fn handle_create_graph(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateGraphBody>,
+) -> Response {
+    let req = proto::CreateGraphRequest {
+        iri: body.iri,
+        metadata: body
+            .metadata
+            .iter()
+            .map(|(predicate, v)| proto::GraphMetadata {
+                predicate: predicate.clone(),
+                value: Some(json_to_proto_value(v)),
+            })
+            .collect(),
+    };
+    match state
+        .client
+        .clone()
+        .create_graph(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => match r.into_inner().graph {
+            Some(g) => Json(graph_info_json(&g)).into_response(),
+            None => Json(serde_json::json!({})).into_response(),
+        },
+        Err(e) => grpc_error(e),
+    }
+}
+
+async fn handle_list_graphs(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<GraphIriParams>,
+) -> Response {
+    let req = proto::ListGraphsRequest {
+        filter: vec![],
+        include_system: params.include_system,
+    };
+    match state
+        .client
+        .clone()
+        .list_graphs(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            let graphs: Vec<_> = r.into_inner().graphs.iter().map(graph_info_json).collect();
+            Json(serde_json::json!({ "graphs": graphs })).into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
+async fn handle_graph_stats(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<GraphIriParams>,
+) -> Response {
+    let req = proto::GraphStatsRequest { iri: params.iri };
+    match state
+        .client
+        .clone()
+        .graph_stats(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            let s = r.into_inner();
+            Json(serde_json::json!({
+                "iri": s.iri,
+                "live_quads": s.live_quads,
+                "last_write_tt": s.last_write_tt,
+            }))
+            .into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ExportGraphParams {
+    /// Graph IRI; empty = the default graph.
+    #[serde(default)]
+    iri: String,
+    /// Export every graph (default + named) instead of `iri`.
+    #[serde(default)]
+    all: bool,
+    /// Render skolem IRIs as blank nodes (`_:label`).
+    #[serde(default)]
+    deskolemize: bool,
+}
+
+/// `GET /graphs/export?iri=<graph>|all=true` — live quads of one graph or of
+/// the whole dataset. N-Quads by default; `Accept: application/trig` for
+/// TriG. A single graph can also be fetched as N-Triples, Turtle or JSON-LD
+/// (graph label dropped); `all=true` requires a quad format (406 otherwise).
+async fn handle_export_graph(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    QueryParams(params): QueryParams<ExportGraphParams>,
+) -> Response {
+    use polargraph_sparql::{node_id_to_iri, value_to_nt_literal, RdfQuad, RdfTriple};
+
+    let accept = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let triple_format = [
+        "application/n-triples",
+        "text/turtle",
+        "application/ld+json",
+    ]
+    .into_iter()
+    .find(|f| accept.contains(f));
+    if params.all && triple_format.is_some() && !accept.contains("application/trig") {
+        return (
+            StatusCode::NOT_ACCEPTABLE,
+            Json(serde_json::json!({
+                "error": "all=true needs a quad format: application/n-quads or application/trig"
+            })),
+        )
+            .into_response();
+    }
+
+    let mut client = state.client.clone();
+    let req = proto::ExportGraphRequest {
+        iri: params.iri,
+        all_graphs: params.all,
+    };
+    let mut stream = match client.export_graph(tonic::Request::new(req)).await {
+        Ok(r) => r.into_inner(),
+        Err(e) => return grpc_error(e),
+    };
+    let mut triples: Vec<RdfTriple> = Vec::new();
+    let mut graphs: Vec<Option<String>> = Vec::new();
+    loop {
+        let chunk = match stream.message().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(e) => return grpc_error(e),
+        };
+        for q in chunk.quads {
+            let Some(subject) = q.subject.as_ref().and_then(proto_node_id) else {
+                continue;
+            };
+            let object = match q.object {
+                Some(proto::exported_quad::Object::Node(n)) => match proto_node_id(&n) {
+                    Some(id) => node_id_to_iri(&id),
+                    None => continue,
+                },
+                Some(proto::exported_quad::Object::Value(v)) => match proto_value_to_pg(&v) {
+                    Some(v) => value_to_nt_literal(&v),
+                    None => continue,
+                },
+                None => continue,
+            };
+            triples.push(RdfTriple {
+                subject: node_id_to_iri(&subject),
+                predicate: format!("<{}>", q.predicate),
+                object,
+            });
+            graphs.push((!q.graph.is_empty()).then(|| format!("<{}>", q.graph)));
+        }
+    }
+
+    let names = resolve_names(
+        &mut client,
+        polargraph_sparql::node_ids_in_triples(&triples),
+        params.deskolemize,
+    )
+    .await;
+    names.rewrite_triples(&mut triples);
+
+    let (content_type, body) = if accept.contains("application/trig") {
+        let quads: Vec<RdfQuad> = triples
+            .into_iter()
+            .zip(graphs)
+            .map(|(triple, graph)| RdfQuad { triple, graph })
+            .collect();
+        (
+            "application/trig",
+            polargraph_sparql::serialize_trig(&quads),
+        )
+    } else {
+        match triple_format {
+            Some("text/turtle") => ("text/turtle", polargraph_sparql::serialize_turtle(&triples)),
+            Some("application/ld+json") => (
+                "application/ld+json",
+                polargraph_sparql::serialize_jsonld(&triples),
+            ),
+            Some(_) => (
+                "application/n-triples",
+                polargraph_sparql::serialize_ntriples(&triples),
+            ),
+            None => {
+                let quads: Vec<RdfQuad> = triples
+                    .into_iter()
+                    .zip(graphs)
+                    .map(|(triple, graph)| RdfQuad { triple, graph })
+                    .collect();
+                (
+                    "application/n-quads",
+                    polargraph_sparql::serialize_nquads(&quads),
+                )
+            }
+        }
+    };
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", content_type)
+        .body(axum::body::boxed(axum::body::Full::from(body)))
+        .unwrap()
+}
+
+/// A 16-byte proto NodeId as a [`NodeId`].
+fn proto_node_id(n: &proto::NodeId) -> Option<NodeId> {
+    let arr: [u8; 16] = n.bytes.as_slice().try_into().ok()?;
+    Some(NodeId(uuid::Uuid::from_bytes(arr)))
+}
+
+/// Inverse of [`pg_value_to_proto`]; `None` for an empty value.
+fn proto_value_to_pg(v: &proto::Value) -> Option<polargraph_core::value::Value> {
+    use polargraph_core::value::Value as V;
+    use proto::value::Kind;
+    Some(match v.kind.as_ref()? {
+        Kind::NullVal(_) => V::Null,
+        Kind::BoolVal(b) => V::Bool(*b),
+        Kind::IntVal(n) => V::Int(*n),
+        Kind::FloatVal(f) => V::Float(*f),
+        Kind::TextVal(s) => V::Text(s.clone()),
+        Kind::BlobVal(b) => V::Blob(b.clone()),
+        Kind::VecVal(a) => V::Vector(a.values.clone()),
+        Kind::LangText(l) => V::LangText {
+            text: l.text.clone(),
+            lang: l.lang.clone(),
+        },
+        Kind::Typed(t) => V::Typed {
+            lexical: t.lexical.clone(),
+            datatype: t.datatype.clone(),
+        },
+    })
+}
+
+async fn handle_copy_graph(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CopyGraphBody>,
+) -> Response {
+    let req = proto::CopyGraphRequest {
+        source: body.source,
+        target: body.target,
+        clear_target: body.clear_target,
+    };
+    match state
+        .client
+        .clone()
+        .copy_graph(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => Json(serde_json::json!({ "quads": r.into_inner().quads })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+async fn handle_move_graph(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CopyGraphBody>,
+) -> Response {
+    let req = proto::MoveGraphRequest {
+        source: body.source,
+        target: body.target,
+    };
+    match state
+        .client
+        .clone()
+        .move_graph(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => Json(serde_json::json!({ "quads": r.into_inner().quads })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+async fn handle_drop_graph(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<GraphIriParams>,
+) -> Response {
+    let req = proto::DropGraphRequest { iri: params.iri };
+    match state
+        .client
+        .clone()
+        .drop_graph(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            Json(serde_json::json!({ "quads_closed": r.into_inner().quads_closed })).into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
 // ── GET /stats ────────────────────────────────────────────────────────────────
 
 async fn handle_stats(State(state): State<Arc<AppState>>) -> Response {
@@ -4018,6 +4512,16 @@ async fn main() -> anyhow::Result<()> {
             "/schema/rdf",
             get(handle_schema_rdf_get).post(handle_schema_rdf_post),
         )
+        .route(
+            "/graphs",
+            get(handle_list_graphs)
+                .post(handle_create_graph)
+                .delete(handle_drop_graph),
+        )
+        .route("/graphs/stats", get(handle_graph_stats))
+        .route("/graphs/export", get(handle_export_graph))
+        .route("/graphs/copy", post(handle_copy_graph))
+        .route("/graphs/move", post(handle_move_graph))
         .with_state(state);
 
     info!(addr = %args.listen, upstream = %args.upstream, "polargraph-rest listening");
@@ -4152,6 +4656,24 @@ mod tests {
         for v in [lang, typed] {
             assert_eq!(proto_value_to_json(&json_to_proto_value(&v)), v);
         }
+    }
+
+    #[test]
+    fn parse_pattern_graph_suffix() {
+        use proto::graph_term::Kind;
+        let kind = |s: &str| parse_pattern(s).unwrap().graph.and_then(|g| g.kind);
+        assert_eq!(kind("?s :knows ?o"), None);
+        assert_eq!(
+            kind("?s :knows ?o @default"),
+            Some(Kind::DefaultGraph(true))
+        );
+        assert_eq!(kind("?s :knows ?o @?g"), Some(Kind::Var("g".into())));
+        assert_eq!(
+            kind("?s :knows ?o @<https://kb.example/g/eng>"),
+            Some(Kind::Iri("https://kb.example/g/eng".into()))
+        );
+        assert!(parse_pattern("?s :knows ?o extra").is_err());
+        assert!(parse_pattern("?s :knows ?o @?").is_err());
     }
 
     #[test]

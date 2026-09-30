@@ -106,6 +106,7 @@ fn pattern(sub: Term, pred: &str, obj: Term) -> VarPattern {
         predicate: pred.into(),
         object: Some(obj),
         predicate_var: String::new(),
+        graph: None,
     }
 }
 
@@ -4737,6 +4738,7 @@ async fn wire_tx_commit_makes_triples_visible() {
                     kind: Some(TermKind::Var("v".to_string())),
                 }),
                 predicate_var: String::new(),
+                graph: None,
             }],
             ..Default::default()
         }))
@@ -4766,6 +4768,7 @@ async fn wire_tx_commit_makes_triples_visible() {
                     kind: Some(TermKind::Var("v".to_string())),
                 }),
                 predicate_var: String::new(),
+                graph: None,
             }],
             ..Default::default()
         }))
@@ -4810,6 +4813,7 @@ async fn wire_tx_rollback_discards_triples() {
                     kind: Some(TermKind::Var("v".to_string())),
                 }),
                 predicate_var: String::new(),
+                graph: None,
             }],
             ..Default::default()
         }))
@@ -4855,6 +4859,7 @@ async fn wire_tx_write_your_own_reads() {
                     kind: Some(TermKind::Var("v".to_string())),
                 }),
                 predicate_var: String::new(),
+                graph: None,
             }],
             tx_id: tx_id.clone(),
             ..Default::default()
@@ -6923,4 +6928,249 @@ async fn insert_into_named_graph_interns_and_scopes_it() {
         .is_empty());
     // Union reads (the existing query paths) still see it.
     assert_eq!(store.scan_by_subject(&core_s).unwrap().len(), 1);
+}
+
+// ── Step 4: graph terms and datasets on Query ────────────────────────────────
+
+#[tokio::test]
+async fn query_graph_terms_and_dataset() {
+    use polargraph_server::proto::{graph_term::Kind as G, GraphSet, GraphTerm};
+
+    let (svc, _dir) = open();
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    for (graph, obj) in [("urn:g:eng", a.clone()), ("urn:g:sales", b.clone())] {
+        svc.insert(Request::new(InsertRequest {
+            triples: vec![rel(a.clone(), "knows", obj)],
+            graph: graph.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    }
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(b.clone(), "knows", a.clone())],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let q = |graph: Option<G>, graphs: Vec<&'static str>| {
+        let svc = &svc;
+        let mut p = pattern(var("s"), "knows", var("o"));
+        p.graph = graph.map(|k| GraphTerm { kind: Some(k) });
+        async move {
+            svc.query(Request::new(QueryRequest {
+                patterns: vec![p],
+                graphs: graphs.into_iter().map(String::from).collect(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .bindings
+        }
+    };
+    assert_eq!(q(None, vec![]).await.len(), 3, "union");
+    assert_eq!(q(Some(G::DefaultGraph(true)), vec![]).await.len(), 1);
+    assert_eq!(q(Some(G::Iri("urn:g:eng".into())), vec![]).await.len(), 1);
+    assert_eq!(
+        q(Some(G::Iri("urn:g:unknown".into())), vec![]).await.len(),
+        0
+    );
+    assert_eq!(
+        q(
+            Some(G::Set(GraphSet {
+                iris: vec!["urn:g:eng".into(), "urn:g:sales".into()]
+            })),
+            vec![]
+        )
+        .await
+        .len(),
+        2
+    );
+    assert_eq!(q(None, vec!["urn:g:sales"]).await.len(), 1, "dataset");
+
+    let with_g = q(Some(G::Var("g".into())), vec![]).await;
+    assert_eq!(with_g.len(), 2, "?g ranges over named graphs only");
+    let eng = polargraph_core::term::iri_to_node_id("urn:g:eng");
+    assert!(with_g
+        .iter()
+        .any(|b| b.vars["g"].bytes == eng.as_bytes().to_vec()));
+}
+
+// ── Step 4: graph management RPCs ────────────────────────────────────────────
+
+#[tokio::test]
+async fn graph_management_rpcs() {
+    use polargraph_server::proto::{
+        CopyGraphRequest, CreateGraphRequest, DropGraphRequest, GraphMetadata, GraphStatsRequest,
+        ListGraphsRequest, MoveGraphRequest,
+    };
+
+    let (svc, _dir) = open();
+    let status = |s: &str| GraphMetadata {
+        predicate: "cb:status".into(),
+        value: Some(Value {
+            kind: Some(ValueKind::TextVal(s.into())),
+        }),
+    };
+    let created = svc
+        .create_graph(Request::new(CreateGraphRequest {
+            iri: "urn:g:p1".into(),
+            metadata: vec![status("Proposed")],
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .graph
+        .unwrap();
+    assert_eq!(created.iri, "urn:g:p1");
+    assert_eq!(created.metadata.len(), 1);
+
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            rel(a.clone(), "dependsOn", b.clone()),
+            text_prop(a, "owner", "t"),
+        ],
+        graph: "urn:g:p1".into(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let list = |filter: Vec<GraphMetadata>| {
+        let svc = &svc;
+        async move {
+            svc.list_graphs(Request::new(ListGraphsRequest {
+                filter,
+                include_system: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .graphs
+        }
+    };
+    assert_eq!(list(vec![]).await.len(), 1, "system graph hidden");
+    assert_eq!(list(vec![status("Proposed")]).await.len(), 1);
+    assert!(list(vec![status("Approved")]).await.is_empty());
+
+    let stats = |iri: &'static str| {
+        let svc = &svc;
+        async move {
+            svc.graph_stats(Request::new(GraphStatsRequest { iri: iri.into() }))
+                .await
+                .unwrap()
+                .into_inner()
+                .live_quads
+        }
+    };
+    assert_eq!(stats("urn:g:p1").await, 2);
+
+    let copied = svc
+        .copy_graph(Request::new(CopyGraphRequest {
+            source: "urn:g:p1".into(),
+            target: "urn:g:approved".into(),
+            clear_target: true,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .quads;
+    assert_eq!(copied, 2);
+    assert_eq!(stats("urn:g:approved").await, 2);
+
+    svc.move_graph(Request::new(MoveGraphRequest {
+        source: "urn:g:approved".into(),
+        target: "urn:g:archive".into(),
+    }))
+    .await
+    .unwrap();
+    assert_eq!(stats("urn:g:approved").await, 0);
+    assert_eq!(stats("urn:g:archive").await, 2);
+
+    let closed = svc
+        .drop_graph(Request::new(DropGraphRequest {
+            iri: "urn:g:p1".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .quads_closed;
+    assert_eq!(closed, 2);
+    assert_eq!(stats("urn:g:p1").await, 0);
+
+    let err = svc
+        .graph_stats(Request::new(GraphStatsRequest {
+            iri: "urn:g:nope".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+}
+
+#[tokio::test]
+async fn export_graph_streams_live_quads() {
+    use polargraph_server::proto::{exported_quad::Object, ExportGraphRequest};
+
+    let (svc, _dir) = open();
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(a.clone(), "dependsOn", b.clone())],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            rel(a.clone(), "dependsOn", b.clone()),
+            text_prop(a, "owner", "t"),
+        ],
+        graph: "urn:g:p1".into(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let export = |iri: &'static str, all_graphs: bool| {
+        let svc = &svc;
+        async move {
+            let mut stream = svc
+                .export_graph(Request::new(ExportGraphRequest {
+                    iri: iri.into(),
+                    all_graphs,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            let mut quads = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                quads.extend(chunk.unwrap().quads);
+            }
+            quads
+        }
+    };
+
+    let named = export("urn:g:p1", false).await;
+    assert_eq!(named.len(), 2);
+    assert!(named.iter().all(|q| q.graph == "urn:g:p1"));
+    assert!(named
+        .iter()
+        .any(|q| q.predicate == "owner" && matches!(q.object, Some(Object::Value(_)))));
+    assert_eq!(export("", false).await.len(), 1);
+    let all = export("", true).await;
+    assert_eq!(all.len(), 3);
+    assert_eq!(all.iter().filter(|q| q.graph.is_empty()).count(), 1);
+
+    let missing = svc
+        .export_graph(Request::new(ExportGraphRequest {
+            iri: "urn:g:nope".into(),
+            all_graphs: false,
+        }))
+        .await;
+    assert_eq!(missing.err().unwrap().code(), tonic::Code::NotFound);
 }

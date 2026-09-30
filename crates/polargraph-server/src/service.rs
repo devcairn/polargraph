@@ -13,24 +13,28 @@ use crate::{
         AddUserToGroupRequest, AddUserToGroupResponse, AppliedMigrationInfo,
         BackupInfo as ProtoBackupInfo, BatchInsertError, BatchInsertVectorsRequest,
         BatchInsertVectorsResponse, BeginTransactionRequest, BeginTransactionResponse,
-        ColumnFamilyInfo, CommitTransactionRequest, CommitTransactionResponse, CreateBackupRequest,
-        CreateBackupResponse, CypherBinding, CypherQueryRequest, CypherQueryResponse,
+        ColumnFamilyInfo, CommitTransactionRequest, CommitTransactionResponse, CopyGraphRequest,
+        CopyGraphResponse, CreateBackupRequest, CreateBackupResponse, CreateGraphRequest,
+        CreateGraphResponse, CypherBinding, CypherQueryRequest, CypherQueryResponse,
         CypherWriteRequest, CypherWriteResponse, DeleteTriplesRequest, DeleteTriplesResponse,
-        ExplainResponse, GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse,
+        DropGraphRequest, DropGraphResponse, ExplainResponse, ExportGraphChunk, ExportGraphRequest,
+        ExportedQuad, GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse,
         GetEdgeIdsByTripleRequest, GetEdgeIdsByTripleResponse, GetEdgeTypeRequest,
         GetEdgeTypeResponse, GetNodeTypeRequest, GetNodeTypeResponse, GetPropertyHistoryRequest,
         GetPropertyHistoryResponse, GetUserAccessRequest, GetUserAccessResponse,
-        GrantAccessRequest, GrantAccessResponse, InsertRequest, InsertResponse,
-        InsertVectorRequest, InsertVectorResponse, ListApiKeysRequest, ListApiKeysResponse,
-        ListBackupsRequest, ListBackupsResponse, ListEdgeTypesRequest, ListEdgeTypesResponse,
-        ListNodeTypesRequest, ListNodeTypesResponse, ListPredicatesBetweenRequest,
-        ListPredicatesBetweenResponse, MigrateRequest, MigrateResponse, MigrationStatusRequest,
-        MigrationStatusResponse, OntologyViolation, PlanNode, PropertyVersion,
-        PurgeOldBackupsRequest, PurgeOldBackupsResponse, QueryRequest, QueryResponse,
-        QueryStreamChunk, ReachableRequest, ReachableResponse, RegisterEdgeTypeRequest,
-        RegisterEdgeTypeResponse, RegisterNodeTypeRequest, RegisterNodeTypeResponse,
-        ReplicaStatusRequest, ReplicaStatusResponse, ResolveIrisRequest, ResolveIrisResponse,
-        RevokeAccessRequest, RevokeAccessResponse, RevokeApiKeyRequest, RevokeApiKeyResponse,
+        GrantAccessRequest, GrantAccessResponse, GraphInfo, GraphMetadata, GraphStatsRequest,
+        GraphStatsResponse, InsertRequest, InsertResponse, InsertVectorRequest,
+        InsertVectorResponse, ListApiKeysRequest, ListApiKeysResponse, ListBackupsRequest,
+        ListBackupsResponse, ListEdgeTypesRequest, ListEdgeTypesResponse, ListGraphsRequest,
+        ListGraphsResponse, ListNodeTypesRequest, ListNodeTypesResponse,
+        ListPredicatesBetweenRequest, ListPredicatesBetweenResponse, MigrateRequest,
+        MigrateResponse, MigrationStatusRequest, MigrationStatusResponse, MoveGraphRequest,
+        OntologyViolation, PlanNode, PropertyVersion, PurgeOldBackupsRequest,
+        PurgeOldBackupsResponse, QueryRequest, QueryResponse, QueryStreamChunk, ReachableRequest,
+        ReachableResponse, RegisterEdgeTypeRequest, RegisterEdgeTypeResponse,
+        RegisterNodeTypeRequest, RegisterNodeTypeResponse, ReplicaStatusRequest,
+        ReplicaStatusResponse, ResolveIrisRequest, ResolveIrisResponse, RevokeAccessRequest,
+        RevokeAccessResponse, RevokeApiKeyRequest, RevokeApiKeyResponse,
         RollbackTransactionRequest, RollbackTransactionResponse, RunMaterializationRequest,
         RunMaterializationResponse, RunRetentionRequest, RunRetentionResponse, ScoredBinding,
         SearchVectorFilteredRequest, SearchVectorFilteredResponse, SearchVectorInSetRequest,
@@ -588,6 +592,26 @@ impl PolarGraphServer {
     }
 
     /// Returns a `FailedPrecondition` status if this is a read replica.
+    /// A graph that must already exist: empty IRI = default graph.
+    #[allow(clippy::result_large_err)]
+    fn existing_graph(&self, iri: &str) -> Result<polargraph_core::id::GraphId, Status> {
+        if iri.is_empty() {
+            return Ok(polargraph_core::id::GraphId::DEFAULT);
+        }
+        self.store
+            .graph_id(iri)
+            .ok_or_else(|| Status::not_found(format!("unknown graph: {iri}")))
+    }
+
+    /// A write target: empty IRI = default graph; interned on first use.
+    #[allow(clippy::result_large_err)]
+    fn target_graph(&self, iri: &str) -> Result<polargraph_core::id::GraphId, Status> {
+        if iri.is_empty() {
+            return Ok(polargraph_core::id::GraphId::DEFAULT);
+        }
+        self.store.intern_graph(iri).map_err(storage_err_to_status)
+    }
+
     fn check_not_replica(&self) -> Result<(), Status> {
         if self.store.is_replica() {
             Err(replica_not_writable())
@@ -680,8 +704,173 @@ impl PolarGraphService for PolarGraphServer {
     type StreamWalStream = ReceiverStream<Result<WalEntry, Status>>;
     type QueryStreamStream = ReceiverStream<Result<QueryStreamChunk, Status>>;
     type CypherQueryStreamStream = ReceiverStream<Result<QueryStreamChunk, Status>>;
+    type ExportGraphStream = ReceiverStream<Result<ExportGraphChunk, Status>>;
 
     /// Insert one or more triples atomically.
+    async fn create_graph(
+        &self,
+        request: Request<CreateGraphRequest>,
+    ) -> Result<Response<CreateGraphResponse>, Status> {
+        self.check_not_replica()?;
+        let req = request.into_inner();
+        if req.iri.is_empty() {
+            return Err(Status::invalid_argument("graph iri must not be empty"));
+        }
+        let metadata = metadata_from_proto(&req.metadata)?;
+        let store = self.store.clone();
+        let graph = tokio::task::spawn_blocking(move || -> Result<GraphInfo, StorageError> {
+            let g = store.create_graph(&req.iri, &metadata)?;
+            graph_info(&store, g, req.iri)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("create_graph task failed: {e}")))?
+        .map_err(storage_err_to_status)?;
+        Ok(Response::new(CreateGraphResponse { graph: Some(graph) }))
+    }
+
+    async fn list_graphs(
+        &self,
+        request: Request<ListGraphsRequest>,
+    ) -> Result<Response<ListGraphsResponse>, Status> {
+        let req = request.into_inner();
+        let filter = metadata_from_proto(&req.filter)?;
+        let mut graphs = Vec::new();
+        for (g, iri) in self.store.list_graphs() {
+            if iri == polargraph_storage::SYSTEM_GRAPH_IRI && !req.include_system {
+                continue;
+            }
+            let info = graph_info(&self.store, g, iri).map_err(storage_err_to_status)?;
+            let has = |(p, v): &(String, Value)| {
+                info.metadata.iter().any(|m| {
+                    m.predicate == *p
+                        && m.value
+                            .as_ref()
+                            .and_then(|pv| convert::value_from_proto(pv).ok())
+                            .as_ref()
+                            == Some(v)
+                })
+            };
+            if filter.iter().all(has) {
+                graphs.push(info);
+            }
+        }
+        Ok(Response::new(ListGraphsResponse { graphs }))
+    }
+
+    async fn graph_stats(
+        &self,
+        request: Request<GraphStatsRequest>,
+    ) -> Result<Response<GraphStatsResponse>, Status> {
+        let iri = request.into_inner().iri;
+        let g = self.existing_graph(&iri)?;
+        let store = self.store.clone();
+        let stats = tokio::task::spawn_blocking(move || store.graph_stats(g))
+            .await
+            .map_err(|e| Status::internal(format!("graph_stats task failed: {e}")))?
+            .map_err(storage_err_to_status)?;
+        Ok(Response::new(GraphStatsResponse {
+            iri,
+            live_quads: stats.live_quads,
+            last_write_tt: stats.last_write_tt,
+        }))
+    }
+
+    async fn copy_graph(
+        &self,
+        request: Request<CopyGraphRequest>,
+    ) -> Result<Response<CopyGraphResponse>, Status> {
+        self.check_not_replica()?;
+        let req = request.into_inner();
+        let source = self.existing_graph(&req.source)?;
+        let target = self.target_graph(&req.target)?;
+        let store = self.store.clone();
+        let quads =
+            tokio::task::spawn_blocking(move || store.copy_graph(source, target, req.clear_target))
+                .await
+                .map_err(|e| Status::internal(format!("copy_graph task failed: {e}")))?
+                .map_err(storage_err_to_status)?;
+        Ok(Response::new(CopyGraphResponse {
+            quads: quads as u64,
+        }))
+    }
+
+    async fn move_graph(
+        &self,
+        request: Request<MoveGraphRequest>,
+    ) -> Result<Response<CopyGraphResponse>, Status> {
+        self.check_not_replica()?;
+        let req = request.into_inner();
+        let source = self.existing_graph(&req.source)?;
+        let target = self.target_graph(&req.target)?;
+        let store = self.store.clone();
+        let quads = tokio::task::spawn_blocking(move || store.move_graph(source, target))
+            .await
+            .map_err(|e| Status::internal(format!("move_graph task failed: {e}")))?
+            .map_err(storage_err_to_status)?;
+        Ok(Response::new(CopyGraphResponse {
+            quads: quads as u64,
+        }))
+    }
+
+    async fn drop_graph(
+        &self,
+        request: Request<DropGraphRequest>,
+    ) -> Result<Response<DropGraphResponse>, Status> {
+        self.check_not_replica()?;
+        let g = self.existing_graph(&request.into_inner().iri)?;
+        let store = self.store.clone();
+        let closed = tokio::task::spawn_blocking(move || store.drop_graph(g))
+            .await
+            .map_err(|e| Status::internal(format!("drop_graph task failed: {e}")))?
+            .map_err(storage_err_to_status)?;
+        Ok(Response::new(DropGraphResponse {
+            quads_closed: closed as u64,
+        }))
+    }
+
+    async fn export_graph(
+        &self,
+        request: Request<ExportGraphRequest>,
+    ) -> Result<Response<Self::ExportGraphStream>, Status> {
+        let req = request.into_inner();
+        let graphs: Vec<(polargraph_core::id::GraphId, String)> = if req.all_graphs {
+            std::iter::once((polargraph_core::id::GraphId::DEFAULT, String::new()))
+                .chain(
+                    self.store
+                        .list_graphs()
+                        .into_iter()
+                        .filter(|(_, iri)| iri != polargraph_storage::SYSTEM_GRAPH_IRI),
+                )
+                .collect()
+        } else {
+            vec![(self.existing_graph(&req.iri)?, req.iri)]
+        };
+        let store = self.store.clone();
+        let (tx, rx) = mpsc::channel::<Result<ExportGraphChunk, Status>>(4);
+        tokio::task::spawn_blocking(move || {
+            let snapshot = store.snapshot(store.begin().read_ts);
+            for (g, iri) in graphs {
+                let triples = match snapshot.scan_graph(g) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = tx.blocking_send(Err(storage_err_to_status(e)));
+                        return;
+                    }
+                };
+                for chunk in triples.chunks(STREAM_CHUNK_SIZE) {
+                    let quads = chunk
+                        .iter()
+                        .filter_map(|t| exported_quad(t, &iri))
+                        .collect();
+                    if tx.blocking_send(Ok(ExportGraphChunk { quads })).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
     async fn resolve_iris(
         &self,
         request: Request<ResolveIrisRequest>,
@@ -841,11 +1030,9 @@ impl PolarGraphService for PolarGraphServer {
         }
 
         // Convert proto VarPatterns → datalog VarPatterns.
-        let patterns: Vec<_> = req
-            .patterns
-            .iter()
-            .map(convert::var_pattern_from_proto)
-            .collect::<Result<_, _>>()?;
+        let patterns = convert::var_patterns_from_proto(&req.patterns, &req.graphs, &|iri| {
+            self.store.graph_id(iri)
+        })?;
 
         let pattern_count = patterns.len();
 
@@ -885,7 +1072,7 @@ impl PolarGraphService for PolarGraphServer {
         let rules: Vec<_> = req
             .rules
             .iter()
-            .map(convert::rule_from_proto)
+            .map(|r| convert::rule_from_proto(r, &|iri| self.store.graph_id(iri)))
             .collect::<Result<_, _>>()?;
 
         let t0 = Instant::now();
@@ -1767,11 +1954,8 @@ impl PolarGraphService for PolarGraphServer {
                 .snapshot(polargraph_core::temporal::Timestamp(req.snapshot_ts))
         };
 
-        let patterns: Vec<_> = req
-            .patterns
-            .iter()
-            .map(convert::var_pattern_from_proto)
-            .collect::<Result<_, _>>()?;
+        let patterns =
+            convert::var_patterns_from_proto(&req.patterns, &[], &|iri| self.store.graph_id(iri))?;
 
         let mut query = Query::new();
         for p in patterns {
@@ -1963,11 +2147,9 @@ impl PolarGraphService for PolarGraphServer {
             ));
         }
 
-        let patterns: Vec<_> = req
-            .patterns
-            .iter()
-            .map(convert::var_pattern_from_proto)
-            .collect::<Result<_, _>>()?;
+        let patterns = convert::var_patterns_from_proto(&req.patterns, &req.graphs, &|iri| {
+            self.store.graph_id(iri)
+        })?;
 
         let mut query = Query::new();
         for p in patterns {
@@ -2582,11 +2764,9 @@ impl PolarGraphService for PolarGraphServer {
             ));
         }
 
-        let patterns: Vec<_> = req
-            .patterns
-            .iter()
-            .map(convert::var_pattern_from_proto)
-            .collect::<Result<_, _>>()?;
+        let patterns = convert::var_patterns_from_proto(&req.patterns, &req.graphs, &|iri| {
+            self.store.graph_id(iri)
+        })?;
 
         let pattern_count = patterns.len();
         let mut query = Query::new();
@@ -2612,7 +2792,7 @@ impl PolarGraphService for PolarGraphServer {
         let rules: Vec<_> = req
             .rules
             .iter()
-            .map(convert::rule_from_proto)
+            .map(|r| convert::rule_from_proto(r, &|iri| self.store.graph_id(iri)))
             .collect::<Result<_, _>>()?;
 
         let t0 = Instant::now();
@@ -3670,6 +3850,78 @@ fn query_err_to_status(err: QueryError, timeout_ms: u64) -> Status {
         }
         QueryError::Storage(se) => storage_err_to_status(se),
     }
+}
+
+#[allow(clippy::result_large_err)]
+fn metadata_from_proto(meta: &[GraphMetadata]) -> Result<Vec<(String, Value)>, Status> {
+    meta.iter()
+        .map(|m| {
+            if m.predicate.is_empty() {
+                return Err(Status::invalid_argument(
+                    "metadata predicate must not be empty",
+                ));
+            }
+            let value = m
+                .value
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("metadata value is required"))?;
+            Ok((m.predicate.clone(), convert::value_from_proto(value)?))
+        })
+        .collect()
+}
+
+/// Proto form of a relation or property quad in graph `graph` (other triple
+/// kinds are not exported).
+fn exported_quad(t: &Triple, graph: &str) -> Option<ExportedQuad> {
+    use crate::proto::exported_quad::Object;
+    let (subject, predicate, object) = match t {
+        Triple::Relation {
+            subject,
+            predicate,
+            object,
+            ..
+        } => (
+            subject,
+            predicate,
+            Object::Node(convert::node_id_to_proto(*object)),
+        ),
+        Triple::Property {
+            subject,
+            predicate,
+            value,
+            ..
+        } => (
+            subject,
+            predicate,
+            Object::Value(convert::value_to_proto(value)),
+        ),
+        _ => return None,
+    };
+    Some(ExportedQuad {
+        subject: Some(convert::node_id_to_proto(*subject)),
+        predicate: predicate.0.clone(),
+        object: Some(object),
+        graph: graph.to_string(),
+    })
+}
+
+fn graph_info(
+    store: &TripleStore,
+    g: polargraph_core::id::GraphId,
+    iri: String,
+) -> Result<GraphInfo, StorageError> {
+    Ok(GraphInfo {
+        iri,
+        id: g.0,
+        metadata: store
+            .graph_metadata(g)?
+            .into_iter()
+            .map(|(predicate, value)| GraphMetadata {
+                predicate,
+                value: Some(convert::value_to_proto(&value)),
+            })
+            .collect(),
+    })
 }
 
 fn storage_err_to_status(err: StorageError) -> Status {

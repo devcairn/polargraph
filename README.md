@@ -14,7 +14,8 @@ PolarGraph is a purpose-built, Rust graph database engine. The core abstraction 
 - **SPARQL 1.1 endpoint** — `polargraph-sparql` library; `GET /sparql`, `POST /sparql`, `POST /sparql/update`; SELECT, ASK, CONSTRUCT, DESCRIBE; UNION, OPTIONAL, FILTER, property paths, GROUP BY, HAVING; full SPARQL-star (subject and object position, variable predicates, Turtle-star/N-Triples-star serialization, Update with embedded triples); INSERT/DELETE WHERE
 - **HNSW vector index** — pure-Rust; named spaces with independent dimensionality; Memory and Mmap storage modes; batch insert; configurable exploration factor (`ef`) for recall/latency tuning
 - **OWL 2 RL materialization** — forward-chaining engine; 12 rules (rdfs2, rdfs3, rdfs5, rdfs7/prp-spo1, rdfs9, rdfs11, prp-symp, prp-trp, prp-inv1/2, eq-sym/trans); derived facts in dedicated `DRV` CF; `RunMaterialization` RPC + `POST /materialize`
-- **RDF interoperability** — multi-format import (`POST /import/rdf`): N-Triples, Turtle, JSON-LD with `Content-Type` detection; JSON-LD export (`GET`/`POST /export/jsonld`); Accept-negotiated subgraph export (`GET /export/subgraph`): N-Triples, Turtle, or JSON-LD; PolarGraph-to-PolarGraph transfer via `POST /import/subgraph`; OWL/RDFS schema round-trip (`GET /schema/rdf`, `POST /schema/rdf`); `polargraph-import --format ntriples|turtle|jsonld`
+- **RDF interoperability** — multi-format import (`POST /import/rdf`): N-Triples, Turtle, JSON-LD, N-Quads, TriG with `Content-Type` detection; JSON-LD export (`GET`/`POST /export/jsonld`); Accept-negotiated subgraph export (`GET /export/subgraph`): N-Triples, Turtle, JSON-LD, N-Quads or TriG; whole-graph / dataset export (`GET /graphs/export`); PolarGraph-to-PolarGraph transfer via `POST /import/subgraph`; OWL/RDFS schema round-trip (`GET /schema/rdf`, `POST /schema/rdf`); `polargraph-import --format ntriples|turtle|jsonld|nquads|trig`
+- **Named graphs** — every quad lives in a graph; graph-scoped query patterns (`@default`, `@<iri>`, `@?g`) and datasets; graph metadata, stats, copy/move and bitemporal drop (`CreateGraph`, `ListGraphs`, `GraphStats`, `CopyGraph`, `MoveGraph`, `DropGraph`, `ExportGraph` RPCs; REST `/graphs*`)
 - **RDF-star edge annotations** — `EdgeProperty` and `EdgeRelation` triple variants; `EPA`/`EPO` column families; `GetEdgeAnnotations` and `GetEdgeIdsByTriple` RPCs; full SPARQL-star integration (subject and object position)
 - **gRPC API** — full-featured `polargraph.v1.PolarGraphService` via tonic; server-streaming variants for large result sets
 - **REST gateway** — standalone `polargraph-rest` binary; HTTP/JSON → gRPC proxy; no client stub required
@@ -775,7 +776,7 @@ grpcurl -plaintext \
 
 ## Bulk import
 
-`polargraph-import` ingests RDF files (N-Triples, Turtle, or JSON-LD) directly into RocksDB via SST file ingestion — bypassing gRPC, the WAL write path, and per-insert MVCC overhead. Expected throughput: 10–100× faster than streaming inserts over gRPC.
+`polargraph-import` ingests RDF files (N-Triples, Turtle, JSON-LD, N-Quads or TriG) directly into RocksDB via SST file ingestion — bypassing gRPC, the WAL write path, and per-insert MVCC overhead. Expected throughput: 10–100× faster than streaming inserts over gRPC.
 
 **The server must be stopped first** — SST ingestion requires exclusive DB access.
 
@@ -804,7 +805,7 @@ polargraphd --data-dir /var/lib/polargraph
 |------|---------|-------------|
 | `--data-dir PATH` | *(required)* | RocksDB data directory |
 | `--input FILE` | *(required)* | Input file |
-| `--format FORMAT` | `ntriples` | Input format: `ntriples` (default), `turtle`, `jsonld` |
+| `--format FORMAT` | `ntriples` | Input format: `ntriples` (default), `turtle`, `jsonld`, `nquads`, `trig` (quads go to their named graphs) |
 | `--batch-size N` | `100000` | Triples per SST import batch |
 | `--temp-dir PATH` | `<data-dir>/sst_tmp` | Temporary SST file directory |
 | `--import-id ID` | *(fresh UUIDv7)* | Blank-node scope; reuse it for an idempotent re-import |

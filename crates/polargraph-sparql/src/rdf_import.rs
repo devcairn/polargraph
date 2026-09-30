@@ -11,10 +11,10 @@ use polargraph_core::{
     value::Value,
 };
 use rio_api::{
-    model::{Literal, Subject, Term, Triple},
-    parser::TriplesParser,
+    model::{GraphName, Literal, Quad, Subject, Term, Triple},
+    parser::{QuadsParser, TriplesParser},
 };
-use rio_turtle::{NTriplesParser, TurtleParser};
+use rio_turtle::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
 
 // ── NodeId / EdgeId helpers ───────────────────────────────────────────────────
 
@@ -54,9 +54,21 @@ pub struct ImportedTriple {
     pub predicate: String,
     /// Object value.
     pub object: ImportedObject,
+    /// Named graph from a quad format (TriG, N-Quads): an IRI, or a blank
+    /// node label as `_:label`. `None` = the default graph.
+    pub graph: Option<String>,
 }
 
 impl ImportedTriple {
+    /// The graph IRI (blank-node graph names skolemized within `scope`);
+    /// `None` for the default graph.
+    pub fn graph_iri(&self, scope: &ImportScope) -> Option<String> {
+        self.graph.as_ref().map(|g| match g.strip_prefix("_:") {
+            Some(label) => scope.skolem_iri(label),
+            None => g.clone(),
+        })
+    }
+
     /// The subject's `NodeId`; blank nodes are skolemized within `scope`.
     pub fn subject_node_id(&self, scope: &ImportScope) -> NodeId {
         if self.subject_is_bnode {
@@ -157,7 +169,21 @@ fn collect_triple(t: Triple<'_>) -> ImportedTriple {
         subject_is_bnode,
         predicate: t.predicate.iri.to_string(),
         object: rio_object_to_imported(&t.object),
+        graph: None,
     }
+}
+
+fn collect_quad(q: Quad<'_>) -> ImportedTriple {
+    let mut t = collect_triple(Triple {
+        subject: q.subject,
+        predicate: q.predicate,
+        object: q.object,
+    });
+    t.graph = q.graph_name.map(|g| match g {
+        GraphName::NamedNode(n) => n.iri.to_string(),
+        GraphName::BlankNode(b) => format!("_:{}", b.id),
+    });
+    t
 }
 
 // ── Public parsers ────────────────────────────────────────────────────────────
@@ -176,6 +202,32 @@ pub fn parse_ntriples(input: &[u8]) -> Result<Vec<ImportedTriple>, String> {
         )
         .map_err(|e| format!("N-Triples parse error: {}", e))?;
     Ok(triples)
+}
+
+/// Parse an [N-Quads](https://www.w3.org/TR/n-quads/) document.
+pub fn parse_nquads(input: &[u8]) -> Result<Vec<ImportedTriple>, String> {
+    let mut parser = NQuadsParser::new(std::io::Cursor::new(input));
+    let mut quads = Vec::new();
+    parser
+        .parse_all(&mut |q: Quad<'_>| -> Result<(), rio_turtle::TurtleError> {
+            quads.push(collect_quad(q));
+            Ok(())
+        })
+        .map_err(|e| format!("N-Quads parse error: {}", e))?;
+    Ok(quads)
+}
+
+/// Parse a [TriG](https://www.w3.org/TR/trig/) document.
+pub fn parse_trig(input: &[u8]) -> Result<Vec<ImportedTriple>, String> {
+    let mut parser = TriGParser::new(std::io::Cursor::new(input), None);
+    let mut quads = Vec::new();
+    parser
+        .parse_all(&mut |q: Quad<'_>| -> Result<(), rio_turtle::TurtleError> {
+            quads.push(collect_quad(q));
+            Ok(())
+        })
+        .map_err(|e| format!("TriG parse error: {}", e))?;
+    Ok(quads)
 }
 
 /// Parse a [Turtle](https://www.w3.org/TR/turtle/) document.
@@ -297,6 +349,7 @@ pub fn parse_jsonld(input: &str) -> Result<Vec<ImportedTriple>, String> {
                     subject_is_bnode,
                     predicate: predicate.clone(),
                     object: imported_object,
+                    graph: None,
                 });
             }
         }
@@ -357,6 +410,29 @@ mod tests {
         assert!(t.subject_is_bnode);
         assert_eq!(t.subject, "b0");
         assert!(matches!(&t.object, ImportedObject::BlankNode(l) if l == "b1"));
+    }
+
+    #[test]
+    fn parse_quad_formats_keep_graph_names() {
+        let nq = concat!(
+            "<http://ex/a> <http://ex/p> <http://ex/b> <http://ex/g1> .\n",
+            "<http://ex/a> <http://ex/p> \"x\" .\n",
+            "<http://ex/a> <http://ex/p> <http://ex/c> _:g .\n",
+        );
+        let q = parse_nquads(nq.as_bytes()).unwrap();
+        assert_eq!(q[0].graph.as_deref(), Some("http://ex/g1"));
+        assert_eq!(q[1].graph, None);
+        let scope = ImportScope::new("https://kb.example.com", "i1");
+        assert_eq!(
+            q[2].graph_iri(&scope).as_deref(),
+            Some("https://kb.example.com/.well-known/genid/i1/g")
+        );
+
+        let trig = b"@prefix ex: <http://ex/> .\nex:g2 { ex:a ex:p ex:b . }\nex:a ex:p ex:c .\n";
+        let t = parse_trig(trig).unwrap();
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0].graph.as_deref(), Some("http://ex/g2"));
+        assert_eq!(t[1].graph, None);
     }
 
     #[test]
