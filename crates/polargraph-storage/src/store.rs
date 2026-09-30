@@ -172,6 +172,9 @@ struct Inner {
     next_pred_id: RwLock<PredId>,
     graph_fwd: RwLock<HashMap<String, GraphId>>, // graph IRI → id
     graph_rev: RwLock<HashMap<GraphId, String>>, // id → graph IRI
+    /// Graph IRI node (`term::iri_to_node_id(iri)`) → graph id, so a graph
+    /// variable bound to a node can be resolved back to its graph.
+    graph_by_node: RwLock<HashMap<NodeId, GraphId>>,
     next_graph_id: RwLock<u32>,
     /// Property payloads above this many bytes go to the `blob` CF.
     inline_value_max_bytes: AtomicUsize,
@@ -205,20 +208,36 @@ type QuadIds = (NodeId, PredId, NodeId, GraphId);
 /// Property values staged in one write batch, per `(s, p, g)`.
 type StagedValues = HashMap<(NodeId, PredId, GraphId), Vec<(NodeId, Vec<u8>)>>;
 
-/// Which graphs a scan returns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GraphFilter {
-    /// Every graph; results de-duplicated on `(s, p, o)`.
+/// Which graphs a scan reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphScope {
+    /// Every graph, the default graph included.
     Union,
+    /// One graph.
     One(GraphId),
+    /// A set of graphs (kept sorted; see [`GraphScope::set`]).
+    Set(Vec<GraphId>),
+    /// Every named graph — everything except the default graph. This is
+    /// what a graph variable (`GRAPH ?g`) ranges over.
+    Named,
 }
 
-impl GraphFilter {
+impl GraphScope {
+    /// A `Set` scope, sorted and de-duplicated.
+    pub fn set(mut graphs: Vec<GraphId>) -> Self {
+        graphs.sort();
+        graphs.dedup();
+        GraphScope::Set(graphs)
+    }
+
+    /// Whether quads in graph `g` are in scope.
     #[inline]
-    fn admits(self, g: GraphId) -> bool {
+    pub fn admits(&self, g: GraphId) -> bool {
         match self {
-            GraphFilter::Union => true,
-            GraphFilter::One(want) => want == g,
+            GraphScope::Union => true,
+            GraphScope::One(want) => *want == g,
+            GraphScope::Set(gs) => gs.binary_search(&g).is_ok(),
+            GraphScope::Named => g != GraphId::DEFAULT,
         }
     }
 }
@@ -318,6 +337,7 @@ impl TripleStore {
                 rev: RwLock::new(rev),
                 next_pred_id: RwLock::new(next_pred_id),
                 graph_fwd: RwLock::new(graph_fwd),
+                graph_by_node: RwLock::new(Self::graph_nodes(&graph_rev)),
                 graph_rev: RwLock::new(graph_rev),
                 next_graph_id: RwLock::new(next_graph_id),
                 inline_value_max_bytes: AtomicUsize::new(DEFAULT_INLINE_VALUE_MAX_BYTES),
@@ -428,6 +448,7 @@ impl TripleStore {
         *self.inner.next_pred_id.write().unwrap() = next_pred_id;
         let (graph_fwd, graph_rev, next_graph_id) = Self::load_graphs(&self.inner.db)?;
         *self.inner.graph_fwd.write().unwrap() = graph_fwd;
+        *self.inner.graph_by_node.write().unwrap() = Self::graph_nodes(&graph_rev);
         *self.inner.graph_rev.write().unwrap() = graph_rev;
         *self.inner.next_graph_id.write().unwrap() = next_graph_id;
         self.inner
@@ -1045,7 +1066,15 @@ impl TripleStore {
         batch.put_cf(&meta_cf, meta_graph_key(iri), id.to_be_bytes());
         batch.put_cf(&meta_cf, meta_graph_rev_key(id), iri.as_bytes());
         batch.put_cf(&meta_cf, META_GRAPH_CTR, next.to_be_bytes());
+        // The graph IRI names a node too (graph variables bind to it), so
+        // record it in the IRI dictionary for export.
+        self.batch_iri(&mut batch, iri, &mut HashMap::new())?;
         self.inner.db.write(batch)?;
+        self.inner
+            .graph_by_node
+            .write()
+            .unwrap()
+            .insert(term::iri_to_node_id(iri), id);
 
         fwd.insert(iri.to_owned(), id);
         self.inner
@@ -1054,6 +1083,24 @@ impl TripleStore {
             .unwrap()
             .insert(id, iri.to_owned());
         Ok(id)
+    }
+
+    fn graph_nodes(graph_rev: &HashMap<GraphId, String>) -> HashMap<NodeId, GraphId> {
+        graph_rev
+            .iter()
+            .map(|(id, iri)| (term::iri_to_node_id(iri), *id))
+            .collect()
+    }
+
+    /// The node a named graph's IRI names — what a graph variable binds to.
+    /// `None` for the default graph (it has no IRI) and unknown ids.
+    pub fn graph_node(&self, id: GraphId) -> Option<NodeId> {
+        self.graph_iri(id).map(|iri| term::iri_to_node_id(&iri))
+    }
+
+    /// The named graph whose IRI names `node`, if any.
+    pub fn graph_for_node(&self, node: &NodeId) -> Option<GraphId> {
+        self.inner.graph_by_node.read().unwrap().get(node).copied()
     }
 
     /// The id of graph `iri` if it has been interned.
@@ -1296,7 +1343,7 @@ impl TripleStore {
                 &prefix,
                 snapshot_ts,
                 vt_as_of,
-                GraphFilter::One(g),
+                &GraphScope::One(g),
             )?
             .into_iter()
             .map(|(_, t)| t)
@@ -1319,11 +1366,67 @@ impl TripleStore {
                 &prefix,
                 snapshot_ts,
                 vt_as_of,
-                GraphFilter::One(g),
+                &GraphScope::One(g),
             )?
             .into_iter()
             .map(|(_, t)| t)
             .collect())
+    }
+
+    /// Triples matching the bound slots within `scope`, each with its graph.
+    ///
+    /// `object` may be a node or a property's value hash. Picks the order
+    /// whose prefix covers the most bound slots: `gspo` / `gpos` for a single
+    /// graph, otherwise the usual subject/predicate/object orders with the
+    /// scope applied to each key's graph slot. Results are not de-duplicated
+    /// across graphs.
+    pub(crate) fn scan_scoped_at(
+        &self,
+        subject: Option<&NodeId>,
+        predicate: Option<&str>,
+        object: Option<&NodeId>,
+        scope: &GraphScope,
+        snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
+    ) -> Result<Vec<(GraphId, Triple)>, StorageError> {
+        let p = match predicate {
+            Some(name) => match self.predicate_id(name) {
+                Some(id) => Some(id),
+                None => return Ok(vec![]),
+            },
+            None => None,
+        };
+        let (s, o) = (subject, object);
+        let (order, prefix) = match (scope, s, p, o) {
+            (GraphScope::One(g), Some(_), _, _) => {
+                // gspo: [g][s][p][o] — o only usable when p is bound.
+                (Order::Gspo, Order::Gspo.prefix(s, p, o, Some(*g)))
+            }
+            (GraphScope::One(g), None, Some(_), _) => {
+                (Order::Gpos, Order::Gpos.prefix(None, p, o, Some(*g)))
+            }
+            (GraphScope::One(_), None, None, Some(_)) => {
+                (Order::Ospg, Order::Ospg.prefix(None, None, o, None))
+            }
+            (GraphScope::One(g), None, None, None) => {
+                (Order::Gspo, Order::Gspo.prefix(None, None, None, Some(*g)))
+            }
+            (_, Some(_), Some(_), _) => (Order::Spog, Order::Spog.prefix(s, p, o, None)),
+            (_, Some(_), None, Some(_)) => (Order::Sopg, Order::Sopg.prefix(s, None, o, None)),
+            (_, Some(_), None, None) => (Order::Spog, Order::Spog.prefix(s, None, None, None)),
+            (_, None, Some(_), _) => (Order::Posg, Order::Posg.prefix(None, p, o, None)),
+            (_, None, None, Some(_)) => (Order::Ospg, Order::Ospg.prefix(None, None, o, None)),
+            (_, None, None, None) => (Order::Spog, Order::Spog.prefix(None, None, None, None)),
+        };
+        let mut quads =
+            self.snapshot_scan_keyed(order.cf(), order, &prefix, snapshot_ts, vt_as_of, scope)?;
+        // A prefix may cover fewer slots than are bound; filter the rest.
+        quads.retain(|((qs, qp, qo, _), _)| {
+            s.map_or(true, |s| s == qs)
+                && p.map_or(true, |p| p == *qp)
+                && o.map_or(true, |o| o == qo)
+        });
+        Ok(quads.into_iter().map(|((_, _, _, g), t)| (g, t)).collect())
     }
 
     // ── snapshot scan implementation ──────────────────────────────────────────
@@ -1342,7 +1445,7 @@ impl TripleStore {
             prefix,
             snapshot_ts,
             vt_as_of,
-            GraphFilter::Union,
+            &GraphScope::Union,
         )?;
         // With no named graphs every quad is in the default graph, so there
         // is nothing to de-duplicate.
@@ -1387,7 +1490,7 @@ impl TripleStore {
         prefix: &[u8],
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
-        graphs: GraphFilter,
+        graphs: &GraphScope,
     ) -> Result<Vec<(GraphId, Triple)>, StorageError> {
         Ok(self
             .snapshot_scan_keyed(cf_name, order, prefix, snapshot_ts, vt_as_of, graphs)?
@@ -1404,7 +1507,7 @@ impl TripleStore {
         prefix: &[u8],
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
-        graphs: GraphFilter,
+        graphs: &GraphScope,
     ) -> Result<Vec<(QuadIds, Triple)>, StorageError> {
         let vt = vt_as_of.unwrap_or_else(|| Timestamp::now().0);
         let cf = self.cf_handle(cf_name)?;
@@ -2418,7 +2521,7 @@ impl TripleStore {
                 &[],
                 snapshot_ts,
                 None,
-                GraphFilter::Union,
+                &GraphScope::Union,
             )?
             .into_iter()
             .map(|(_, t)| t)

@@ -493,6 +493,25 @@ impl Snapshot {
             .scan_by_predicate_value_at(predicate, value, self.ts, self.vt_as_of)
     }
 
+    /// Triples matching the bound slots within `scope`, each with its graph
+    /// (see [`crate::GraphScope`]). `object` may be a node or a property's
+    /// value hash ([`crate::keys::value_object`]).
+    pub fn scan_scoped(
+        &self,
+        subject: Option<&NodeId>,
+        predicate: Option<&str>,
+        object: Option<&NodeId>,
+        scope: &crate::store::GraphScope,
+    ) -> Result<Vec<(GraphId, Triple)>, StorageError> {
+        self.store
+            .scan_scoped_at(subject, predicate, object, scope, self.ts, self.vt_as_of)
+    }
+
+    /// The store this snapshot reads (for graph ↔ node lookups).
+    pub fn store(&self) -> &TripleStore {
+        &self.store
+    }
+
     /// Every triple in graph `g`.
     pub fn scan_graph(&self, g: GraphId) -> Result<Vec<Triple>, StorageError> {
         self.store.scan_graph_at(g, self.ts, self.vt_as_of)

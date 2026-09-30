@@ -352,3 +352,57 @@ fn new_stores_are_created_in_format_3_without_v2_cfs() {
     // Reopening a format-3 store works.
     TripleStore::open(dir.path()).unwrap();
 }
+
+// ── graph scopes ──────────────────────────────────────────────────────────────
+
+#[test]
+fn scoped_scans_respect_every_scope_and_report_graphs() {
+    use polargraph_core::term;
+    use polargraph_storage::GraphScope;
+
+    let (store, _dir) = open();
+    let g1 = store.intern_graph("urn:g1").unwrap();
+    let g2 = store.intern_graph("urn:g2").unwrap();
+    let (a, b) = (NodeId::new(), NodeId::new());
+    let d = GraphId::DEFAULT;
+    commit(
+        &store,
+        vec![
+            (prop(a, "status", text("draft")), g1, WriteMode::Add),
+            (prop(a, "status", text("final")), g2, WriteMode::Add),
+            (prop(b, "status", text("final")), d, WriteMode::Add),
+        ],
+    );
+    let snap = store.snapshot(Timestamp(store.oracle_ts()));
+    let graphs_of = |scope: GraphScope, s: Option<&NodeId>| {
+        let mut gs: Vec<GraphId> = snap
+            .scan_scoped(s, Some("status"), None, &scope)
+            .unwrap()
+            .into_iter()
+            .map(|(g, _)| g)
+            .collect();
+        gs.sort();
+        gs
+    };
+    assert_eq!(graphs_of(GraphScope::Union, None), vec![d, g1, g2]);
+    assert_eq!(graphs_of(GraphScope::Named, None), vec![g1, g2]);
+    assert_eq!(graphs_of(GraphScope::One(g2), None), vec![g2]);
+    assert_eq!(graphs_of(GraphScope::One(g1), Some(&a)), vec![g1]);
+    assert_eq!(graphs_of(GraphScope::set(vec![g2, d]), None), vec![d, g2]);
+    assert!(graphs_of(GraphScope::One(g1), Some(&b)).is_empty());
+
+    // Bound value object through the value index, within one graph.
+    let fin = polargraph_storage::keys::value_object(&text("final"));
+    let hits = snap
+        .scan_scoped(None, Some("status"), Some(&fin), &GraphScope::Named)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].0, g2);
+
+    // Graph ↔ node mapping, and the graph IRI is in the IRI dictionary.
+    let n1 = store.graph_node(g1).unwrap();
+    assert_eq!(n1, term::iri_to_node_id("urn:g1"));
+    assert_eq!(store.graph_for_node(&n1), Some(g1));
+    assert_eq!(store.graph_node(GraphId::DEFAULT), None);
+    assert_eq!(store.iri_of(&n1).unwrap().as_deref(), Some("urn:g1"));
+}
