@@ -197,8 +197,8 @@ See `polargraph.example.toml` in the repo root for a fully-commented example.
 | `--replica-of URL` | `POLARGRAPH_REPLICA_OF` | *(none)* | gRPC address of primary; enables WAL streaming replica mode |
 | `--replica-tls-ca PATH` | `POLARGRAPH_REPLICA_TLS_CA` | *(none)* | CA cert for verifying the primary's TLS certificate (replica mode only) |
 | `--rate-limit-rps N` | `POLARGRAPH_RATE_LIMIT_RPS` | `0` | Max requests/sec per client IP (token bucket); 0 = disabled |
-| `--retention-tx-age-secs N` | `POLARGRAPH_RETENTION_TX_AGE_SECS` | *(none)* | Delete triples older than N seconds (transaction time); runs once at startup |
-| `--retention-vt-lookback-secs N` | `POLARGRAPH_RETENTION_VT_LOOKBACK_SECS` | *(none)* | Also delete triples whose valid-time end is more than N seconds in the past |
+| `--retention-tx-age-secs N` | `POLARGRAPH_RETENTION_TX_AGE_SECS` | *(none)* | Delete versions superseded more than N seconds ago (current values are kept); runs once at startup |
+| `--retention-vt-lookback-secs N` | `POLARGRAPH_RETENTION_VT_LOOKBACK_SECS` | *(none)* | Also delete triples whose versions all ended (valid time) more than N seconds ago |
 | `--retention-schedule` | `POLARGRAPH_RETENTION_SCHEDULE` | `false` | Enable background periodic retention task |
 | `--default-vector-ef N` | `POLARGRAPH_DEFAULT_VECTOR_EF` | `50` | Default HNSW exploration factor for vector searches |
 | `--query-cache-size N` | `POLARGRAPH_QUERY_CACHE_SIZE` | `1000` | Max Cypher query plans to cache |

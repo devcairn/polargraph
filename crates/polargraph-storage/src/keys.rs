@@ -28,6 +28,20 @@ use uuid::Uuid;
 /// Interned predicate ID — 32-bit so keys stay compact.
 pub type PredId = u32;
 
+/// Width of a hexastore key: the (S,P,O) tuple in CF order plus `tt`.
+pub const HEXASTORE_KEY_LEN: usize = 44;
+
+/// Width of the (S,P,O) tuple prefix of a hexastore key — everything but `tt`.
+/// All versions of one logical triple share this prefix and sort together,
+/// oldest `tt` first.
+pub const HEXASTORE_TUPLE_LEN: usize = HEXASTORE_KEY_LEN - 8;
+
+/// Read the transaction time from the last 8 bytes of a hexastore key.
+#[inline]
+pub fn hexastore_tt(key: &[u8]) -> Timestamp {
+    tt_from(&key[key.len() - 8..])
+}
+
 /// Sentinel NodeId used in the object slot for property triples.
 pub const PROPERTY_SENTINEL: [u8; 16] = [0xFF; 16];
 

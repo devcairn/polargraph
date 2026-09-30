@@ -137,6 +137,13 @@ struct Inner {
 // META key for persisting the last replicated WAL sequence number.
 const META_LAST_REPL_SEQ: &[u8] = b"__replication__/last_seq";
 
+/// A raw (key, value) entry read straight from a column family.
+pub type RawEntry = (Box<[u8]>, Box<[u8]>);
+
+/// Per-key winner while deduplicating versions in `snapshot_scan_cf`:
+/// `(vt_start, tt, vt_end, value_bytes)`.
+type VersionSlot = (i64, Timestamp, i64, Vec<u8>);
+
 impl TripleStore {
     // ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -1031,6 +1038,7 @@ impl TripleStore {
     ///        the correcting) entry always wins the tie-break, so once its
     ///        own window closes the fact is hidden rather than falling back
     ///        to the older, still-open-ended version.
+    ///
     ///    The winning entry is then only returned if its own window actually
     ///    covers `vt` (`vt < vt_end`); otherwise the key is dropped entirely
     ///    (this is what makes DELETE hide data instead of resurrecting an
@@ -1057,8 +1065,7 @@ impl TripleStore {
         // Map: (subject, pred_id, object) → (vt_start, tt, vt_end, value_bytes)
         // `vt_start`/`vt_end` are only meaningful (and only populated) when
         // `vt_as_of` is `Some`; in the `None` case we only ever compare `tt`.
-        let mut latest: HashMap<(NodeId, PredId, NodeId), (i64, Timestamp, i64, Vec<u8>)> =
-            HashMap::new();
+        let mut latest: HashMap<(NodeId, PredId, NodeId), VersionSlot> = HashMap::new();
 
         for item in iter {
             let (key, value) = item?;
@@ -1099,12 +1106,13 @@ impl TripleStore {
                     continue;
                 }
 
-                let slot = latest
-                    .entry(key_tuple)
-                    .or_insert((i64::MIN, Timestamp(i64::MIN), i64::MIN, vec![]));
-                if temporal.vt_start.0 > slot.0
-                    || (temporal.vt_start.0 == slot.0 && tt > slot.1)
-                {
+                let slot = latest.entry(key_tuple).or_insert((
+                    i64::MIN,
+                    Timestamp(i64::MIN),
+                    i64::MIN,
+                    vec![],
+                ));
+                if temporal.vt_start.0 > slot.0 || (temporal.vt_start.0 == slot.0 && tt > slot.1) {
                     *slot = (temporal.vt_start.0, tt, temporal.vt_end.0, value_bytes);
                 }
             } else {
@@ -1786,35 +1794,69 @@ impl TripleStore {
         Ok(())
     }
 
-    /// Iterate all (key, value) pairs in a hexastore CF without snapshot filtering.
+    /// Walk a CF in key order without snapshot filtering, grouping consecutive
+    /// entries whose first `group_len` key bytes are equal, and delete the
+    /// entries `select` picks from each group.
     ///
-    /// Used by `CompactionManager` to scan for expired triples. The callback
-    /// receives raw bytes and returns `true` to mark the key for deletion.
-    pub fn scan_cf_raw<F>(&self, cf_name: &str, mut should_delete: F) -> Result<usize, StorageError>
+    /// For hexastore CFs with `group_len = keys::HEXASTORE_TUPLE_LEN`, each
+    /// group is every stored version of one logical triple, oldest `tt` first.
+    /// `select` returns indices into the group slice. Used by
+    /// `CompactionManager`. Returns `(entries_scanned, entries_deleted)`.
+    pub fn prune_cf_groups<F>(
+        &self,
+        cf_name: &str,
+        group_len: usize,
+        mut select: F,
+    ) -> Result<(usize, usize), StorageError>
     where
-        F: FnMut(&[u8], &[u8]) -> bool,
+        F: FnMut(&[RawEntry]) -> Vec<usize>,
     {
+        // Deletes are flushed in chunks to bound memory on large CFs. The
+        // iterator reads from an implicit snapshot, so flushing mid-scan is safe.
+        const FLUSH_EVERY: usize = 10_000;
+
         if self.is_replica() {
             return Err(Self::read_only_err());
         }
         let cf = self.cf_handle(cf_name)?;
         let iter = self.inner.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
-        let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
+
+        let mut scanned = 0usize;
+        let mut deleted = 0usize;
+        let mut group: Vec<RawEntry> = Vec::new();
+        let mut batch = WriteBatch::default();
+
+        let mut flush_group = |group: &mut Vec<RawEntry>, batch: &mut WriteBatch| -> usize {
+            if group.is_empty() {
+                return 0;
+            }
+            let picked = select(group);
+            for &i in &picked {
+                batch.delete_cf(&cf, &group[i].0);
+            }
+            group.clear();
+            picked.len()
+        };
+
         for item in iter {
             let (k, v) = item?;
-            if should_delete(&k, &v) {
-                keys_to_delete.push(k.to_vec());
+            scanned += 1;
+            let same_group = group.first().is_some_and(|(g, _)| {
+                g.len() >= group_len && k.len() >= group_len && g[..group_len] == k[..group_len]
+            });
+            if !same_group {
+                deleted += flush_group(&mut group, &mut batch);
+                if batch.len() >= FLUSH_EVERY {
+                    self.db_write(std::mem::take(&mut batch))?;
+                }
             }
+            group.push((k, v));
         }
-        let count = keys_to_delete.len();
-        if !keys_to_delete.is_empty() {
-            let mut batch = WriteBatch::default();
-            for key in keys_to_delete {
-                batch.delete_cf(&cf, &key);
-            }
+        deleted += flush_group(&mut group, &mut batch);
+        if !batch.is_empty() {
             self.db_write(batch)?;
         }
-        Ok(count)
+        Ok((scanned, deleted))
     }
 
     // ── Derived triple store (DRV CF) ─────────────────────────────────────────

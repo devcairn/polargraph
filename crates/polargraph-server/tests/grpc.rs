@@ -2086,7 +2086,7 @@ async fn backup_purge_removes_old_backups() {
 // ── RunRetention tests ────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn run_retention_deletes_old_triples() {
+async fn run_retention_deletes_superseded_versions() {
     let (svc, _dir) = open();
     let (_core_s, proto_s) = new_node();
 
@@ -2097,21 +2097,28 @@ async fn run_retention_deletes_old_triples() {
     };
     svc.insert(Request::new(insert_req)).await.unwrap();
 
-    // Plant an old triple directly via the store (tt = 1 µs since epoch).
+    // Plant an old value and an old correction of it directly via the store
+    // (tt = 1 µs and 2 µs since epoch). Retention prunes history, so only the
+    // superseded first version is eligible.
     let (core_old, _) = new_node();
-    let old_triple = polargraph_core::triple::Triple::Property {
+    let old_version = |text: &str| polargraph_core::triple::Triple::Property {
         subject: core_old,
         predicate: polargraph_core::triple::Predicate::new("label"),
-        value: polargraph_core::value::Value::Text("ancient".into()),
+        value: polargraph_core::value::Value::Text(text.into()),
         temporal: polargraph_core::temporal::BiTemporalRange {
             vt_start: Timestamp(0),
             vt_end: Timestamp(i64::MAX),
             tt: Timestamp(0),
         },
     };
-    svc.store().insert_at_ts(&old_triple, Timestamp(1)).unwrap();
+    svc.store()
+        .insert_at_ts(&old_version("ancient"), Timestamp(1))
+        .unwrap();
+    svc.store()
+        .insert_at_ts(&old_version("corrected"), Timestamp(2))
+        .unwrap();
 
-    // Run retention with 2-second tx_age — old triple's tt(1 µs) is < (now - 2s).
+    // Run retention with 2-second tx_age — the correction (tt = 2 µs) is older than the cutoff.
     let resp = svc
         .run_retention(Request::new(RunRetentionRequest {
             tx_age_secs: 2,
@@ -2121,7 +2128,8 @@ async fn run_retention_deletes_old_triples() {
         .unwrap()
         .into_inner();
 
-    // 6 CF copies of the old triple should be gone.
+    // 6 CF copies of the superseded version should be gone; the current
+    // value of every triple (including the correction) survives.
     assert_eq!(resp.triples_deleted, 6);
     assert!(resp.triples_scanned >= 6);
 }

@@ -292,15 +292,17 @@ pub fn builtin_edge_types() -> Vec<EdgeTypeDef> {
 
 /// Policy controlling bitemporal data retention.
 ///
-/// Any triple matching either condition is eligible for deletion by
-/// [`CompactionManager::run_retention`].
+/// Retention prunes history, never current state — see
+/// `CompactionManager::run_retention` in `polargraph-storage` for the rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetentionPolicy {
-    /// Delete triples whose transaction time (`tt`) is older than this many
-    /// seconds relative to the time `run_retention` is called.
+    /// Delete versions that were shadowed (by a correction or a DELETE with
+    /// the same `vt_start`) more than this many seconds before the time
+    /// `run_retention` is called. The current version is always kept.
     pub tx_age_secs: u64,
-    /// If `Some(n)`, also delete triples whose `vt_end` is more than `n`
-    /// seconds in the past. `None` keeps all valid-time history.
+    /// If `Some(n)`, also delete a triple entirely once every one of its
+    /// versions has a `vt_end` more than `n` seconds in the past. `None`
+    /// keeps all valid-time history.
     pub vt_lookback_secs: Option<u64>,
 }
 

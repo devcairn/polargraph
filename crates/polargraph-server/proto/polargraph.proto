@@ -567,10 +567,12 @@ message PurgeOldBackupsResponse {
 // ── Retention ─────────────────────────────────────────────────────────────────
 
 message RunRetentionRequest {
-    /// Delete triples whose transaction time is older than this many seconds.
+    /// Delete versions superseded (corrected or deleted) more than this many
+    /// seconds ago. The current version of a triple is never deleted.
     uint64 tx_age_secs = 1;
-    /// Also delete triples whose vt_end is more than this many seconds in the
-    /// past. Set to 0 to disable valid-time lookback (keep all valid-time history).
+    /// Also delete a triple entirely once all of its versions have a vt_end more
+    /// than this many seconds in the past. Set to 0 to disable valid-time
+    /// lookback (keep all valid-time history).
     uint64 vt_lookback_secs = 2;
 }
 
@@ -1032,8 +1034,8 @@ service PolarGraphService {
     /// Note: restore is an offline operation — see docs/architecture.md.
     rpc PurgeOldBackups(PurgeOldBackupsRequest) returns (PurgeOldBackupsResponse);
 
-    /// Scan all hexastore column families and delete triples whose
-    /// transaction time or valid-time window has expired per the supplied policy.
+    /// Scan all hexastore column families and delete superseded versions (and
+    /// triples whose valid-time windows have fully expired) per the policy.
     /// Triggers a full RocksDB compaction on any CF that had deletions.
     rpc RunRetention(RunRetentionRequest) returns (RunRetentionResponse);
 

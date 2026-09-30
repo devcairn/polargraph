@@ -115,8 +115,8 @@ struct Cli {
     #[arg(long = "no-metrics", default_value_t = false)]
     no_metrics: bool,
 
-    /// Run retention on startup: delete triples whose transaction time is older
-    /// than this many seconds.
+    /// Run retention on startup: delete versions superseded (corrected or
+    /// deleted) more than this many seconds ago. Current values are kept.
     #[arg(
         long = "retention-tx-age-secs",
         env = "POLARGRAPH_RETENTION_TX_AGE_SECS",
@@ -124,7 +124,8 @@ struct Cli {
     )]
     retention_tx_age_secs: Option<u64>,
 
-    /// Companion to --retention-tx-age-secs; also deletes triples with old vt_end.
+    /// Companion to --retention-tx-age-secs; also deletes triples whose versions
+    /// all ended (valid time) more than this many seconds ago.
     #[arg(
         long = "retention-vt-lookback-secs",
         env = "POLARGRAPH_RETENTION_VT_LOOKBACK_SECS",

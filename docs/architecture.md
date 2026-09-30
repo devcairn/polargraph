@@ -1106,11 +1106,23 @@ discriminant and carry `vt_start` and `vt_end` (also microseconds since epoch).
 
 | Field | Effect |
 |-------|--------|
-| `tx_age_secs` | Delete any triple whose `tt` is more than `tx_age_secs` seconds before now. This is the primary retention knob — it bounds how much transaction history is kept. |
-| `vt_lookback_secs` (optional) | Also delete triples whose `vt_end` (the end of their valid-time window) is more than `vt_lookback_secs` seconds in the past. Useful for purging facts whose real-world validity has ended. Disabled when `None`. |
+| `tx_age_secs` | Bounds how much transaction history is kept. A stored version is deleted when a newer version of the same triple **with the same `vt_start`** was committed more than `tx_age_secs` seconds ago — i.e. it has been shadowed (by a correction or a DELETE tombstone) for longer than the window. The current version of a triple is never deleted by this rule, however old it is, and versions that record valid-time history (a later `vt_start`) are kept. |
+| `vt_lookback_secs` (optional) | Also delete a triple entirely — every remaining version — once *all* of its versions have a `vt_end` more than `vt_lookback_secs` seconds in the past. Useful for purging facts whose real-world validity has ended. Disabled when `None`. |
 
-Either condition is sufficient for deletion — a triple matching either is
-removed from all six CFs atomically via a single `WriteBatch`.
+Retention walks each CF one triple at a time (all versions of one (S,P,O)
+share a 36-byte key prefix and sort by `tt`), so the rules can compare a
+version with its successors. Every query answer at a transaction time inside
+the window — plain, `as_of_valid_time`, or `as_of_tx_time` — is unchanged by
+a retention run.
+
+A closed version is never removed on its own: deleting a DELETE tombstone
+while the original open-ended version survives would resurrect the fact.
+
+> **Behaviour change (after 0.1.0):** earlier releases deleted *every*
+> version whose `tt` was older than the cutoff, including the current value of
+> a triple that had simply not changed recently — a TTL on live data rather
+> than a bound on history. Stores that relied on that behaviour should
+> close facts explicitly (DELETE / `vt_end`) and use `vt_lookback_secs`.
 
 ### Transaction time and the oracle
 
@@ -1146,8 +1158,9 @@ Returns `RetentionStats { triples_scanned, triples_deleted, duration_ms }`.
 
 ### Performance implications
 
-Retention does a **full scan** of all six hexastore CFs. Each row is checked
-against the policy; matching rows are batched into a `WriteBatch` and deleted.
+Retention does a **full scan** of all six hexastore CFs. Each triple's version
+group is checked against the policy; matching rows are batched into a
+`WriteBatch` (flushed every 10 000 deletes) and deleted.
 After deletion, `db.compact_range_cf` is called on each modified CF so that
 RocksDB reclaims the on-disk space promptly (rather than waiting for the next
 scheduled compaction). On a large store this can take tens of seconds.
