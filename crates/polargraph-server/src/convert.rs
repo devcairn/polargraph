@@ -191,6 +191,7 @@ pub fn term_from_proto(proto: &proto::Term) -> Result<Term, Status> {
             }
             Ok(Term::Var(name.clone()))
         }
+        Some(TermKind::Literal(v)) => Ok(Term::Literal(value_from_proto(v)?)),
         None => Ok(Term::Any),
     }
 }

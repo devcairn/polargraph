@@ -6602,3 +6602,123 @@ async fn run_materialization_incremental_reaches_fixpoint() {
         "incremental run on converged state should need 0 iterations"
     );
 }
+
+// ── Exact-triple deletes and literal terms ───────────────────────────────────
+
+#[tokio::test]
+async fn delete_triples_object_and_value_filters_close_only_the_named_triple() {
+    use polargraph_server::proto::DeleteTriplesRequest;
+
+    let (svc, _dir) = open();
+    let (_, s) = new_node();
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            rel(s.clone(), "knows", a.clone()),
+            rel(s.clone(), "knows", b.clone()),
+            text_prop(s.clone(), "name", "Sam"),
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let delete = |req: DeleteTriplesRequest| {
+        let svc = &svc;
+        async move {
+            svc.delete_triples(Request::new(req))
+                .await
+                .unwrap()
+                .into_inner()
+                .deleted_count
+        }
+    };
+    let base = || DeleteTriplesRequest {
+        subject_ids: vec![s.bytes.clone()],
+        ..Default::default()
+    };
+
+    // Object filter: only (s knows a).
+    let n = delete(DeleteTriplesRequest {
+        predicate: "knows".into(),
+        object_id: a.bytes.clone(),
+        ..base()
+    })
+    .await;
+    assert_eq!(n, 1, "only the relation to `a` is closed");
+
+    // Value filter that doesn't match: nothing.
+    let n = delete(DeleteTriplesRequest {
+        predicate: "name".into(),
+        value: Some(Value {
+            kind: Some(ValueKind::TextVal("Other".into())),
+        }),
+        ..base()
+    })
+    .await;
+    assert_eq!(n, 0);
+
+    // Value filter that matches: the property, and never a relation.
+    let n = delete(DeleteTriplesRequest {
+        value: Some(Value {
+            kind: Some(ValueKind::TextVal("Sam".into())),
+        }),
+        ..base()
+    })
+    .await;
+    assert_eq!(n, 1);
+
+    // `s knows b` is still live.
+    let n = delete(DeleteTriplesRequest {
+        predicate: "knows".into(),
+        ..base()
+    })
+    .await;
+    assert_eq!(n, 1, "only `b` remained open");
+
+    // Both filters at once is rejected.
+    let err = svc
+        .delete_triples(Request::new(DeleteTriplesRequest {
+            object_id: a.bytes.clone(),
+            value: Some(Value {
+                kind: Some(ValueKind::IntVal(1)),
+            }),
+            ..base()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn query_literal_term_matches_equal_property_values_only() {
+    let (svc, _dir) = open();
+    let (_, alice) = new_node();
+    let (_, bob) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            text_prop(alice.clone(), "name", "Alice"),
+            text_prop(bob.clone(), "name", "Bob"),
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let literal = Term {
+        kind: Some(TermKind::Literal(Value {
+            kind: Some(ValueKind::TextVal("Alice".into())),
+        })),
+    };
+    let resp = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(var("s"), "name", literal)],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.bindings.len(), 1, "literal must not act as a wildcard");
+    assert_eq!(resp.bindings[0].vars["s"].bytes, alice.bytes);
+}

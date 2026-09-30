@@ -7,6 +7,7 @@ pub mod id;
 pub mod schema;
 pub mod skolem;
 pub mod temporal;
+pub mod term;
 pub mod triple;
 pub mod value;
 pub mod view;

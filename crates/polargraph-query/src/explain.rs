@@ -168,6 +168,7 @@ fn format_term(term: &Term) -> String {
         Term::Var(name) => format!("?{name}"),
         Term::Any => "_".to_string(),
         Term::Param(name) => format!("${name}"),
+        Term::Literal(v) => format!("{v:?}"),
     }
 }
 

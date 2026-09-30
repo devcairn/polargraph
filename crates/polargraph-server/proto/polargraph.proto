@@ -75,6 +75,8 @@ message Term {
     oneof kind {
         NodeId bound = 1;
         string var   = 2;
+        /// Object slot only: matches property triples whose value equals this.
+        Value literal = 3;
     }
 }
 
@@ -923,6 +925,12 @@ message DeleteTriplesRequest {
     string predicate = 2;
     /// Explicit vt_end in microseconds since Unix epoch; 0 means use server clock.
     int64 vt_end = 3;
+    /// Optional 16-byte object NodeId: only relations to this object are closed
+    /// (properties are left alone). Empty means any object.
+    bytes object_id = 4;
+    /// Optional property value: only properties with exactly this value are
+    /// closed (relations are left alone). Unset means any value.
+    Value value = 5;
 }
 
 message DeleteTriplesResponse {

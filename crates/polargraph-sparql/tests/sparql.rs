@@ -60,6 +60,37 @@ fn translate_simple_bgp() {
 }
 
 #[test]
+fn translate_iris_and_literals_are_never_wildcards() {
+    let q = spargebra::Query::parse(
+        r#"SELECT ?s WHERE {
+            <http://example.org/Alice> <http://example.org/knows> ?s .
+            ?s <http://example.org/age> 30 .
+            ?s <http://example.org/id> <urn:uuid:0191c1f6-2b1e-7c3a-9f00-000000000001> .
+        }"#,
+        None,
+    )
+    .unwrap();
+    let t = translate_query(&q).unwrap();
+    let p = &t.branches[0].patterns;
+    assert!(
+        matches!(&p[0].subject, Term::Bound(id)
+            if *id == polargraph_core::term::iri_to_node_id("http://example.org/Alice")),
+        "non-UUID IRI must bind, got {:?}",
+        p[0].subject
+    );
+    assert!(
+        matches!(&p[1].object, Term::Literal(Value::Int(30))),
+        "literal must become Term::Literal, got {:?}",
+        p[1].object
+    );
+    assert!(
+        matches!(&p[2].object, Term::Bound(id)
+            if *id == node("0191c1f6-2b1e-7c3a-9f00-000000000001")),
+        "urn:uuid IRI must map to its UUID"
+    );
+}
+
+#[test]
 fn translate_multi_pattern_bgp() {
     let q = spargebra::Query::parse(
         "SELECT ?s ?o WHERE { ?s <http://example.org/knows> ?o . ?o <http://example.org/age> ?age }",

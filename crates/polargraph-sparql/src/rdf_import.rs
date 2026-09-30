@@ -7,6 +7,7 @@
 use polargraph_core::{
     id::{EdgeId, NodeId},
     skolem::ImportScope,
+    term,
     value::Value,
 };
 use rio_api::{
@@ -17,24 +18,15 @@ use rio_turtle::{NTriplesParser, TurtleParser};
 
 // ── NodeId / EdgeId helpers ───────────────────────────────────────────────────
 
-/// Map a URI string to a deterministic, stable [`NodeId`] using xxHash3-128.
-///
-/// The same URI always produces the same NodeId across processes and restarts.
+/// Map an IRI to its [`NodeId`] — see [`polargraph_core::term::iri_to_node_id`]
+/// (`urn:uuid:` IRIs map to their UUID, everything else is hashed).
 pub fn uri_to_node_id(uri: &str) -> NodeId {
-    NodeId::from_iri(uri)
+    term::iri_to_node_id(uri)
 }
 
-/// Derive a deterministic [`EdgeId`] from the three IRI/blank-node strings of
-/// a Relation triple. The same (S, P, O) combination always yields the same EdgeId.
+/// Deterministic [`EdgeId`] for a relation — see [`polargraph_core::term::edge_id_for`].
 pub fn edge_id_for(subject: &str, predicate: &str, object: &str) -> EdgeId {
-    let mut buf = Vec::with_capacity(subject.len() + predicate.len() + object.len() + 2);
-    buf.extend_from_slice(subject.as_bytes());
-    buf.push(b'\x00');
-    buf.extend_from_slice(predicate.as_bytes());
-    buf.push(b'\x00');
-    buf.extend_from_slice(object.as_bytes());
-    let hash: u128 = xxhash_rust::xxh3::xxh3_128(&buf);
-    EdgeId(uuid::Uuid::from_bytes(hash.to_le_bytes()))
+    term::edge_id_for(subject, predicate, object)
 }
 
 // ── ImportedTriple ────────────────────────────────────────────────────────────
@@ -89,7 +81,7 @@ impl ImportedObject {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-fn xsd_literal_to_value(value: &str, datatype_iri: &str) -> Value {
+pub(crate) fn xsd_literal_to_value(value: &str, datatype_iri: &str) -> Value {
     match datatype_iri {
         "http://www.w3.org/2001/XMLSchema#integer"
         | "http://www.w3.org/2001/XMLSchema#long"

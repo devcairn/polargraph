@@ -77,7 +77,10 @@ Recorded after auditing this plan against the code at `849839a`.
 |------|------|-----------|--------|
 | 0 | Retention fix (1.5); bnode skolemization (1.1); trigram size cap (1.4) | none | ✅ `5cb5af4`, `d2ae884`, `b3536c5` |
 | 1 | Refactor only: key-width constants/accessors in `keys::`, `VarPattern` literals via `..Default::default()`. No behaviour change. (`Quad` type moved to step 3, where it's first used.) | none | ✅ |
-| 2 | Term identity + IRI dictionary (1.6) | additive CF, no rewrite | |
+| 2a | Canonical term mapping (`polargraph-core::term`) on every path; SPARQL IRIs/literals never widen to wildcards (`Term::Literal`); SPARQL DELETE closes exactly the named triple | none | ✅ |
+| 2b | IRI dictionary CF; IRI bindings on insert/import; `ResolveIris` RPC | additive CF | |
+| 2c | Export paths render stored IRIs; optional de-skolemization | none | |
+| 2d | Literal datatypes + language tags preserved | none | |
 | 3 | New key layout: value-hashed property keys (1.2), 48-byte keys with `g` (2.3), `GSPO`/`GPOS`, `BLOB` CF + value refs (1.3), conflict detection on `(s,p,o,g)`, graph interning | **v3** offline rewrite | |
 | 4 | `GraphTerm` in Datalog/planner; graph RPCs; N-Quads/TriG | — | |
 | 5 | SPARQL dataset semantics + graph Update ops; Cypher `USE GRAPH` | — | |
@@ -108,6 +111,7 @@ Audit of the repo as of commit `849839a`.
 | Change feed | Only `StreamWal` for replicas | No public subscription for renderers, embedders, notifications |
 | Retention | Deletes **every** version older than `tx_age`, including the current value of a fact that hasn't changed; `vt_lookback` can delete a DELETE tombstone alone and resurrect the fact | Destroys **live data**, not just history. Fixed by §1.5 (done) |
 | Column families | 13, not 12 (`PEA` predicate-first annotation index exists) | — |
+| SPARQL terms | Non-`urn:uuid` IRIs and literals in triple patterns were translated to **wildcards** (`<ex:Alice> :knows ?o` returned everyone's `knows`); `DELETE DATA { s p o }` closed **every** triple of `s`. Datalog bindings hold `NodeId`s only, so `?s :name ?n` can't bind `?n` | Wrong answers and over-deletion — fixed in step 2a. Property-value variables need value-carrying bindings (new query-layer work, see §1.6) |
 | Vector index | Pure-Rust HNSW, memory/mmap, named spaces | No quantization; RAM heavy at 10M+ vectors |
 
 ---
@@ -292,6 +296,10 @@ dropped.
   included in the §1.2 value hash.
 - SPARQL `INSERT DATA`/`DELETE DATA` map terms through the same module instead
   of dropping non-`urn:uuid` IRIs, and report failures rather than skipping.
+  *(Done in 2a, together with exact-triple deletes and `Term::Literal`.)*
+- **Open:** value-carrying bindings in Datalog so a variable can bind a property
+  value (`?s :name ?n`, SPARQL `SELECT ?n`, `FILTER` on property values). After
+  §1.2 lands, a bound literal becomes a `POS` value lookup instead of a scan.
 
 **Migration.** Additive (new CF); no rewrite. Existing hashed IRIs can't be
 recovered (hashes are one-way), so pre-existing data exports as `urn:uuid:`

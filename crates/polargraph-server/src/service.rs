@@ -3426,6 +3426,23 @@ impl PolarGraphService for PolarGraphServer {
         } else {
             Some(req.predicate.clone())
         };
+        let object_filter: Option<NodeId> = if req.object_id.is_empty() {
+            None
+        } else {
+            Some(NodeId(uuid::Uuid::from_slice(&req.object_id).map_err(
+                |_| Status::invalid_argument("object_id must be a 16-byte UUID"),
+            )?))
+        };
+        let value_filter: Option<Value> = req
+            .value
+            .as_ref()
+            .map(crate::convert::value_from_proto)
+            .transpose()?;
+        if object_filter.is_some() && value_filter.is_some() {
+            return Err(Status::invalid_argument(
+                "object_id and value are mutually exclusive",
+            ));
+        }
         let mut deleted_count: u64 = 0;
 
         for id_bytes in &req.subject_ids {
@@ -3446,6 +3463,19 @@ impl PolarGraphService for PolarGraphServer {
 
             let mut tx = self.store.begin();
             for triple in triples {
+                let selected = match &triple {
+                    Triple::Relation { object, .. } => {
+                        value_filter.is_none() && object_filter.map_or(true, |o| o == *object)
+                    }
+                    Triple::Property { value, .. } => {
+                        object_filter.is_none()
+                            && value_filter.as_ref().map_or(true, |v| v == value)
+                    }
+                    _ => false,
+                };
+                if !selected {
+                    continue;
+                }
                 match &triple {
                     Triple::Relation {
                         subject: s,

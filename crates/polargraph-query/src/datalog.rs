@@ -49,6 +49,7 @@ use polargraph_core::{
     id::{EdgeId, NodeId},
     temporal::{BiTemporalRange, Timestamp},
     triple::{Predicate, Triple},
+    value::Value,
 };
 use polargraph_storage::{EdgeTypeRegistry, Snapshot, StorageError};
 use std::collections::{HashMap, HashSet};
@@ -68,7 +69,7 @@ pub enum QueryError {
 
 /// A slot in a VarPattern — either a concrete value, a named variable, or a
 /// wildcard that matches anything.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Term {
     /// Concrete, already-known node ID.
     Bound(NodeId),
@@ -81,6 +82,9 @@ pub enum Term {
     /// evaluation. Treated like `Any` at evaluation time — the actual substitution
     /// is handled at the Cypher layer via `CompiledQuery::substitute_params`.
     Param(String),
+    /// A literal value in the object slot: matches only `Property` triples
+    /// whose value equals it (never a relation). Binds nothing.
+    Literal(Value),
 }
 
 impl Term {
@@ -219,6 +223,8 @@ fn resolve_term(term: &Term, bindings: &Bindings) -> Option<NodeId> {
         Term::Any => None,
         // Params should be substituted before evaluation; treat as wildcard.
         Term::Param(_) => None,
+        // Scanned as a wildcard object; `extend_full` checks the value.
+        Term::Literal(_) => None,
     }
 }
 
@@ -251,6 +257,10 @@ fn extend_full(
     match &vp.object {
         Term::Any | Term::Param(_) => {} // nothing to bind
         Term::Bound(_) => {}             // substitution already handled this
+        Term::Literal(expected) => match triple {
+            Triple::Property { value, .. } if value == expected => {}
+            _ => return None,
+        },
         Term::Var(_) => {
             match triple {
                 Triple::Relation { object, .. } => {
@@ -306,6 +316,8 @@ fn extend_full(
 fn bind_term(term: &Term, value: NodeId, bindings: &Bindings) -> Option<Bindings> {
     match term {
         Term::Any | Term::Bound(_) | Term::Param(_) => Some(bindings.clone()),
+        // A node slot can never equal a literal.
+        Term::Literal(_) => None,
         Term::Var(name) => {
             if let Some(&existing) = bindings.get(name) {
                 if existing == value {
@@ -405,6 +417,8 @@ fn evaluate_seeded_inner(
                                         next.push((b, pred_bindings.clone()));
                                     }
                                 }
+                                // Path traversal only reaches nodes.
+                                Term::Literal(_) => {}
                             }
                         }
                     }
@@ -1007,6 +1021,44 @@ mod tests {
         let who = collect_var(&results, "who");
         assert!(who.contains(&bob));
         assert!(who.contains(&carol));
+    }
+
+    #[test]
+    fn literal_object_matches_only_equal_property_values() {
+        let (store, _dir) = open();
+        let alice = NodeId::new();
+        let bob = NodeId::new();
+        let snap = commit(
+            &store,
+            vec![
+                prop(alice, "name", "Alice"),
+                prop(bob, "name", "Bob"),
+                rel(alice, "knows", bob),
+            ],
+        );
+
+        let by_name = |name: &str| {
+            let q = Query::new().pattern(
+                VarPattern::new()
+                    .subject(var("s"))
+                    .predicate("name")
+                    .object(Term::Literal(Value::Text(name.into()))),
+            );
+            execute_query(&q, &snap, None, None).unwrap()
+        };
+        let hits = by_name("Alice");
+        assert_eq!(hits.len(), 1, "a literal must not act as a wildcard");
+        assert_eq!(hits[0]["s"], alice);
+        assert!(by_name("Carol").is_empty());
+
+        // A literal never matches a relation.
+        let q = Query::new().pattern(
+            VarPattern::new()
+                .subject(var("s"))
+                .predicate("knows")
+                .object(Term::Literal(Value::Text("Bob".into()))),
+        );
+        assert!(execute_query(&q, &snap, None, None).unwrap().is_empty());
     }
 
     #[test]

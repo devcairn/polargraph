@@ -814,6 +814,8 @@ by the SPARQL Update DELETE DATA handler and available directly.
 | `subject_ids` | `repeated bytes` | UUIDs of the subjects whose triples to close |
 | `predicate` | `string` | Predicate to filter on (empty = all predicates) |
 | `vt_end` | `int64` | Valid-time end to write (0 = current timestamp) |
+| `object_id` | `bytes` | Optional 16-byte object: only relations to this node are closed (properties untouched) |
+| `value` | `Value` | Optional: only properties with exactly this value are closed (relations untouched). Mutually exclusive with `object_id` |
 
 **Response fields:** `deleted_count` — number of entries closed.
 
@@ -879,7 +881,9 @@ Response format negotiated via `Accept` header, same as `GET /sparql`.
 
 Executes a SPARQL 1.1 Update request. Body is a raw SPARQL Update string.
 Supports `INSERT DATA`, `DELETE DATA`, and `INSERT/DELETE WHERE`. Returns
-`{"inserted": N, "deleted": N}`.
+`{"ok": bool, "inserted": N, "deleted": N, "failed": N}`. Each deleted quad
+closes exactly that triple. IRIs map to nodes the same way as `/import/rdf`
+(`urn:uuid:` IRIs keep their UUID, others are hashed).
 
 ---
 

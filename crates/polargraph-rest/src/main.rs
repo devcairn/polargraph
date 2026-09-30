@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use polargraph_core::id::NodeId;
+use polargraph_core::{id::NodeId, term::iri_to_node_id};
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 use tonic::metadata::MetadataValue;
@@ -2071,6 +2071,9 @@ fn sparql_term_to_proto(term: &polargraph_query::Term) -> proto::Term {
                 bytes: id.0.as_bytes().to_vec(),
             })),
         },
+        Term::Literal(v) => proto::Term {
+            kind: Some(proto::term::Kind::Literal(pg_value_to_proto(v))),
+        },
         Term::Any | Term::Param(_) => proto::Term { kind: None },
     }
 }
@@ -2176,11 +2179,7 @@ async fn execute_sparql_construct(
         // Bare DESCRIBE <urn:uuid:…> with no WHERE bindings.
         if node_ids.is_empty() {
             if let Some(ref iri) = ct.describe_iri {
-                if let Some(uuid_str) = iri.strip_prefix("urn:uuid:") {
-                    if let Ok(u) = uuid::Uuid::parse_str(uuid_str) {
-                        node_ids.insert(NodeId(u));
-                    }
-                }
+                node_ids.insert(iri_to_node_id(iri));
             }
         }
 
@@ -2370,6 +2369,9 @@ async fn handle_sparql_update(
 
     let mut inserted: u64 = 0;
     let mut deleted: u64 = 0;
+    // Quads that couldn't be applied (unsupported terms or RPC errors) — reported
+    // rather than silently dropped.
+    let mut failed: u64 = 0;
 
     for operation in update.operations {
         match operation {
@@ -2405,63 +2407,56 @@ async fn handle_sparql_update(
                         };
                         if client.insert(tonic::Request::new(req)).await.is_ok() {
                             inserted += 1;
+                        } else {
+                            failed += 1;
                         }
+                    } else {
+                        failed += 1;
                     }
                 }
             }
             spargebra::GraphUpdateOperation::DeleteData { data } => {
-                // Group plain GroundQuads by subject for DeleteTriples RPC.
-                // Gap 4: quoted-triple subjects are handled in a separate pre-pass.
-                let mut by_subject: std::collections::HashMap<String, Vec<String>> =
-                    std::collections::HashMap::new();
+                // Each plain quad closes exactly that (S, P, O) — never other
+                // triples of the subject.
                 for gq in &data {
                     match &gq.subject {
                         spargebra::term::GroundSubject::Triple(inner) => {
                             // Gap 4: DELETE DATA { << S P O >> :annot :val }
                             // Resolve inner triple to edge_id and delete the annotation.
                             if let Some(s_iri) = ground_triple_subject_iri(inner) {
-                                if let Some(s_uuid_str) = s_iri.strip_prefix("urn:uuid:") {
-                                    if let Ok(s_uuid) = uuid::Uuid::parse_str(s_uuid_str) {
-                                        // Use the inner triple's subject as a proxy to soft-delete
-                                        // the annotation predicate on all edges from that subject.
-                                        let mut client = state.client.clone();
-                                        let req = proto::DeleteTriplesRequest {
-                                            subject_ids: vec![s_uuid.as_bytes().to_vec()],
-                                            predicate: gq.predicate.as_str().to_string(),
-                                            vt_end: 0,
-                                        };
-                                        if let Ok(r) =
-                                            client.delete_triples(tonic::Request::new(req)).await
-                                        {
-                                            deleted += r.into_inner().deleted_count;
-                                        }
-                                    }
+                                let s_id = iri_to_node_id(&s_iri);
+                                // Use the inner triple's subject as a proxy to soft-delete
+                                // the annotation predicate on all edges from that subject.
+                                let mut client = state.client.clone();
+                                let req = proto::DeleteTriplesRequest {
+                                    subject_ids: vec![s_id.0.as_bytes().to_vec()],
+                                    predicate: gq.predicate.as_str().to_string(),
+                                    ..Default::default()
+                                };
+                                if let Ok(r) = client.delete_triples(tonic::Request::new(req)).await
+                                {
+                                    deleted += r.into_inner().deleted_count;
                                 }
                             }
                         }
                         spargebra::term::GroundSubject::NamedNode(n) => {
-                            let subj_iri = n.as_str().to_string();
-                            let pred = gq.predicate.as_str().to_string();
-                            by_subject.entry(subj_iri).or_default().push(pred);
+                            let Some(target) = ground_term_delete_target(&gq.object) else {
+                                failed += 1;
+                                continue;
+                            };
+                            let req = exact_delete_request(
+                                iri_to_node_id(n.as_str()),
+                                gq.predicate.as_str(),
+                                target,
+                            );
+                            let mut client = state.client.clone();
+                            match client.delete_triples(tonic::Request::new(req)).await {
+                                Ok(r) => deleted += r.into_inner().deleted_count,
+                                Err(_) => failed += 1,
+                            }
                         }
                         #[allow(unreachable_patterns)]
                         _ => {}
-                    }
-                }
-
-                for (subj_iri, _preds) in by_subject {
-                    if let Some(uuid_str) = subj_iri.strip_prefix("urn:uuid:") {
-                        if let Ok(u) = uuid::Uuid::parse_str(uuid_str) {
-                            let mut client = state.client.clone();
-                            let req = proto::DeleteTriplesRequest {
-                                subject_ids: vec![u.as_bytes().to_vec()],
-                                predicate: String::new(),
-                                vt_end: 0,
-                            };
-                            if let Ok(r) = client.delete_triples(tonic::Request::new(req)).await {
-                                deleted += r.into_inner().deleted_count;
-                            }
-                        }
                     }
                 }
             }
@@ -2533,14 +2528,16 @@ async fn handle_sparql_update(
                                     continue;
                                 }
                             };
-                            let mut client = state.client.clone();
-                            let req = proto::DeleteTriplesRequest {
-                                subject_ids: vec![subj_id.0.as_bytes().to_vec()],
-                                predicate: pred,
-                                vt_end: 0,
+                            let Some(target) = resolve_ground_term_object(&gqp.object, binding)
+                            else {
+                                failed += 1;
+                                continue;
                             };
-                            if let Ok(r) = client.delete_triples(tonic::Request::new(req)).await {
-                                deleted += r.into_inner().deleted_count;
+                            let req = exact_delete_request(subj_id, &pred, target);
+                            let mut client = state.client.clone();
+                            match client.delete_triples(tonic::Request::new(req)).await {
+                                Ok(r) => deleted += r.into_inner().deleted_count,
+                                Err(_) => failed += 1,
                             }
                         }
                     }
@@ -2569,8 +2566,13 @@ async fn handle_sparql_update(
         }
     }
 
-    Json(serde_json::json!({ "ok": true, "inserted": inserted, "deleted": deleted }))
-        .into_response()
+    Json(serde_json::json!({
+        "ok": failed == 0,
+        "inserted": inserted,
+        "deleted": deleted,
+        "failed": failed,
+    }))
+    .into_response()
 }
 
 // ── POST /delete ──────────────────────────────────────────────────────────────
@@ -2615,6 +2617,7 @@ async fn handle_delete_triples(
         subject_ids,
         predicate: body.predicate,
         vt_end: body.vt_end,
+        ..Default::default()
     };
 
     let mut client = state.client.clone();
@@ -2686,7 +2689,7 @@ async fn sparql_star_quad_to_annotation(
         Subject::NamedNode(n) => n.as_str().to_string(),
         _ => return None,
     };
-    let s_uuid = uuid::Uuid::parse_str(s_iri.strip_prefix("urn:uuid:")?).ok()?;
+    let s_uuid = iri_to_node_id(&s_iri).0;
     let s_bytes = s_uuid.as_bytes().to_vec();
 
     let pred = inner.predicate.as_str().to_string();
@@ -2695,7 +2698,7 @@ async fn sparql_star_quad_to_annotation(
         Term::NamedNode(n) => n.as_str().to_string(),
         _ => return None,
     };
-    let o_uuid = uuid::Uuid::parse_str(o_iri.strip_prefix("urn:uuid:")?).ok()?;
+    let o_uuid = iri_to_node_id(&o_iri).0;
     let o_bytes = o_uuid.as_bytes().to_vec();
 
     // Look up the edge ID for (S, P, O).
@@ -2705,7 +2708,7 @@ async fn sparql_star_quad_to_annotation(
     // Map the annotation object to an EdgeAnnotation value.
     let ann_value = match object {
         Term::NamedNode(n) => {
-            let obj_uuid = uuid::Uuid::parse_str(n.as_str().strip_prefix("urn:uuid:")?).ok()?;
+            let obj_uuid = iri_to_node_id(n.as_str()).0;
             proto::edge_annotation::Value::NodeId(obj_uuid.as_bytes().to_vec())
         }
         Term::Literal(lit) => {
@@ -2741,13 +2744,13 @@ fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Tr
         Subject::NamedNode(n) => n.as_str().to_string(),
         _ => return None, // blank nodes not supported
     };
-    let subj_id = uuid::Uuid::parse_str(subj_iri.strip_prefix("urn:uuid:")?).ok()?;
+    let subj_id = iri_to_node_id(&subj_iri).0;
     let predicate = quad.predicate.as_str().to_string();
 
     match &quad.object {
         Term::NamedNode(n) => {
             let obj_iri = n.as_str();
-            let obj_id = uuid::Uuid::parse_str(obj_iri.strip_prefix("urn:uuid:")?).ok()?;
+            let obj_id = iri_to_node_id(obj_iri).0;
             Some(proto::Triple {
                 kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
                     subject: Some(proto::NodeId {
@@ -2797,6 +2800,74 @@ fn sparql_literal_to_proto_value(lit: &spargebra::term::Literal) -> Option<proto
     Some(proto::Value { kind: Some(kind) })
 }
 
+/// What a SPARQL DELETE quad's object pins down: a node or a literal value.
+enum DeleteTarget {
+    Node(NodeId),
+    Value(proto::Value),
+}
+
+/// A `DeleteTriples` request that closes exactly `(subject, predicate, target)`.
+fn exact_delete_request(
+    subject: NodeId,
+    predicate: &str,
+    target: DeleteTarget,
+) -> proto::DeleteTriplesRequest {
+    let mut req = proto::DeleteTriplesRequest {
+        subject_ids: vec![subject.0.as_bytes().to_vec()],
+        predicate: predicate.to_string(),
+        ..Default::default()
+    };
+    match target {
+        DeleteTarget::Node(o) => req.object_id = o.0.as_bytes().to_vec(),
+        DeleteTarget::Value(v) => req.value = Some(v),
+    }
+    req
+}
+
+/// The object of a DELETE DATA quad. `None` for terms we can't delete by
+/// (quoted triples, unsupported literal types).
+fn ground_term_delete_target(term: &spargebra::term::GroundTerm) -> Option<DeleteTarget> {
+    use spargebra::term::GroundTerm;
+    match term {
+        GroundTerm::NamedNode(n) => Some(DeleteTarget::Node(iri_to_node_id(n.as_str()))),
+        GroundTerm::Literal(l) => sparql_literal_to_proto_value(l).map(DeleteTarget::Value),
+        #[allow(unreachable_patterns)]
+        _ => None,
+    }
+}
+
+/// The object of a DELETE template quad under `binding`.
+fn resolve_ground_term_object(
+    gtp: &spargebra::term::GroundTermPattern,
+    binding: &polargraph_sparql::SparqlBindings,
+) -> Option<DeleteTarget> {
+    use polargraph_sparql::SparqlValue;
+    use spargebra::term::GroundTermPattern;
+    match gtp {
+        GroundTermPattern::NamedNode(n) => Some(DeleteTarget::Node(iri_to_node_id(n.as_str()))),
+        GroundTermPattern::Literal(l) => sparql_literal_to_proto_value(l).map(DeleteTarget::Value),
+        GroundTermPattern::Variable(v) => match binding.get(v.as_str())? {
+            SparqlValue::Uri(id) => Some(DeleteTarget::Node(*id)),
+            other => sparql_value_to_proto(other).map(DeleteTarget::Value),
+        },
+        _ => None,
+    }
+}
+
+/// Convert a literal SPARQL binding to a proto value; `None` for URIs.
+fn sparql_value_to_proto(v: &polargraph_sparql::SparqlValue) -> Option<proto::Value> {
+    use polargraph_sparql::SparqlValue;
+    use proto::value::Kind;
+    let kind = match v {
+        SparqlValue::Uri(_) => return None,
+        SparqlValue::Literal(s) => Kind::TextVal(s.clone()),
+        SparqlValue::LiteralInt(n) => Kind::IntVal(*n),
+        SparqlValue::LiteralFloat(f) => Kind::FloatVal(*f),
+        SparqlValue::LiteralBool(b) => Kind::BoolVal(*b),
+    };
+    Some(proto::Value { kind: Some(kind) })
+}
+
 /// Resolve a [`GroundTermPattern`] subject to a [`NodeId`] using current bindings.
 fn resolve_ground_term_subject(
     gtp: &spargebra::term::GroundTermPattern,
@@ -2805,11 +2876,7 @@ fn resolve_ground_term_subject(
     use polargraph_sparql::SparqlValue;
     use spargebra::term::GroundTermPattern;
     match gtp {
-        GroundTermPattern::NamedNode(n) => {
-            let iri = n.as_str();
-            let uuid_str = iri.strip_prefix("urn:uuid:")?;
-            Some(NodeId(uuid::Uuid::parse_str(uuid_str).ok()?))
-        }
+        GroundTermPattern::NamedNode(n) => Some(iri_to_node_id(n.as_str())),
         GroundTermPattern::Variable(v) => {
             if let Some(SparqlValue::Uri(id)) = binding.get(v.as_str()) {
                 Some(*id)
@@ -2831,11 +2898,7 @@ fn resolve_quad_pattern_to_proto(
 
     // Resolve subject.
     let subj_id = match &qp.subject {
-        TermPattern::NamedNode(n) => {
-            let iri = n.as_str();
-            let uuid_str = iri.strip_prefix("urn:uuid:")?;
-            NodeId(uuid::Uuid::parse_str(uuid_str).ok()?)
-        }
+        TermPattern::NamedNode(n) => iri_to_node_id(n.as_str()),
         TermPattern::Variable(v) => {
             if let Some(SparqlValue::Uri(id)) = binding.get(v.as_str()) {
                 *id
@@ -2856,7 +2919,7 @@ fn resolve_quad_pattern_to_proto(
     match &qp.object {
         TermPattern::NamedNode(n) => {
             let iri = n.as_str();
-            let obj_id = uuid::Uuid::parse_str(iri.strip_prefix("urn:uuid:")?).ok()?;
+            let obj_id = iri_to_node_id(iri).0;
             Some(proto::Triple {
                 kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
                     subject: Some(proto::NodeId {

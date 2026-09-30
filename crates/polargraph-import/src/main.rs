@@ -19,7 +19,8 @@
 //!   - Comment and blank lines are skipped; unparseable lines are counted and
 //!     skipped rather than aborting the import.
 //!
-//! IRIs are hashed to stable NodeIds with [`NodeId::from_iri`]. Blank nodes are
+//! IRIs map to NodeIds via [`term::iri_to_node_id`] (`urn:uuid:` IRIs keep
+//! their UUID; others are hashed). Blank nodes are
 //! skolemized per import (`{skolem-base}/.well-known/genid/{import-id}/{label}`),
 //! so `_:b0` in two different files is two different nodes. Re-running with the
 //! same `--import-id` reproduces the same blank-node NodeIds.
@@ -42,9 +43,9 @@ use std::{
 use anyhow::{Context, Result};
 use clap::Parser;
 use polargraph_core::{
-    id::{EdgeId, NodeId},
     skolem::{ImportScope, DEFAULT_SKOLEM_BASE},
     temporal::{BiTemporalRange, Timestamp},
+    term,
     triple::{Predicate, Triple},
     value::Value,
 };
@@ -301,17 +302,17 @@ impl Converter {
 
     fn relation(&self, subject: &str, predicate: &str, object: &str) -> Triple {
         Triple::Relation {
-            subject: NodeId::from_iri(subject),
+            subject: term::iri_to_node_id(subject),
             predicate: Predicate::new(predicate),
-            object: NodeId::from_iri(object),
-            edge_id: edge_id_for(subject, predicate, object),
+            object: term::iri_to_node_id(object),
+            edge_id: term::edge_id_for(subject, predicate, object),
             temporal: self.temporal,
         }
     }
 
     fn property(&self, subject: &str, predicate: &str, value: Value) -> Triple {
         Triple::Property {
-            subject: NodeId::from_iri(subject),
+            subject: term::iri_to_node_id(subject),
             predicate: Predicate::new(predicate),
             value,
             temporal: self.temporal,
@@ -383,19 +384,6 @@ fn parse_line(line: &str, conv: &Converter) -> Option<Triple> {
         })
         .ok()?;
     parsed
-}
-
-/// Generate a deterministic `EdgeId` from the three IRI strings of a relation
-/// (skolem IRIs for blank nodes).
-fn edge_id_for(subject: &str, predicate: &str, object: &str) -> EdgeId {
-    let mut buf = Vec::with_capacity(subject.len() + predicate.len() + object.len() + 2);
-    buf.extend_from_slice(subject.as_bytes());
-    buf.push(b'\x00');
-    buf.extend_from_slice(predicate.as_bytes());
-    buf.push(b'\x00');
-    buf.extend_from_slice(object.as_bytes());
-    let hash: u128 = xxhash_rust::xxh3::xxh3_128(&buf);
-    EdgeId(uuid::Uuid::from_bytes(hash.to_le_bytes()))
 }
 
 // ── Turtle / JSON-LD parsers ──────────────────────────────────────────────────
@@ -513,8 +501,8 @@ mod tests {
             Triple::Relation {
                 subject, object, ..
             } => {
-                assert_eq!(subject, NodeId::from_iri("http://example.org/Alice"));
-                assert_eq!(object, NodeId::from_iri("http://example.org/Bob"));
+                assert_eq!(subject, term::iri_to_node_id("http://example.org/Alice"));
+                assert_eq!(object, term::iri_to_node_id("http://example.org/Bob"));
             }
             other => panic!("unexpected: {other:?}"),
         }

@@ -2480,6 +2480,16 @@ The translation layer (`polargraph-sparql`) has no dependency on
 nodes into `VarPattern`, `Rule`, and `Branch` structs that the gRPC API already
 understands.
 
+### Terms
+
+Every IRI maps to a node through `polargraph_core::term::iri_to_node_id` —
+`urn:uuid:<u>` to `NodeId(u)`, any other IRI to its xxHash3-128 — the same
+mapping RDF import uses, so data loaded with `/import/rdf` can be queried by
+its IRIs. An IRI or literal in a triple pattern never widens to a wildcard: a
+literal object becomes `Term::Literal(value)` and matches only property
+triples with an equal value. (Binding a *variable* to a property value —
+`?s :name ?n` — is not supported yet; Datalog bindings hold nodes only.)
+
 ### HTTP endpoints
 
 | Method | Path | Description |
@@ -2520,8 +2530,12 @@ Content negotiation via `Accept` header: `application/sparql-results+json`
 | Operation | Notes |
 |-----------|-------|
 | INSERT DATA | Each triple translated to an `InsertRequest` gRPC call |
-| DELETE DATA | Each triple translated to a `DeleteTriples` gRPC call grouped by subject |
-| INSERT/DELETE WHERE | WHERE clause evaluated via `Query` RPC; templates applied per binding row |
+| DELETE DATA | Each triple closes exactly that `(S, P, O)` via `DeleteTriples` with `object_id` / `value` set |
+| INSERT/DELETE WHERE | WHERE clause evaluated via `Query` RPC; templates applied per binding row; DELETE templates close exactly the bound `(S, P, O)` |
+
+The response is `{"ok": bool, "inserted": N, "deleted": N, "failed": N}`;
+`failed` counts quads that couldn't be applied (unsupported terms or RPC
+errors), and `ok` is false when any failed.
 
 ### Other known limitations
 
