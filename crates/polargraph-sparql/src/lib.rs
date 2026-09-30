@@ -30,10 +30,10 @@ pub use response::{
     SparqlValue,
 };
 pub use serialize::{
-    node_id_to_iri, parse_schema_rdf, serialize_jsonld, serialize_ntriples,
-    serialize_ntriples_star, serialize_schema_rdf, serialize_turtle, serialize_turtle_star,
-    strip_brackets, value_to_nt_literal, RdfStarSubject, RdfStarTriple, RdfTriple, SchemaEdgeType,
-    SchemaField, SchemaNodeType,
+    node_id_to_iri, parse_schema_rdf, serialize_jsonld, serialize_nquads, serialize_ntriples,
+    serialize_ntriples_star, serialize_schema_rdf, serialize_trig, serialize_turtle,
+    serialize_turtle_star, strip_brackets, value_to_nt_literal, RdfQuad, RdfStarSubject,
+    RdfStarTriple, RdfTriple, SchemaEdgeType, SchemaField, SchemaNodeType,
 };
 pub use translate::{
     translate_construct, translate_pattern_pub, translate_query, Branch, ConstructTemplate,
