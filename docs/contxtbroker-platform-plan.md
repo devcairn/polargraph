@@ -79,7 +79,7 @@ Recorded after auditing this plan against the code at `849839a`.
 | 1 | Refactor only: key-width constants/accessors in `keys::`, `VarPattern` literals via `..Default::default()`. No behaviour change. (`Quad` type moved to step 3, where it's first used.) | none | ✅ |
 | 2a | Canonical term mapping (`polargraph-core::term`) on every path; SPARQL IRIs/literals never widen to wildcards (`Term::Literal`); SPARQL DELETE closes exactly the named triple | none | ✅ |
 | 2b | IRI dictionary CF; IRI bindings on insert/import; `ResolveIris` RPC | additive CF | ✅ |
-| 2c | Export paths render stored IRIs; optional de-skolemization | none | |
+| 2c | Export paths render stored IRIs; optional de-skolemization | none | ✅ |
 | 2d | Literal datatypes + language tags preserved | none | |
 | 3 | New key layout: value-hashed property keys (1.2), 48-byte keys with `g` (2.3), `GSPO`/`GPOS`, `BLOB` CF + value refs (1.3), conflict detection on `(s,p,o,g)`, graph interning | **v3** offline rewrite | |
 | 4 | `GraphTerm` in Datalog/planner; graph RPCs; N-Quads/TriG | — | |

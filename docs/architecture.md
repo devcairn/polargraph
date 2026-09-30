@@ -2823,7 +2823,12 @@ it in the same commit as the triples: REST `/import/rdf` and SPARQL
 `SstImporter::add_iri`. `urn:uuid:` IRIs aren't stored — they carry their ID.
 A different IRI for an already-named NodeId (a 128-bit hash collision) is
 rejected with `IriCollision`. `ResolveIris` maps NodeIds back to IRIs, falling
-back to `urn:uuid:`. Entries are never rewritten or deleted. Data imported
+back to `urn:uuid:`. Every export path — SPARQL SELECT (JSON/CSV,
+`GROUP_CONCAT`), CONSTRUCT/DESCRIBE, `/export/jsonld`, `/export/subgraph` —
+resolves the nodes it emits in one batched `ResolveIris` call and renders them
+through `polargraph_sparql::IriNames`; the export endpoints accept
+`deskolemize=true` to render skolem IRIs as `_:{import_id}_{label}`. Entries
+are never rewritten or deleted. Data imported
 before the dictionary existed has no entries and still resolves to
 `urn:uuid:` until re-imported.
 

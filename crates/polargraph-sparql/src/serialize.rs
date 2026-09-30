@@ -302,6 +302,10 @@ pub fn serialize_jsonld(triples: &[RdfTriple]) -> String {
 /// - `"lit"^^<type>` → `{ "@value": lit, "@type": "xsd:…" }`
 /// - `"lit"` → `{ "@value": lit, "@type": "xsd:string" }`
 fn nt_object_to_jsonld(obj: &str) -> serde_json::Value {
+    if obj.starts_with("_:") {
+        // Blank node
+        return serde_json::json!({ "@id": obj });
+    }
     if obj.starts_with('<') {
         // IRI
         let iri = strip_brackets(obj);

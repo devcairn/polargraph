@@ -1951,6 +1951,15 @@ async fn execute_sparql_query(
         all_bindings.extend(branch_bindings);
     }
 
+    // Names for every node in the result, resolved once (before aggregation,
+    // which may fold URIs into GROUP_CONCAT strings).
+    let names = resolve_names(
+        &mut state.client.clone(),
+        polargraph_sparql::node_ids_in_bindings(&all_bindings),
+        false,
+    )
+    .await;
+
     // 4. GROUP BY / aggregation.
     if !translation.aggregates.is_empty() || !translation.group_by.is_empty() {
         all_bindings = polargraph_sparql::execute::execute_sparql_aggregations(
@@ -1958,6 +1967,7 @@ async fn execute_sparql_query(
             &translation.group_by,
             &translation.aggregates,
             translation.having_filter.as_ref(),
+            &names,
         );
     }
 
@@ -2033,7 +2043,7 @@ async fn execute_sparql_query(
     let format = polargraph_sparql::negotiate_format(&http_headers);
     match format {
         ResponseFormat::Json => {
-            let body = polargraph_sparql::serialize_json(&all_var_names, &projected);
+            let body = polargraph_sparql::serialize_json(&all_var_names, &projected, &names);
             axum::response::Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "application/sparql-results+json")
@@ -2041,7 +2051,7 @@ async fn execute_sparql_query(
                 .unwrap()
         }
         ResponseFormat::Csv => {
-            let body = polargraph_sparql::serialize_csv(&all_var_names, &projected);
+            let body = polargraph_sparql::serialize_csv(&all_var_names, &projected, &names);
             axum::response::Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/csv")
@@ -2166,7 +2176,7 @@ async fn execute_sparql_construct(
     }
 
     // Build RDF triples.
-    let rdf_triples: Vec<RdfStarTriple> = if is_describe {
+    let mut rdf_triples: Vec<RdfStarTriple> = if is_describe {
         // Collect unique NodeIds from all bound values, plus any bare DESCRIBE <iri>.
         let mut node_ids: HashSet<NodeId> = HashSet::new();
         for b in &all_bindings {
@@ -2241,6 +2251,14 @@ async fn execute_sparql_construct(
         }
         result
     };
+
+    let names = resolve_names(
+        &mut state.client.clone(),
+        polargraph_sparql::node_ids_in_star_triples(&rdf_triples),
+        false,
+    )
+    .await;
+    names.rewrite_star_triples(&mut rdf_triples);
 
     // Serialize based on Accept header.
     let accept = headers
@@ -3063,6 +3081,31 @@ fn imported_triples_to_proto(
         .collect()
 }
 
+/// Names for `ids` from the IRI dictionary (`ResolveIris`, batched). Display
+/// only: if the lookup fails (e.g. an older server), nodes fall back to
+/// `urn:uuid:` and a warning is logged rather than failing the response.
+async fn resolve_names(
+    client: &mut GrpcClient,
+    ids: Vec<NodeId>,
+    deskolemize: bool,
+) -> polargraph_sparql::IriNames {
+    const BATCH: usize = 10_000;
+    let mut pairs = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(BATCH) {
+        let req = proto::ResolveIrisRequest {
+            nodes: chunk.iter().map(|id| pg_node_id_to_proto(*id)).collect(),
+        };
+        match client.resolve_iris(tonic::Request::new(req)).await {
+            Ok(resp) => pairs.extend(chunk.iter().copied().zip(resp.into_inner().iris)),
+            Err(e) => {
+                tracing::warn!("ResolveIris failed; exporting urn:uuid IRIs: {e}");
+                break;
+            }
+        }
+    }
+    polargraph_sparql::IriNames::from_pairs(pairs, deskolemize)
+}
+
 /// Insert a batch of proto triples via the gRPC Insert RPC, recording `iris`
 /// in the IRI dictionary in the same commit.
 async fn insert_proto_triples(
@@ -3259,6 +3302,9 @@ struct ExportJsonLdBody {
     #[serde(default)]
     #[allow(dead_code)]
     view_id: Option<String>,
+    /// Render skolem IRIs as blank nodes (`_:label`).
+    #[serde(default)]
+    deskolemize: bool,
 }
 
 #[derive(Deserialize)]
@@ -3267,12 +3313,16 @@ struct ExportJsonLdParams {
     subject: Option<String>,
     /// Comma-separated predicate IRIs (GET shorthand).
     predicates: Option<String>,
+    /// Render skolem IRIs as blank nodes (`_:label`).
+    #[serde(default)]
+    deskolemize: bool,
 }
 
 async fn export_jsonld_for(
     state: Arc<AppState>,
     subjects: Vec<String>,
     predicates: Vec<String>,
+    deskolemize: bool,
 ) -> Response {
     use polargraph_sparql::{node_id_to_iri, serialize_jsonld, uri_to_node_id, RdfTriple};
 
@@ -3416,6 +3466,14 @@ async fn export_jsonld_for(
         }
     }
 
+    let names = resolve_names(
+        &mut state.client.clone(),
+        polargraph_sparql::node_ids_in_triples(&all_rdf),
+        deskolemize,
+    )
+    .await;
+    names.rewrite_triples(&mut all_rdf);
+
     let body = serialize_jsonld(&all_rdf);
     axum::response::Response::builder()
         .status(StatusCode::OK)
@@ -3433,14 +3491,14 @@ async fn handle_export_jsonld_get(
         .predicates
         .map(|s| s.split(',').map(str::trim).map(str::to_string).collect())
         .unwrap_or_default();
-    export_jsonld_for(state, subjects, predicates).await
+    export_jsonld_for(state, subjects, predicates, params.deskolemize).await
 }
 
 async fn handle_export_jsonld_post(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ExportJsonLdBody>,
 ) -> Response {
-    export_jsonld_for(state, body.subjects, body.predicates).await
+    export_jsonld_for(state, body.subjects, body.predicates, body.deskolemize).await
 }
 
 // ── GET /export/subgraph ──────────────────────────────────────────────────────
@@ -3453,10 +3511,13 @@ async fn handle_export_jsonld_post(
 
 #[derive(Deserialize)]
 struct ExportSubgraphParams {
-    /// Comma-separated UUID strings identifying the subjects to export.
+    /// Comma-separated subjects to export: UUIDs or IRIs.
     subjects: Option<String>,
     /// Comma-separated predicate IRIs to include (if omitted: all, unknown).
     predicates: Option<String>,
+    /// Render skolem IRIs as blank nodes (`_:label`).
+    #[serde(default)]
+    deskolemize: bool,
 }
 
 async fn handle_export_subgraph(
@@ -3472,7 +3533,10 @@ async fn handle_export_subgraph(
         .unwrap_or("")
         .split(',')
         .filter(|s| !s.trim().is_empty())
-        .filter_map(|s| uuid::Uuid::parse_str(s.trim()).ok())
+        .map(|s| {
+            let s = s.trim();
+            uuid::Uuid::parse_str(s).unwrap_or_else(|_| iri_to_node_id(s).0)
+        })
         .collect();
 
     let predicates: Vec<String> = params
@@ -3616,6 +3680,14 @@ async fn handle_export_subgraph(
             }
         }
     }
+
+    let names = resolve_names(
+        &mut state.client.clone(),
+        polargraph_sparql::node_ids_in_triples(&all_rdf),
+        params.deskolemize,
+    )
+    .await;
+    names.rewrite_triples(&mut all_rdf);
 
     let accept = headers
         .get("accept")

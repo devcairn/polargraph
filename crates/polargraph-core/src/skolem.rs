@@ -69,6 +69,32 @@ pub fn is_skolem_iri(iri: &str) -> bool {
     iri.contains(GENID_SEGMENT)
 }
 
+/// Split a skolem IRI minted by [`ImportScope`] into `(import_id, label)`.
+pub fn parse_skolem_iri(iri: &str) -> Option<(&str, &str)> {
+    let (_, rest) = iri.split_once(GENID_SEGMENT)?;
+    let (import_id, label) = rest.split_once('/')?;
+    (!import_id.is_empty() && !label.is_empty()).then_some((import_id, label))
+}
+
+/// A blank-node label for a skolem IRI, unique across imports:
+/// `{import_id}_{label}` with characters outside `[A-Za-z0-9_-]` replaced by
+/// `_` (valid as an N-Triples / Turtle / JSON-LD blank-node label).
+pub fn deskolemized_label(iri: &str) -> Option<String> {
+    let (import_id, label) = parse_skolem_iri(iri)?;
+    Some(
+        format!("{import_id}_{label}")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +121,8 @@ mod tests {
         assert_eq!(iri, "https://kb.example.com/.well-known/genid/run-1/b0");
         assert!(is_skolem_iri(&iri));
         assert!(!is_skolem_iri("https://kb.example.com/Alice"));
+        assert_eq!(parse_skolem_iri(&iri), Some(("run-1", "b0")));
+        assert_eq!(deskolemized_label(&iri).as_deref(), Some("run-1_b0"));
+        assert_eq!(parse_skolem_iri("https://kb.example.com/Alice"), None);
     }
 }

@@ -985,6 +985,7 @@ Query parameters:
 |---|---|---|
 | `subject` | No | Subject URI to export |
 | `predicates` | No | Comma-separated predicate IRIs to include |
+| `deskolemize` | No | `true` renders skolem IRIs as blank nodes (`_:{import_id}_{label}`) |
 
 ### `POST /export/jsonld`
 
@@ -993,7 +994,8 @@ Body:
 {
   "subjects":   ["http://example.org/Alice"],
   "predicates": ["http://schema.org/knows"],
-  "view_id":    "optional-view-id"
+  "view_id":    "optional-view-id",
+  "deskolemize": false
 }
 ```
 
@@ -1020,6 +1022,12 @@ Query parameters:
 |---|---|---|
 | `subjects` | Yes | Comma-separated subject UUIDs or URIs |
 | `predicates` | No | Comma-separated predicate IRIs |
+| `deskolemize` | No | `true` renders skolem IRIs as blank nodes (`_:{import_id}_{label}`) |
+
+Nodes are rendered under the IRI stored in the IRI dictionary (`ResolveIris`),
+falling back to `urn:uuid:` — the same applies to SPARQL SELECT results
+(`uri` values, including inside `GROUP_CONCAT`), CONSTRUCT/DESCRIBE and the
+JSON-LD export.
 
 Response format negotiated via `Accept` header:
 

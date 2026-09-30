@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 
 use polargraph_core::id::NodeId;
+
+use crate::names::IriNames;
 use serde_json::{json, Map, Value};
 
 // ── Value types ───────────────────────────────────────────────────────────────
@@ -56,7 +58,8 @@ pub enum ResponseFormat {
 ///
 /// - `vars`: projected variable names in order
 /// - `bindings`: list of binding rows
-pub fn serialize_json(vars: &[String], bindings: &[SparqlBindings]) -> String {
+/// - `names`: IRIs for URI values (see [`IriNames`])
+pub fn serialize_json(vars: &[String], bindings: &[SparqlBindings], names: &IriNames) -> String {
     let head = json!({ "vars": vars });
 
     let result_bindings: Vec<Value> = bindings
@@ -65,7 +68,7 @@ pub fn serialize_json(vars: &[String], bindings: &[SparqlBindings]) -> String {
             let mut obj = Map::new();
             for var in vars {
                 if let Some(val) = b.get(var) {
-                    obj.insert(var.clone(), sparql_value_to_json(val));
+                    obj.insert(var.clone(), sparql_value_to_json(val, names));
                 }
             }
             Value::Object(obj)
@@ -83,7 +86,8 @@ pub fn serialize_json(vars: &[String], bindings: &[SparqlBindings]) -> String {
 ///
 /// - `vars`: projected variable names in order
 /// - `bindings`: list of binding rows
-pub fn serialize_csv(vars: &[String], bindings: &[SparqlBindings]) -> String {
+/// - `names`: IRIs for URI values (see [`IriNames`])
+pub fn serialize_csv(vars: &[String], bindings: &[SparqlBindings], names: &IriNames) -> String {
     let mut out = String::new();
     out.push_str(&vars.join(","));
     out.push('\n');
@@ -91,7 +95,10 @@ pub fn serialize_csv(vars: &[String], bindings: &[SparqlBindings]) -> String {
         let row: Vec<String> = vars
             .iter()
             .map(|v| match b.get(v) {
-                Some(SparqlValue::Uri(id)) => format!("urn:uuid:{}", id.0),
+                Some(SparqlValue::Uri(id)) => match names.bnode_label(id) {
+                    Some(label) => format!("_:{label}"),
+                    None => names.iri(id),
+                },
                 Some(SparqlValue::Literal(s)) => s.clone(),
                 Some(SparqlValue::LiteralInt(n)) => n.to_string(),
                 Some(SparqlValue::LiteralFloat(f)) => f.to_string(),
@@ -107,12 +114,12 @@ pub fn serialize_csv(vars: &[String], bindings: &[SparqlBindings]) -> String {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-fn sparql_value_to_json(val: &SparqlValue) -> Value {
+fn sparql_value_to_json(val: &SparqlValue, names: &IriNames) -> Value {
     match val {
-        SparqlValue::Uri(id) => json!({
-            "type": "uri",
-            "value": format!("urn:uuid:{}", id.0)
-        }),
+        SparqlValue::Uri(id) => match names.bnode_label(id) {
+            Some(label) => json!({ "type": "bnode", "value": label }),
+            None => json!({ "type": "uri", "value": names.iri(id) }),
+        },
         SparqlValue::Literal(s) => json!({
             "type": "literal",
             "value": s

@@ -7,7 +7,7 @@ use polargraph_query::Term;
 use polargraph_sparql::{
     execute::{apply_sparql_filter, execute_sparql_aggregations, left_join},
     node_id_to_iri, serialize_csv, serialize_json, serialize_ntriples, serialize_turtle,
-    translate_construct, translate_query, value_to_nt_literal, RdfTriple, SparqlAggFunc,
+    translate_construct, translate_query, value_to_nt_literal, IriNames, RdfTriple, SparqlAggFunc,
     SparqlAggregateSpec, SparqlBindings, SparqlFilter, SparqlLiteral, SparqlValue,
 };
 use std::collections::HashMap;
@@ -166,7 +166,7 @@ fn translate_ask_query() {
 fn serialize_json_format() {
     let id = node("018e8c1e-1234-7000-8000-000000000001");
     let b: SparqlBindings = bind_map(&[("s", SparqlValue::Uri(id))]);
-    let json_str = serialize_json(&["s".to_string()], &[b]);
+    let json_str = serialize_json(&["s".to_string()], &[b], &IriNames::default());
     let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
     assert!(v["head"]["vars"]
         .as_array()
@@ -185,10 +185,43 @@ fn serialize_json_format() {
 fn serialize_csv_format() {
     let id = node("018e8c1e-1234-7000-8000-000000000001");
     let b: SparqlBindings = bind_map(&[("s", SparqlValue::Uri(id))]);
-    let csv = serialize_csv(&["s".to_string()], &[b]);
+    let csv = serialize_csv(&["s".to_string()], &[b], &IriNames::default());
     let lines: Vec<&str> = csv.lines().collect();
     assert_eq!(lines[0], "s");
     assert!(lines[1].starts_with("urn:uuid:"));
+}
+
+#[test]
+fn serializers_render_resolved_iris_and_deskolemized_bnodes() {
+    let alice = polargraph_core::term::iri_to_node_id("http://ex/Alice");
+    let scope = polargraph_sparql::ImportScope::new("https://kb.example.com", "i1");
+    let bnode = scope.bnode_node_id("b0");
+    let names = IriNames::from_pairs(
+        [
+            (alice, "http://ex/Alice".to_string()),
+            (bnode, scope.skolem_iri("b0")),
+        ],
+        true,
+    );
+    let rows = [bind_map(&[
+        ("s", SparqlValue::Uri(alice)),
+        ("o", SparqlValue::Uri(bnode)),
+    ])];
+    let vars = ["s".to_string(), "o".to_string()];
+
+    let v: serde_json::Value = serde_json::from_str(&serialize_json(&vars, &rows, &names)).unwrap();
+    let b = &v["results"]["bindings"][0];
+    assert_eq!(
+        b["s"],
+        serde_json::json!({"type": "uri", "value": "http://ex/Alice"})
+    );
+    assert_eq!(
+        b["o"],
+        serde_json::json!({"type": "bnode", "value": "i1_b0"})
+    );
+
+    let csv = serialize_csv(&vars, &rows, &names);
+    assert_eq!(csv.lines().nth(1), Some("http://ex/Alice,_:i1_b0"));
 }
 
 // ── Phase 2: OPTIONAL / left join ────────────────────────────────────────────
@@ -328,7 +361,13 @@ fn group_by_count_execution() {
         func: SparqlAggFunc::CountStar,
     }];
 
-    let result = execute_sparql_aggregations(bindings, &["type".to_string()], &specs, None);
+    let result = execute_sparql_aggregations(
+        bindings,
+        &["type".to_string()],
+        &specs,
+        None,
+        &IriNames::default(),
+    );
 
     assert_eq!(result.len(), 2);
     let group_a = result
@@ -368,7 +407,13 @@ fn group_by_avg_execution() {
         func: SparqlAggFunc::Avg("val".to_string()),
     }];
 
-    let result = execute_sparql_aggregations(bindings, &["g".to_string()], &specs, None);
+    let result = execute_sparql_aggregations(
+        bindings,
+        &["g".to_string()],
+        &specs,
+        None,
+        &IriNames::default(),
+    );
 
     assert_eq!(result.len(), 2);
     let ga = result
@@ -402,8 +447,13 @@ fn having_filter_execution() {
     // HAVING ?n > 1 — only type_a (count=2) passes
     let having = SparqlFilter::GreaterThan("n".to_string(), SparqlLiteral::Int(1));
 
-    let result =
-        execute_sparql_aggregations(bindings, &["type".to_string()], &specs, Some(&having));
+    let result = execute_sparql_aggregations(
+        bindings,
+        &["type".to_string()],
+        &specs,
+        Some(&having),
+        &IriNames::default(),
+    );
 
     assert_eq!(
         result.len(),
@@ -497,7 +547,7 @@ fn sum_integers() {
         alias: "total".into(),
         func: SparqlAggFunc::Sum("v".into()),
     }];
-    let result = execute_sparql_aggregations(bindings, &[], &specs, None);
+    let result = execute_sparql_aggregations(bindings, &[], &specs, None, &IriNames::default());
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].get("total"), Some(&SparqlValue::LiteralInt(10)));
 }
@@ -518,10 +568,11 @@ fn min_and_max_integers() {
         func: SparqlAggFunc::Max("v".into()),
     }];
 
-    let min_r = execute_sparql_aggregations(bindings.clone(), &[], &min_spec, None);
+    let min_r =
+        execute_sparql_aggregations(bindings.clone(), &[], &min_spec, None, &IriNames::default());
     assert_eq!(min_r[0].get("mn"), Some(&SparqlValue::LiteralInt(1)));
 
-    let max_r = execute_sparql_aggregations(bindings, &[], &max_spec, None);
+    let max_r = execute_sparql_aggregations(bindings, &[], &max_spec, None, &IriNames::default());
     assert_eq!(max_r[0].get("mx"), Some(&SparqlValue::LiteralInt(5)));
 }
 
@@ -549,7 +600,11 @@ fn malformed_sparql_missing_where_fails() {
 
 #[test]
 fn serialize_json_empty_bindings_is_valid_sparql_json() {
-    let json_str = serialize_json(&["s".to_string(), "o".to_string()], &[]);
+    let json_str = serialize_json(
+        &["s".to_string(), "o".to_string()],
+        &[],
+        &IriNames::default(),
+    );
     let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
     let vars = v["head"]["vars"]
         .as_array()
@@ -567,7 +622,7 @@ fn serialize_json_empty_bindings_is_valid_sparql_json() {
 #[test]
 fn serialize_csv_empty_bindings_has_header_only() {
     let empty: Vec<SparqlBindings> = vec![];
-    let csv = serialize_csv(&["s".to_string()], &empty);
+    let csv = serialize_csv(&["s".to_string()], &empty, &IriNames::default());
     let lines: Vec<&str> = csv.lines().collect();
     assert_eq!(
         lines.len(),
@@ -586,7 +641,7 @@ fn serialize_json_large_bindings_stays_bounded() {
         .map(|i| bind_map(&[("s", SparqlValue::Uri(NodeId(Uuid::from_u128(i + 1))))]))
         .collect();
 
-    let json_str = serialize_json(&["s".to_string()], &bindings);
+    let json_str = serialize_json(&["s".to_string()], &bindings, &IriNames::default());
     let v: serde_json::Value = serde_json::from_str(&json_str).expect("output must be valid JSON");
     let result_bindings = v["results"]["bindings"].as_array().unwrap();
     assert_eq!(result_bindings.len(), n);
