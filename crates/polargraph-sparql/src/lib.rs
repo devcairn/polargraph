@@ -11,16 +11,19 @@
 //! serialization.
 
 pub mod execute;
+pub mod names;
 pub mod protocol;
 pub mod rdf_import;
 pub mod response;
 pub mod serialize;
 pub mod translate;
 
+pub use names::{node_ids_in_bindings, node_ids_in_star_triples, node_ids_in_triples, IriNames};
+pub use polargraph_core::skolem::{ImportScope, DEFAULT_SKOLEM_BASE};
 pub use protocol::negotiate_format;
 pub use rdf_import::{
-    bnode_to_node_id, edge_id_for, parse_jsonld, parse_ntriples, parse_turtle, uri_to_node_id,
-    ImportedObject, ImportedTriple,
+    edge_id_for, parse_jsonld, parse_ntriples, parse_turtle, uri_to_node_id, ImportedObject,
+    ImportedTriple,
 };
 pub use response::{
     node_bindings_to_sparql, serialize_csv, serialize_json, ResponseFormat, SparqlBindings,

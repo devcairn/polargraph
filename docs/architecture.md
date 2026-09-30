@@ -2,17 +2,21 @@
 
 This document describes the design of PolarGraph: why the major choices were
 made, how the pieces fit together, and what the current capabilities are.
+The exact on-disk formats are specified in
+[`design/v3-key-layout.md`](design/v3-key-layout.md); the roadmap for the
+knowledge-platform work is [`contxtbroker-platform-plan.md`](contxtbroker-platform-plan.md).
 
 ---
 
 ## Overview
 
 PolarGraph is a purpose-built graph database. Its core abstraction is the
-**triple** — an atomic (subject, predicate, object) statement — stored with
-full bitemporal versioning and indexed six ways for O(log n) lookups on any
-combination of bound variables. On top of this sit an optimistic MVCC
-concurrency layer, a Datalog query evaluator, a pure-Rust HNSW vector index,
-and a gRPC server.
+**quad** — a (subject, predicate, object) statement in a named graph — stored
+with full bitemporal versioning and indexed eight ways for O(log n) lookups
+on any combination of bound slots. On top of this sit an optimistic MVCC
+concurrency layer, a Datalog query evaluator (with Cypher and SPARQL front
+ends), a pure-Rust HNSW vector index, and a gRPC server with an HTTP/JSON
+gateway.
 
 The motivating constraints:
 
@@ -20,56 +24,81 @@ The motivating constraints:
   from when they were recorded. Both axes must be queryable independently.
 - **Graph flexibility**: relationships and properties share one index; no
   schema migration is needed to add a new relationship type.
+- **Partitioning by source and trust**: every fact lives in a graph, so data
+  can be scoped, promoted and access-controlled per source.
 - **Vector search as a first-class citizen**: node embeddings live alongside
   graph structure in the same store, not in a sidecar system.
 - **Embeddability**: the storage layer is a library, not just a server, so the
   application can own the process boundary.
 
+```mermaid
+flowchart LR
+    clients["Clients<br/>(Python / Go / TS SDKs,<br/>grpcurl)"] -->|gRPC| server
+    http["HTTP clients<br/>(SPARQL, RDF import/export)"] -->|HTTP/JSON| rest["polargraph-rest<br/>gateway"]
+    rest -->|gRPC| server["polargraphd<br/>(polargraph-server)"]
+    ui["Management UI"] -->|HTTP| server
+    server --> query["polargraph-query<br/>Datalog · Cypher · planner"]
+    server --> storage
+    query --> storage["polargraph-storage<br/>quad index · MVCC · HNSW"]
+    storage --> rocks[("RocksDB<br/>17 column families")]
+    import["polargraph-import<br/>(offline bulk load)"] --> storage
+    replica["replica polargraphd"] -. "StreamWal" .-> server
+```
+
 ---
 
 ## Crate graph
 
-```
-polargraph-core       (no external I/O, no async)
-      ↑
-polargraph-storage    (RocksDB, MVCC, HNSW index)
-      ↑
-polargraph-query      (Datalog evaluator, view projection)
-      ↑
-polargraph-server     (gRPC binary: polargraphd)
+```mermaid
+flowchart BT
+    core["polargraph-core<br/>types · term identity · skolem<br/>(no I/O, no async)"]
+    storage["polargraph-storage<br/>RocksDB · MVCC · HNSW · migration"] --> core
+    query["polargraph-query<br/>Datalog · Cypher · planner"] --> storage
+    sparql["polargraph-sparql<br/>SPARQL translation · RDF I/O"] --> query
+    server["polargraph-server<br/>polargraphd (gRPC, UI, metrics)"] --> query
+    rest["polargraph-rest<br/>HTTP gateway"] --> sparql
+    importer["polargraph-import<br/>bulk SST loader"] --> storage
+    bench["polargraph-bench"] --> server
 ```
 
 `polargraph-core` is intentionally dependency-free at the I/O level. Every
 type that crosses a crate boundary lives here, keeping the type system the
 single source of truth and compile times for upper crates fast.
+`polargraph-rest` talks to `polargraphd` over gRPC only; it has no RocksDB
+dependency.
 
 ---
 
 ## Data model
 
-### Triple
+### Triples and quads
 
-The atomic unit of storage is a `Triple`. There are two variants:
+The atomic unit of storage is a `Triple`, always stored in a named graph
+(a `Quad` = triple + `GraphId`). There are four variants:
 
-**Relation triple** — a directed edge between two nodes:
+| Variant | Shape | Stored in |
+|---|---|---|
+| `Relation` | `(subject: NodeId) --predicate--> (object: NodeId)`, with an `EdgeId` | quad index |
+| `Property` | `(subject: NodeId) --predicate--> (value: Value)` | quad index |
+| `EdgeProperty` | RDF-star annotation: `edge --predicate--> value` | `epag` / `peag` |
+| `EdgeRelation` | RDF-star annotation: `edge --predicate--> node` | `epog` |
 
-```
-(subject: NodeId) --[predicate: String]--> (object: NodeId)
-```
-
-**Property triple** — a scalar attribute on a node:
-
-```
-(subject: NodeId) --[predicate: String]--> (value: Value)
-```
-
-Both variants carry a `BiTemporalRange`. There is no separate table for
+All variants carry a `BiTemporalRange`. There is no separate table for
 nodes: a node exists by virtue of appearing as the subject (or object) of at
-least one triple.
+least one triple. A subject can hold **several values** for one predicate
+(`"Acme"@en` and `"Acmé"@fr`); see [Write modes](#write-modes).
+
+### Graphs
+
+Every quad belongs to a graph. `GraphId(0)` is the **default graph**: every
+write that doesn't name a graph lands there, so pre-graph clients keep
+working unchanged. Named graphs are identified by IRI and interned to `u32`
+ids exactly like predicates (`TripleStore::intern_graph`). Reads that don't
+name a graph cover every graph and return each `(s, p, o)` once.
 
 ### Predicate
 
-Predicates are arbitrary strings (`"works_at"`, `"name"`, `"since"`, …).
+Predicates are arbitrary strings (`"works_at"`, `"name"`, an IRI, …).
 They are stored verbatim externally but **interned** to compact `u32` IDs
 inside index keys. The intern table lives in the META column family and is
 loaded into memory at store-open time. Adding a new predicate requires no
@@ -84,18 +113,36 @@ Int(i64)
 Float(f64)
 Text(String)
 Blob(Vec<u8>)
-Vector(Vec<f32>)   — dense embedding vector; stored in binary (not JSON)
+Vector(Vec<f32>)                              — dense embedding; binary codec
+LangText { text: String, lang: String }       — "Acme"@en
+Typed    { lexical: String, datatype: String } — "2026-09-29"^^xsd:date
 ```
 
-All variants except `Vector` are JSON-encoded in the RocksDB value bytes.
-`Vector` uses a dedicated binary codec (discriminant `0x03`) to avoid JSON
-overhead on large float arrays — see [Value encoding](#value-encoding).
+`LangText` and `Typed` keep RDF literals lossless; every import and query
+path maps literals through `polargraph_core::term::literal_to_value`.
+`Value::content_hash()` is the xxHash3-128 of a fixed canonical encoding (not
+`serde_json`); it is a property's object slot in the index and the key of
+out-of-line value storage. `Value::as_text()` exposes the string of `Text`
+and `LangText` to text search and string predicates.
 
-### Identifiers
+### Identifiers and terms
 
-`NodeId` and `EdgeId` wrap UUID v7. UUID v7 is time-ordered, so IDs sort
-chronologically in the index without a central sequence generator.
-The 16-byte representation is used directly in index keys.
+`NodeId` and `EdgeId` wrap 16-byte UUIDs. Natively created nodes use UUID v7
+(time-ordered). Nodes named by IRIs get their ID from
+`polargraph_core::term::iri_to_node_id`, the single mapping every path uses:
+
+```mermaid
+flowchart LR
+    iri["IRI"] --> q{"urn:uuid:… ?"}
+    q -->|yes| direct["NodeId(u)<br/>(round-trips as-is)"]
+    q -->|no| hash["NodeId = xxHash3-128(IRI)"]
+    hash --> dict[("iri CF<br/>NodeId → IRI")]
+    bnode["blank node _:b0"] --> skolem["skolem IRI<br/>{base}/.well-known/genid/{import_id}/b0"] --> q
+```
+
+Hashing is one-way, so the IRI dictionary (`iri` CF) records the IRI behind
+every hashed NodeId; export paths look it up (see
+[IRI dictionary](#iri-dictionary)).
 
 ---
 
@@ -111,10 +158,14 @@ Every `BiTemporalRange` carries three fields:
 
 This supports three classes of historical query:
 
-- **Current state** — filter to `vt_end = END_OF_TIME` and `tt ≤ now`
+- **Current state** — the default: facts valid now, as of the latest commit
 - **Valid-time query** — "what was true at world-time T?" → `vt_start ≤ T < vt_end`
 - **Bitemporally anchored** — "what did we *believe* at audit time A about
   world-time T?" → filter both axes simultaneously
+
+Nothing is updated in place. A DELETE writes a new version of the fact with
+the same `vt_start` and a closed `vt_end`; replacing a property value writes
+a closing version of the old value and an open version of the new one.
 
 `tt` is stored in the last 8 bytes of every index key, not in the value
 payload. MVCC snapshot filtering therefore requires only a key comparison —
@@ -124,115 +175,217 @@ no value decode needed to discard invisible entries.
 
 ## Storage layer
 
+The storage format is **v3** (`__storage__/format = 3` in META). Stores
+written by older builds must be migrated offline — see
+[Storage format migration](#storage-format-migration).
+
 ### Column families
 
-PolarGraph opens twelve RocksDB column families:
+PolarGraph opens seventeen RocksDB column families:
 
-| CF | Purpose |
-|----|---------|
-| `spo` | Subject → Predicate → Object index |
-| `sop` | Subject → Object → Predicate index |
-| `pso` | Predicate → Subject → Object index |
-| `pos` | Predicate → Object → Subject index |
-| `osp` | Object → Subject → Predicate index |
-| `ops` | Object → Predicate → Subject index |
-| `meta` | Predicate intern table, timestamp oracle counter, migration version |
-| `hnsw` | HNSW vector index nodes and entry-point records (per named space) |
-| `tri` | Trigram full-text index (key: `[trigram:3][pred_id:4][subject_id:16]`) |
-| `drv` | OWL 2 RL derived (materialized) facts — same SPO key layout, separate CF |
-| `epa` | Edge property annotations (key: `[edge_id:16][pred_id:4][tt:8]`) |
-| `epo` | Edge relation annotations (key: `[edge_id:16][pred_id:4][obj_id:16][tt:8]`) |
+| CF | Purpose | Key |
+|----|---------|-----|
+| `spog` `sopg` `psog` `posg` `ospg` `opsg` | Quad index, six non-graph-leading orders | 48 bytes, see [Key layout](#key-layout) |
+| `gspo` `gpos` | Quad index, graph-leading orders | 48 bytes |
+| `meta` | Predicate and graph intern tables, timestamp oracle, storage format, schema-migration version | text keys |
+| `hnsw` | HNSW vector index nodes and entry points (per named space) | `<space>/n/<id>`, `<space>/__ep` |
+| `trig` | Trigram full-text index | `[trigram:3][pred:4][g:4][subject:16]` |
+| `drvg` | OWL 2 RL derived facts | `spog` layout |
+| `epag` | Edge property annotations | `[edge:16][pred:4][g:4][tt:8]` |
+| `epog` | Edge relation annotations | `[edge:16][pred:4][obj:16][g:4][tt:8]` |
+| `peag` | Predicate-first index over `epag` | `[pred:4][edge:16][g:4][tt:8]` |
+| `iri` | IRI dictionary | `[node_id:16]` → IRI |
+| `blob` | Out-of-line property values | `[value_hash:16]` → payload |
 
-The six `spo`/`sop`/`pso`/`pos`/`osp`/`ops` CFs implement the **hexastore** pattern. Every insert
-writes atomically to all six via a single `WriteBatch`. This makes every
-read O(log n) with no secondary lookups, at the cost of 6× write amplification.
+Every quad version is written to all eight quad-index CFs in one atomic
+`WriteBatch`. That makes every read O(log n) with no secondary lookups, at
+the cost of 8× index write amplification.
 
-### Index selection
-
-The query planner maps each (S, P, O) bind pattern to the cheapest CF:
-
-| Bound slots | CF used | Prefix width |
-|-------------|---------|-------------|
-| S, P, O | SPO | 36-byte exact key |
-| S, P | SPO | 20 bytes |
-| S, O | SOP | 32 bytes |
-| S | SPO | 16 bytes |
-| P, O | POS | 20 bytes |
-| P | PSO | 4 bytes |
-| O | OSP | 16 bytes |
-| (none) | SPO | full scan |
+```mermaid
+flowchart TB
+    quad["one quad version<br/>(s, p, o, g, tt) + value"]
+    subgraph index["quad index — 8 × 48-byte keys, one WriteBatch"]
+      direction LR
+      spog ~~~ sopg ~~~ psog ~~~ posg ~~~ ospg ~~~ opsg ~~~ gspo ~~~ gpos
+    end
+    subgraph side["written alongside when applicable"]
+      direction LR
+      blob[("blob<br/>payload > 256 B, stored once")] ~~~ trig[("trig<br/>text ≤ 512 B")] ~~~ iri[("iri<br/>IRIs named")]
+    end
+    quad --> index
+    quad -.-> side
+```
 
 ### Key layout
 
-All triple-index keys are fixed-width at 44 bytes, so RocksDB's default
-lexicographic comparator gives correct range scans without a custom comparator:
+All quad-index keys are fixed-width at 48 bytes, so RocksDB's default
+lexicographic comparator gives correct range scans:
 
 ```
-SPO  [subject(16)][pred_id(4)][object(16)][tt(8)]
-SOP  [subject(16)][object(16)][pred_id(4)][tt(8)]
-PSO  [pred_id(4)][subject(16)][object(16)][tt(8)]
-POS  [pred_id(4)][object(16)][subject(16)][tt(8)]
-OSP  [object(16)][subject(16)][pred_id(4)][tt(8)]
-OPS  [object(16)][pred_id(4)][subject(16)][tt(8)]
+spog [s:16][p:4][o:16][g:4][tt:8]      gspo [g:4][s:16][p:4][o:16][tt:8]
+sopg [s:16][o:16][p:4][g:4][tt:8]      gpos [g:4][p:4][o:16][s:16][tt:8]
+psog [p:4][s:16][o:16][g:4][tt:8]
+posg [p:4][o:16][s:16][g:4][tt:8]
+ospg [o:16][s:16][p:4][g:4][tt:8]
+opsg [o:16][p:4][s:16][g:4][tt:8]
 ```
 
-`tt` is always the last 8 bytes. All versions of an (S,P,O) tuple therefore
-sort together and in chronological order, enabling MVCC snapshot filtering
-via forward scan with early exit.
+- The first **40 bytes** identify the quad; `tt` is the last 8. All versions
+  of one quad therefore sort together, oldest first.
+- In the six non-graph-leading orders the graph sits at bytes 36–40, so a
+  scan can skip graphs by reading 4 bytes without decoding the key.
+- `keys::Order` encodes, decodes and builds scan prefixes for every order
+  generically; `Order::prefix` fills the bound leading slots and stops at the
+  first unbound one.
 
-### Property triples in the index
+### Property keys and the value index
 
-Property triples (scalar values) use a **sentinel object** (`0xFF × 16`) in
-the object slot of every index key. This puts them in the same key space as
-relation triples, allowing a single scan implementation for both variants.
+For a property, the object slot holds the **value's content hash**
+(`keys::value_object(value)`), not a node. Relation vs property is decided by
+the value's discriminant byte. Two consequences:
+
+- Each value has its own key, so a property can be multi-valued.
+- `posg` (and `gpos` within a graph) is a **value index**: `(?s, :status,
+  "blocked")` is a prefix lookup on `[p][hash(value)]`. The Datalog evaluator
+  resolves `Term::Literal` to that hash and verifies the decoded value.
+
+### Index selection
+
+The query planner maps each bound pattern to the cheapest order:
+
+| Bound slots | Order | Prefix |
+|-------------|-------|--------|
+| S, P, O | `spog` | `[s][p]`, filtered to O |
+| S, P | `spog` | `[s][p]` (20 bytes) |
+| S, O | `sopg` | `[s][o]` (32 bytes) |
+| S | `spog` | `[s]` (16 bytes) |
+| P, O (incl. a literal) | `posg` | `[p][o]` (20 bytes) |
+| P | `psog` | `[p]` (4 bytes) |
+| O | `ospg` | `[o]` (16 bytes) |
+| G | `gspo` | `[g]` (4 bytes) |
+| G, S | `gspo` | `[g][s]` (20 bytes) |
+| (none) | `spog` | full scan |
 
 ### Value encoding
 
 The RocksDB value bytes carry a 1-byte discriminant followed by temporal and
-payload data:
+payload data; `tt` comes from the key:
 
 ```
-Relation  [0x01][edge_id: 16][vt_start: 8 BE][vt_end: 8 BE]        = 33 bytes
-Property  [0x02][vt_start: 8 BE][vt_end: 8 BE][json_payload: N]     = 17+N bytes
-Vector    [0x03][vt_start: 8 BE][vt_end: 8 BE][len: 4 LE][f32×len LE]
+Relation     [0x01][edge_id:16][vt_start:8 BE][vt_end:8 BE]        = 33 bytes
+Property     [0x02][vt_start:8 BE][vt_end:8 BE][json_payload:N]     = 17+N bytes
+Vector       [0x03][vt_start:8 BE][vt_end:8 BE][len:4 LE][f32×len LE]
+PropertyRef  [0x04][vt_start:8 BE][vt_end:8 BE]                     = 17 bytes
 ```
 
-`tt` is recovered from the key and is not duplicated in the value bytes.
-`Vector` values bypass JSON entirely: `len` is a little-endian `u32` count
-of `f32` elements followed by the raw IEEE 754 bytes, also little-endian.
+### Out-of-line values
+
+A property whose encoded payload exceeds `inline_value_max_bytes` (default
+256; `--inline-value-max-bytes`, `[storage] inline_value_max_bytes`) is
+written **once** to `blob[value_hash]` as `[disc][payload]`, and all eight
+index entries carry a 17-byte `PropertyRef`. The hash is already the key's
+object slot, so the ref needs no pointer. Identical large values (boilerplate,
+repeated chunks, embeddings) share one blob. Refs are resolved only when a
+value is reconstructed. Retention sweeps blobs that no index entry references
+any more (mark-and-sweep over `spog`).
 
 ---
 
-## MVCC layer
+## Write path and MVCC
 
 PolarGraph uses **optimistic concurrency control** (OCC):
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant S as PolarGraphServer
+    participant T as Transaction
+    participant O as TimestampOracle
+    participant W as stage_writes
+    participant R as RocksDB
+    C->>S: Insert { triples, graph?, iris? }
+    S->>S: intern graph IRI (if any)
+    S->>T: begin() — read_ts = oracle.read_ts()
+    S->>T: insert_in(triple, graph, mode) per triple · bind_iri(iri)
+    S->>T: commit()
+    T->>O: begin_commit() — lock, commit_ts = max(prev+1, now µs)
+    loop each write (one reused gspo iterator)
+        T->>R: seek conflict prefix — any tt in (read_ts, commit_ts]?
+    end
+    alt conflict
+        T-->>S: WriteConflict → ABORTED
+    else clean
+        T->>W: stage_writes(writes, commit_ts)
+        W->>R: Replace: seek gspo [g][s][p] for open values to close
+        W->>W: encode entries · blobs · trigrams · annotations
+        T->>T: IRI dictionary entries (collision check)
+        T->>R: one WriteBatch: 8 orders + blob/trig/iri + oracle counter
+        T-->>S: commit_ts
+    end
+    S-->>C: InsertResponse { commit_ts, edge_ids }
 ```
-begin()      → snapshot read_ts from TimestampOracle (AtomicI64 load)
-reads        → filter all index entries to tt ≤ read_ts
-write buffer → collect triples in memory (no locks held)
-commit()     → acquire commit_lock (Mutex)
-               advance oracle → commit_ts = read_ts + 1
-               conflict check: any (S,P,O) with read_ts < tt ≤ commit_ts?
-               if clean: flush WriteBatch with commit_ts stamped on every key
-               persist oracle counter to META CF
-               release commit_lock
+
+- **Conflict detection** checks the exact quad (relations, `Add` writes) or
+  the `[g][s][p]` prefix (`Replace` writes) for any version committed after
+  the transaction's `read_ts`. The same triple written to two different
+  graphs never conflicts.
+- **TimestampOracle** is an `AtomicI64` plus a `Mutex<()>`. Read
+  transactions sample the atomic without contention; commits serialize under
+  the mutex. Commit timestamps are wall-clock microseconds
+  (`max(committed + 1, now)`), and the counter persists to META.
+- **Snapshots** (`polargraph_storage::Snapshot`) are the read-only
+  counterpart: a store handle, a fixed `ts`, and a valid-time point (default
+  "now").
+
+### Write modes
+
+A property write says how it treats the other values of the same
+`(subject, predicate, graph)`:
+
+```mermaid
+flowchart TD
+    w["property write"] --> m{"mode"}
+    m -->|Add| add["write this value only<br/>(others untouched)"]
+    m -->|Replace| rep["close every other open value<br/>at this vt_start, then write"]
+    m -->|"Auto (default)"| open{"vt_end = end of time?"}
+    open -->|"yes (a new value)"| rep
+    open -->|"no (a DELETE / closing write)"| add
 ```
 
-**Conflict detection** scans the SPO key range for each buffered (S,P,O)
-tuple and checks whether any key has `tt` in `(read_ts, commit_ts]`. A hit
-means another transaction committed to that triple after the current
-transaction began; the commit returns `StorageError::WriteConflict`.
+- `Auto` keeps pre-v3 behaviour: setting a property replaces it, and a DELETE
+  closes only the value it names.
+- RDF import, SPARQL `INSERT DATA` / `INSERT` templates and bulk import use
+  `Add`, so multi-valued RDF properties survive.
+- On the wire: `PropertyTriple.mode` (`PROPERTY_WRITE_MODE_AUTO` = 0,
+  `_REPLACE`, `_ADD`) and `InsertRequest.graph`.
 
-**TimestampOracle** is an `AtomicI64` plus a `Mutex<()>`. Read transactions
-sample the atomic without touching it (no contention). Commit transactions
-acquire the mutex to serialize the increment-and-write sequence.
+### Read path
 
-The oracle counter persists to the META CF so restarts do not reuse
-timestamps and old snapshot reads remain valid.
+```mermaid
+flowchart TD
+    q["scan (order, prefix, snapshot ts, valid time vt, graphs)"] --> it["prefix-scan the order's CF"]
+    it --> tt{"tt ≤ snapshot ts<br/>and graph admitted?"}
+    tt -->|no| it
+    tt -->|yes| vs{"vt_start ≤ vt?"}
+    vs -->|no| it
+    vs -->|yes| win["keep per quad: latest vt_start,<br/>ties → highest tt"]
+    win --> it
+    it -->|prefix exhausted| cover{"winner's vt_end > vt?"}
+    cover -->|no| drop["hidden (deleted / replaced)"]
+    cover -->|yes| rec["reconstruct Triple<br/>(resolve PropertyRef from blob)"]
+    rec --> union{"union read and<br/>named graphs exist?"}
+    union -->|yes| dedup["one result per (s, p, o)<br/>(lowest graph id)"]
+    union -->|no| out["results"]
+    dedup --> out
+```
 
-**Snapshots** (`polargraph_storage::Snapshot`) are the read-only counterpart:
-a `TripleStore` handle plus a fixed `ts`; all scan methods filter to `tt ≤ ts`.
+A scan with no explicit valid time uses **now**, so replaced and deleted
+values are hidden everywhere — `TripleStore::scan_*` and transaction reads
+included. Choosing the governing version by `vt_start` (not raw `tt`) is what
+makes both kinds of change work: a new temporal version (later `vt_start`)
+only takes over once its window begins, while a DELETE or replacement
+(same `vt_start`, closed `vt_end`) wins the tie-break and hides the fact.
 
 ---
 
@@ -824,7 +977,7 @@ message PlanNode {
 }
 ```
 
-**Index selection** follows the hexastore table: after each pattern is
+**Index selection** follows the [index selection table](#index-selection): after each pattern is
 evaluated, the variables it binds become "bound" for subsequent patterns. The
 planner simulates this symbolically — a `Var` slot is treated as bound if the
 variable was introduced by an earlier pattern.
@@ -1017,17 +1170,17 @@ directory is the same as the data directory (RocksDB default).
 
 ## Bulk import
 
-For large initial data loads, `polargraph-import` ingests N-Triples files
-directly into RocksDB via SST file ingestion — completely bypassing gRPC,
-the WAL write path, and per-insert MVCC overhead. Expected throughput is
-10–100× faster than streaming inserts over gRPC.
+For large initial data loads, `polargraph-import` ingests RDF files directly
+into RocksDB via SST file ingestion — completely bypassing gRPC, the WAL
+write path, and per-insert MVCC overhead. Expected throughput is 10–100×
+faster than streaming inserts over gRPC.
 
 ### Use case
 
 Use `polargraph-import` when loading millions of triples into a fresh or
 offline database (knowledge graph seed data, migration from another store,
 test fixture load). It is **not** suitable for incremental updates to a live
-database — use the `Insert` RPC for that.
+database — use the `Insert` RPC or `POST /import/rdf` for that.
 
 ### How to run
 
@@ -1037,54 +1190,102 @@ database — use the `Insert` RPC for that.
 polargraph-import \
   --data-dir /var/lib/polargraph \
   --input    ./dump.nt \
+  --format   ntriples \            # ntriples (default) | turtle | jsonld
+  --import-id crm-2026-09-29 \     # optional; blank-node scope
+  --skolem-base https://kb.example.com \
   --batch-size 100000
 
 # Example output:
+# Import id: crm-2026-09-29
 # Imported 100000 triples (batch 1) in 312ms
-# Imported 100000 triples (batch 2) in 298ms
 # Total: 200000 triples in 612ms (326797 triples/sec)
 
 # Restart the server — all imported triples are immediately visible.
 polargraphd --data-dir /var/lib/polargraph
 ```
 
-### N-Triples support
+### What gets stored
 
-`polargraph-import` handles the common N-Triples subset:
+All three formats go through one `rio`-based converter:
 
-| Input form | Storage result |
+| Input | Storage result |
 |---|---|
-| `<uri> <uri> <uri> .` | `Triple::Relation` — subject/object URIs hashed to stable `NodeId`s |
-| `<uri> <uri> "literal" .` | `Triple::Property` — `Value::Text` |
-| `<uri> <uri> "literal"@lang .` | `Triple::Property` — language tag stripped |
-| Lines starting with `#` | Skipped (comments) |
-| Blank lines | Skipped |
-| `_:blank_node` objects | Skipped (not supported) |
+| `<iri> <iri> <iri> .` | `Relation`, IRIs → NodeIds via `term::iri_to_node_id`, EdgeId via `term::edge_id_for` |
+| `<iri> <iri> "literal" .` | `Property`; datatypes and language tags kept (`term::literal_to_value`) |
+| `_:b0` subjects / objects | Skolemized per import (`{skolem-base}/.well-known/genid/{import-id}/b0`) |
+| every hashed IRI (incl. skolem IRIs) | recorded in the `iri` dictionary |
+| comment / blank lines | skipped; unparseable N-Triples lines are counted and skipped |
 
-URIs are hashed to `NodeId` using xxHash3-128 — the same URI always
-produces the same `NodeId` across runs.
+Bulk import only **adds** values (`WriteMode::Add`) into the default graph.
 
 ### Why offline-only
 
-RocksDB SST file ingestion acquires exclusive locks on the column families
+RocksDB SST file ingestion needs exclusive access to the column families
 being written. Running `polargraph-import` against a database that is also
 being served by `polargraphd` will cause RocksDB errors or data corruption.
-The gRPC `Insert` RPC is the correct path for concurrent writes to a live server.
 
 ### Implementation
 
 `polargraph-storage::SstImporter` (in `sst_import.rs`):
 
-1. Buffers triples in memory.
-2. On `finish(&store)`: interns all predicates, acquires a commit timestamp
-   via `begin_commit()`, encodes keys for all 6 hexastore CFs, sorts per CF
-   (RocksDB SST requires sorted order), writes one `.sst` file per CF via
-   `SstFileWriter`, calls `db.ingest_external_file_cf()` for each CF, then
-   persists the updated oracle counter to the META CF.
-3. Returns `ImportStats { triples_imported, duration_ms }`.
+1. Buffers triples (`add_triple`) and IRIs (`add_iri`) in memory.
+2. On `finish(&store)`: interns predicates, acquires a commit timestamp via
+   `begin_commit()`, encodes every quad for all eight orders, and writes one
+   sorted `.sst` file per order via `ingest_sorted` (`SstFileWriter` +
+   `ingest_external_file_cf`).
+3. Out-of-line values, trigrams, annotations, IRI entries and the oracle
+   counter go in through one `WriteBatch`.
+4. Returns `ImportStats { triples_imported, duration_ms }`.
 
 `polargraph-import/src/main.rs` drives `SstImporter` in batches (default
 100 000 triples/batch) and prints per-batch and summary progress lines.
+
+---
+
+## Storage format migration
+
+Storage format v3 (this document) replaced v2 (six 44-byte-key CFs, a
+`0xFF×16` object sentinel for properties, no graphs). A v3 build refuses to
+open a store holding v2 data (`StorageError::NeedsMigration`), and never
+migrates automatically. Migrate offline:
+
+```bash
+# Server stopped. A backup is required unless you pass --no-backup.
+polargraphd migrate --data-dir /var/lib/polargraph --backup-dir /backups/polargraph
+```
+
+```mermaid
+flowchart TD
+    start["polargraphd migrate"] --> fmt{"__storage__/format = 3?"}
+    fmt -->|yes| done0["already migrated — no-op"]
+    fmt -->|no| bk{"--backup-dir given?"}
+    bk -->|no, and no --no-backup| refuse["refuse"]
+    bk -->|yes| backup["BackupEngine backup"]
+    backup --> clear["clear partial v3 data<br/>from an interrupted run"]
+    bk -->|--no-backup| clear
+    clear --> quads["stream v2 spo in key order<br/>(one (s,p,o) group at a time)"]
+    quads --> replay["relations: 1:1<br/>properties: replay versions as Auto writes<br/>→ synthesize closing versions"]
+    replay --> enc["value hash · blobs · trigrams<br/>→ sorted SST chunks for 8 orders"]
+    enc --> rest["v2 drv → drvg · epa → epag + peag · epo → epog"]
+    rest --> verify{"all 8 orders have N entries<br/>and checksum matches?"}
+    verify -->|no| fail["error — v2 data untouched,<br/>rerun after fixing"]
+    verify -->|yes| commit["COMMIT POINT:<br/>write __storage__/format = 3"]
+    commit --> drop["drop v2 CFs<br/>(retried on next open if interrupted)"]
+```
+
+- Only v2 `spo`, `drv`, `epa` and `epo` are read — every other v2 CF is
+  derivable from them. The trigram index is rebuilt.
+- v2 kept every value of a property under one key, so a correction replaced
+  the old value implicitly. The migration replays those versions as `Auto`
+  writes and synthesizes the closing versions a live `Replace` would have
+  written (`MigrationReport::closing_versions_synthesized`). One edge case
+  reads differently afterwards: a correction back-dated *earlier* than the
+  value it corrected takes effect from its own `vt_start` (v2 kept showing the
+  old value from that value's later start onward).
+- Replicas re-bootstrap from a backup taken after the primary is migrated.
+- The logical schema-migration counter (`__migrations__/version`, applied
+  automatically at startup by `MigrationRunner`) is separate from the storage
+  format and unaffected.
 
 ---
 
@@ -1092,25 +1293,47 @@ The gRPC `Insert` RPC is the correct path for concurrent writes to a live server
 
 PolarGraph stores every write as an immutable versioned entry. Without
 pruning, storage grows unboundedly. `CompactionManager` (in
-`polargraph-storage::compaction`) scans the six hexastore column families
-and deletes entries that have expired under a `RetentionPolicy`, then triggers
-a full RocksDB compaction on any CF that received deletions.
+`polargraph-storage::compaction`) walks the eight quad-index column families
+and deletes versions that have expired under a `RetentionPolicy`, triggers a
+full RocksDB compaction on any CF that received deletions, and then sweeps
+out-of-line values nothing references any more.
 
-### What timestamps are checked
+### What is checked
 
-Every hexastore key ends with 8 bytes of `tt` (transaction time, microseconds
-since Unix epoch, wall-clock). The codec value bytes begin with the
-discriminant and carry `vt_start` and `vt_end` (also microseconds since epoch).
+Every quad-index key ends with 8 bytes of `tt` (transaction time, wall-clock
+µs). The value bytes carry `vt_start` and `vt_end`. Retention walks each CF
+one quad at a time — all versions of one quad share a 40-byte key prefix and
+sort by `tt` — so the rules can compare a version with its successors.
 
-`RetentionPolicy` has two independent knobs:
+`RetentionPolicy` has two knobs:
 
 | Field | Effect |
 |-------|--------|
-| `tx_age_secs` | Delete any triple whose `tt` is more than `tx_age_secs` seconds before now. This is the primary retention knob — it bounds how much transaction history is kept. |
-| `vt_lookback_secs` (optional) | Also delete triples whose `vt_end` (the end of their valid-time window) is more than `vt_lookback_secs` seconds in the past. Useful for purging facts whose real-world validity has ended. Disabled when `None`. |
+| `tx_age_secs` | Bounds how much transaction history is kept. A version is deleted when a newer version of the same quad **with the same `vt_start`** was committed more than `tx_age_secs` seconds ago — it has been shadowed (by a correction, a replacement or a DELETE) for longer than the window. The newest version of a quad is never deleted by this rule, however old, and versions that record valid-time history (a later `vt_start`) are kept. |
+| `vt_lookback_secs` (optional) | Also delete a quad entirely — every remaining version — once *all* of them have a `vt_end` more than `vt_lookback_secs` seconds in the past. Disabled when `None`. |
 
-Either condition is sufficient for deletion — a triple matching either is
-removed from all six CFs atomically via a single `WriteBatch`.
+```mermaid
+flowchart TD
+    g["versions of one quad<br/>(oldest tt first)"] --> each["for each version v"]
+    each --> sh{"a newer version with the same vt_start<br/>committed before now − tx_age?"}
+    sh -->|yes| del1["delete v (shadowed history)"]
+    sh -->|no| keep1["keep v"]
+    del1 --> all
+    keep1 --> all{"vt_lookback set and every<br/>surviving version closed<br/>before now − vt_lookback?"}
+    all -->|yes| delall["delete the whole quad"]
+    all -->|no| keep["keep survivors"]
+```
+
+Every query answer at a transaction time inside the window — plain,
+`as_of_valid_time` or `as_of_tx_time` — is unchanged by a retention run. A
+closed version is never removed on its own: deleting a DELETE's closing
+version while the original open version survives would resurrect the fact.
+
+> **Behaviour change (after 0.1.0):** earlier releases deleted *every*
+> version whose `tt` was older than the cutoff, including the current value of
+> a fact that had simply not changed recently — a TTL on live data rather
+> than a bound on history. Stores that relied on that behaviour should
+> close facts explicitly (DELETE / `vt_end`) and use `vt_lookback_secs`.
 
 ### Transaction time and the oracle
 
@@ -1133,6 +1356,9 @@ polargraphd \
   --retention-vt-lookback-secs 86400    # 1 day
 ```
 
+**Periodically** — `--retention-schedule` (plus `--retention-interval-secs`)
+runs the same pass in the background.
+
 **Via gRPC** — the `RunRetention` RPC runs retention without a restart:
 
 ```
@@ -1142,17 +1368,19 @@ RunRetentionRequest {
 }
 ```
 
-Returns `RetentionStats { triples_scanned, triples_deleted, duration_ms }`.
+Returns `{ triples_scanned, triples_deleted, duration_ms }`, counted in
+index entries across the eight orders (one quad version = 8 entries). The
+library-level `RetentionStats` also reports `blobs_deleted`.
 
 ### Performance implications
 
-Retention does a **full scan** of all six hexastore CFs. Each row is checked
-against the policy; matching rows are batched into a `WriteBatch` and deleted.
+Retention does a **full scan** of all eight quad-index CFs; matching entries
+are batched into a `WriteBatch` (flushed every 10 000 deletes) and deleted.
 After deletion, `db.compact_range_cf` is called on each modified CF so that
-RocksDB reclaims the on-disk space promptly (rather than waiting for the next
-scheduled compaction). On a large store this can take tens of seconds.
+RocksDB reclaims the space promptly, then the blob sweep scans `spog` once.
+On a large store this can take tens of seconds.
 
-META and HNSW column families are never touched.
+META, HNSW and IRI column families are never touched.
 
 ---
 
@@ -1208,22 +1436,22 @@ Typical use cases:
 
 ### Filter ordering and correctness
 
-The valid-time filter runs **inside** `snapshot_scan_cf`, before the MVCC
-deduplication step that picks the highest-`tt` entry for each `(S, P, O)`.
-
-This ordering is necessary for correctness. Consider two versions of the same
-fact:
+Version selection happens **inside** the snapshot scan (`snapshot_scan_keyed`
+in `store.rs`) and is keyed on valid time: per quad, among versions with
+`tt ≤ snapshot` and `vt_start ≤ vt`, the one with the latest `vt_start` wins
+(ties → highest `tt`), and it is returned only if `vt < vt_end`.
 
 ```
 version 1: tt=T1, vt=[100, 200)
 version 2: tt=T2, vt=[200, MAX)     (T2 > T1)
 ```
 
-A query with `as_of_valid_time=150` should return version 1. If filtering
-happened _after_ deduplication, version 2 (the higher-`tt` entry) would
-be selected first, then rejected, leaving no result — incorrect. By filtering
-before deduplication each eligible version participates in the latest-version
-selection independently.
+`as_of_valid_time=150` returns version 1: version 2 hasn't started at 150 so
+it never competes. Picking the highest-`tt` version first and filtering
+afterwards would select version 2, reject it, and return nothing. Conversely,
+a DELETE writes a version with the *same* `vt_start` and a closed `vt_end`; it
+wins the tie-break, so the fact is hidden rather than falling back to the
+older open version. See [Read path](#read-path).
 
 ### Combining both filters
 
@@ -1242,11 +1470,10 @@ This is a full bitemporal point query — a precise snapshot along both axes.
 
 ### Implementation
 
-- `Snapshot.vt_as_of: Option<i64>` — set by `Snapshot::with_vt_as_of(vt)`.
-- All `scan_*` methods on `Snapshot` forward `vt_as_of` to the underlying
-  `scan_*_at` methods on `TripleStore`.
-- `snapshot_scan_cf` in `store.rs` applies the valid-time filter inline before
-  updating the `latest` deduplication map.
+- `Snapshot.vt_as_of` defaults to "now" and is pinned by
+  `Snapshot::with_vt_as_of(vt)`; `as_of_tx_time` sets the snapshot `ts`.
+- Scans with no valid time (`TripleStore::scan_*`, transaction reads) also
+  mean "valid now".
 - The `datalog`, `eval`, and query planner layers need no changes — they call
   `Snapshot` scan methods and inherit the filter transparently.
 
@@ -1254,51 +1481,35 @@ This is a full bitemporal point query — a precise snapshot along both axes.
 
 ## Read replicas
 
-PolarGraph supports horizontal read scale-out via RocksDB secondary instances. A secondary instance opens the primary's data directory in read-only mode and periodically ingests new SST files without copying them.
+A replica is a `polargraphd` started with `--replica-of <primary gRPC URL>`.
+It keeps its own RocksDB copy and applies the primary's committed write
+batches in order, so every column family — quads, blobs, IRI dictionary,
+META — replicates without special cases. No shared filesystem is needed.
 
-### Opening a secondary
+```mermaid
+sequenceDiagram
+    participant R as Replica (wal_client)
+    participant P as Primary (StreamWal)
+    participant DB as Replica RocksDB
+    R->>R: since = last_applied_seq (META)
+    R->>P: StreamWal { since_seq }
+    loop each committed batch (~50 ms after commit)
+        P-->>R: WalEntry { sequence_number, write_batch }
+        R->>DB: apply_replicated_batch — write batch, persist last_applied_seq,<br/>reload predicate/graph tables, advance oracle
+    end
+    Note over R,P: on any error: health NOT_SERVING,<br/>reconnect with backoff 1 s → 30 s
+```
 
-`TripleStore::open_secondary(data_dir, primary_path)` calls
-`DB::open_cf_descriptors_as_secondary` with all 8 column families (SPO, SOP,
-PSO, POS, OSP, OPS, META, HNSW). `data_dir` is a small local directory for
-RocksDB secondary metadata; `primary_path` is the primary's data directory
-(must be readable from the replica host).
-
-### Catch-up
-
-`TripleStore::try_catch_up_with_primary()` calls RocksDB's
-`try_catch_up_with_primary`, which re-reads the primary's MANIFEST and
-hard-links any new SST files into the secondary's view. PolarGraph then
-refreshes its in-memory predicate maps and advances the MVCC oracle to the
-latest transaction timestamp so that reads at `snapshot_ts=0` see the
-newest data.
-
-The `polargraphd` server spawns a background tokio task that calls this on the
-interval set by `--replica-catchup-interval-ms` (default 1 s).
-
-### Consistency model
-
-The secondary provides **eventual consistency**: reads may lag the primary by
-up to one catch-up interval. There is no read-your-own-writes guarantee.
-Transaction timestamps on the replica are always ≤ the primary's committed
-timestamp at the last catch-up.
-
-### Write blocking
-
-All storage-layer write operations (`db_write`, `intern_predicate`,
-`insert_vector`, `batch_insert_vectors`, `insert_at_ts`, `compact_cf`,
-`scan_cf_raw`) return `StorageError::ReadOnly` when called on a secondary. The
-gRPC service layer adds a second guard (`check_not_replica`) that returns
-`FAILED_PRECONDITION` before the request reaches the storage layer, giving
-clients a clear error message.
-
-### ReplicaStatus RPC
-
-The `ReplicaStatus` RPC returns:
-- `is_replica` — whether this instance is a secondary.
-- `primary_path` — the primary's data directory.
-- `last_catchup_at` — Unix microseconds of the most recent successful catch-up.
-- `catchup_count` — total successful catch-ups since server start.
+- The primary keeps WAL for 1 hour / 512 MB; a replica further behind than
+  that must be re-bootstrapped from a backup (see `docs/scaling.md`).
+- **Consistency** is eventual: reads lag the primary by the stream delay.
+- **Write blocking**: storage write APIs return `StorageError::ReadOnly` on a
+  replica, and the service's `check_not_replica` guard answers every write RPC
+  (and `StreamWal`) with `FAILED_PRECONDITION`.
+- **`ReplicaStatus`** returns `is_replica`, `primary_address`,
+  `last_catchup_at`, `catchup_count`, `last_applied_seq` and
+  `replication_lag_entries`. The gRPC health service reports `SERVING` on a
+  replica only while the stream is connected.
 
 ---
 
@@ -1653,7 +1864,7 @@ GET /health
 { "status": "degraded" }
 ```
 
-`mode` is `"primary"` or `"replica"`.  `triples` is a fast approximate count from RocksDB's `estimate-num-keys` property on the SPO column family (not exact; use for monitoring only).
+`mode` is `"primary"` or `"replica"`.  `triples` is a fast approximate count from RocksDB's `estimate-num-keys` property on the `spog` column family (not exact; use for monitoring only).
 
 The `/health` endpoint requires no authentication and is always available regardless of `--api-key` configuration.
 
@@ -2032,7 +2243,7 @@ Cypher string
 
 Node patterns `(a:Person)` become two `VarPattern`s: one binding `a` to any subject and one constraining `a :__type "Person"`. Relationship patterns `(a)-[:knows]->(b)` add a third pattern for the relation triple.
 
-`WHERE` equality predicates (`a.name = "Alice"`) compile to bound patterns `(a, "name", "Alice")`. Comparison predicates use post-filter evaluation. Text predicates (`CONTAINS`, `STARTS WITH`, `=~`) are routed to the trigram index (see Full-text trigram search below) and therefore do not generate Datalog patterns at all — the trigram scan returns a candidate node set that is then intersected with the rest of the join.
+`WHERE` equality predicates (`a.name = "Alice"`) compile to bound patterns `(a, "name", "Alice")`. Comparison predicates use post-filter evaluation. Text predicates (`CONTAINS`, `STARTS WITH`, `=~`) do not generate Datalog patterns; `apply_text_filters` post-filters the join's bindings by reading each candidate's text values. (They do not currently use the trigram index — see Full-text trigram search below.)
 
 ### Aggregations
 
@@ -2067,30 +2278,38 @@ The `WITH` clause compiles to a sub-plan: run the left-hand query, apply any agg
 
 ## Full-text trigram search
 
-### TRI column family
+### `trig` column family
 
-Text properties that are candidates for `CONTAINS` / `STARTS WITH` / `=~` filtering are indexed in a seventh column family (`TRI`). On every property triple write where `value` is `Value::Text`, the storage layer calls `extract_trigrams()` and writes one entry per trigram:
+Short text properties are indexed in the `trig` column family. On every property write where `value.as_text()` (a `Text` or `LangText`) is at most `TRIGRAM_MAX_TEXT_BYTES` (512) UTF-8 bytes, the storage layer calls `extract_trigrams()` and writes one entry per trigram. Longer values (descriptions, document chunks) are not indexed — they would multiply the CF by their length and are better served by vector search:
 
 ```
-Key:   [trigram: 3 bytes][pred_id: 4 bytes][subject_id: 16 bytes]
+Key:   [trigram: 3 bytes][pred_id: 4 bytes][graph: 4 bytes][subject_id: 16 bytes]
 Value: (empty)
 ```
 
-The key layout sorts first by trigram, then by predicate, then by subject. A prefix scan on `[trigram][pred_id]` returns all subjects that contain the trigram under that predicate in O(log n + |results|) time.
+The key layout sorts by trigram, predicate, graph, then subject. A prefix scan on `[trigram][pred_id]` returns every subject (in any graph) that contains the trigram under that predicate in O(log n + |results|) time; the graph before the subject lets graph ACLs skip candidates without decoding them.
 
 ### Trigram extraction
 
-`extract_trigrams(text) -> HashSet<[u8; 3]>` pads the input with two null bytes, then slides a 3-byte window across the UTF-8 bytes. For `STARTS WITH`, only the leading trigram(s) of the pattern are extracted. For `=~`, the regex is statically analysed for literal substrings long enough to produce trigrams; if none can be found, the query falls back to a full SPO scan.
+`keys::extract_trigrams(text)` slides a 3-byte window across the UTF-8 bytes and de-duplicates the grams; text shorter than 3 bytes becomes one zero-padded gram. A query string is split the same way, and the candidate sets of all its trigrams are intersected.
 
 ### Query path
 
-1. `compile_cypher()` identifies text predicates in the WHERE clause.
-2. It calls `text_search(store, predicate, pattern, mode)` → `HashSet<NodeId>`.
-3. The resulting node set becomes an allowed-set filter applied to the join variables before the Datalog patterns execute, equivalent to the `SearchVectorInSet` approach used for vector post-filtering.
+`TripleStore::text_search(predicate, query, snapshot_ts, vt_as_of)` (and
+`Snapshot::text_search`) intersects the candidate sets of every trigram in
+`query`, then confirms each candidate against its live value in the snapshot,
+which also discards stale entries from superseded values.
+
+Cypher `CONTAINS` / `STARTS WITH` / `=~` do **not** call `text_search` today;
+they post-filter bindings in `apply_text_filters`. Wiring them to the index is
+future work, and must fall back to a scan for values over the size cap.
 
 ### Insert path
 
-`TripleStore::insert()` detects `Value::Text` payloads and calls `insert_trigrams()` inside the same `WriteBatch` as the hexastore keys. There is no separate indexing step — trigrams are always consistent with the triple data.
+Every write path — `Transaction::commit()`, `insert_at_ts`, and SST import —
+calls `batch_text_trigrams()` inside the same `WriteBatch` as the quad-index
+keys. TRI keys carry no `tt` and are never deleted when a value changes; the
+confirmation step above keeps results correct.
 
 ---
 
@@ -2181,7 +2400,7 @@ Returns a snapshot of server internals:
 | `rocksdb_*` | Selected RocksDB statistics properties |
 | `oracle_ts` | Current committed timestamp from the MVCC oracle |
 | `open_transaction_count` | Number of in-flight wire transactions |
-| `triple_count` | Approximate triple count from `estimate-num-keys` on the SPO CF |
+| `triple_count` | Approximate quad-version count from `estimate-num-keys` on the `spog` CF |
 
 Neither RPC touches the data plane, so they are safe to call on heavily loaded primaries.
 
@@ -2459,6 +2678,16 @@ The translation layer (`polargraph-sparql`) has no dependency on
 nodes into `VarPattern`, `Rule`, and `Branch` structs that the gRPC API already
 understands.
 
+### Terms
+
+Every IRI maps to a node through `polargraph_core::term::iri_to_node_id` —
+`urn:uuid:<u>` to `NodeId(u)`, any other IRI to its xxHash3-128 — the same
+mapping RDF import uses, so data loaded with `/import/rdf` can be queried by
+its IRIs. An IRI or literal in a triple pattern never widens to a wildcard: a
+literal object becomes `Term::Literal(value)` and matches only property
+triples with an equal value. (Binding a *variable* to a property value —
+`?s :name ?n` — is not supported yet; Datalog bindings hold nodes only.)
+
 ### HTTP endpoints
 
 | Method | Path | Description |
@@ -2499,8 +2728,12 @@ Content negotiation via `Accept` header: `application/sparql-results+json`
 | Operation | Notes |
 |-----------|-------|
 | INSERT DATA | Each triple translated to an `InsertRequest` gRPC call |
-| DELETE DATA | Each triple translated to a `DeleteTriples` gRPC call grouped by subject |
-| INSERT/DELETE WHERE | WHERE clause evaluated via `Query` RPC; templates applied per binding row |
+| DELETE DATA | Each triple closes exactly that `(S, P, O)` via `DeleteTriples` with `object_id` / `value` set |
+| INSERT/DELETE WHERE | WHERE clause evaluated via `Query` RPC; templates applied per binding row; DELETE templates close exactly the bound `(S, P, O)` |
+
+The response is `{"ok": bool, "inserted": N, "deleted": N, "failed": N}`;
+`failed` counts quads that couldn't be applied (unsupported terms or RPC
+errors), and `ok` is false when any failed.
 
 ### Other known limitations
 
@@ -2515,14 +2748,15 @@ Content negotiation via `Accept` header: `application/sparql-results+json`
 
 PolarGraph implements OWL 2 RL Phase 1 forward-chaining materialization via
 the `polargraph-storage::owl_rl` module. Materialized (derived) facts are
-stored in the `DRV` column family, separate from the base hexastore, so they
+stored in the `drvg` column family, separate from the base quad index, so they
 can be cleared and re-derived independently.
 
 ### DRV column family
 
-The `DRV` CF uses the same 44-byte SPO key layout as the hexastore CFs. On a
-hexastore read the caller chooses whether to include derived facts by also
-scanning DRV, or reads only the base CFs for the authoritative fact set.
+The `drvg` CF uses the 48-byte `spog` key layout (default graph for now; one
+derived graph per approved graph is planned). A read chooses whether to
+include derived facts by also scanning it, or reads only the quad index for
+the authoritative fact set.
 
 ### Implemented rules
 
@@ -2575,7 +2809,7 @@ runs materialization at startup before accepting connections.
 ## RDF-star edge annotations
 
 PolarGraph supports RDF-star-style annotations on edges (relation triples) via
-two dedicated column families: `EPA` (edge property annotations) and `EPO`
+dedicated column families: `epag` (edge property annotations, with the `peag` predicate-first index) and `epog`
 (edge relation annotations).
 
 ### Data model
@@ -2588,11 +2822,12 @@ Three `Triple` variants handle edge-level data:
 | `Triple::EdgeProperty { edge, predicate, value, temporal }` | A scalar property on an edge (subject = `EdgeId`, maps to `NodeId(edge_id.0)`) |
 | `Triple::EdgeRelation { edge, predicate, object, temporal }` | A relation from an edge to another node |
 
-`EdgeProperty` triples are stored in the `EPA` CF with key `[edge_id:16][pred_id:4][tt:8]`.
-`EdgeRelation` triples are stored in the `EPO` CF with key `[edge_id:16][pred_id:4][obj_id:16][tt:8]`.
+`EdgeProperty` triples are stored in the `epag` CF with key `[edge_id:16][pred_id:4][g:4][tt:8]`
+(plus the predicate-first `peag` index), and `EdgeRelation` triples in `epog` with key
+`[edge_id:16][pred_id:4][obj_id:16][g:4][tt:8]`.
 
-The base hexastore CFs are unchanged — existing `Triple::Relation` and
-`Triple::Property` storage is unaffected.
+Annotations live in their own CFs (`epag`, `epog`, `peag`), each keyed with
+the graph the annotation was asserted in; the quad index is unaffected.
 
 ### API
 
@@ -2640,9 +2875,11 @@ store.scan_property_history(
 ) -> Vec<(Value, i64)>
 ```
 
-Scans the SPO CF with a 36-byte prefix `[subject:16][pred_id:4][sentinel:16]`
-(bypassing MVCC's latest-version selection) and returns all historical values
-with their `tt` timestamps, ordered newest-first. `limit` caps the result.
+Scans `spog` with the prefix `[subject:16][pred_id:4]` (every value key of the
+property, all graphs), bypassing latest-version selection, and returns all
+historical values with their `tt`, newest first. The closing versions a
+`Replace` writes for superseded values are left out, so the list shows writes.
+`limit` caps the result.
 
 ### gRPC RPC
 
@@ -2752,10 +2989,76 @@ RDF bytes
 IRIs are mapped to deterministic `NodeId`s via xxHash3-128:
 
 ```
-uri_to_node_id("http://example.org/Alice")  →  stable NodeId
-bnode_to_node_id("b0")  →  NodeId from "_:bnode_b0"
-edge_id_for(s, p, o)    →  stable EdgeId for a Relation triple
+uri_to_node_id("http://example.org/Alice")  →  NodeId::from_iri(...), stable
+scope.bnode_node_id("b0")                    →  NodeId of the skolem IRI (below)
+edge_id_for(s, p, o)                         →  stable EdgeId for a Relation triple
 ```
+
+#### Blank nodes (skolemization)
+
+A blank-node label is only meaningful inside the document that contains it,
+so every import runs in an `ImportScope` (`polargraph-core::skolem`) that maps
+each label to an RDF 1.1 skolem IRI:
+
+```
+{skolem-base}/.well-known/genid/{import_id}/{label}
+```
+
+`_:b0` in two different imports therefore names two different nodes, while
+re-importing with the same `import_id` reproduces the same NodeIds
+(idempotent). `import_id` defaults to a fresh UUIDv7. `skolem-base` should be
+the instance's public origin (default `https://polargraph.invalid`); set it
+with `--skolem-base` on `polargraph-rest` (`POLARGRAPH_REST_SKOLEM_BASE`) and
+`polargraph-import` (`POLARGRAPH_SKOLEM_BASE`). In JSON-LD, an `@id` of the
+form `_:label` is a blank node.
+
+Skolem IRIs are recorded in the IRI dictionary (below) like any other IRI.
+
+#### IRI dictionary
+
+NodeIds for IRIs are one-way hashes, so the `iri` column family records the
+IRI behind each hashed NodeId (`[node_id:16] → IRI`). Every import path writes
+it in the same commit as the triples: REST `/import/rdf` and SPARQL
+`INSERT DATA` send `InsertRequest.iris`, `polargraph-import` calls
+`SstImporter::add_iri`. `urn:uuid:` IRIs aren't stored — they carry their ID.
+A different IRI for an already-named NodeId (a 128-bit hash collision) is
+rejected with `IriCollision`. `ResolveIris` maps NodeIds back to IRIs, falling
+back to `urn:uuid:`. Every export path — SPARQL SELECT (JSON/CSV,
+`GROUP_CONCAT`), CONSTRUCT/DESCRIBE, `/export/jsonld`, `/export/subgraph` —
+resolves the nodes it emits in one batched `ResolveIris` call and renders them
+through `polargraph_sparql::IriNames`; the export endpoints accept
+`deskolemize=true` to render skolem IRIs as `_:{import_id}_{label}`. Entries
+are never rewritten or deleted. Data imported
+before the dictionary existed has no entries and still resolves to
+`urn:uuid:` until re-imported.
+
+The full round trip for a document with an IRI and a blank node:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant G as polargraph-rest
+    participant T as polargraph_core::term / skolem
+    participant S as polargraphd
+    participant DB as RocksDB
+    U->>G: POST /import/rdf?import_id=crm-1<br/>ex:Acme ex:address _:a . _:a ex:city "Calgary" .
+    G->>T: parse (rio) · ImportScope("https://kb.example.com", "crm-1")
+    T-->>G: ex:Acme → hash(IRI) · _:a → skolem IRI …/genid/crm-1/a → hash
+    G->>S: Insert { triples (mode ADD), iris: [ex:Acme, …/genid/crm-1/a] }
+    S->>DB: one commit: quads in 8 orders + iri[NodeId] = IRI
+    U->>G: GET /export/subgraph?subjects=ex:Acme&deskolemize=true
+    G->>S: scan triples for the subject
+    S-->>G: triples with NodeIds (rendered <urn:uuid:…>)
+    G->>S: ResolveIris(all NodeIds in the response)
+    S->>DB: multi_get iri[NodeId]
+    S-->>G: IRIs (urn:uuid: fallback for unnamed nodes)
+    G->>G: IriNames.rewrite_triples — skolem IRIs → _:crm-1_a
+    G-->>U: <ex:Acme> <ex:address> _:crm-1_a .
+```
+
+The same `term` mapping is used by SPARQL queries (so `<ex:Acme>` in a
+pattern finds the imported node), SPARQL Update and the bulk importer.
 
 RDF-star quoted triples (as subject or object) are stored as the N-Triples-star
 string representation.
@@ -2766,6 +3069,8 @@ string representation.
 
 Accepts N-Triples, Turtle, or JSON-LD based on `Content-Type`.
 Triples are bulk-inserted via the gRPC `Insert` RPC in batches of 1 000.
+Optional `?import_id=<id>` (1–128 chars of `[A-Za-z0-9._~-]`) fixes the
+blank-node scope for idempotent re-imports.
 
 ```
 POST /import/rdf
@@ -2777,7 +3082,8 @@ ex:Alice ex:knows ex:Bob .
 
 Response:
 ```json
-{ "imported": 1, "total_parsed": 1, "duration_ms": 12 }
+{ "imported": 1, "total_parsed": 1, "duration_ms": 12,
+  "import_id": "01928c7e-5b1a-7f3e-9d0c-2a4b6c8d0e1f" }
 ```
 
 #### `POST /import/subgraph`
@@ -2865,7 +3171,13 @@ polargraph-import \
   --data-dir /data \
   --input data.ttl \
   --format turtle   # ntriples (default) | turtle | jsonld
+  --import-id crm-2026-09-29   # optional; blank-node scope (default: fresh UUIDv7)
+  --skolem-base https://kb.example.com
 ```
+
+All three formats keep blank nodes (skolemized per import) and convert typed
+literals (`xsd:integer`, `double`, `boolean`, …) to typed values. N-Triples
+lines that fail to parse are counted and skipped.
 
 The binary must run while `polargraphd` is stopped (SST ingestion requires
 exclusive DB access).

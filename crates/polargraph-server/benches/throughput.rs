@@ -17,8 +17,8 @@ use hdrhistogram::Histogram;
 use polargraph_server::{
     proto::{
         polar_graph_service_client::PolarGraphServiceClient,
-        polar_graph_service_server::PolarGraphServiceServer, term::Kind as TermKind, NodeId as PNodeId,
-        PropertyTriple, QueryRequest, Term, Triple, Value, VarPattern,
+        polar_graph_service_server::PolarGraphServiceServer, term::Kind as TermKind,
+        NodeId as PNodeId, PropertyTriple, QueryRequest, Term, Triple, Value, VarPattern,
     },
     service::PolarGraphServer,
 };
@@ -29,7 +29,9 @@ use tonic::transport::{Channel, Server};
 
 // ── server/client bootstrap (mirrors crates/polargraph-server/tests/grpc.rs) ──
 
-async fn start_server(store: TripleStore) -> (std::net::SocketAddr, tokio::sync::oneshot::Sender<()>) {
+async fn start_server(
+    store: TripleStore,
+) -> (std::net::SocketAddr, tokio::sync::oneshot::Sender<()>) {
     let svc = PolarGraphServer::new(store).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -64,29 +66,35 @@ fn new_node_id() -> PNodeId {
 
 fn name_property(subject: PNodeId, text: &str) -> Triple {
     Triple {
-        kind: Some(polargraph_server::proto::triple::Kind::Property(PropertyTriple {
-            subject: Some(subject),
-            predicate: "name".into(),
-            value: Some(Value {
-                kind: Some(polargraph_server::proto::value::Kind::TextVal(text.into())),
-            }),
-            vt_start: 0,
-            vt_end: 0,
-        })),
+        kind: Some(polargraph_server::proto::triple::Kind::Property(
+            PropertyTriple {
+                subject: Some(subject),
+                predicate: "name".into(),
+                value: Some(Value {
+                    kind: Some(polargraph_server::proto::value::Kind::TextVal(text.into())),
+                }),
+                vt_start: 0,
+                vt_end: 0,
+                mode: 0,
+            },
+        )),
     }
 }
 
 fn versioned_property(subject: PNodeId, text: &str, vt_start: i64, vt_end: i64) -> Triple {
     Triple {
-        kind: Some(polargraph_server::proto::triple::Kind::Property(PropertyTriple {
-            subject: Some(subject),
-            predicate: "status".into(),
-            value: Some(Value {
-                kind: Some(polargraph_server::proto::value::Kind::TextVal(text.into())),
-            }),
-            vt_start,
-            vt_end,
-        })),
+        kind: Some(polargraph_server::proto::triple::Kind::Property(
+            PropertyTriple {
+                subject: Some(subject),
+                predicate: "status".into(),
+                value: Some(Value {
+                    kind: Some(polargraph_server::proto::value::Kind::TextVal(text.into())),
+                }),
+                vt_start,
+                vt_end,
+                mode: 0,
+            },
+        )),
     }
 }
 

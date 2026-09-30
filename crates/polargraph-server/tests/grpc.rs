@@ -95,6 +95,7 @@ fn text_prop(subject: NodeId, predicate: &str, text: &str) -> Triple {
             }),
             vt_start: 0,
             vt_end: 0,
+            mode: 0,
         })),
     }
 }
@@ -2086,7 +2087,7 @@ async fn backup_purge_removes_old_backups() {
 // ── RunRetention tests ────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn run_retention_deletes_old_triples() {
+async fn run_retention_deletes_superseded_versions() {
     let (svc, _dir) = open();
     let (_core_s, proto_s) = new_node();
 
@@ -2097,21 +2098,28 @@ async fn run_retention_deletes_old_triples() {
     };
     svc.insert(Request::new(insert_req)).await.unwrap();
 
-    // Plant an old triple directly via the store (tt = 1 µs since epoch).
+    // Plant an old value and an old correction of it directly via the store
+    // (tt = 1 µs and 2 µs since epoch). Retention prunes history, so only the
+    // superseded first version is eligible.
     let (core_old, _) = new_node();
-    let old_triple = polargraph_core::triple::Triple::Property {
+    let old_version = |text: &str| polargraph_core::triple::Triple::Property {
         subject: core_old,
         predicate: polargraph_core::triple::Predicate::new("label"),
-        value: polargraph_core::value::Value::Text("ancient".into()),
+        value: polargraph_core::value::Value::Text(text.into()),
         temporal: polargraph_core::temporal::BiTemporalRange {
             vt_start: Timestamp(0),
             vt_end: Timestamp(i64::MAX),
             tt: Timestamp(0),
         },
     };
-    svc.store().insert_at_ts(&old_triple, Timestamp(1)).unwrap();
+    svc.store()
+        .insert_at_ts(&old_version("ancient"), Timestamp(1))
+        .unwrap();
+    svc.store()
+        .insert_at_ts(&old_version("corrected"), Timestamp(2))
+        .unwrap();
 
-    // Run retention with 2-second tx_age — old triple's tt(1 µs) is < (now - 2s).
+    // Run retention with 2-second tx_age — the correction (tt = 2 µs) is older than the cutoff.
     let resp = svc
         .run_retention(Request::new(RunRetentionRequest {
             tx_age_secs: 2,
@@ -2121,9 +2129,10 @@ async fn run_retention_deletes_old_triples() {
         .unwrap()
         .into_inner();
 
-    // 6 CF copies of the old triple should be gone.
-    assert_eq!(resp.triples_deleted, 6);
-    assert!(resp.triples_scanned >= 6);
+    // The 8 index entries of the superseded version should be gone; the current
+    // value of every triple (including the correction) survives.
+    assert_eq!(resp.triples_deleted, 8);
+    assert!(resp.triples_scanned >= 8);
 }
 
 #[tokio::test]
@@ -2224,6 +2233,7 @@ fn text_prop_with_vt(
             }),
             vt_start,
             vt_end,
+            mode: 0,
         })),
     }
 }
@@ -4907,7 +4917,8 @@ async fn show_indexes_returns_all_cfs() {
         .map(|cf| cf.name.as_str())
         .collect();
     for expected in &[
-        "spo", "sop", "pso", "pos", "osp", "ops", "meta", "hnsw", "tri",
+        "spog", "sopg", "psog", "posg", "ospg", "opsg", "gspo", "gpos", "meta", "hnsw", "trig",
+        "blob", "iri",
     ] {
         assert!(
             cf_names.contains(expected),
@@ -6108,6 +6119,7 @@ fn int_prop(subject: NodeId, predicate: &str, n: i64) -> Triple {
             }),
             vt_start: 0,
             vt_end: 0,
+            mode: 0,
         })),
     }
 }
@@ -6593,4 +6605,322 @@ async fn run_materialization_incremental_reaches_fixpoint() {
         resp.iterations, 0,
         "incremental run on converged state should need 0 iterations"
     );
+}
+
+// ── Exact-triple deletes and literal terms ───────────────────────────────────
+
+#[tokio::test]
+async fn delete_triples_object_and_value_filters_close_only_the_named_triple() {
+    use polargraph_server::proto::DeleteTriplesRequest;
+
+    let (svc, _dir) = open();
+    let (_, s) = new_node();
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            rel(s.clone(), "knows", a.clone()),
+            rel(s.clone(), "knows", b.clone()),
+            text_prop(s.clone(), "name", "Sam"),
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let delete = |req: DeleteTriplesRequest| {
+        let svc = &svc;
+        async move {
+            svc.delete_triples(Request::new(req))
+                .await
+                .unwrap()
+                .into_inner()
+                .deleted_count
+        }
+    };
+    let base = || DeleteTriplesRequest {
+        subject_ids: vec![s.bytes.clone()],
+        ..Default::default()
+    };
+
+    // Object filter: only (s knows a).
+    let n = delete(DeleteTriplesRequest {
+        predicate: "knows".into(),
+        object_id: a.bytes.clone(),
+        ..base()
+    })
+    .await;
+    assert_eq!(n, 1, "only the relation to `a` is closed");
+
+    // Value filter that doesn't match: nothing.
+    let n = delete(DeleteTriplesRequest {
+        predicate: "name".into(),
+        value: Some(Value {
+            kind: Some(ValueKind::TextVal("Other".into())),
+        }),
+        ..base()
+    })
+    .await;
+    assert_eq!(n, 0);
+
+    // Value filter that matches: the property, and never a relation.
+    let n = delete(DeleteTriplesRequest {
+        value: Some(Value {
+            kind: Some(ValueKind::TextVal("Sam".into())),
+        }),
+        ..base()
+    })
+    .await;
+    assert_eq!(n, 1);
+
+    // `s knows b` is still live.
+    let n = delete(DeleteTriplesRequest {
+        predicate: "knows".into(),
+        ..base()
+    })
+    .await;
+    assert_eq!(n, 1, "only `b` remained open");
+
+    // Both filters at once is rejected.
+    let err = svc
+        .delete_triples(Request::new(DeleteTriplesRequest {
+            object_id: a.bytes.clone(),
+            value: Some(Value {
+                kind: Some(ValueKind::IntVal(1)),
+            }),
+            ..base()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn query_literal_term_matches_equal_property_values_only() {
+    let (svc, _dir) = open();
+    let (_, alice) = new_node();
+    let (_, bob) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            text_prop(alice.clone(), "name", "Alice"),
+            text_prop(bob.clone(), "name", "Bob"),
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let literal = Term {
+        kind: Some(TermKind::Literal(Value {
+            kind: Some(ValueKind::TextVal("Alice".into())),
+        })),
+    };
+    let resp = svc
+        .query(Request::new(QueryRequest {
+            patterns: vec![pattern(var("s"), "name", literal)],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.bindings.len(), 1, "literal must not act as a wildcard");
+    assert_eq!(resp.bindings[0].vars["s"].bytes, alice.bytes);
+}
+
+// ── IRI dictionary ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn insert_iris_then_resolve_iris_round_trips() {
+    use polargraph_server::proto::ResolveIrisRequest;
+
+    let (svc, _dir) = open();
+    let alice_iri = "http://example.org/Alice";
+    let alice = polargraph_core::term::iri_to_node_id(alice_iri);
+    let alice_proto = NodeId {
+        bytes: alice.as_bytes().to_vec(),
+    };
+    let (native, native_proto) = new_node();
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(alice_proto.clone(), "knows", native_proto.clone())],
+        iris: vec![alice_iri.into()],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .resolve_iris(Request::new(ResolveIrisRequest {
+            nodes: vec![alice_proto, native_proto],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        resp.iris,
+        vec![
+            alice_iri.to_string(),
+            polargraph_core::term::fallback_iri(&native),
+        ],
+        "stored IRI, then urn:uuid fallback, in request order"
+    );
+}
+
+#[tokio::test]
+async fn insert_accepts_iri_only_requests_and_rejects_empty_iris() {
+    let (svc, _dir) = open();
+    svc.insert(Request::new(InsertRequest {
+        iris: vec!["http://example.org/Bob".into()],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let err = svc
+        .insert(Request::new(InsertRequest {
+            iris: vec![String::new()],
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+// ── Language-tagged and typed literals ───────────────────────────────────────
+
+#[tokio::test]
+async fn language_tag_is_part_of_a_literal_match() {
+    use polargraph_server::proto::LangText;
+
+    let (svc, _dir) = open();
+    let (_, s) = new_node();
+    let lang_val = |text: &str, lang: &str| Value {
+        kind: Some(ValueKind::LangText(LangText {
+            text: text.into(),
+            lang: lang.into(),
+        })),
+    };
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![Triple {
+            kind: Some(TripleKind::Property(PropertyTriple {
+                subject: Some(s.clone()),
+                predicate: "label".into(),
+                value: Some(lang_val("Acme", "en")),
+                vt_start: 0,
+                vt_end: 0,
+                mode: 0,
+            })),
+        }],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let count = |v: Value| {
+        let svc = &svc;
+        async move {
+            svc.query(Request::new(QueryRequest {
+                patterns: vec![pattern(
+                    var("s"),
+                    "label",
+                    Term {
+                        kind: Some(TermKind::Literal(v)),
+                    },
+                )],
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .bindings
+            .len()
+        }
+    };
+    assert_eq!(count(lang_val("Acme", "en")).await, 1);
+    assert_eq!(count(lang_val("Acme", "fr")).await, 0, "different tag");
+    assert_eq!(
+        count(Value {
+            kind: Some(ValueKind::TextVal("Acme".into())),
+        })
+        .await,
+        0,
+        "plain string is a different literal"
+    );
+}
+
+// ── v3: write modes and named graphs on Insert ───────────────────────────────
+
+fn text_prop_mode(subject: NodeId, predicate: &str, text: &str, mode: i32) -> Triple {
+    Triple {
+        kind: Some(TripleKind::Property(PropertyTriple {
+            subject: Some(subject),
+            predicate: predicate.into(),
+            value: Some(Value {
+                kind: Some(ValueKind::TextVal(text.into())),
+            }),
+            vt_start: 0,
+            vt_end: 0,
+            mode,
+        })),
+    }
+}
+
+#[tokio::test]
+async fn insert_mode_add_keeps_values_and_default_replaces() {
+    use polargraph_server::proto::PropertyWriteMode;
+
+    let (svc, _dir) = open();
+    let (core_s, s) = new_node();
+    let add = PropertyWriteMode::Add as i32;
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            text_prop_mode(s.clone(), "alias", "Acme", add),
+            text_prop_mode(s.clone(), "alias", "ACME Inc.", add),
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    let aliases = svc
+        .store()
+        .scan_by_subject_predicate(&core_s, "alias")
+        .unwrap();
+    assert_eq!(aliases.len(), 2, "ADD keeps both values");
+
+    // A plain insert (AUTO) replaces all of them.
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(s.clone(), "alias", "Acme Corp")],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    let aliases = svc
+        .store()
+        .scan_by_subject_predicate(&core_s, "alias")
+        .unwrap();
+    assert_eq!(aliases.len(), 1);
+}
+
+#[tokio::test]
+async fn insert_into_named_graph_interns_and_scopes_it() {
+    let (svc, _dir) = open();
+    let (core_s, s) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(s.clone(), "status", "proposed")],
+        graph: "https://kb.example/g/proposal-1".into(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let store = svc.store();
+    let g = store.graph_id("https://kb.example/g/proposal-1").unwrap();
+    let snap = store.snapshot(Timestamp(store.oracle_ts()));
+    assert_eq!(snap.scan_graph(g).unwrap().len(), 1);
+    assert!(snap
+        .scan_graph(polargraph_core::id::GraphId::DEFAULT)
+        .unwrap()
+        .is_empty());
+    // Union reads (the existing query paths) still see it.
+    assert_eq!(store.scan_by_subject(&core_s).unwrap().len(), 1);
 }

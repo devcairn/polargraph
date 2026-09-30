@@ -7,29 +7,45 @@
 //!
 //! # What is deleted
 //!
-//! Two independent age checks may trigger deletion (either is sufficient):
+//! Retention prunes *history*, never the current state of the graph. Every
+//! stored version of one logical triple shares a key prefix (the S,P,O tuple),
+//! so each CF is walked one version group at a time:
 //!
-//! - **Transaction-time age** (`tx_age_secs`): the triple's `tt` (the wall-clock
-//!   time when it was written) is older than `tx_age_secs` seconds.
-//! - **Valid-time lookback** (`vt_lookback_secs`): the triple's `vt_end` is
-//!   earlier than `now − vt_lookback_secs` seconds, meaning even the fact's
-//!   claimed validity window has fully expired.
+//! - **Transaction-time age** (`tx_age_secs`): a version is deleted when a
+//!   newer version with the **same `vt_start`** was committed before the
+//!   cutoff. Such a version can no longer win any read — plain, `as_of_valid_time`
+//!   or `as_of_tx_time` at or after the cutoff — so removing it changes no
+//!   answer inside the retention window. This covers corrections and DELETE
+//!   tombstones (which reuse the original `vt_start`). The newest version of a
+//!   triple is never removed by this rule, however old it is, and versions
+//!   that record valid-time history (a later `vt_start`) are kept.
+//! - **Valid-time lookback** (`vt_lookback_secs`): a triple is removed
+//!   entirely — every remaining version — once *all* of its versions have a
+//!   `vt_end` earlier than `now − vt_lookback_secs`. Removing only some closed
+//!   versions could let an older, still-open version win again and resurrect
+//!   a deleted fact, so partial removal is never done.
 //!
-//! META and HNSW column families are never touched.
+//! Afterwards, out-of-line values in the `blob` CF that no index entry
+//! references any more are swept (mark-and-sweep over `spog`).
+//!
+//! META, HNSW and IRI column families are never touched.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use polargraph_core::{schema::RetentionPolicy, temporal::Timestamp};
 
-use crate::{cf, error::StorageError, store::TripleStore};
-
-const HEXASTORE_CFS: &[&str] = &[cf::SPO, cf::SOP, cf::PSO, cf::POS, cf::OSP, cf::OPS];
+use crate::{codec, error::StorageError, keys, store::TripleStore};
 
 /// Statistics returned by a completed retention run.
+///
+/// `triples_scanned` / `triples_deleted` count index entries across all
+/// eight quad orders (one quad version = 8 entries).
 #[derive(Debug, Clone, Default)]
 pub struct RetentionStats {
     pub triples_scanned: usize,
     pub triples_deleted: usize,
+    /// Out-of-line values no longer referenced by any index entry.
+    pub blobs_deleted: usize,
     pub duration_ms: u64,
 }
 
@@ -43,7 +59,8 @@ impl CompactionManager {
         Self { store }
     }
 
-    /// Scan all six hexastore CFs and delete triples that violate `policy`.
+    /// Scan all eight quad CFs and delete versions that `policy` expires,
+    /// then sweep unreferenced out-of-line values.
     ///
     /// After deletion, triggers a full compaction on every CF that had at
     /// least one deletion so that RocksDB reclaims disk space promptly.
@@ -60,12 +77,13 @@ impl CompactionManager {
         let mut total_scanned = 0usize;
         let mut total_deleted = 0usize;
 
-        for &cf_name in HEXASTORE_CFS {
-            let mut cf_scanned = 0usize;
-            let cf_deleted = self.store.scan_cf_raw(cf_name, |key, value| {
-                cf_scanned += 1;
-                is_expired(key, value, tx_cutoff, vt_cutoff)
-            })?;
+        for order in keys::Order::ALL {
+            let cf_name = order.cf();
+            let (cf_scanned, cf_deleted) =
+                self.store
+                    .prune_cf_groups(cf_name, keys::QUAD_TUPLE_LEN, |versions| {
+                        select_expired(versions, tx_cutoff, vt_cutoff)
+                    })?;
 
             total_scanned += cf_scanned;
             total_deleted += cf_deleted;
@@ -75,9 +93,16 @@ impl CompactionManager {
             }
         }
 
+        let blobs_deleted = if total_deleted > 0 {
+            self.store.sweep_unreferenced_blobs()?
+        } else {
+            0
+        };
+
         Ok(RetentionStats {
             triples_scanned: total_scanned,
             triples_deleted: total_deleted,
+            blobs_deleted,
             duration_ms: start.elapsed().as_millis() as u64,
         })
     }
@@ -85,59 +110,58 @@ impl CompactionManager {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Returns `true` if the key/value pair should be deleted under the policy.
+/// Pick the versions of one triple that `policy` expires.
 ///
-/// `key` is always 44 bytes for hexastore CFs; `tt` lives in the last 8 bytes.
-/// `vt_end` is extracted from the value based on the discriminant byte.
-fn is_expired(
-    key: &[u8],
-    value: &[u8],
+/// `versions` are all stored versions of a single (S,P,O) in one CF, sorted by
+/// `tt` ascending (the hexastore key order). Returns indices into `versions`.
+/// See the module docs for the rules.
+fn select_expired<K: AsRef<[u8]>, V: AsRef<[u8]>>(
+    versions: &[(K, V)],
     tx_cutoff: Timestamp,
     vt_cutoff: Option<Timestamp>,
-) -> bool {
-    if key.len() < 8 {
-        return false;
-    }
-    let tt_bytes: [u8; 8] = match key[key.len() - 8..].try_into() {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-    let tt = Timestamp::from_be_bytes(tt_bytes);
-
-    if tt.0 < tx_cutoff.0 {
-        return true;
-    }
-
-    if let Some(vt_cut) = vt_cutoff {
-        if let Some(vt_end) = extract_vt_end(value) {
-            if vt_end.0 < vt_cut.0 {
-                return true;
+) -> Vec<usize> {
+    // Parse (tt, vt_start, vt_end); entries we can't parse are never touched.
+    let parsed: Vec<Option<(Timestamp, Timestamp, Timestamp)>> = versions
+        .iter()
+        .map(|(k, v)| {
+            let k = k.as_ref();
+            if k.len() < 8 {
+                return None;
             }
+            let (vt_start, vt_end) = codec::valid_time(v.as_ref())?;
+            Some((keys::key_tt(k), vt_start, vt_end))
+        })
+        .collect();
+
+    // Transaction-time rule: shadowed by a newer same-vt_start version
+    // committed before the cutoff.
+    let mut expired = vec![false; versions.len()];
+    for (i, vi) in parsed.iter().enumerate() {
+        let Some((tt_i, start_i, _)) = vi else {
+            continue;
+        };
+        expired[i] = parsed.iter().any(|vj| {
+            matches!(vj, Some((tt_j, start_j, _))
+                if start_j == start_i && tt_j > tt_i && *tt_j < tx_cutoff)
+        });
+    }
+
+    // Valid-time rule: drop the whole triple once every surviving version is
+    // closed before the lookback cutoff.
+    if let Some(vt_cut) = vt_cutoff {
+        let survivors_all_closed = parsed
+            .iter()
+            .zip(&expired)
+            .filter(|(_, e)| !**e)
+            .all(|(p, _)| matches!(p, Some((_, _, vt_end)) if *vt_end < vt_cut));
+        if survivors_all_closed {
+            return (0..versions.len())
+                .filter(|&i| parsed[i].is_some())
+                .collect();
         }
     }
 
-    false
-}
-
-/// Extract `vt_end` from a raw value blob without a full decode.
-///
-/// Layout by discriminant:
-/// - 0x01 (Relation): `[disc(1)][edge_id(16)][vt_start(8)][vt_end(8)]` → vt_end at [25..33]
-/// - 0x02 (Property): `[disc(1)][vt_start(8)][vt_end(8)][json]`        → vt_end at [9..17]
-/// - 0x03 (Vector):   `[disc(1)][vt_start(8)][vt_end(8)][...]`          → vt_end at [9..17]
-fn extract_vt_end(value: &[u8]) -> Option<Timestamp> {
-    if value.is_empty() {
-        return None;
-    }
-    match value[0] {
-        0x01 if value.len() >= 33 => {
-            Some(Timestamp::from_be_bytes(value[25..33].try_into().unwrap()))
-        }
-        0x02 | 0x03 if value.len() >= 17 => {
-            Some(Timestamp::from_be_bytes(value[9..17].try_into().unwrap()))
-        }
-        _ => None,
-    }
+    (0..versions.len()).filter(|&i| expired[i]).collect()
 }
 
 fn now_micros() -> i64 {
@@ -155,85 +179,72 @@ mod tests {
     use crate::codec;
     use polargraph_core::{temporal::BiTemporalRange, value::Value};
 
-    fn temporal(vt_start: i64, vt_end: i64) -> BiTemporalRange {
-        BiTemporalRange {
+    const OPEN: i64 = i64::MAX;
+
+    fn version(tt: i64, vt_start: i64, vt_end: i64) -> (Vec<u8>, Vec<u8>) {
+        let mut key = vec![0u8; keys::QUAD_KEY_LEN];
+        key[keys::QUAD_TUPLE_LEN..].copy_from_slice(&Timestamp(tt).to_be_bytes());
+        let t = BiTemporalRange {
             vt_start: Timestamp(vt_start),
             vt_end: Timestamp(vt_end),
-            tt: Timestamp(0),
-        }
+            tt: Timestamp(tt),
+        };
+        (key, codec::encode_property(&Value::Bool(true), &t).unwrap())
     }
 
-    fn make_key(tt: i64) -> [u8; 44] {
-        let mut key = [0u8; 44];
-        key[36..44].copy_from_slice(&Timestamp(tt).to_be_bytes());
-        key
-    }
-
-    #[test]
-    fn extract_vt_end_from_relation_value() {
-        use polargraph_core::id::EdgeId;
-        let eid = EdgeId(uuid::Uuid::from_bytes([0xAB; 16]));
-        let t = temporal(100, 999);
-        let encoded = codec::encode_relation(&eid, &t);
-        let vt_end = extract_vt_end(&encoded).unwrap();
-        assert_eq!(vt_end, Timestamp(999));
+    fn select(versions: &[(Vec<u8>, Vec<u8>)], tx_cut: i64, vt_cut: Option<i64>) -> Vec<usize> {
+        select_expired(versions, Timestamp(tx_cut), vt_cut.map(Timestamp))
     }
 
     #[test]
-    fn extract_vt_end_from_property_value() {
-        let t = temporal(200, 888);
-        let encoded = codec::encode_property(&Value::Int(42), &t).unwrap();
-        let vt_end = extract_vt_end(&encoded).unwrap();
-        assert_eq!(vt_end, Timestamp(888));
+    fn sole_version_is_never_expired_by_tx_age() {
+        // An old, still-current fact is live state, not history.
+        assert!(select(&[version(50, 0, OPEN)], 100, None).is_empty());
     }
 
     #[test]
-    fn extract_vt_end_from_vector_value() {
-        let t = temporal(300, 777);
-        let encoded = codec::encode_property(&Value::Vector(vec![1.0, 2.0]), &t).unwrap();
-        let vt_end = extract_vt_end(&encoded).unwrap();
-        assert_eq!(vt_end, Timestamp(777));
+    fn correction_before_cutoff_expires_the_shadowed_version() {
+        let vs = [version(10, 0, OPEN), version(20, 0, OPEN)];
+        assert_eq!(select(&vs, 100, None), vec![0]);
     }
 
     #[test]
-    fn is_expired_by_tx_age() {
-        let key = make_key(50);
-        let value = codec::encode_property(&Value::Bool(true), &temporal(0, i64::MAX)).unwrap();
-        // tx_cutoff=100 → tt(50) < 100 → expired
-        assert!(is_expired(&key, &value, Timestamp(100), None));
+    fn correction_after_cutoff_keeps_the_shadowed_version() {
+        // as_of_tx_time queries inside the window can still see version 0.
+        let vs = [version(10, 0, OPEN), version(200, 0, OPEN)];
+        assert!(select(&vs, 100, None).is_empty());
     }
 
     #[test]
-    fn is_not_expired_recent_triple() {
-        let key = make_key(500);
-        let value = codec::encode_property(&Value::Bool(true), &temporal(0, i64::MAX)).unwrap();
-        // tx_cutoff=100 → tt(500) ≥ 100 → not expired
-        assert!(!is_expired(&key, &value, Timestamp(100), None));
+    fn valid_time_history_is_kept() {
+        // Sequential valid-time versions: v0 answers as_of_valid_time < 50.
+        let vs = [version(10, 0, OPEN), version(20, 50, OPEN)];
+        assert!(select(&vs, 100, None).is_empty());
     }
 
     #[test]
-    fn is_expired_by_vt_lookback() {
-        let key = make_key(500); // recent tx, so tx check passes
-        let value = codec::encode_property(&Value::Bool(true), &temporal(0, 10)).unwrap();
-        // vt_end=10, vt_cutoff=100 → expired by vt
-        assert!(is_expired(
-            &key,
-            &value,
-            Timestamp(100),
-            Some(Timestamp(100))
-        ));
+    fn delete_tombstone_expires_original_but_is_kept_itself() {
+        // DELETE re-inserts with the original vt_start and a closed vt_end.
+        let vs = [version(10, 0, OPEN), version(20, 0, 20)];
+        assert_eq!(select(&vs, 100, None), vec![0]);
     }
 
     #[test]
-    fn is_not_expired_open_ended_vt() {
-        let key = make_key(500);
-        let value = codec::encode_property(&Value::Bool(true), &temporal(0, i64::MAX)).unwrap();
-        // vt_end=MAX → never expired by vt
-        assert!(!is_expired(
-            &key,
-            &value,
-            Timestamp(100),
-            Some(Timestamp(200))
-        ));
+    fn vt_lookback_never_removes_a_tombstone_alone() {
+        // Tombstone committed inside the tx window: the open original must not
+        // resurface, so nothing is removed yet.
+        let vs = [version(10, 0, OPEN), version(200, 0, 20)];
+        assert!(select(&vs, 100, Some(1_000)).is_empty());
+    }
+
+    #[test]
+    fn vt_lookback_removes_fully_closed_triple() {
+        let vs = [version(10, 0, OPEN), version(20, 0, 20)];
+        assert_eq!(select(&vs, 100, Some(1_000)), vec![0, 1]);
+    }
+
+    #[test]
+    fn vt_lookback_keeps_open_ended_triple() {
+        assert!(select(&[version(500, 0, OPEN)], 100, Some(200)).is_empty());
     }
 }

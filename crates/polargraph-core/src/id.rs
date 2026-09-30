@@ -16,6 +16,15 @@ impl NodeId {
         Self(Uuid::now_v7())
     }
 
+    /// Deterministic `NodeId` for an IRI: xxHash3-128 of the IRI bytes.
+    ///
+    /// Every importer and query translator must map IRIs through this function
+    /// so that the same IRI always names the same node.
+    pub fn from_iri(iri: &str) -> Self {
+        let hash: u128 = xxhash_rust::xxh3::xxh3_128(iri.as_bytes());
+        Self(Uuid::from_bytes(hash.to_le_bytes()))
+    }
+
     /// Fixed-width 16-byte representation for index keys.
     #[inline]
     pub fn as_bytes(&self) -> &[u8; 16] {
@@ -61,5 +70,34 @@ impl Default for EdgeId {
 impl fmt::Display for EdgeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+/// Interned identifier of a named graph. Graph IRIs are interned to `u32`s in
+/// storage exactly like predicates; `GraphId::DEFAULT` (0) is the default
+/// graph, which every write lands in unless a graph is named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GraphId(pub u32);
+
+impl GraphId {
+    /// The default graph.
+    pub const DEFAULT: GraphId = GraphId(0);
+
+    /// Big-endian bytes, as stored in index keys.
+    #[inline]
+    pub fn to_be_bytes(self) -> [u8; 4] {
+        self.0.to_be_bytes()
+    }
+}
+
+impl Default for GraphId {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl fmt::Display for GraphId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "g{}", self.0)
     }
 }

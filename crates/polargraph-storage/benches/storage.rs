@@ -145,6 +145,51 @@ fn bench_pattern_query(c: &mut Criterion) {
     drop(dir);
 }
 
+// ── named-graph benchmarks (storage format v3) ───────────────────────────────
+
+/// Load every quad of one graph with a `gspo` prefix scan. Plan target
+/// (docs/contxtbroker-platform-plan.md §2.10): 1K quads, p50 ≤ 2 ms.
+fn bench_graph_scan(c: &mut Criterion) {
+    const GRAPHS: usize = 20;
+    const PER_GRAPH: usize = 1_000;
+    let dir = tempfile::tempdir().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let graphs: Vec<_> = (0..GRAPHS)
+        .map(|i| store.intern_graph(&format!("urn:bench:g{i}")).unwrap())
+        .collect();
+    for &g in &graphs {
+        let mut tx = store.begin();
+        let ids: Vec<NodeId> = (0..PER_GRAPH / 2).map(|_| NodeId::new()).collect();
+        for (i, &id) in ids.iter().enumerate() {
+            tx.insert_in(
+                prop(id, "name", &format!("node-{i}")),
+                g,
+                polargraph_storage::WriteMode::Add,
+            );
+            tx.insert_in(
+                rel(id, "follows", ids[(i + 1) % ids.len()]),
+                g,
+                polargraph_storage::WriteMode::Add,
+            );
+        }
+        tx.commit().unwrap();
+    }
+    let snap = store.snapshot(Timestamp(store.oracle_ts()));
+
+    let mut group = c.benchmark_group("graph_scan");
+    let mut idx = 0usize;
+    group.throughput(Throughput::Elements(PER_GRAPH as u64));
+    group.bench_function("gspo_1k_quads", |b| {
+        b.iter(|| {
+            let g = graphs[idx % GRAPHS];
+            idx = idx.wrapping_add(1);
+            std::hint::black_box(snap.scan_graph(g).unwrap())
+        });
+    });
+    group.finish();
+    drop(dir);
+}
+
 // ── HNSW vector benchmarks ────────────────────────────────────────────────────
 
 fn bench_hnsw_insert(c: &mut Criterion) {
@@ -701,7 +746,7 @@ fn bench_bsbm_q7(c: &mut Criterion) {
 // ── criterion wiring ──────────────────────────────────────────────────────────
 
 criterion_group!(writes, bench_triple_writes);
-criterion_group!(queries, bench_pattern_query);
+criterion_group!(queries, bench_pattern_query, bench_graph_scan);
 criterion_group!(
     vector,
     bench_hnsw_insert,

@@ -2318,10 +2318,8 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
                 patterns.push(VarPattern {
                     subject: Term::Var(vf.var.clone()),
                     predicate: Some(vf.predicate.clone()),
-                    predicate_var: None,
                     object: Term::Any,
-                    edge_var: None,
-                    max_hops: None,
+                    ..Default::default()
                 });
             }
         }
@@ -2330,10 +2328,8 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
                 patterns.push(VarPattern {
                     subject: Term::Var(tf.var.clone()),
                     predicate: Some(tf.predicate.clone()),
-                    predicate_var: None,
                     object: Term::Any,
-                    edge_var: None,
-                    max_hops: None,
+                    ..Default::default()
                 });
             }
         }
@@ -2474,10 +2470,9 @@ fn compile_path(
                 patterns.push(VarPattern {
                     subject: subj,
                     predicate: Some(pred.clone()),
-                    predicate_var: None,
                     object: obj,
-                    edge_var: None,
                     max_hops: Some(max_hops),
+                    ..Default::default()
                 });
             } else {
                 // Unlimited transitive: emit TC Datalog rules + query pattern.
@@ -2489,10 +2484,8 @@ fn compile_path(
                         Rule::new(tc_pred.clone(), "x", "y").with_body(vec![VarPattern {
                             subject: Term::Var("x".into()),
                             predicate: Some(pred.clone()),
-                            predicate_var: None,
                             object: Term::Var("y".into()),
-                            edge_var: None,
-                            max_hops: None,
+                            ..Default::default()
                         }]),
                     );
                     // Recursive rule: __tc_pred(x, z) :- __tc_pred(x, y), pred(y, z)
@@ -2500,18 +2493,14 @@ fn compile_path(
                         VarPattern {
                             subject: Term::Var("x".into()),
                             predicate: Some(tc_pred.clone()),
-                            predicate_var: None,
                             object: Term::Var("y".into()),
-                            edge_var: None,
-                            max_hops: None,
+                            ..Default::default()
                         },
                         VarPattern {
                             subject: Term::Var("y".into()),
                             predicate: Some(pred.clone()),
-                            predicate_var: None,
                             object: Term::Var("z".into()),
-                            edge_var: None,
-                            max_hops: None,
+                            ..Default::default()
                         },
                     ]));
                 }
@@ -2523,10 +2512,8 @@ fn compile_path(
                 patterns.push(VarPattern {
                     subject: subj,
                     predicate: Some(tc_pred),
-                    predicate_var: None,
                     object: obj,
-                    edge_var: None,
-                    max_hops: None,
+                    ..Default::default()
                 });
             }
         } else {
@@ -2542,10 +2529,9 @@ fn compile_path(
             patterns.push(VarPattern {
                 subject: subj,
                 predicate: Some(hop.rel.predicate.clone()),
-                predicate_var: None,
                 object: obj,
                 edge_var: edge_var_name,
-                max_hops: None,
+                ..Default::default()
             });
         }
 
@@ -2570,10 +2556,8 @@ fn emit_node_binding(
             patterns.push(VarPattern {
                 subject: Term::Var(var.to_string()),
                 predicate: Some("__type".into()),
-                predicate_var: None,
                 object: Term::Any,
-                edge_var: None,
-                max_hops: None,
+                ..Default::default()
             });
         }
         value_filters.push(ValueFilter {
@@ -2589,10 +2573,8 @@ fn emit_node_binding(
             patterns.push(VarPattern {
                 subject: Term::Var(var.to_string()),
                 predicate: Some(key.clone()),
-                predicate_var: None,
                 object: Term::Any,
-                edge_var: None,
-                max_hops: None,
+                ..Default::default()
             });
             first_prop = false;
         }
@@ -2712,16 +2694,16 @@ pub fn apply_text_filters(
 
             let triples = snapshot.scan_by_subject_predicate(&node_id, &filter.predicate)?;
             let matched = triples.iter().any(|t| match t {
-                Triple::Property {
-                    value: Value::Text(text),
-                    ..
-                } => match &filter.kind {
-                    TextFilterKind::Contains(needle) => text.contains(needle.as_str()),
-                    TextFilterKind::StartsWith(prefix) => text.starts_with(prefix.as_str()),
-                    TextFilterKind::Regex(pattern) => regex::Regex::new(pattern)
-                        .map(|re| re.is_match(text))
-                        .unwrap_or(false),
-                },
+                Triple::Property { value, .. } if value.as_text().is_some() => {
+                    let text = value.as_text().unwrap_or_default();
+                    match &filter.kind {
+                        TextFilterKind::Contains(needle) => text.contains(needle.as_str()),
+                        TextFilterKind::StartsWith(prefix) => text.starts_with(prefix.as_str()),
+                        TextFilterKind::Regex(pattern) => regex::Regex::new(pattern)
+                            .map(|re| re.is_match(text))
+                            .unwrap_or(false),
+                    }
+                }
                 _ => false,
             });
 
@@ -2791,6 +2773,11 @@ fn compare_values(actual: &Value, op: &ComparisonOp, expected: &Value) -> bool {
         (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
         (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.partial_cmp(b),
+        // Cypher has no language tags: compare a tagged string by its text.
+        (Value::LangText { .. }, Value::Text(_) | Value::LangText { .. })
+        | (Value::Text(_), Value::LangText { .. }) => {
+            actual.as_text().partial_cmp(&expected.as_text())
+        }
         _ => {
             // Cross-type: only equality makes sense.
             return matches!(op, ComparisonOp::Eq) && actual == expected;

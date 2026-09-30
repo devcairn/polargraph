@@ -1,6 +1,6 @@
 # PolarGraph DB Engine
 
-PolarGraph is a purpose-built, Rust graph database engine. The core abstraction is the **triple** — an atomic (subject, predicate, object) statement — stored with full bitemporal versioning, indexed six ways via a hexastore for O(log n) lookups on any bind pattern, and protected by optimistic MVCC. On top of this sit a Datalog query evaluator, a Cypher surface layer (including the `VECTOR_NEAR` predicate for unified ANN + graph queries), a pure-Rust HNSW vector index with named spaces and configurable exploration factor, and a gRPC server with a REST gateway, management UI, TLS, API key authentication, rate limiting, WAL streaming replication, incremental backups, schema migrations, and Prometheus observability — all in a single statically-linked binary.
+PolarGraph is a purpose-built, Rust graph database engine. The core abstraction is the **triple** — an atomic (subject, predicate, object) statement — stored in named graphs with full bitemporal versioning, indexed eight ways (subject, predicate, object and graph orders) for O(log n) lookups on any bind pattern including literal values, and protected by optimistic MVCC. On top of this sit a Datalog query evaluator, a Cypher surface layer (including the `VECTOR_NEAR` predicate for unified ANN + graph queries), a pure-Rust HNSW vector index with named spaces and configurable exploration factor, and a gRPC server with a REST gateway, management UI, TLS, API key authentication, rate limiting, WAL streaming replication, incremental backups, schema migrations, and Prometheus observability — all in a single statically-linked binary.
 
 ---
 
@@ -807,23 +807,24 @@ polargraphd --data-dir /var/lib/polargraph
 | `--format FORMAT` | `ntriples` | Input format: `ntriples` (default), `turtle`, `jsonld` |
 | `--batch-size N` | `100000` | Triples per SST import batch |
 | `--temp-dir PATH` | `<data-dir>/sst_tmp` | Temporary SST file directory |
+| `--import-id ID` | *(fresh UUIDv7)* | Blank-node scope; reuse it for an idempotent re-import |
+| `--skolem-base IRI` | `https://polargraph.invalid` | Base of skolem IRIs for blank nodes (`POLARGRAPH_SKOLEM_BASE`) |
 
 ### Supported input formats
 
 Pass `--format turtle` or `--format jsonld` to switch parsers; default is `ntriples`.
 
-### N-Triples specifics
+### What gets stored
 
 | Input form | Storage result |
 |---|---|
-| `<uri> <uri> <uri> .` | `Triple::Relation` — URIs hashed to stable `NodeId`s via xxHash3-128 |
-| `<uri> <uri> "literal" .` | `Triple::Property` — `Value::Text` |
-| `<uri> <uri> "literal"@lang .` | `Triple::Property` — language tag stripped |
-| Lines starting with `#` | Skipped (comments) |
-| Blank lines | Skipped |
-| `_:blank_node` objects | Skipped (not supported) |
+| `<iri> <iri> <iri> .` | `Relation` — IRIs map to stable `NodeId`s (`urn:uuid:` IRIs keep their UUID, others are hashed) |
+| `<iri> <iri> "literal" .` | `Property` — datatypes and language tags kept (`"Acme"@en`, `"2026-09-29"^^xsd:date`) |
+| `_:b0` | Skolemized per import: `{skolem-base}/.well-known/genid/{import-id}/b0` |
+| Comment / blank lines | Skipped; unparseable N-Triples lines are counted and skipped |
 
-The same URI always produces the same `NodeId` across runs.
+Every hashed IRI is recorded in the IRI dictionary, so exports show real IRIs.
+Values are added (never replaced) into the default graph.
 
 ---
 
@@ -919,6 +920,24 @@ The HTTP `/health` endpoint returns `503` with `{"status":"degraded"}` when the 
 ---
 
 ## Schema migrations
+
+### Storage format migration (v2 → v3)
+
+The on-disk layout changed in storage format v3 (named graphs, value-hashed
+keys). A v3 server refuses to open a v2 data directory and tells you to
+migrate. Stop the server, then:
+
+```bash
+polargraphd migrate --data-dir /var/lib/polargraph --backup-dir /backups/polargraph
+# Migrated /var/lib/polargraph to storage format 3 in 1234 ms: …
+```
+
+A backup is taken first (pass `--no-backup` only if you already have one).
+The migration verifies every index before switching over and can be rerun
+safely if interrupted. Replicas re-bootstrap from a post-migration backup.
+Details: `docs/architecture.md` → *Storage format migration*.
+
+### Logical schema migrations
 
 Migrations are versioned Rust functions applied automatically at startup before the gRPC server accepts connections. Replicas skip auto-migration (read-only).
 
@@ -1344,6 +1363,6 @@ polargraph-rest:   generated proto client only (no storage deps)
 
 ## Further reading
 
-- [`docs/architecture.md`](docs/architecture.md) — hexastore layout, MVCC, HNSW algorithm, Datalog evaluator, bitemporal model, Cypher compilation, replication, TLS, rate limiting, schema migrations
+- [`docs/architecture.md`](docs/architecture.md) — quad-index storage layout (with diagrams), write path and MVCC, migration, HNSW algorithm, Datalog evaluator, bitemporal model, Cypher compilation, replication, TLS, rate limiting, schema migrations
 - [`polargraph.example.toml`](polargraph.example.toml) — fully-commented configuration reference covering every option
 - [`CLAUDE.md`](CLAUDE.md) — codebase guide for contributors and AI assistants; conventions, crate responsibilities, implementation status

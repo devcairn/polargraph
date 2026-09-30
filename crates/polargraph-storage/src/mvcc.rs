@@ -10,9 +10,10 @@
 //! 4. `commit()` — acquire commit lock, check for write-write conflicts,
 //!    stamp all buffered triples with `commit_ts`, flush to RocksDB.
 //!
-//! Conflicts: if any (subject, predicate, object) in the write buffer has a
-//! version in storage with `tt > read_ts`, another transaction beat us to it.
-//! We abort rather than silently overwrite.
+//! Conflicts: if a quad in the write buffer — or, for a `Replace` property
+//! write, any value of its `(subject, predicate, graph)` — has a version in
+//! storage with `read_ts < tt <= commit_ts`, another transaction beat us to
+//! it. We abort rather than silently overwrite.
 //!
 //! # Timestamp oracle
 //!
@@ -23,19 +24,20 @@
 //! restarts pick up where they left off.
 
 use crate::{
-    cf, codec,
+    cf,
     error::StorageError,
-    keys,
-    store::{encode_epo_value, TripleStore},
+    keys::{self, Order},
+    store::{PendingWrite, TripleStore},
 };
 use polargraph_core::{
-    id::NodeId,
-    temporal::{BiTemporalRange, Timestamp},
+    id::{GraphId, NodeId},
+    temporal::Timestamp,
     triple::Triple,
     value::Value,
 };
-use rocksdb::{Direction, IteratorMode, WriteBatch};
+use rocksdb::WriteBatch;
 use std::{
+    collections::HashMap,
     sync::{
         atomic::{AtomicI64, Ordering},
         Arc, Mutex, MutexGuard,
@@ -141,6 +143,39 @@ impl std::fmt::Display for ConflictError {
 
 impl std::error::Error for ConflictError {}
 
+// ── WriteMode ─────────────────────────────────────────────────────────────────
+
+/// How a property write treats existing values of the same
+/// `(subject, predicate, graph)` (`docs/design/v3-key-layout.md` §6).
+/// Relations and annotations ignore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WriteMode {
+    /// `Replace` for an open-ended property (`vt_end` = end of time), `Add`
+    /// otherwise — a closing write (DELETE) only touches its own value.
+    #[default]
+    Auto,
+    /// Close every other open value of `(s, p, g)` at the new value's
+    /// `vt_start`, then write it: the property ends up single-valued.
+    Replace,
+    /// Write alongside existing values (RDF semantics, multi-valued fields).
+    Add,
+}
+
+impl WriteMode {
+    /// The effective mode for `triple` (`Auto` resolved).
+    pub fn resolve(self, triple: &Triple) -> WriteMode {
+        match (self, triple) {
+            (WriteMode::Auto, Triple::Property { temporal, .. })
+                if temporal.vt_end == Timestamp::END_OF_TIME =>
+            {
+                WriteMode::Replace
+            }
+            (WriteMode::Auto, _) => WriteMode::Add,
+            (mode, _) => mode,
+        }
+    }
+}
+
 // ── Transaction ───────────────────────────────────────────────────────────────
 
 /// An in-progress read-write transaction.
@@ -151,6 +186,10 @@ pub struct Transaction {
     pub(crate) store: TripleStore,
     pub read_ts: Timestamp,
     write_buffer: Vec<Triple>,
+    /// Graph and write mode of each entry in `write_buffer` (same order).
+    write_meta: Vec<(GraphId, WriteMode)>,
+    /// IRIs to record in the IRI dictionary on commit.
+    iris: Vec<String>,
 }
 
 impl Transaction {
@@ -159,15 +198,31 @@ impl Transaction {
             store,
             read_ts,
             write_buffer: Vec::new(),
+            write_meta: Vec::new(),
+            iris: Vec::new(),
         }
     }
 
-    /// Buffer a triple for insertion at commit time.
+    /// Record `iri` in the IRI dictionary when this transaction commits, so
+    /// the node it names (`term::iri_to_node_id(iri)`) can be exported under
+    /// its IRI. `urn:uuid:` IRIs are ignored (they carry their ID).
+    pub fn bind_iri(&mut self, iri: impl Into<String>) {
+        self.iris.push(iri.into());
+    }
+
+    /// Buffer a triple for insertion into the default graph at commit time,
+    /// with [`WriteMode::Auto`].
     ///
     /// The triple's existing `tt` is ignored; the actual commit timestamp is
     /// assigned at `commit()`.
     pub fn insert(&mut self, triple: Triple) {
+        self.insert_in(triple, GraphId::DEFAULT, WriteMode::Auto);
+    }
+
+    /// Buffer a triple for insertion into `graph` with an explicit write mode.
+    pub fn insert_in(&mut self, triple: Triple, graph: GraphId, mode: WriteMode) {
         self.write_buffer.push(triple);
+        self.write_meta.push((graph, mode));
     }
 
     /// Returns a view of triples buffered but not yet committed.
@@ -234,124 +289,110 @@ impl Transaction {
     ///   4. Persist updated oracle counter to META CF.
     ///   5. Release commit lock.
     pub fn commit(self) -> Result<Timestamp, StorageError> {
-        if self.write_buffer.is_empty() {
-            return Ok(self.read_ts);
+        let Transaction {
+            store,
+            read_ts,
+            write_buffer,
+            write_meta,
+            iris,
+        } = self;
+        if write_buffer.is_empty() && iris.is_empty() {
+            return Ok(read_ts);
         }
 
-        let (commit_ts, _guard) = self.store.oracle().begin_commit();
-        debug!(
-            "tx commit: read_ts={} commit_ts={}",
-            self.read_ts.0, commit_ts.0
-        );
+        let (commit_ts, _guard) = store.oracle().begin_commit();
+        debug!("tx commit: read_ts={} commit_ts={}", read_ts.0, commit_ts.0);
 
-        // ── conflict check (hexastore triples only) ───────────────────────────
-        for triple in &self.write_buffer {
-            match triple {
-                Triple::Relation { .. } | Triple::Property { .. } => {
-                    if let Some(conflict) = self.check_conflict(triple, commit_ts)? {
-                        return Err(StorageError::WriteConflict(conflict));
-                    }
+        let writes: Vec<PendingWrite> = write_buffer
+            .into_iter()
+            .zip(write_meta)
+            .map(|(triple, (graph, mode))| PendingWrite {
+                triple,
+                graph,
+                mode,
+            })
+            .collect();
+
+        // ── conflict check (quads only) ───────────────────────────────────────
+        // Edge annotations don't participate; they use additive append-only
+        // semantics. One raw iterator is reused for every check.
+        {
+            let gspo_cf = store.cf_handle(Order::Gspo.cf())?;
+            let mut gspo = store.db_ref().raw_iterator_cf(&gspo_cf);
+            for w in &writes {
+                if let Some(conflict) = check_conflict(&store, &mut gspo, w, read_ts, commit_ts)? {
+                    return Err(StorageError::WriteConflict(conflict));
                 }
-                // Edge annotations don't participate in hexastore conflict
-                // checking; they use additive append-only semantics.
-                Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => {}
             }
         }
 
         // ── build WriteBatch ──────────────────────────────────────────────────
         let mut batch = WriteBatch::default();
+        store.stage_writes(&mut batch, &writes, commit_ts)?;
 
-        for triple in &self.write_buffer {
-            let temporal_stamped = stamp_temporal(triple.temporal(), commit_ts);
-            let pred_id = self.store.intern_predicate(triple.predicate().0.as_str())?;
-
-            match triple {
-                Triple::Relation { .. } | Triple::Property { .. } => {
-                    self.store.batch_triple(
-                        &mut batch,
-                        triple.subject(),
-                        pred_id,
-                        object_of(triple),
-                        commit_ts,
-                        &encode_value(triple, &temporal_stamped)?,
-                    )?;
-                    // Trigram index: write TRI CF entries for text property values.
-                    if let Triple::Property {
-                        value: Value::Text(text),
-                        ..
-                    } = triple
-                    {
-                        self.store.batch_text_trigrams(
-                            &mut batch,
-                            &triple.subject(),
-                            pred_id,
-                            text,
-                        )?;
-                    }
-                }
-                Triple::EdgeProperty { edge, value, .. } => {
-                    let value_bytes = codec::encode_property(value, &temporal_stamped)?;
-                    self.store
-                        .batch_epa(&mut batch, *edge, pred_id, commit_ts, &value_bytes)?;
-                }
-                Triple::EdgeRelation { edge, object, .. } => {
-                    let epo_val = encode_epo_value(&temporal_stamped);
-                    self.store
-                        .batch_epo(&mut batch, *edge, pred_id, *object, commit_ts, &epo_val)?;
-                }
-            }
+        // IRI dictionary entries — checked and written under the commit lock,
+        // so concurrent bindings of one node are serialized.
+        let mut pending_iris = HashMap::new();
+        for iri in &iris {
+            store.batch_iri(&mut batch, iri, &mut pending_iris)?;
         }
 
         // Persist oracle counter so restarts don't reuse timestamps.
-        let meta_cf = self.store.cf_handle(cf::META)?;
+        let meta_cf = store.cf_handle(cf::META)?;
         batch.put_cf(&meta_cf, META_ORACLE_CTR, commit_ts.0.to_be_bytes());
 
-        self.store.db_write(batch)?;
+        store.db_write(batch)?;
         Ok(commit_ts)
     }
+}
 
-    // ── private ───────────────────────────────────────────────────────────────
-
-    /// Returns `Some(ConflictError)` if a newer version exists in storage.
-    fn check_conflict(
-        &self,
-        triple: &Triple,
-        commit_ts: Timestamp,
-    ) -> Result<Option<ConflictError>, StorageError> {
-        let s = triple.subject();
-        let pred_str = triple.predicate().0.as_str();
-        let p = match self.store.predicate_id(pred_str) {
-            Some(id) => id,
-            None => return Ok(None), // predicate not yet in store → no conflict
-        };
-        let o = object_of(triple);
-
-        // Scan the SPO key range for this exact (S,P,O) and check if any
-        // entry has tt in (read_ts, commit_ts].
-        let prefix = keys::encode_spo(&s, p, &o, Timestamp(0));
-        // We use the full 44-byte key up to (but not including) the tt part
-        // as our prefix — that's the first 36 bytes.
-        let spo_prefix = &prefix[..36];
-
-        let cf = self.store.cf_handle(cf::SPO)?;
-        let db = self.store.db_ref();
-        let iter = db.iterator_cf(&cf, IteratorMode::From(spo_prefix, Direction::Forward));
-
-        for item in iter {
-            let (key, _) = item?;
-            if !key.starts_with(spo_prefix) {
-                break;
-            }
-            let decoded = keys::decode_spo(&key)?;
-            if decoded.tt > self.read_ts && decoded.tt <= commit_ts {
-                return Ok(Some(ConflictError {
-                    subject: s,
-                    predicate: pred_str.to_owned(),
-                }));
-            }
+/// Returns `Some(ConflictError)` if a version committed in
+/// `(read_ts, commit_ts]` exists for what `w` writes: the exact quad, or — for
+/// a `Replace` property write — any value of its `(subject, predicate, graph)`.
+fn check_conflict(
+    store: &TripleStore,
+    gspo: &mut rocksdb::DBRawIteratorWithThreadMode<'_, crate::store::DB>,
+    w: &PendingWrite,
+    read_ts: Timestamp,
+    commit_ts: Timestamp,
+) -> Result<Option<ConflictError>, StorageError> {
+    let s = w.triple.subject();
+    let pred_str = w.triple.predicate().0.as_str();
+    let Some(p) = store.predicate_id(pred_str) else {
+        return Ok(None); // predicate not yet in store → no conflict
+    };
+    let prefix = match &w.triple {
+        Triple::Relation { object, .. } => {
+            Order::Gspo.prefix(Some(&s), Some(p), Some(object), Some(w.graph))
         }
-        Ok(None)
+        Triple::Property { value, .. } => match w.mode.resolve(&w.triple) {
+            WriteMode::Replace => Order::Gspo.prefix(Some(&s), Some(p), None, Some(w.graph)),
+            _ => Order::Gspo.prefix(
+                Some(&s),
+                Some(p),
+                Some(&keys::value_object(value)),
+                Some(w.graph),
+            ),
+        },
+        Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => return Ok(None),
+    };
+
+    gspo.seek(prefix);
+    while let Some(key) = gspo.key() {
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        let tt = keys::key_tt(key);
+        if tt > read_ts && tt <= commit_ts {
+            return Ok(Some(ConflictError {
+                subject: s,
+                predicate: pred_str.to_owned(),
+            }));
+        }
+        gspo.next();
     }
+    gspo.status()?;
+    Ok(None)
 }
 
 // ── Snapshot ──────────────────────────────────────────────────────────────────
@@ -441,7 +482,34 @@ impl Snapshot {
         self.store.scan_all_at(self.ts, self.vt_as_of)
     }
 
+    /// Property triples of `predicate` whose value equals `value` — an index
+    /// lookup on the value hash (any graph).
+    pub fn scan_by_predicate_value(
+        &self,
+        predicate: &str,
+        value: &Value,
+    ) -> Result<Vec<Triple>, StorageError> {
+        self.store
+            .scan_by_predicate_value_at(predicate, value, self.ts, self.vt_as_of)
+    }
+
+    /// Every triple in graph `g`.
+    pub fn scan_graph(&self, g: GraphId) -> Result<Vec<Triple>, StorageError> {
+        self.store.scan_graph_at(g, self.ts, self.vt_as_of)
+    }
+
+    /// Triples of `subject` in graph `g`.
+    pub fn scan_by_subject_in_graph(
+        &self,
+        g: GraphId,
+        subject: &NodeId,
+    ) -> Result<Vec<Triple>, StorageError> {
+        self.store
+            .scan_by_subject_in_graph_at(g, subject, self.ts, self.vt_as_of)
+    }
+
     /// Return `NodeId`s confirmed to have a live text value for `predicate` containing `query`.
+    /// Values longer than [`crate::store::TRIGRAM_MAX_TEXT_BYTES`] are not indexed and never match.
     pub fn text_search(
         &self,
         predicate: &str,
@@ -473,44 +541,5 @@ impl Snapshot {
         edge: polargraph_core::id::EdgeId,
     ) -> Result<Vec<polargraph_core::triple::Triple>, StorageError> {
         self.store.scan_edge_annotations_as_triples(edge, self.ts)
-    }
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-/// Return the object NodeId for a hexastore triple, using the property sentinel
-/// for property triples. Edge annotations are not routed through this helper.
-fn object_of(triple: &Triple) -> NodeId {
-    match triple {
-        Triple::Relation { object, .. } => *object,
-        Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => {
-            // Property triples and edge annotations use the sentinel.
-            // (EdgeProperty/EdgeRelation are handled separately before this
-            // function would be reached, but we need an arm to satisfy Rust.)
-            NodeId(uuid::Uuid::from_bytes(keys::PROPERTY_SENTINEL))
-        }
-    }
-}
-
-/// Produce a BiTemporalRange with the commit timestamp stamped as `tt`,
-/// preserving the valid-time range from the original triple.
-fn stamp_temporal(original: &BiTemporalRange, commit_ts: Timestamp) -> BiTemporalRange {
-    BiTemporalRange {
-        vt_start: original.vt_start,
-        vt_end: original.vt_end,
-        tt: commit_ts,
-    }
-}
-
-/// Encode the RocksDB value bytes for a hexastore triple given a stamped temporal range.
-///
-/// Edge annotations (`EdgeProperty`/`EdgeRelation`) are handled separately in
-/// `commit()` and should never be passed here; returns an empty vec for them.
-fn encode_value(triple: &Triple, temporal: &BiTemporalRange) -> Result<Vec<u8>, StorageError> {
-    match triple {
-        Triple::Relation { edge_id, .. } => Ok(codec::encode_relation(edge_id, temporal)),
-        Triple::Property { value, .. } => codec::encode_property(value, temporal),
-        // Edge annotations routed to EPA/EPO — not encoded via this function.
-        Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => Ok(vec![]),
     }
 }

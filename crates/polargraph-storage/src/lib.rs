@@ -20,6 +20,7 @@ pub mod compaction;
 pub mod error;
 pub mod hnsw;
 pub mod keys;
+pub mod migrate_v3;
 pub mod migrations;
 pub mod mvcc;
 pub mod owl_rl;
@@ -31,11 +32,15 @@ pub mod wal_stream;
 pub use backup::BackupManager;
 pub use compaction::{CompactionManager, RetentionStats};
 pub use error::StorageError;
+pub use migrate_v3::MigrationReport;
 pub use migrations::{AppliedMigration, MigrationRunner, MigrationStats, MIGRATIONS};
-pub use mvcc::{ConflictError, Snapshot, Transaction};
+pub use mvcc::{ConflictError, Snapshot, Transaction, WriteMode};
 pub use owl_rl::MaterializationStats;
 pub use polargraph_core::schema::{RetentionPolicy, VectorSpaceDef};
 pub use registry::{EdgeTypeRegistry, NodeTypeRegistry, ValidationError, SCHEMA_REGISTRY_NODE};
 pub use sst_import::{ImportStats, SstImporter};
-pub use store::{EdgeAnnotation, EdgeAnnotationValue, StoreMode, TripleStore};
+pub use store::{
+    EdgeAnnotation, EdgeAnnotationValue, StoreMode, TripleStore, DEFAULT_INLINE_VALUE_MAX_BYTES,
+    STORAGE_FORMAT, TRIGRAM_MAX_TEXT_BYTES,
+};
 pub use wal_stream::{WalEntry, WalStreamer};

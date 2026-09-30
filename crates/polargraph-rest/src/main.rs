@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use polargraph_core::id::NodeId;
+use polargraph_core::{id::NodeId, term::iri_to_node_id};
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 use tonic::metadata::MetadataValue;
@@ -53,6 +53,16 @@ struct Args {
     /// Path to a PEM CA certificate for verifying the upstream TLS connection.
     #[arg(long, env = "POLARGRAPH_REST_TLS_CA")]
     tls_ca: Option<std::path::PathBuf>,
+
+    /// Base IRI for skolemized blank nodes on RDF import
+    /// (`{base}/.well-known/genid/{import_id}/{label}`). Set this to the
+    /// instance's public origin, e.g. `https://kb.example.com`.
+    #[arg(
+        long,
+        env = "POLARGRAPH_REST_SKOLEM_BASE",
+        default_value = polargraph_sparql::DEFAULT_SKOLEM_BASE
+    )]
+    skolem_base: String,
 }
 
 // ── Auth interceptor ──────────────────────────────────────────────────────────
@@ -95,6 +105,8 @@ type GrpcClient = PolarGraphServiceClient<
 struct AppState {
     /// gRPC client; cheap to clone (backed by a pooled Channel).
     client: GrpcClient,
+    /// Base IRI for blank-node skolem IRIs on RDF import.
+    skolem_base: String,
 }
 
 // ── JSON request/response types ───────────────────────────────────────────────
@@ -159,6 +171,9 @@ struct InsertBody {
     /// Open transaction ID to buffer this insert into instead of auto-committing.
     #[serde(default)]
     tx_id: Option<String>,
+    /// Named graph (IRI) to write into; omitted = the default graph.
+    #[serde(default)]
+    graph: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -357,6 +372,9 @@ fn proto_value_to_json(v: &proto::Value) -> serde_json::Value {
             serde_json::Value::String(hex)
         }
         Some(Kind::VecVal(fa)) => serde_json::json!(fa.values),
+        // JSON-LD value objects, so the tag / datatype survives a round trip.
+        Some(Kind::LangText(l)) => serde_json::json!({ "@value": l.text, "@language": l.lang }),
+        Some(Kind::Typed(t)) => serde_json::json!({ "@value": t.lexical, "@type": t.datatype }),
     }
 }
 
@@ -373,6 +391,24 @@ fn json_to_proto_value(v: &serde_json::Value) -> proto::Value {
             }
         }
         serde_json::Value::String(s) => Kind::TextVal(s.clone()),
+        // JSON-LD value objects: {"@value", "@language"} / {"@value", "@type"}.
+        serde_json::Value::Object(o) => match (
+            o.get("@value").and_then(|v| v.as_str()),
+            o.get("@language").and_then(|v| v.as_str()),
+            o.get("@type").and_then(|v| v.as_str()),
+        ) {
+            (Some(text), Some(lang), _) if !lang.is_empty() => Kind::LangText(proto::LangText {
+                text: text.to_string(),
+                lang: lang.to_string(),
+            }),
+            (Some(lexical), None, Some(datatype)) if !datatype.is_empty() => {
+                Kind::Typed(proto::TypedLiteral {
+                    lexical: lexical.to_string(),
+                    datatype: datatype.to_string(),
+                })
+            }
+            _ => Kind::TextVal(v.to_string()),
+        },
         other => Kind::TextVal(other.to_string()),
     };
     proto::Value { kind: Some(kind) }
@@ -532,6 +568,7 @@ async fn handle_insert(
         .insert(tonic::Request::new(proto::InsertRequest {
             triples: vec![triple],
             tx_id: body.tx_id.unwrap_or_default(),
+            graph: body.graph.unwrap_or_default(),
             ..Default::default()
         }))
         .await
@@ -1939,6 +1976,15 @@ async fn execute_sparql_query(
         all_bindings.extend(branch_bindings);
     }
 
+    // Names for every node in the result, resolved once (before aggregation,
+    // which may fold URIs into GROUP_CONCAT strings).
+    let names = resolve_names(
+        &mut state.client.clone(),
+        polargraph_sparql::node_ids_in_bindings(&all_bindings),
+        false,
+    )
+    .await;
+
     // 4. GROUP BY / aggregation.
     if !translation.aggregates.is_empty() || !translation.group_by.is_empty() {
         all_bindings = polargraph_sparql::execute::execute_sparql_aggregations(
@@ -1946,6 +1992,7 @@ async fn execute_sparql_query(
             &translation.group_by,
             &translation.aggregates,
             translation.having_filter.as_ref(),
+            &names,
         );
     }
 
@@ -2021,7 +2068,7 @@ async fn execute_sparql_query(
     let format = polargraph_sparql::negotiate_format(&http_headers);
     match format {
         ResponseFormat::Json => {
-            let body = polargraph_sparql::serialize_json(&all_var_names, &projected);
+            let body = polargraph_sparql::serialize_json(&all_var_names, &projected, &names);
             axum::response::Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "application/sparql-results+json")
@@ -2029,7 +2076,7 @@ async fn execute_sparql_query(
                 .unwrap()
         }
         ResponseFormat::Csv => {
-            let body = polargraph_sparql::serialize_csv(&all_var_names, &projected);
+            let body = polargraph_sparql::serialize_csv(&all_var_names, &projected, &names);
             axum::response::Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/csv")
@@ -2058,6 +2105,9 @@ fn sparql_term_to_proto(term: &polargraph_query::Term) -> proto::Term {
             kind: Some(proto::term::Kind::Bound(proto::NodeId {
                 bytes: id.0.as_bytes().to_vec(),
             })),
+        },
+        Term::Literal(v) => proto::Term {
+            kind: Some(proto::term::Kind::Literal(pg_value_to_proto(v))),
         },
         Term::Any | Term::Param(_) => proto::Term { kind: None },
     }
@@ -2151,7 +2201,7 @@ async fn execute_sparql_construct(
     }
 
     // Build RDF triples.
-    let rdf_triples: Vec<RdfStarTriple> = if is_describe {
+    let mut rdf_triples: Vec<RdfStarTriple> = if is_describe {
         // Collect unique NodeIds from all bound values, plus any bare DESCRIBE <iri>.
         let mut node_ids: HashSet<NodeId> = HashSet::new();
         for b in &all_bindings {
@@ -2164,11 +2214,7 @@ async fn execute_sparql_construct(
         // Bare DESCRIBE <urn:uuid:…> with no WHERE bindings.
         if node_ids.is_empty() {
             if let Some(ref iri) = ct.describe_iri {
-                if let Some(uuid_str) = iri.strip_prefix("urn:uuid:") {
-                    if let Ok(u) = uuid::Uuid::parse_str(uuid_str) {
-                        node_ids.insert(NodeId(u));
-                    }
-                }
+                node_ids.insert(iri_to_node_id(iri));
             }
         }
 
@@ -2230,6 +2276,14 @@ async fn execute_sparql_construct(
         }
         result
     };
+
+    let names = resolve_names(
+        &mut state.client.clone(),
+        polargraph_sparql::node_ids_in_star_triples(&rdf_triples),
+        false,
+    )
+    .await;
+    names.rewrite_star_triples(&mut rdf_triples);
 
     // Serialize based on Accept header.
     let accept = headers
@@ -2358,6 +2412,9 @@ async fn handle_sparql_update(
 
     let mut inserted: u64 = 0;
     let mut deleted: u64 = 0;
+    // Quads that couldn't be applied (unsupported terms or RPC errors) — reported
+    // rather than silently dropped.
+    let mut failed: u64 = 0;
 
     for operation in update.operations {
         match operation {
@@ -2389,67 +2446,61 @@ async fn handle_sparql_update(
                         let mut client = state.client.clone();
                         let req = proto::InsertRequest {
                             triples: vec![triple],
+                            iris: sparql_quad_iris(quad),
                             ..Default::default()
                         };
                         if client.insert(tonic::Request::new(req)).await.is_ok() {
                             inserted += 1;
+                        } else {
+                            failed += 1;
                         }
+                    } else {
+                        failed += 1;
                     }
                 }
             }
             spargebra::GraphUpdateOperation::DeleteData { data } => {
-                // Group plain GroundQuads by subject for DeleteTriples RPC.
-                // Gap 4: quoted-triple subjects are handled in a separate pre-pass.
-                let mut by_subject: std::collections::HashMap<String, Vec<String>> =
-                    std::collections::HashMap::new();
+                // Each plain quad closes exactly that (S, P, O) — never other
+                // triples of the subject.
                 for gq in &data {
                     match &gq.subject {
                         spargebra::term::GroundSubject::Triple(inner) => {
                             // Gap 4: DELETE DATA { << S P O >> :annot :val }
                             // Resolve inner triple to edge_id and delete the annotation.
                             if let Some(s_iri) = ground_triple_subject_iri(inner) {
-                                if let Some(s_uuid_str) = s_iri.strip_prefix("urn:uuid:") {
-                                    if let Ok(s_uuid) = uuid::Uuid::parse_str(s_uuid_str) {
-                                        // Use the inner triple's subject as a proxy to soft-delete
-                                        // the annotation predicate on all edges from that subject.
-                                        let mut client = state.client.clone();
-                                        let req = proto::DeleteTriplesRequest {
-                                            subject_ids: vec![s_uuid.as_bytes().to_vec()],
-                                            predicate: gq.predicate.as_str().to_string(),
-                                            vt_end: 0,
-                                        };
-                                        if let Ok(r) =
-                                            client.delete_triples(tonic::Request::new(req)).await
-                                        {
-                                            deleted += r.into_inner().deleted_count;
-                                        }
-                                    }
+                                let s_id = iri_to_node_id(&s_iri);
+                                // Use the inner triple's subject as a proxy to soft-delete
+                                // the annotation predicate on all edges from that subject.
+                                let mut client = state.client.clone();
+                                let req = proto::DeleteTriplesRequest {
+                                    subject_ids: vec![s_id.0.as_bytes().to_vec()],
+                                    predicate: gq.predicate.as_str().to_string(),
+                                    ..Default::default()
+                                };
+                                if let Ok(r) = client.delete_triples(tonic::Request::new(req)).await
+                                {
+                                    deleted += r.into_inner().deleted_count;
                                 }
                             }
                         }
                         spargebra::term::GroundSubject::NamedNode(n) => {
-                            let subj_iri = n.as_str().to_string();
-                            let pred = gq.predicate.as_str().to_string();
-                            by_subject.entry(subj_iri).or_default().push(pred);
+                            let Some(target) = ground_term_delete_target(&gq.object) else {
+                                failed += 1;
+                                continue;
+                            };
+                            let req = exact_delete_request(
+                                iri_to_node_id(n.as_str()),
+                                gq.predicate.as_str(),
+                                target,
+                            );
+                            let mut client = state.client.clone();
+                            match client.delete_triples(tonic::Request::new(req)).await {
+                                Ok(r) => deleted += r.into_inner().deleted_count,
+                                Err(_) => failed += 1,
+                            }
                         }
                         #[allow(unreachable_patterns)]
                         _ => {}
-                    }
-                }
-
-                for (subj_iri, _preds) in by_subject {
-                    if let Some(uuid_str) = subj_iri.strip_prefix("urn:uuid:") {
-                        if let Ok(u) = uuid::Uuid::parse_str(uuid_str) {
-                            let mut client = state.client.clone();
-                            let req = proto::DeleteTriplesRequest {
-                                subject_ids: vec![u.as_bytes().to_vec()],
-                                predicate: String::new(),
-                                vt_end: 0,
-                            };
-                            if let Ok(r) = client.delete_triples(tonic::Request::new(req)).await {
-                                deleted += r.into_inner().deleted_count;
-                            }
-                        }
                     }
                 }
             }
@@ -2521,14 +2572,16 @@ async fn handle_sparql_update(
                                     continue;
                                 }
                             };
-                            let mut client = state.client.clone();
-                            let req = proto::DeleteTriplesRequest {
-                                subject_ids: vec![subj_id.0.as_bytes().to_vec()],
-                                predicate: pred,
-                                vt_end: 0,
+                            let Some(target) = resolve_ground_term_object(&gqp.object, binding)
+                            else {
+                                failed += 1;
+                                continue;
                             };
-                            if let Ok(r) = client.delete_triples(tonic::Request::new(req)).await {
-                                deleted += r.into_inner().deleted_count;
+                            let req = exact_delete_request(subj_id, &pred, target);
+                            let mut client = state.client.clone();
+                            match client.delete_triples(tonic::Request::new(req)).await {
+                                Ok(r) => deleted += r.into_inner().deleted_count,
+                                Err(_) => failed += 1,
                             }
                         }
                     }
@@ -2557,8 +2610,13 @@ async fn handle_sparql_update(
         }
     }
 
-    Json(serde_json::json!({ "ok": true, "inserted": inserted, "deleted": deleted }))
-        .into_response()
+    Json(serde_json::json!({
+        "ok": failed == 0,
+        "inserted": inserted,
+        "deleted": deleted,
+        "failed": failed,
+    }))
+    .into_response()
 }
 
 // ── POST /delete ──────────────────────────────────────────────────────────────
@@ -2603,6 +2661,7 @@ async fn handle_delete_triples(
         subject_ids,
         predicate: body.predicate,
         vt_end: body.vt_end,
+        ..Default::default()
     };
 
     let mut client = state.client.clone();
@@ -2674,7 +2733,7 @@ async fn sparql_star_quad_to_annotation(
         Subject::NamedNode(n) => n.as_str().to_string(),
         _ => return None,
     };
-    let s_uuid = uuid::Uuid::parse_str(s_iri.strip_prefix("urn:uuid:")?).ok()?;
+    let s_uuid = iri_to_node_id(&s_iri).0;
     let s_bytes = s_uuid.as_bytes().to_vec();
 
     let pred = inner.predicate.as_str().to_string();
@@ -2683,7 +2742,7 @@ async fn sparql_star_quad_to_annotation(
         Term::NamedNode(n) => n.as_str().to_string(),
         _ => return None,
     };
-    let o_uuid = uuid::Uuid::parse_str(o_iri.strip_prefix("urn:uuid:")?).ok()?;
+    let o_uuid = iri_to_node_id(&o_iri).0;
     let o_bytes = o_uuid.as_bytes().to_vec();
 
     // Look up the edge ID for (S, P, O).
@@ -2693,7 +2752,7 @@ async fn sparql_star_quad_to_annotation(
     // Map the annotation object to an EdgeAnnotation value.
     let ann_value = match object {
         Term::NamedNode(n) => {
-            let obj_uuid = uuid::Uuid::parse_str(n.as_str().strip_prefix("urn:uuid:")?).ok()?;
+            let obj_uuid = iri_to_node_id(n.as_str()).0;
             proto::edge_annotation::Value::NodeId(obj_uuid.as_bytes().to_vec())
         }
         Term::Literal(lit) => {
@@ -2717,6 +2776,21 @@ async fn sparql_star_quad_to_annotation(
 /// Returns `None` if the quad cannot be mapped (e.g. blank-node subjects).
 /// Quoted-triple subjects `<< S P O >>` are converted to edge annotation inserts via the
 /// separate `sparql_quad_to_edge_annotation` path (handled by the caller).
+/// IRIs a ground quad names nodes by (subject and IRI object), for the IRI
+/// dictionary.
+fn sparql_quad_iris(quad: &spargebra::term::Quad) -> Vec<String> {
+    use spargebra::term::{Subject, Term};
+    let mut iris = Vec::new();
+    if let Subject::NamedNode(n) = &quad.subject {
+        iris.push(n.as_str().to_string());
+    }
+    if let Term::NamedNode(n) = &quad.object {
+        iris.push(n.as_str().to_string());
+    }
+    iris.retain(|i| polargraph_core::term::needs_dictionary(i));
+    iris
+}
+
 fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Triple> {
     use spargebra::term::{Subject, Term};
 
@@ -2729,13 +2803,13 @@ fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Tr
         Subject::NamedNode(n) => n.as_str().to_string(),
         _ => return None, // blank nodes not supported
     };
-    let subj_id = uuid::Uuid::parse_str(subj_iri.strip_prefix("urn:uuid:")?).ok()?;
+    let subj_id = iri_to_node_id(&subj_iri).0;
     let predicate = quad.predicate.as_str().to_string();
 
     match &quad.object {
         Term::NamedNode(n) => {
             let obj_iri = n.as_str();
-            let obj_id = uuid::Uuid::parse_str(obj_iri.strip_prefix("urn:uuid:")?).ok()?;
+            let obj_id = iri_to_node_id(obj_iri).0;
             Some(proto::Triple {
                 kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
                     subject: Some(proto::NodeId {
@@ -2762,6 +2836,7 @@ fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Tr
                     value: Some(val),
                     vt_start: 0,
                     vt_end: i64::MAX,
+                    mode: proto::PropertyWriteMode::Add as i32,
                 })),
             })
         }
@@ -2769,18 +2844,79 @@ fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Tr
     }
 }
 
+/// A SPARQL literal as a proto value (see `polargraph_core::term::literal_to_value`).
 fn sparql_literal_to_proto_value(lit: &spargebra::term::Literal) -> Option<proto::Value> {
+    Some(pg_value_to_proto(&polargraph_core::term::literal_to_value(
+        lit.value(),
+        Some(lit.datatype().as_str()),
+        lit.language(),
+    )))
+}
+
+/// What a SPARQL DELETE quad's object pins down: a node or a literal value.
+enum DeleteTarget {
+    Node(NodeId),
+    Value(proto::Value),
+}
+
+/// A `DeleteTriples` request that closes exactly `(subject, predicate, target)`.
+fn exact_delete_request(
+    subject: NodeId,
+    predicate: &str,
+    target: DeleteTarget,
+) -> proto::DeleteTriplesRequest {
+    let mut req = proto::DeleteTriplesRequest {
+        subject_ids: vec![subject.0.as_bytes().to_vec()],
+        predicate: predicate.to_string(),
+        ..Default::default()
+    };
+    match target {
+        DeleteTarget::Node(o) => req.object_id = o.0.as_bytes().to_vec(),
+        DeleteTarget::Value(v) => req.value = Some(v),
+    }
+    req
+}
+
+/// The object of a DELETE DATA quad. `None` for terms we can't delete by
+/// (quoted triples, unsupported literal types).
+fn ground_term_delete_target(term: &spargebra::term::GroundTerm) -> Option<DeleteTarget> {
+    use spargebra::term::GroundTerm;
+    match term {
+        GroundTerm::NamedNode(n) => Some(DeleteTarget::Node(iri_to_node_id(n.as_str()))),
+        GroundTerm::Literal(l) => sparql_literal_to_proto_value(l).map(DeleteTarget::Value),
+        #[allow(unreachable_patterns)]
+        _ => None,
+    }
+}
+
+/// The object of a DELETE template quad under `binding`.
+fn resolve_ground_term_object(
+    gtp: &spargebra::term::GroundTermPattern,
+    binding: &polargraph_sparql::SparqlBindings,
+) -> Option<DeleteTarget> {
+    use polargraph_sparql::SparqlValue;
+    use spargebra::term::GroundTermPattern;
+    match gtp {
+        GroundTermPattern::NamedNode(n) => Some(DeleteTarget::Node(iri_to_node_id(n.as_str()))),
+        GroundTermPattern::Literal(l) => sparql_literal_to_proto_value(l).map(DeleteTarget::Value),
+        GroundTermPattern::Variable(v) => match binding.get(v.as_str())? {
+            SparqlValue::Uri(id) => Some(DeleteTarget::Node(*id)),
+            other => sparql_value_to_proto(other).map(DeleteTarget::Value),
+        },
+        _ => None,
+    }
+}
+
+/// Convert a literal SPARQL binding to a proto value; `None` for URIs.
+fn sparql_value_to_proto(v: &polargraph_sparql::SparqlValue) -> Option<proto::Value> {
+    use polargraph_sparql::SparqlValue;
     use proto::value::Kind;
-    let dt = lit.datatype().as_str();
-    let val = lit.value();
-    let kind = if dt.ends_with("#integer") || dt.ends_with("#int") || dt.ends_with("#long") {
-        Kind::IntVal(val.parse::<i64>().ok()?)
-    } else if dt.ends_with("#double") || dt.ends_with("#float") || dt.ends_with("#decimal") {
-        Kind::FloatVal(val.parse::<f64>().ok()?)
-    } else if dt.ends_with("#boolean") {
-        Kind::BoolVal(val == "true")
-    } else {
-        Kind::TextVal(val.to_string())
+    let kind = match v {
+        SparqlValue::Uri(_) => return None,
+        SparqlValue::Literal(s) => Kind::TextVal(s.clone()),
+        SparqlValue::LiteralInt(n) => Kind::IntVal(*n),
+        SparqlValue::LiteralFloat(f) => Kind::FloatVal(*f),
+        SparqlValue::LiteralBool(b) => Kind::BoolVal(*b),
     };
     Some(proto::Value { kind: Some(kind) })
 }
@@ -2793,11 +2929,7 @@ fn resolve_ground_term_subject(
     use polargraph_sparql::SparqlValue;
     use spargebra::term::GroundTermPattern;
     match gtp {
-        GroundTermPattern::NamedNode(n) => {
-            let iri = n.as_str();
-            let uuid_str = iri.strip_prefix("urn:uuid:")?;
-            Some(NodeId(uuid::Uuid::parse_str(uuid_str).ok()?))
-        }
+        GroundTermPattern::NamedNode(n) => Some(iri_to_node_id(n.as_str())),
         GroundTermPattern::Variable(v) => {
             if let Some(SparqlValue::Uri(id)) = binding.get(v.as_str()) {
                 Some(*id)
@@ -2819,11 +2951,7 @@ fn resolve_quad_pattern_to_proto(
 
     // Resolve subject.
     let subj_id = match &qp.subject {
-        TermPattern::NamedNode(n) => {
-            let iri = n.as_str();
-            let uuid_str = iri.strip_prefix("urn:uuid:")?;
-            NodeId(uuid::Uuid::parse_str(uuid_str).ok()?)
-        }
+        TermPattern::NamedNode(n) => iri_to_node_id(n.as_str()),
         TermPattern::Variable(v) => {
             if let Some(SparqlValue::Uri(id)) = binding.get(v.as_str()) {
                 *id
@@ -2844,7 +2972,7 @@ fn resolve_quad_pattern_to_proto(
     match &qp.object {
         TermPattern::NamedNode(n) => {
             let iri = n.as_str();
-            let obj_id = uuid::Uuid::parse_str(iri.strip_prefix("urn:uuid:")?).ok()?;
+            let obj_id = iri_to_node_id(iri).0;
             Some(proto::Triple {
                 kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
                     subject: Some(proto::NodeId {
@@ -2888,6 +3016,7 @@ fn resolve_quad_pattern_to_proto(
                     value: Some(val),
                     vt_start: 0,
                     vt_end: i64::MAX,
+                    mode: proto::PropertyWriteMode::Add as i32,
                 })),
             })
         }
@@ -2917,6 +3046,14 @@ fn pg_value_to_proto(v: &polargraph_core::value::Value) -> proto::Value {
             V::Bool(b) => proto::value::Kind::BoolVal(*b),
             V::Blob(b) => proto::value::Kind::BlobVal(b.clone()),
             V::Vector(vs) => proto::value::Kind::VecVal(proto::FloatArray { values: vs.clone() }),
+            V::LangText { text, lang } => proto::value::Kind::LangText(proto::LangText {
+                text: text.clone(),
+                lang: lang.clone(),
+            }),
+            V::Typed { lexical, datatype } => proto::value::Kind::Typed(proto::TypedLiteral {
+                lexical: lexical.clone(),
+                datatype: datatype.clone(),
+            }),
             V::Null => return proto::Value { kind: None },
         }),
     }
@@ -2925,35 +3062,25 @@ fn pg_value_to_proto(v: &polargraph_core::value::Value) -> proto::Value {
 /// Convert a batch of [`polargraph_sparql::ImportedTriple`] objects to `proto::Triple` objects.
 ///
 /// Each Relation becomes one `proto::Triple::Relation`; each Literal becomes a Property.
-fn imported_triples_to_proto(triples: &[polargraph_sparql::ImportedTriple]) -> Vec<proto::Triple> {
-    use polargraph_sparql::{bnode_to_node_id, uri_to_node_id, ImportedObject};
+/// Blank nodes are skolemized within `scope`, so the same label in two
+/// imports names two different nodes.
+fn imported_triples_to_proto(
+    triples: &[polargraph_sparql::ImportedTriple],
+    scope: &polargraph_sparql::ImportScope,
+) -> Vec<proto::Triple> {
+    use polargraph_sparql::ImportedObject;
 
     triples
         .iter()
         .map(|t| {
-            let subj_node_id = if t.subject_is_bnode {
-                bnode_to_node_id(&t.subject)
-            } else {
-                uri_to_node_id(&t.subject)
-            };
-            let subject_proto = pg_node_id_to_proto(subj_node_id);
+            let subject_proto = pg_node_id_to_proto(t.subject_node_id(scope));
 
             match &t.object {
-                ImportedObject::Iri(obj_iri) => {
-                    let obj_node_id = uri_to_node_id(obj_iri);
-                    proto::Triple {
-                        kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
-                            subject: Some(subject_proto),
-                            predicate: t.predicate.clone(),
-                            object: Some(pg_node_id_to_proto(obj_node_id)),
-                            vt_start: 0,
-                            vt_end: i64::MAX,
-                            properties: vec![],
-                        })),
-                    }
-                }
-                ImportedObject::BlankNode(bnode) => {
-                    let obj_node_id = bnode_to_node_id(bnode);
+                ImportedObject::Iri(_) | ImportedObject::BlankNode(_) => {
+                    let obj_node_id = t
+                        .object
+                        .node_id(scope)
+                        .expect("IRI and blank-node objects always have a NodeId");
                     proto::Triple {
                         kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
                             subject: Some(subject_proto),
@@ -2974,6 +3101,7 @@ fn imported_triples_to_proto(triples: &[polargraph_sparql::ImportedTriple]) -> V
                             value: Some(proto_val),
                             vt_start: 0,
                             vt_end: i64::MAX,
+                            mode: proto::PropertyWriteMode::Add as i32,
                         })),
                     }
                 }
@@ -2982,19 +3110,64 @@ fn imported_triples_to_proto(triples: &[polargraph_sparql::ImportedTriple]) -> V
         .collect()
 }
 
-/// Insert a batch of proto triples via the gRPC Insert RPC.
+/// Names for `ids` from the IRI dictionary (`ResolveIris`, batched). Display
+/// only: if the lookup fails (e.g. an older server), nodes fall back to
+/// `urn:uuid:` and a warning is logged rather than failing the response.
+async fn resolve_names(
+    client: &mut GrpcClient,
+    ids: Vec<NodeId>,
+    deskolemize: bool,
+) -> polargraph_sparql::IriNames {
+    const BATCH: usize = 10_000;
+    let mut pairs = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(BATCH) {
+        let req = proto::ResolveIrisRequest {
+            nodes: chunk.iter().map(|id| pg_node_id_to_proto(*id)).collect(),
+        };
+        match client.resolve_iris(tonic::Request::new(req)).await {
+            Ok(resp) => pairs.extend(chunk.iter().copied().zip(resp.into_inner().iris)),
+            Err(e) => {
+                tracing::warn!("ResolveIris failed; exporting urn:uuid IRIs: {e}");
+                break;
+            }
+        }
+    }
+    polargraph_sparql::IriNames::from_pairs(pairs, deskolemize)
+}
+
+/// Insert a batch of proto triples via the gRPC Insert RPC, recording `iris`
+/// in the IRI dictionary in the same commit.
 async fn insert_proto_triples(
     client: &mut GrpcClient,
     triples: Vec<proto::Triple>,
+    iris: Vec<String>,
 ) -> Result<usize, tonic::Status> {
     let n = triples.len();
     client
         .insert(tonic::Request::new(proto::InsertRequest {
             triples,
+            iris,
             ..Default::default()
         }))
         .await?;
     Ok(n)
+}
+
+/// Distinct IRIs (including skolem IRIs) named by `triples`, for the IRI
+/// dictionary. `urn:uuid:` IRIs are left out — they carry their ID.
+fn imported_iris(
+    triples: &[polargraph_sparql::ImportedTriple],
+    scope: &polargraph_sparql::ImportScope,
+) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for t in triples {
+        for iri in t.node_iris(scope) {
+            if polargraph_core::term::needs_dictionary(&iri) {
+                seen.insert(iri);
+            }
+        }
+    }
+    seen.into_iter().collect()
 }
 
 // ── POST /import/rdf ──────────────────────────────────────────────────────────
@@ -3004,14 +3177,48 @@ async fn insert_proto_triples(
 //   application/n-triples  → N-Triples
 //   text/turtle             → Turtle
 //   application/ld+json    → JSON-LD
+//
+// Blank nodes are skolemized per import. Pass `?import_id=<id>` to make a
+// re-import idempotent (same id → same blank-node NodeIds); otherwise a fresh
+// UUIDv7 is generated. The id used is returned as `import_id`.
+
+#[derive(Deserialize, Default)]
+struct ImportRdfParams {
+    import_id: Option<String>,
+}
+
+/// An `import_id` becomes a path segment of every skolem IRI, so keep it to
+/// unreserved IRI characters.
+fn valid_import_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+}
 
 async fn handle_import_rdf(
     State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<ImportRdfParams>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    use polargraph_sparql::{parse_jsonld, parse_ntriples, parse_turtle};
+    use polargraph_sparql::{parse_jsonld, parse_ntriples, parse_turtle, ImportScope};
     use std::time::Instant;
+
+    let scope = match params.import_id {
+        Some(id) if !valid_import_id(&id) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "import_id must be 1-128 characters of [A-Za-z0-9._~-]"
+                })),
+            )
+                .into_response()
+        }
+        Some(id) => ImportScope::new(&state.skolem_base, id),
+        None => ImportScope::fresh(&state.skolem_base),
+    };
 
     let content_type = headers
         .get("content-type")
@@ -3081,14 +3288,15 @@ async fn handle_import_rdf(
     };
 
     let total = imported_triples.len();
-    let proto_triples = imported_triples_to_proto(&imported_triples);
 
-    // Insert in batches of 1 000.
+    // Insert in batches of 1 000, each carrying the IRIs it names.
     const BATCH: usize = 1_000;
     let mut imported = 0usize;
     let mut client = state.client.clone();
-    for chunk in proto_triples.chunks(BATCH) {
-        match insert_proto_triples(&mut client, chunk.to_vec()).await {
+    for chunk in imported_triples.chunks(BATCH) {
+        let triples = imported_triples_to_proto(chunk, &scope);
+        let iris = imported_iris(chunk, &scope);
+        match insert_proto_triples(&mut client, triples, iris).await {
             Ok(n) => imported += n,
             Err(e) => return grpc_error(e),
         }
@@ -3099,6 +3307,7 @@ async fn handle_import_rdf(
         "imported": imported,
         "total_parsed": total,
         "duration_ms": duration_ms,
+        "import_id": scope.import_id(),
     }))
     .into_response()
 }
@@ -3122,6 +3331,9 @@ struct ExportJsonLdBody {
     #[serde(default)]
     #[allow(dead_code)]
     view_id: Option<String>,
+    /// Render skolem IRIs as blank nodes (`_:label`).
+    #[serde(default)]
+    deskolemize: bool,
 }
 
 #[derive(Deserialize)]
@@ -3130,12 +3342,16 @@ struct ExportJsonLdParams {
     subject: Option<String>,
     /// Comma-separated predicate IRIs (GET shorthand).
     predicates: Option<String>,
+    /// Render skolem IRIs as blank nodes (`_:label`).
+    #[serde(default)]
+    deskolemize: bool,
 }
 
 async fn export_jsonld_for(
     state: Arc<AppState>,
     subjects: Vec<String>,
     predicates: Vec<String>,
+    deskolemize: bool,
 ) -> Response {
     use polargraph_sparql::{node_id_to_iri, serialize_jsonld, uri_to_node_id, RdfTriple};
 
@@ -3279,6 +3495,14 @@ async fn export_jsonld_for(
         }
     }
 
+    let names = resolve_names(
+        &mut state.client.clone(),
+        polargraph_sparql::node_ids_in_triples(&all_rdf),
+        deskolemize,
+    )
+    .await;
+    names.rewrite_triples(&mut all_rdf);
+
     let body = serialize_jsonld(&all_rdf);
     axum::response::Response::builder()
         .status(StatusCode::OK)
@@ -3296,14 +3520,14 @@ async fn handle_export_jsonld_get(
         .predicates
         .map(|s| s.split(',').map(str::trim).map(str::to_string).collect())
         .unwrap_or_default();
-    export_jsonld_for(state, subjects, predicates).await
+    export_jsonld_for(state, subjects, predicates, params.deskolemize).await
 }
 
 async fn handle_export_jsonld_post(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ExportJsonLdBody>,
 ) -> Response {
-    export_jsonld_for(state, body.subjects, body.predicates).await
+    export_jsonld_for(state, body.subjects, body.predicates, body.deskolemize).await
 }
 
 // ── GET /export/subgraph ──────────────────────────────────────────────────────
@@ -3316,10 +3540,13 @@ async fn handle_export_jsonld_post(
 
 #[derive(Deserialize)]
 struct ExportSubgraphParams {
-    /// Comma-separated UUID strings identifying the subjects to export.
+    /// Comma-separated subjects to export: UUIDs or IRIs.
     subjects: Option<String>,
     /// Comma-separated predicate IRIs to include (if omitted: all, unknown).
     predicates: Option<String>,
+    /// Render skolem IRIs as blank nodes (`_:label`).
+    #[serde(default)]
+    deskolemize: bool,
 }
 
 async fn handle_export_subgraph(
@@ -3335,7 +3562,10 @@ async fn handle_export_subgraph(
         .unwrap_or("")
         .split(',')
         .filter(|s| !s.trim().is_empty())
-        .filter_map(|s| uuid::Uuid::parse_str(s.trim()).ok())
+        .map(|s| {
+            let s = s.trim();
+            uuid::Uuid::parse_str(s).unwrap_or_else(|_| iri_to_node_id(s).0)
+        })
         .collect();
 
     let predicates: Vec<String> = params
@@ -3480,6 +3710,14 @@ async fn handle_export_subgraph(
         }
     }
 
+    let names = resolve_names(
+        &mut state.client.clone(),
+        polargraph_sparql::node_ids_in_triples(&all_rdf),
+        params.deskolemize,
+    )
+    .await;
+    names.rewrite_triples(&mut all_rdf);
+
     let accept = headers
         .get("accept")
         .and_then(|v| v.to_str().ok())
@@ -3520,10 +3758,11 @@ async fn handle_export_subgraph(
 
 async fn handle_import_subgraph(
     state: State<Arc<AppState>>,
+    params: QueryParams<ImportRdfParams>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    handle_import_rdf(state, headers, body).await
+    handle_import_rdf(state, params, headers, body).await
 }
 
 // ── GET /schema/rdf ───────────────────────────────────────────────────────────
@@ -3733,7 +3972,10 @@ async fn main() -> anyhow::Result<()> {
         },
     );
 
-    let state = Arc::new(AppState { client });
+    let state = Arc::new(AppState {
+        client,
+        skolem_base: args.skolem_base.clone(),
+    });
 
     let app = Router::new()
         .route("/query", post(handle_query))
@@ -3898,5 +4140,67 @@ mod tests {
             req.metadata().get("x-polargraph-user-id").is_none(),
             "no metadata header should be set for empty user_id"
         );
+    }
+
+    #[test]
+    fn json_ld_value_objects_round_trip_through_proto() {
+        let lang = serde_json::json!({ "@value": "Acme", "@language": "en" });
+        let typed = serde_json::json!({
+            "@value": "2026-09-29",
+            "@type": "http://www.w3.org/2001/XMLSchema#date"
+        });
+        for v in [lang, typed] {
+            assert_eq!(proto_value_to_json(&json_to_proto_value(&v)), v);
+        }
+    }
+
+    #[test]
+    fn import_id_validation() {
+        assert!(valid_import_id("crm-2026-09-29.v1"));
+        assert!(valid_import_id(&Uuid::now_v7().to_string()));
+        assert!(!valid_import_id(""));
+        assert!(!valid_import_id("a/b"));
+        assert!(!valid_import_id("has space"));
+        assert!(!valid_import_id(&"x".repeat(129)));
+    }
+
+    #[test]
+    fn imported_iris_are_distinct_hashed_iris_including_skolems() {
+        use polargraph_sparql::{parse_ntriples, ImportScope};
+
+        let doc = concat!(
+            "<http://ex/a> <http://ex/p> _:b0 .\n",
+            "<http://ex/a> <http://ex/name> \"A\" .\n",
+            "<http://ex/a> <http://ex/p> <urn:uuid:0191c1f6-2b1e-7c3a-9f00-000000000001> .\n",
+        );
+        let parsed = parse_ntriples(doc.as_bytes()).unwrap();
+        let iris = imported_iris(&parsed, &ImportScope::new("https://kb.example.com", "i1"));
+        assert_eq!(
+            iris,
+            vec![
+                "http://ex/a".to_string(),
+                "https://kb.example.com/.well-known/genid/i1/b0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rdf_import_skolemizes_bnodes_per_scope() {
+        use polargraph_sparql::{parse_ntriples, ImportScope};
+
+        let doc = b"_:b0 <http://schema.org/knows> _:b1 .\n";
+        let parsed = parse_ntriples(doc).unwrap();
+        let rel = |scope: &ImportScope| match &imported_triples_to_proto(&parsed, scope)[0].kind {
+            Some(proto::triple::Kind::Relation(r)) => (r.subject.clone(), r.object.clone()),
+            other => panic!("expected relation, got {other:?}"),
+        };
+
+        let a = rel(&ImportScope::new("https://kb.example.com", "one"));
+        let b = rel(&ImportScope::new("https://kb.example.com", "two"));
+        let a_again = rel(&ImportScope::new("https://kb.example.com", "one"));
+
+        assert_ne!(a.0, b.0, "_:b0 must differ across imports");
+        assert_ne!(a.1, b.1, "_:b1 must differ across imports");
+        assert_eq!(a, a_again, "same import_id is idempotent");
     }
 }

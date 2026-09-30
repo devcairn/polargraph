@@ -9,11 +9,14 @@ structural changes.
 ## What this is
 
 PolarGraph is a purpose-built, Rust-based graph database engine. The core
-data model is a **triple store** (subject → predicate → object) with:
+data model is a **quad store** (subject → predicate → object, in a named
+graph) with:
 
 - **Bitemporal versioning** on every fact (valid time + transaction time)
-- A **hexastore index** (6 RocksDB column families + ancillary CFs) for O(log n) lookups on
-  any (S, P, O) bind pattern
+- A **quad index** (8 RocksDB column families + 9 ancillary CFs, storage
+  format v3) for O(log n) lookups on any (S, P, O, G) bind pattern
+- **Named graphs**, **multi-valued properties** and a **value index**
+  (property keys carry the value's content hash)
 - **Optimistic MVCC** for snapshot-isolated reads and conflict-detected writes
 - A **View** system for projecting subsets of the graph with label overrides
 - A **Datalog query layer** (conjunctive + recursive rules) and **gRPC server** with HTTP/JSON REST gateway
@@ -28,7 +31,8 @@ polargraph/
 ├── CLAUDE.md                   # this file
 ├── docs/
 │   ├── architecture.md         # design narrative
-│   └── api-reference.md        # public API surface
+│   ├── api-reference.md        # public API surface
+│   └── contxtbroker-platform-plan.md  # knowledge-platform roadmap; §0.1–0.2 = engine decisions + sequencing
 ├── clients/
 │   ├── python/                 # Python SDK (sync + async, grpc)
 │   ├── go/                     # Go SDK (functional options, full RPC surface)
@@ -80,6 +84,9 @@ cargo build -p polargraph-import
 # Build the REST gateway binary
 cargo build -p polargraph-rest
 
+# Migrate a stopped server's data dir from storage format v2 to v3
+polargraphd migrate --data-dir /data --backup-dir /backups   # or --no-backup
+
 # Check without linking
 cargo check
 
@@ -105,32 +112,36 @@ Dependency-free. No I/O, no async. Contains every shared type.
 | `id` | `NodeId`, `EdgeId` — UUID v7 wrappers |
 | `temporal` | `Timestamp` (i64 µs), `BiTemporalRange` |
 | `triple` | `Triple` (enum), `Node`, `Edge`, `Predicate` |
-| `value` | `Value` enum: Null, Bool, Int, Float, Text, Blob, Vector |
+| `value` | `Value` enum: Null, Bool, Int, Float, Text, Blob, Vector, LangText, Typed; `as_text()` |
 | `view` | `View`, `ViewId`, `NodeFilter`, `EdgePresentation` |
 | `schema` | `FieldKind`, `FieldDef`, `NodeTypeDef`, `EdgeTypeDef`, `VectorSpaceDef` |
+| `skolem` | `ImportScope` — per-import blank-node skolemization (`{base}/.well-known/genid/{import_id}/{label}`) |
+| `term` | `iri_to_node_id`, `fallback_iri`, `edge_id_for`, `literal_to_value` — the one IRI ↔ NodeId and RDF literal ↔ Value mapping every path uses |
 
 **Do not add I/O or async imports here.**
 
 ### `polargraph-storage`
 
-RocksDB-backed persistence. Owns the hexastore layout and MVCC layer.
+RocksDB-backed persistence. Owns the quad-index layout (storage format v3,
+`docs/design/v3-key-layout.md`) and MVCC layer.
 
 | Module | Contents |
 |--------|----------|
-| `store` | `TripleStore` — main handle, insert, scan, predicate interning, named HNSW spaces; `StoreMode` (`Primary`/`Secondary`), `open_secondary`, `try_catch_up_with_primary` |
-| `mvcc` | `TimestampOracle`, `Transaction`, `Snapshot`, `ConflictError` |
-| `keys` | Fixed-width key encoding/decoding for all hexastore CFs |
-| `codec` | Value serialization (discriminant + temporal + payload) |
-| `cf` | Column family name constants (SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, DRV, EPA, EPO) |
+| `store` | `TripleStore` — main handle, scans (union and per-graph), `stage_writes` (the one write-encoding path), predicate and graph interning, IRI dictionary, out-of-line values, named HNSW spaces; `StoreMode` (`Primary`/`Replica`), `open_as_replica`, `apply_replicated_batch` |
+| `mvcc` | `TimestampOracle`, `Transaction` (`insert`, `insert_in`, `bind_iri`), `WriteMode` (`Auto`/`Replace`/`Add`), `Snapshot`, `ConflictError` |
+| `keys` | `Order` (8 quad orders: encode/decode/prefix), `QuadKey`, `KeyPrefix`, `value_object`, ancillary keys; `keys::v2` read-only legacy layouts |
+| `codec` | Value serialization (discriminant + temporal + payload); `PropertyRef` and blob payloads; `valid_time`, `with_vt_end` |
+| `cf` | Column family names (`spog sopg psog posg ospg opsg gspo gpos meta hnsw trig epag epog peag drvg iri blob`); `cf::v2` legacy names |
+| `migrate_v3` | `migrate`, `open_for_migration`, `MigrationReport` — offline v2 → v3 storage migration |
 | `error` | `StorageError` |
 | `hnsw` | `HnswIndex` — pure-Rust HNSW, named-space key helpers, serialize/deserialize, mmap storage |
 | `registry` | `NodeTypeRegistry`, `EdgeTypeRegistry`, `ValidationError` |
-| `sst_import` | `SstImporter`, `ImportStats` — bulk triple import via RocksDB SST file ingestion |
-| `compaction` | `CompactionManager`, `RetentionStats` — bitemporal retention scan + RocksDB compaction |
+| `sst_import` | `SstImporter`, `ImportStats` — bulk import (Add-only, default graph) via SST ingestion into all 8 orders |
+| `compaction` | `CompactionManager`, `RetentionStats` — history-pruning retention over the 8 orders, RocksDB compaction, blob sweep |
 | `backup` | `BackupManager` — incremental RocksDB `BackupEngine` wrapper |
 | `migrations` | `MigrationRunner`, `Migration`, `AppliedMigration` — versioned schema migrations |
 | `wal_stream` | `WalStreamer`, `WalEntry` — WAL streaming for replication |
-| `owl_rl` | `materialize()` — OWL 2 RL forward-chaining engine, 12 rules, DRV CF |
+| `owl_rl` | `materialize()` — OWL 2 RL forward-chaining engine, 12 rules, `drvg` CF |
 
 `TripleStore` is `Clone` (Arc-backed). Prefer passing it by clone rather
 than wrapping it again in Arc.
@@ -197,12 +208,17 @@ See `polargraph.example.toml` in the repo root for a fully-commented example.
 | `--replica-of URL` | `POLARGRAPH_REPLICA_OF` | *(none)* | gRPC address of primary; enables WAL streaming replica mode |
 | `--replica-tls-ca PATH` | `POLARGRAPH_REPLICA_TLS_CA` | *(none)* | CA cert for verifying the primary's TLS certificate (replica mode only) |
 | `--rate-limit-rps N` | `POLARGRAPH_RATE_LIMIT_RPS` | `0` | Max requests/sec per client IP (token bucket); 0 = disabled |
-| `--retention-tx-age-secs N` | `POLARGRAPH_RETENTION_TX_AGE_SECS` | *(none)* | Delete triples older than N seconds (transaction time); runs once at startup |
-| `--retention-vt-lookback-secs N` | `POLARGRAPH_RETENTION_VT_LOOKBACK_SECS` | *(none)* | Also delete triples whose valid-time end is more than N seconds in the past |
+| `--retention-tx-age-secs N` | `POLARGRAPH_RETENTION_TX_AGE_SECS` | *(none)* | Delete versions superseded more than N seconds ago (current values are kept); runs once at startup |
+| `--retention-vt-lookback-secs N` | `POLARGRAPH_RETENTION_VT_LOOKBACK_SECS` | *(none)* | Also delete triples whose versions all ended (valid time) more than N seconds ago |
 | `--retention-schedule` | `POLARGRAPH_RETENTION_SCHEDULE` | `false` | Enable background periodic retention task |
 | `--default-vector-ef N` | `POLARGRAPH_DEFAULT_VECTOR_EF` | `50` | Default HNSW exploration factor for vector searches |
 | `--query-cache-size N` | `POLARGRAPH_QUERY_CACHE_SIZE` | `1000` | Max Cypher query plans to cache |
 | `--auto-materialize` | `POLARGRAPH_AUTO_MATERIALIZE` | `false` | Run OWL 2 RL materialization at startup |
+| `--inline-value-max-bytes N` | `POLARGRAPH_INLINE_VALUE_MAX_BYTES` | `256` | Property payloads above this are stored once in the `blob` CF |
+
+Subcommand: `polargraphd migrate [--backup-dir PATH | --no-backup]` — offline
+storage-format migration (v2 → v3). `--data-dir`, `--backup-dir`, `--config`
+and `--log-level` are global flags.
 
 ### `polargraph-import`
 
@@ -215,6 +231,9 @@ into RocksDB via SST file ingestion — no server required.
 | `--input FILE` | *(required)* | N-Triples input file |
 | `--batch-size N` | `100000` | Triples per SST import batch |
 | `--temp-dir PATH` | `<data-dir>/sst_tmp` | Temporary SST file directory |
+| `--format FORMAT` | `ntriples` | `ntriples`, `turtle`, or `jsonld` |
+| `--import-id ID` | *(fresh UUIDv7)* | Blank-node skolemization scope; reuse for idempotent re-import |
+| `--skolem-base IRI` | `https://polargraph.invalid` | Base of skolem IRIs (`POLARGRAPH_SKOLEM_BASE`) |
 
 **Must be run while `polargraphd` is stopped** — SST ingestion requires
 exclusive DB access.
@@ -231,6 +250,7 @@ the generated proto client code via `tonic`.
 | `--listen ADDR` | `POLARGRAPH_REST_LISTEN` | `0.0.0.0:8000` | HTTP listen address |
 | `--api-key KEY` | `POLARGRAPH_REST_API_KEY` | *(none)* | Forwarded as `Authorization: Bearer` to upstream |
 | `--tls-ca PATH` | `POLARGRAPH_REST_TLS_CA` | *(none)* | PEM CA cert for upstream TLS verification |
+| `--skolem-base IRI` | `POLARGRAPH_REST_SKOLEM_BASE` | `https://polargraph.invalid` | Base of blank-node skolem IRIs on `/import/rdf` |
 
 Endpoints include: `POST /query`, `POST /query/stream`, `POST /insert`, `GET /triples`,
 `POST /vector/search`, `GET /health`, `POST /explain`, `POST /cypher`, `POST /cypher/write`,
@@ -253,7 +273,7 @@ used exclusively by `polargraph-rest`.
 | `response` | `serialize_json()`, `serialize_csv()`, `node_bindings_to_sparql()` — SPARQL results serializers |
 | `serialize` | `serialize_ntriples()`, `serialize_turtle()`, `node_id_to_iri()` — RDF output for CONSTRUCT/DESCRIBE; Turtle-star / N-Triples-star serialization for SPARQL-star results |
 | `protocol` | `negotiate_format()`, `extract_query_from_form()` — HTTP content negotiation and form-encoded body parsing |
-| `rdf_import` | `parse_ntriples()`, `parse_turtle()`, `parse_jsonld()` — multi-format RDF parsing (rio_api 0.8); `uri_to_node_id`, `bnode_to_node_id`, `edge_id_for` — deterministic IRI → NodeId/EdgeId mapping; `serialize_jsonld`, `serialize_schema_rdf`, `parse_schema_rdf` |
+| `rdf_import` | `parse_ntriples()`, `parse_turtle()`, `parse_jsonld()` — multi-format RDF parsing (rio_api 0.8); `uri_to_node_id`, `edge_id_for` — deterministic IRI → NodeId/EdgeId mapping; blank nodes via `ImportedTriple::subject_node_id(&ImportScope)` / `ImportedObject::node_id`; `serialize_jsonld`, `serialize_schema_rdf`, `parse_schema_rdf` |
 
 ---
 
@@ -261,46 +281,45 @@ used exclusively by `polargraph-rest`.
 
 ### Triple model
 
-Everything is a `Triple`. There are two variants:
+Everything is a `Triple` in a graph (`Quad` = triple + `GraphId`; graph 0 is
+the default graph). Variants:
 
 - **Relation**: subject → predicate → object (both `NodeId`)
-- **Property**: subject → predicate → value (scalar `Value`)
+- **Property**: subject → predicate → value (scalar `Value`, incl. `LangText`
+  and `Typed` RDF literals)
+- **EdgeProperty / EdgeRelation**: RDF-star annotations keyed by `EdgeId`
 
-Property triples use a 16-byte sentinel (`0xFF × 16`) in the object slot of
-every index key, so both variants share the same index structure.
+A property's object slot in every index key is its value's content hash
+(`keys::value_object`), so a subject can hold several values per predicate
+and `posg` doubles as a value index. Relation vs property is decided by the
+value discriminant byte.
 
 ### Column families
 
-PolarGraph uses 12 RocksDB column families. Every triple is written atomically
-to all 6 hexastore CFs via a single `WriteBatch`; the others are written in the
-same batch or separately as appropriate:
+Storage format v3 (`__storage__/format = 3` in META) uses 17 column
+families. Every quad version is written atomically to all 8 quad orders via
+one `WriteBatch` (`TripleStore::stage_writes`):
 
 | CF | Purpose |
 |----|---------|
-| SPO, SOP, PSO, POS, OSP, OPS | Hexastore triple index (6 CFs, see below) |
-| META | Predicate intern table, timestamp oracle, migration version |
-| HNSW | HNSW vector index nodes and entry points (per named space) |
-| TRI | Trigram full-text index (key: `[trigram:3][pred_id:4][subject:16]`) |
-| DRV | OWL 2 RL derived facts (same SPO key layout as hexastore, separate CF) |
-| EPA | Edge property annotations (key: `[edge_id:16][pred_id:4][tt:8]`) |
-| EPO | Edge relation annotations (key: `[edge_id:16][pred_id:4][obj_id:16][tt:8]`) |
+| `spog sopg psog posg ospg opsg` | Quad index, graph before `tt` (48-byte keys) |
+| `gspo gpos` | Quad index, graph-leading (per-graph scans) |
+| `meta` | Predicate + graph intern tables, timestamp oracle, storage format, schema-migration version |
+| `hnsw` | HNSW vector index nodes and entry points (per named space) |
+| `trig` | Trigram index `[trigram:3][pred:4][g:4][subject:16]` (text ≤ 512 bytes) |
+| `drvg` | OWL 2 RL derived facts (`spog` layout) |
+| `epag` / `peag` | Edge property annotations `[edge:16][pred:4][g:4][tt:8]` / predicate-first |
+| `epog` | Edge relation annotations `[edge:16][pred:4][obj:16][g:4][tt:8]` |
+| `iri` | IRI dictionary `[node_id:16]` → IRI (`Transaction::bind_iri`, `iri_of`, `iris_of`) |
+| `blob` | Out-of-line values `[value_hash:16]` → payload (> `inline_value_max_bytes`, default 256) |
 
-### Hexastore (6-CF sub-index)
+Key layout: `[slot][slot][slot][slot][tt(8)]` — always 48 bytes; the first
+40 identify the quad and `tt` is last, so versions sort oldest-first. The
+graph is at bytes 36–40 in the six non-graph-leading orders. `keys::Order`
+handles encoding, decoding and scan prefixes for every order.
 
-Each CF supports a different bind pattern:
-
-| CF | Prefix scan gives you |
-|----|-----------------------|
-| SPO | all predicates/objects for a given subject |
-| SOP | all predicates between a given (subject, object) pair |
-| PSO | all subjects/objects for a given predicate |
-| POS | all subjects that have a given (predicate, object) |
-| OSP | all subjects/predicates that point to a given object |
-| OPS | all subjects for a given (object, predicate) pair |
-
-Key layout: `[slot_a][slot_b][slot_c][tt(8)]` — always 44 bytes. The `tt`
-(transaction time) is the last 8 bytes so keys sort oldest-first within a
-given (S,P,O) tuple, enabling efficient MVCC range queries.
+Stores in the old v2 layout are refused (`StorageError::NeedsMigration`)
+until migrated offline with `polargraphd migrate`.
 
 ### Bitemporal model
 
@@ -324,11 +343,13 @@ Predicates are stored as variable-length strings externally but interned to
 Optimistic concurrency:
 
 1. `begin()` snapshots `read_ts` from the `TimestampOracle`.
-2. Reads filter to `tt <= read_ts`.
-3. Writes buffer in memory.
-4. `commit()` acquires the commit mutex, increments the oracle, checks for
-   write-write conflicts (any (S,P,O) with `read_ts < tt <= commit_ts`),
-   then flushes with the new `commit_ts`.
+2. Reads filter to `tt <= read_ts` and, unless a valid time is given, to
+   facts valid **now** (closed / replaced values are hidden).
+3. Writes buffer in memory with a graph and a `WriteMode`.
+4. `commit()` acquires the commit mutex, advances the oracle, checks for
+   write-write conflicts (the exact quad, or `[g][s][p]` for `Replace`, with
+   `read_ts < tt <= commit_ts`), then `stage_writes` encodes everything —
+   including closing versions for `Replace` — and flushes with `commit_ts`.
 
 The oracle counter persists to the META CF so restarts don't reuse timestamps.
 
@@ -356,6 +377,9 @@ sort order and is cluster-safe without a central sequence generator.
 ---
 
 ## Current state (phase 2 in progress)
+
+Entries describe each feature as it was built; storage key formats in older
+entries were superseded by storage format v3 (last entries below).
 
 - [x] Core type system (`polargraph-core`)
 - [x] Hexastore storage layer with predicate interning
@@ -404,7 +428,7 @@ sort order and is cluster-safe without a central sequence generator.
 - [x] Cypher aggregations — `polargraph-query::aggregation` module; `AggregationPlan` + `apply_aggregations()`; COUNT(*), COUNT(var), COLLECT(); SUM(var.prop), AVG(var.prop), MIN(var.prop), MAX(var.prop) (numeric property aggregations via snapshot lookup); ORDER BY with multi-key, ASC/DESC; SKIP N; WITH clause pipeline for multi-step Cypher; integrated into Cypher compiler output
 - [x] Variable-length path syntax — `[r*1..n]` and `[r*n]` in Cypher MATCH patterns compile to bounded BFS via `reachable_from_hops` (max_hops field on `VarPattern`); `[r*]` (no bound) still uses unlimited Datalog TC rules; unbound subject automatically enumerates all starting nodes via predicate scan
 - [x] Cypher write operations — `CypherWrite` gRPC RPC; `WriteOp` enum, `CompiledWrite`, `parse_write()`, `execute_write_ops()` in `polargraph-query::cypher`; supports CREATE node/relation, MERGE, SET property, DELETE; `CypherWriteRequest/Response` proto messages; REST `POST /cypher/write`; returns created node IDs and triple counts
-- [x] Full-text trigram search — `TRI` column family (key: `[trigram:3][pred_id:4][subject_id:16]`); `extract_trigrams()`, `insert_trigrams()`, `text_search()` on `TripleStore`; integrated with Cypher WHERE CONTAINS / STARTS WITH / =~ so text predicates hit the `TRI` CF instead of doing full scans
+- [x] Full-text trigram search — `TRI` column family (key: `[trigram:3][pred_id:4][subject_id:16]`); `extract_trigrams()`, `insert_trigrams()`, `text_search()` on `TripleStore`; only values ≤ `TRIGRAM_MAX_TEXT_BYTES` (512) are indexed; `Snapshot::text_search` reads it — Cypher CONTAINS / STARTS WITH / =~ currently post-filter bindings and do not use `TRI`
 - [x] Schema-aware query optimization — `evaluate_with_registry()` in `polargraph-query::eval`; accepts `&EdgeTypeRegistry`; uses domain/range type hints to prune impossible join branches before evaluation; `SchemaHints` struct wraps registry lookups; no change to the triple wire format
 - [x] Wire transactions — `BeginTransaction` / `CommitTransaction` / `RollbackTransaction` gRPC RPCs; optional `tx_id: string` field on `InsertRequest`, `QueryRequest`, `CypherWriteRequest`; `open_txns: Arc<DashMap<String, Arc<Mutex<Transaction>>>>` in `PolarGraphServer`; UUID v4 token assigned at `BeginTransaction`; idle-TTL cleanup task evicts transactions open for >5 min; REST `POST /tx/begin`, `POST /tx/commit`, `POST /tx/rollback`
 - [x] Server-streaming queries — `QueryStream` and `CypherQueryStream` server-streaming gRPC RPCs; results streamed in chunks of `STREAM_CHUNK_SIZE = 500` bindings; REST `POST /query/stream` and `POST /cypher/stream` return NDJSON (newline-delimited JSON); useful for large result sets without holding a full in-memory buffer
@@ -432,6 +456,14 @@ sort order and is cluster-safe without a central sequence generator.
 
 ---
 
+- [x] Retention prunes history, never live state — a version is deleted only when shadowed by a newer same-`vt_start` version older than the cutoff; `vt_lookback` removes a quad only once every version is closed (no resurrection); `TripleStore::prune_cf_groups`
+- [x] Blank-node skolemization — `polargraph-core::skolem::ImportScope` (`{base}/.well-known/genid/{import_id}/{label}`); REST `?import_id=` + `--skolem-base`; `polargraph-import --import-id --skolem-base`; JSON-LD `_:` ids
+- [x] Trigram size cap — values over `TRIGRAM_MAX_TEXT_BYTES` (512) aren't indexed; Cypher text predicates post-filter and don't read `trig`
+- [x] Term identity — `polargraph-core::term` (`iri_to_node_id`, `fallback_iri`, `edge_id_for`, `literal_to_value`) used by every path; SPARQL IRIs/literals never widen to wildcards (`Term::Literal`); SPARQL DELETE closes exactly the named triple (`DeleteTriples.object_id` / `.value`); SPARQL Update reports `failed`
+- [x] IRI dictionary — `iri` CF; `Transaction::bind_iri`, `iri_of`/`iris_of`; `InsertRequest.iris`; `ResolveIris` RPC; exports render stored IRIs via `polargraph_sparql::IriNames`, `?deskolemize=true`
+- [x] Lossless literals — `Value::LangText`, `Value::Typed`, `Value::as_text()`; proto `Value.lang_text` / `.typed`; REST JSON-LD value objects
+- [x] Storage format v3 — 8 quad orders with graph slot (`keys::Order`), value-hashed property keys + value index, graph interning (`intern_graph`), `WriteMode` Auto/Replace/Add (`InsertRequest.graph`, `PropertyTriple.mode`), out-of-line values (`blob` CF, 17-byte `PropertyRef`, retention sweep), reads default to "valid now", offline `polargraphd migrate` with verification; see `docs/design/v3-key-layout.md` (§10 as built, benchmarks)
+
 ## Adding a new predicate
 
 Predicates are interned automatically on first `insert()` — no schema
@@ -441,7 +473,12 @@ migration needed. Just use the string you want in `Triple::Relation` or
 ## Adding a new `Value` variant
 
 1. Add the variant to `polargraph_core::value::Value`.
-2. Update the `serde` representation if needed (it uses tagged JSON).
-3. `codec::encode_property` / `decode_value` will pick up the new variant
-   automatically via `serde_json`.
-4. Add a round-trip test in `polargraph_storage::codec::tests`.
+2. Give it a **new, never-reused tag** in `Value::canonical_bytes` — the
+   content hash is part of every property key, so changing an existing
+   encoding invalidates stored data.
+3. `codec::encode_property` / `decode_value` pick up the new variant
+   automatically via `serde_json` (vectors use a binary codec).
+4. Map it in `polargraph-server::convert` (proto `Value`), the REST JSON
+   conversions, `polargraph-sparql::serialize::value_to_nt_literal`, and
+   `term::literal_to_value` if it is an RDF literal form.
+5. Add a round-trip test in `polargraph_storage::codec::tests`.

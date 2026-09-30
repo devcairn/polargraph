@@ -4,8 +4,11 @@
 //! on it. Keep it that way.
 
 pub mod id;
+pub mod quad;
 pub mod schema;
+pub mod skolem;
 pub mod temporal;
+pub mod term;
 pub mod triple;
 pub mod value;
 pub mod view;
@@ -13,7 +16,8 @@ pub mod view;
 #[cfg(test)]
 mod tests;
 
-pub use id::NodeId;
+pub use id::{GraphId, NodeId};
+pub use quad::Quad;
 pub use schema::{EdgeTypeDef, FieldDef, FieldKind, NodeTypeDef, StorageMode, VectorSpaceDef};
 pub use temporal::Timestamp;
 pub use triple::{Edge, Node, Predicate, Triple};

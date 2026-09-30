@@ -28,6 +28,10 @@ pub fn value_to_nt_literal(val: &Value) -> String {
             )
         }
         Value::Null => "\"\"^^<http://www.w3.org/2001/XMLSchema#string>".to_string(),
+        Value::LangText { text, lang } => format!("\"{}\"@{}", nt_escape(text), lang),
+        Value::Typed { lexical, datatype } => {
+            format!("\"{}\"^^<{}>", nt_escape(lexical), datatype)
+        }
     }
 }
 
@@ -302,6 +306,10 @@ pub fn serialize_jsonld(triples: &[RdfTriple]) -> String {
 /// - `"lit"^^<type>` → `{ "@value": lit, "@type": "xsd:…" }`
 /// - `"lit"` → `{ "@value": lit, "@type": "xsd:string" }`
 fn nt_object_to_jsonld(obj: &str) -> serde_json::Value {
+    if obj.starts_with("_:") {
+        // Blank node
+        return serde_json::json!({ "@id": obj });
+    }
     if obj.starts_with('<') {
         // IRI
         let iri = strip_brackets(obj);
@@ -701,6 +709,23 @@ mod tests {
         let iri = node_id_to_iri(&id);
         assert!(iri.starts_with("<urn:uuid:"));
         assert!(iri.ends_with('>'));
+    }
+
+    #[test]
+    fn value_lang_and_typed_literals() {
+        let lang = Value::LangText {
+            text: "say \"hi\"".into(),
+            lang: "en".into(),
+        };
+        assert_eq!(value_to_nt_literal(&lang), r#""say \"hi\""@en"#);
+        let typed = Value::Typed {
+            lexical: "2026-09-29".into(),
+            datatype: "http://www.w3.org/2001/XMLSchema#date".into(),
+        };
+        assert_eq!(
+            value_to_nt_literal(&typed),
+            r#""2026-09-29"^^<http://www.w3.org/2001/XMLSchema#date>"#
+        );
     }
 
     #[test]

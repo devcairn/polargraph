@@ -1,44 +1,66 @@
-//! Column family names and helpers.
+//! Column family names (storage format v3, see `docs/design/v3-key-layout.md`).
 
-/// The six triple-index column families.
-pub const SPO: &str = "spo";
-pub const SOP: &str = "sop";
-pub const PSO: &str = "pso";
-pub const POS: &str = "pos";
-pub const OSP: &str = "osp";
-pub const OPS: &str = "ops";
+/// The eight quad-index column families. Key: 48 bytes, see [`crate::keys::Order`].
+pub const SPOG: &str = "spog";
+pub const SOPG: &str = "sopg";
+pub const PSOG: &str = "psog";
+pub const POSG: &str = "posg";
+pub const OSPG: &str = "ospg";
+pub const OPSG: &str = "opsg";
+pub const GSPO: &str = "gspo";
+pub const GPOS: &str = "gpos";
 
-/// A metadata CF for predicate interning and schema info.
+/// Predicate / graph intern tables, timestamp oracle, format and migration versions.
 pub const META: &str = "meta";
 
 /// HNSW vector index — one entry per node, plus a `__ep` entry-point record.
 pub const HNSW: &str = "hnsw";
 
-/// Full-text / trigram inverted index.
-/// Key layout: [trigram(3)][pred_id LE(4)][subject(16)] = 23 bytes, value empty.
-pub const TRI: &str = "tri";
+/// Trigram full-text index.
+/// Key: `[trigram(3)][pred_id BE(4)][g BE(4)][subject(16)]` = 27 bytes, value empty.
+pub const TRI: &str = "trig";
 
-/// RDF-star edge-property annotations (scalar values keyed by edge).
-/// Key layout: [edge_id(16)][pred_id BE(4)][tt BE(8)] = 28 bytes.
-/// Value: same codec as Property triple (DISC_PROPERTY + temporal + json_value).
-pub const EPA: &str = "epa";
+/// RDF-star edge-property annotations.
+/// Key: `[edge_id(16)][pred_id(4)][g(4)][tt(8)]` = 32 bytes. Value: Property codec.
+pub const EPA: &str = "epag";
 
-/// RDF-star edge-relation annotations (node references keyed by edge).
-/// Key layout: [edge_id(16)][pred_id BE(4)][obj_id(16)][tt BE(8)] = 44 bytes.
-/// Value: [vt_start BE(8)][vt_end BE(8)] = 16 bytes.
-pub const EPO: &str = "epo";
+/// RDF-star edge-relation annotations.
+/// Key: `[edge_id(16)][pred_id(4)][obj_id(16)][g(4)][tt(8)]` = 48 bytes.
+/// Value: `[vt_start BE(8)][vt_end BE(8)]`.
+pub const EPO: &str = "epog";
 
-/// Predicate-first secondary index for edge property annotations.
-/// Key layout: [pred_id BE(4)][edge_id(16)][tt BE(8)] = 28 bytes.
-/// Value: same bytes as the corresponding EPA entry.
-pub const PEA: &str = "pea";
+/// Predicate-first index over EPA.
+/// Key: `[pred_id(4)][edge_id(16)][g(4)][tt(8)]` = 32 bytes. Value: same as EPA.
+pub const PEA: &str = "peag";
 
-/// Derived triple store for OWL 2 RL materialized facts.
-/// Key layout: same as SPO — [subject(16)][pred_id BE(4)][object(16)][tt BE(8)] = 44 bytes.
-/// Value: same codec as SPO relation entries.
-/// Derived triples are kept separate from base data and can be wiped and rebuilt cleanly.
-pub const DRV: &str = "drv";
+/// OWL 2 RL derived facts, `spog` key layout (g = the derived graph).
+pub const DRV: &str = "drvg";
 
+/// IRI dictionary: `[node_id(16)]` → IRI (UTF-8) for hashed NodeIds.
+pub const IRI: &str = "iri";
+
+/// Out-of-line property values: `[value_hash(16)]` → `[disc][payload]`.
+pub const BLOB: &str = "blob";
+
+/// Every column family of the current format.
 pub const ALL: &[&str] = &[
-    SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, EPA, EPO, PEA, DRV,
+    SPOG, SOPG, PSOG, POSG, OSPG, OPSG, GSPO, GPOS, META, HNSW, TRI, EPA, EPO, PEA, DRV, IRI, BLOB,
 ];
+
+/// Column families of storage format v2, read only by `migrate_v3` and
+/// dropped once a store is migrated.
+pub mod v2 {
+    pub const SPO: &str = "spo";
+    pub const SOP: &str = "sop";
+    pub const PSO: &str = "pso";
+    pub const POS: &str = "pos";
+    pub const OSP: &str = "osp";
+    pub const OPS: &str = "ops";
+    pub const TRI: &str = "tri";
+    pub const EPA: &str = "epa";
+    pub const EPO: &str = "epo";
+    pub const PEA: &str = "pea";
+    pub const DRV: &str = "drv";
+
+    pub const ALL: &[&str] = &[SPO, SOP, PSO, POS, OSP, OPS, TRI, EPA, EPO, PEA, DRV];
+}

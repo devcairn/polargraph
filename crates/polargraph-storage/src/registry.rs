@@ -699,6 +699,8 @@ fn value_kind_name(v: &Value) -> &'static str {
         Value::Text(_) => "text",
         Value::Blob(_) => "blob",
         Value::Vector(_) => "vector",
+        Value::LangText { .. } => "lang_text",
+        Value::Typed { .. } => "typed",
     }
 }
 

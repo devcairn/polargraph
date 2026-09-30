@@ -41,13 +41,14 @@
 # Equivalent to --backup-dir / POLARGRAPH_BACKUP_DIR
 # backup_dir = "/var/lib/polargraph/backups"
 
-# Delete triples whose transaction time is older than this many seconds
-# (run once at startup).  Leave unset to skip startup retention.
+# Transaction-history window: delete versions that were superseded (corrected
+# or deleted) more than this many seconds ago.  The current value of a triple
+# is never deleted, however old.  Runs once at startup; leave unset to skip.
 # Equivalent to --retention-tx-age-secs / POLARGRAPH_RETENTION_TX_AGE_SECS
 # retention_tx_age_secs = 2592000   # 30 days
 
-# Companion window: also expire triples whose valid-time end is this many
-# seconds in the past.  Only meaningful when retention_tx_age_secs is set.
+# Companion window: also remove a triple entirely once all of its versions
+# have a valid-time end this many seconds in the past.  Only meaningful when retention_tx_age_secs is set.
 # Equivalent to --retention-vt-lookback-secs / POLARGRAPH_RETENTION_VT_LOOKBACK_SECS
 # retention_vt_lookback_secs = 604800   # 7 days
 

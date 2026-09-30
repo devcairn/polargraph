@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 
 use crate::{
+    names::IriNames,
     response::{SparqlBindings, SparqlValue},
     translate::{SparqlAggFunc, SparqlAggregateSpec, SparqlFilter, SparqlLiteral},
 };
@@ -89,11 +90,14 @@ fn merge(left: &SparqlBindings, right: &SparqlBindings) -> SparqlBindings {
 /// - One entry per aggregate spec, keyed by its alias.
 ///
 /// If `having` is provided, only groups satisfying the filter are returned.
+///
+/// `names` renders URIs inside `GROUP_CONCAT` results.
 pub fn execute_sparql_aggregations(
     bindings: Vec<SparqlBindings>,
     group_by: &[String],
     aggregates: &[SparqlAggregateSpec],
     having: Option<&SparqlFilter>,
+    names: &IriNames,
 ) -> Vec<SparqlBindings> {
     if aggregates.is_empty() && group_by.is_empty() {
         return bindings;
@@ -138,7 +142,7 @@ pub fn execute_sparql_aggregations(
 
         // Compute each aggregate.
         for spec in aggregates {
-            let agg_val = compute_aggregate(rows, &spec.func);
+            let agg_val = compute_aggregate(rows, &spec.func, names);
             out.insert(spec.alias.clone(), agg_val);
         }
 
@@ -151,7 +155,11 @@ pub fn execute_sparql_aggregations(
     result
 }
 
-fn compute_aggregate(rows: &[SparqlBindings], func: &SparqlAggFunc) -> SparqlValue {
+fn compute_aggregate(
+    rows: &[SparqlBindings],
+    func: &SparqlAggFunc,
+    names: &IriNames,
+) -> SparqlValue {
     match func {
         SparqlAggFunc::CountStar => SparqlValue::LiteralInt(rows.len() as i64),
 
@@ -256,7 +264,7 @@ fn compute_aggregate(rows: &[SparqlBindings], func: &SparqlAggFunc) -> SparqlVal
                 .iter()
                 .filter_map(|r| r.get(var))
                 .map(|v| match v {
-                    SparqlValue::Uri(id) => format!("urn:uuid:{}", id.0),
+                    SparqlValue::Uri(id) => names.iri(id),
                     SparqlValue::Literal(s) => s.clone(),
                     SparqlValue::LiteralInt(n) => n.to_string(),
                     SparqlValue::LiteralFloat(f) => f.to_string(),

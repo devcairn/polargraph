@@ -1,7 +1,7 @@
 //! Translate a parsed `spargebra::Query` into PolarGraph native query types.
 
 use crate::SparqlError;
-use polargraph_core::id::NodeId;
+use polargraph_core::term::iri_to_node_id;
 use polargraph_query::{Rule, Term, VarPattern};
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, GraphPattern, PropertyPathExpression,
@@ -480,27 +480,24 @@ fn translate_triple_pattern(
         subject: subj,
         predicate,
         object: obj,
-        edge_var: None,
-        max_hops: None,
-        predicate_var: None,
+        ..Default::default()
     })
 }
 
 fn translate_term_pattern(tp: &TermPattern) -> Result<Term, SparqlError> {
     match tp {
         TermPattern::Variable(v) => Ok(Term::Var(v.as_str().to_string())),
-        TermPattern::NamedNode(n) => {
-            let iri = n.as_str();
-            if let Some(uuid_str) = iri.strip_prefix("urn:uuid:") {
-                if let Ok(u) = uuid::Uuid::parse_str(uuid_str) {
-                    return Ok(Term::Bound(NodeId(u)));
-                }
-            }
-            // Non-UUID IRIs used as subjects/objects become wildcards.
-            Ok(Term::Any)
-        }
+        // Every IRI names exactly one node (see `polargraph_core::term`); it
+        // must never widen to a wildcard.
+        TermPattern::NamedNode(n) => Ok(Term::Bound(iri_to_node_id(n.as_str()))),
         TermPattern::BlankNode(b) => Ok(Term::Var(format!("_bn_{}", b.as_str()))),
-        TermPattern::Literal(_) => Ok(Term::Any),
+        // A literal matches only property triples with an equal value
+        // (language tag and datatype included).
+        TermPattern::Literal(l) => Ok(Term::Literal(polargraph_core::term::literal_to_value(
+            l.value(),
+            Some(l.datatype().as_str()),
+            l.language(),
+        ))),
         // Nested quoted triples in general position are handled at the BGP level;
         // if we reach here it means a triple appeared somewhere unexpected — treat as wildcard.
         TermPattern::Triple(_) => Ok(Term::Any),
@@ -820,9 +817,7 @@ fn translate_path(
                 subject,
                 predicate: Some(n.as_str().to_string()),
                 object,
-                edge_var: None,
-                max_hops: None,
-                predicate_var: None,
+                ..Default::default()
             });
             Ok(())
         }
@@ -894,9 +889,7 @@ fn translate_one_or_more(
             subject: Term::Var(x.clone()),
             predicate: Some(base_pred.clone()),
             object: Term::Var(y.clone()),
-            edge_var: None,
-            max_hops: None,
-            predicate_var: None,
+            ..Default::default()
         }]));
 
     branch
@@ -906,17 +899,13 @@ fn translate_one_or_more(
                 subject: Term::Var(x.clone()),
                 predicate: Some(tc_name.clone()),
                 object: Term::Var(y.clone()),
-                edge_var: None,
-                max_hops: None,
-                predicate_var: None,
+                ..Default::default()
             },
             VarPattern {
                 subject: Term::Var(y.clone()),
                 predicate: Some(base_pred.clone()),
                 object: Term::Var(z.clone()),
-                edge_var: None,
-                max_hops: None,
-                predicate_var: None,
+                ..Default::default()
             },
         ]));
 
@@ -924,9 +913,7 @@ fn translate_one_or_more(
         subject,
         predicate: Some(tc_name),
         object,
-        edge_var: None,
-        max_hops: None,
-        predicate_var: None,
+        ..Default::default()
     });
 
     Ok(())

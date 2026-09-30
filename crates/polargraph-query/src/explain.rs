@@ -104,6 +104,7 @@ fn static_pattern(vp: &VarPattern, bound_vars: &HashSet<String>) -> Pattern {
         predicate: vp.predicate.clone(),
         object: match &vp.object {
             Term::Bound(id) => Some(*id),
+            Term::Literal(v) => Some(polargraph_storage::keys::value_object(v)),
             Term::Var(name) if bound_vars.contains(name) => Some(sentinel),
             _ => None,
         },
@@ -168,6 +169,7 @@ fn format_term(term: &Term) -> String {
         Term::Var(name) => format!("?{name}"),
         Term::Any => "_".to_string(),
         Term::Param(name) => format!("${name}"),
+        Term::Literal(v) => format!("{v:?}"),
     }
 }
 
@@ -345,6 +347,24 @@ mod tests {
         let plan = explain_query(&query, &[]);
         assert!(
             plan.steps[0].index_used.starts_with("SPO (exact lookup)"),
+            "got: {}",
+            plan.steps[0].index_used
+        );
+    }
+
+    #[test]
+    fn literal_object_uses_the_value_index() {
+        let query = Query::new().pattern(
+            VarPattern::new()
+                .subject(Term::var("s"))
+                .predicate("status")
+                .object(Term::Literal(polargraph_core::value::Value::Text(
+                    "blocked".into(),
+                ))),
+        );
+        let plan = explain_query(&query, &[]);
+        assert!(
+            plan.steps[0].index_used.starts_with("POS"),
             "got: {}",
             plan.steps[0].index_used
         );

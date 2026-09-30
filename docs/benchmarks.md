@@ -5,6 +5,11 @@ Results collected June 2026 using the suites in `polargraph-storage/benches/stor
 All numbers are from a single run on the machine described below and are meant as
 directional guidance, not production SLAs.
 
+> These measurements predate storage format v3 (named graphs, 8 quad orders,
+> value-hashed keys). The v2 → v3 comparison — end-to-end inserts −9%, union
+> scans 3–17% faster, a 1K-quad graph load in 0.37 ms — is in
+> [`design/v3-key-layout.md`](design/v3-key-layout.md) §10.
+
 ---
 
 ## Environment
@@ -27,8 +32,8 @@ Run with `cargo bench -p polargraph-storage`.
 
 ### Triple writes
 
-Each iteration commits a single `WriteBatch` containing all six hexastore column-family
-entries for every triple, plus the oracle-counter update.
+Each iteration commits a single `WriteBatch` containing every index entry for every
+triple (six CFs in v2, eight in v3), plus the oracle-counter update.
 
 | Batch size | Median latency | Throughput |
 |---:|---:|---:|
@@ -143,9 +148,8 @@ Run with `cargo run -p polargraph-bench --release -- --scenario <name>`.
 
 Relation batches are roughly 2× slower than property batches for two reasons. First,
 the `links` predicate requires interning on first use (a read-modify-write to the META
-column family). Second, relation triples occupy the full hexastore — all six column
-families — whereas property triples use the `PROPERTY_SENTINEL` object slot and only
-populate four of them.
+column family). Second, relation values carry a 16-byte edge id, so each of the
+index entries is larger.
 
 The p99 spike on property batches (2,703 µs vs. p95 of 1,011 µs) is a RocksDB
 background compaction pause that coincidentally aligned with those samples. Relation
@@ -300,11 +304,12 @@ intern table, OS overhead, and the tonic/tokio runtime.
 
 ### Disk
 
-Triple storage cost is dominated by the hexastore: each triple is written to 6 column
-families, each with a 44-byte fixed-width key and a ~40-byte encoded value
-(discriminant + temporal envelope + payload). At 15 triples/node on average:
+Triple storage cost is dominated by the quad index: each triple is written to 8 column
+families (storage format v3), each with a 48-byte fixed-width key and a ~40-byte encoded
+value (discriminant + temporal envelope + payload; payloads over 256 bytes are stored once
+in `blob` and referenced with a 17-byte value). At 15 triples/node on average:
 
-`1M nodes × 15 triples × 6 CFs × ~84 bytes ≈ 7.6 GB raw, ~1.5 GB after RocksDB compression`
+`1M nodes × 15 triples × 8 CFs × ~88 bytes ≈ 10.6 GB raw, ~2–3 GB after RocksDB compression`
 
 The HNSW column family stores each node's vector and neighbor lists once (not ×6), so
 even at 1,536 dims it adds only ~6.5 GB uncompressed (vectors don't compress well).

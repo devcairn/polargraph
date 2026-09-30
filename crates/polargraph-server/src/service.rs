@@ -29,16 +29,16 @@ use crate::{
         PurgeOldBackupsRequest, PurgeOldBackupsResponse, QueryRequest, QueryResponse,
         QueryStreamChunk, ReachableRequest, ReachableResponse, RegisterEdgeTypeRequest,
         RegisterEdgeTypeResponse, RegisterNodeTypeRequest, RegisterNodeTypeResponse,
-        ReplicaStatusRequest, ReplicaStatusResponse, RevokeAccessRequest, RevokeAccessResponse,
-        RevokeApiKeyRequest, RevokeApiKeyResponse, RollbackTransactionRequest,
-        RollbackTransactionResponse, RunMaterializationRequest, RunMaterializationResponse,
-        RunRetentionRequest, RunRetentionResponse, ScoredBinding, SearchVectorFilteredRequest,
-        SearchVectorFilteredResponse, SearchVectorInSetRequest, SearchVectorInSetResponse,
-        SearchVectorRequest, SearchVectorResponse, ShowIndexesRequest, ShowIndexesResponse,
-        ShowStatsRequest, ShowStatsResponse, StreamWalRequest, ValidateEdgeRequest,
-        ValidateEdgeResponse, ValidateNodeRequest, ValidateNodeResponse, ValidateOntologyRequest,
-        ValidateOntologyResponse, VectorSearchResult, VectorSeedQueryRequest,
-        VectorSeedQueryResponse, VectorSpaceInfo, WalEntry,
+        ReplicaStatusRequest, ReplicaStatusResponse, ResolveIrisRequest, ResolveIrisResponse,
+        RevokeAccessRequest, RevokeAccessResponse, RevokeApiKeyRequest, RevokeApiKeyResponse,
+        RollbackTransactionRequest, RollbackTransactionResponse, RunMaterializationRequest,
+        RunMaterializationResponse, RunRetentionRequest, RunRetentionResponse, ScoredBinding,
+        SearchVectorFilteredRequest, SearchVectorFilteredResponse, SearchVectorInSetRequest,
+        SearchVectorInSetResponse, SearchVectorRequest, SearchVectorResponse, ShowIndexesRequest,
+        ShowIndexesResponse, ShowStatsRequest, ShowStatsResponse, StreamWalRequest,
+        ValidateEdgeRequest, ValidateEdgeResponse, ValidateNodeRequest, ValidateNodeResponse,
+        ValidateOntologyRequest, ValidateOntologyResponse, VectorSearchResult,
+        VectorSeedQueryRequest, VectorSeedQueryResponse, VectorSpaceInfo, WalEntry,
     },
 };
 use dashmap::DashMap;
@@ -682,6 +682,35 @@ impl PolarGraphService for PolarGraphServer {
     type CypherQueryStreamStream = ReceiverStream<Result<QueryStreamChunk, Status>>;
 
     /// Insert one or more triples atomically.
+    async fn resolve_iris(
+        &self,
+        request: Request<ResolveIrisRequest>,
+    ) -> Result<Response<ResolveIrisResponse>, Status> {
+        const MAX_NODES: usize = 10_000;
+        let req = request.into_inner();
+        if req.nodes.len() > MAX_NODES {
+            return Err(Status::invalid_argument(format!(
+                "at most {MAX_NODES} nodes per ResolveIris request"
+            )));
+        }
+        let nodes = req
+            .nodes
+            .iter()
+            .map(convert::node_id_from_proto)
+            .collect::<Result<Vec<_>, _>>()?;
+        let stored = self.store.iris_of(&nodes).map_err(storage_err_to_status)?;
+        let iris = nodes
+            .iter()
+            .map(|n| {
+                stored
+                    .get(n)
+                    .cloned()
+                    .unwrap_or_else(|| polargraph_core::term::fallback_iri(n))
+            })
+            .collect();
+        Ok(Response::new(ResolveIrisResponse { iris }))
+    }
+
     async fn insert(
         &self,
         request: Request<InsertRequest>,
@@ -689,17 +718,35 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let req = request.into_inner();
 
-        if req.triples.is_empty() && req.edge_annotations.is_empty() {
+        if req.triples.is_empty() && req.edge_annotations.is_empty() && req.iris.is_empty() {
             return Err(Status::invalid_argument(
-                "insert request must contain at least one triple or edge annotation",
+                "insert request must contain at least one triple, edge annotation or IRI",
+            ));
+        }
+        if req.iris.iter().any(|iri| iri.is_empty()) {
+            return Err(Status::invalid_argument(
+                "iris must not contain empty strings",
             ));
         }
 
-        // Convert proto triples → core triples, collecting EdgeIds for relations.
+        // Target graph (interned on first use; empty = default graph).
+        let graph = if req.graph.is_empty() {
+            polargraph_core::id::GraphId::DEFAULT
+        } else {
+            self.store
+                .intern_graph(&req.graph)
+                .map_err(storage_err_to_status)?
+        };
+
+        // Convert proto triples → core triples (with each one's write mode),
+        // collecting EdgeIds for relations.
         let mut all_triples: Vec<Triple> = Vec::new();
+        let mut modes: Vec<polargraph_storage::WriteMode> = Vec::new();
         let mut edge_ids: Vec<Vec<u8>> = Vec::new();
         for proto_triple in &req.triples {
             let (triples, edge_id) = convert::triples_from_proto(proto_triple)?;
+            let mode = convert::write_mode_from_proto(proto_triple)?;
+            modes.extend(std::iter::repeat(mode).take(triples.len()));
             all_triples.extend(triples);
             if let Some(eid) = edge_id {
                 edge_ids.push(eid.0.as_bytes().to_vec());
@@ -710,6 +757,7 @@ impl PolarGraphService for PolarGraphServer {
         for ann in &req.edge_annotations {
             let triple = convert::edge_annotation_from_proto(ann)?;
             all_triples.push(triple);
+            modes.push(polargraph_storage::WriteMode::Auto);
         }
 
         debug!(
@@ -725,8 +773,11 @@ impl PolarGraphService for PolarGraphServer {
                 Status::not_found(format!("unknown or expired transaction: {}", req.tx_id))
             })?;
             let mut guard = entry.lock().await;
-            for triple in &all_triples {
-                guard.tx.insert(triple.clone());
+            for (triple, mode) in all_triples.iter().zip(&modes) {
+                guard.tx.insert_in(triple.clone(), graph, *mode);
+            }
+            for iri in &req.iris {
+                guard.tx.bind_iri(iri.as_str());
             }
             guard.last_used = Instant::now();
             debug!(tx_id = %req.tx_id, "buffered {} triple(s) into open transaction", all_triples.len());
@@ -753,8 +804,11 @@ impl PolarGraphService for PolarGraphServer {
 
         // Auto-commit path: begin a new transaction, insert all, commit.
         let mut tx = self.store.begin();
-        for triple in &all_triples {
-            tx.insert(triple.clone());
+        for (triple, mode) in all_triples.iter().zip(&modes) {
+            tx.insert_in(triple.clone(), graph, *mode);
+        }
+        for iri in &req.iris {
+            tx.bind_iri(iri.as_str());
         }
         let commit_ts = tx.commit().map_err(storage_err_to_status)?;
 
@@ -3426,6 +3480,23 @@ impl PolarGraphService for PolarGraphServer {
         } else {
             Some(req.predicate.clone())
         };
+        let object_filter: Option<NodeId> = if req.object_id.is_empty() {
+            None
+        } else {
+            Some(NodeId(uuid::Uuid::from_slice(&req.object_id).map_err(
+                |_| Status::invalid_argument("object_id must be a 16-byte UUID"),
+            )?))
+        };
+        let value_filter: Option<Value> = req
+            .value
+            .as_ref()
+            .map(crate::convert::value_from_proto)
+            .transpose()?;
+        if object_filter.is_some() && value_filter.is_some() {
+            return Err(Status::invalid_argument(
+                "object_id and value are mutually exclusive",
+            ));
+        }
         let mut deleted_count: u64 = 0;
 
         for id_bytes in &req.subject_ids {
@@ -3446,6 +3517,19 @@ impl PolarGraphService for PolarGraphServer {
 
             let mut tx = self.store.begin();
             for triple in triples {
+                let selected = match &triple {
+                    Triple::Relation { object, .. } => {
+                        value_filter.is_none() && object_filter.map_or(true, |o| o == *object)
+                    }
+                    Triple::Property { value, .. } => {
+                        object_filter.is_none()
+                            && value_filter.as_ref().map_or(true, |v| v == value)
+                    }
+                    _ => false,
+                };
+                if !selected {
+                    continue;
+                }
                 match &triple {
                     Triple::Relation {
                         subject: s,
@@ -3604,5 +3688,12 @@ fn storage_err_to_status(err: StorageError) -> Status {
         StorageError::Io(_) => Status::internal(err.to_string()),
         StorageError::ReadOnly(_) => Status::failed_precondition(err.to_string()),
         StorageError::Validation(_) => Status::failed_precondition(err.to_string()),
+        StorageError::NeedsMigration | StorageError::UnsupportedFormat(_) => {
+            Status::failed_precondition(err.to_string())
+        }
+        StorageError::IriCollision { .. } => {
+            warn!("{err}");
+            Status::already_exists(err.to_string())
+        }
     }
 }

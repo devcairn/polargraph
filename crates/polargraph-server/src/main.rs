@@ -76,11 +76,21 @@ use polargraph_server::{
 struct Cli {
     /// Path to a TOML configuration file.  When omitted the server tries
     /// `./polargraph.toml` then `~/.config/polargraph/config.toml`.
-    #[arg(long = "config", env = "POLARGRAPH_CONFIG", value_name = "PATH")]
+    #[arg(
+        long = "config",
+        env = "POLARGRAPH_CONFIG",
+        value_name = "PATH",
+        global = true
+    )]
     config: Option<PathBuf>,
 
     /// Directory where RocksDB stores its data files.
-    #[arg(long = "data-dir", env = "POLARGRAPH_DATA_DIR", value_name = "PATH")]
+    #[arg(
+        long = "data-dir",
+        env = "POLARGRAPH_DATA_DIR",
+        value_name = "PATH",
+        global = true
+    )]
     data_dir: Option<PathBuf>,
 
     /// Socket address the gRPC server will listen on.
@@ -91,12 +101,18 @@ struct Cli {
     #[arg(
         long = "backup-dir",
         env = "POLARGRAPH_BACKUP_DIR",
-        value_name = "PATH"
+        value_name = "PATH",
+        global = true
     )]
     backup_dir: Option<PathBuf>,
 
     /// Log level / filter directive (same syntax as `RUST_LOG`).
-    #[arg(long = "log-level", env = "RUST_LOG", value_name = "LEVEL")]
+    #[arg(
+        long = "log-level",
+        env = "RUST_LOG",
+        value_name = "LEVEL",
+        global = true
+    )]
     log_level: Option<String>,
 
     /// Log output format (`pretty` or `json`).
@@ -115,8 +131,8 @@ struct Cli {
     #[arg(long = "no-metrics", default_value_t = false)]
     no_metrics: bool,
 
-    /// Run retention on startup: delete triples whose transaction time is older
-    /// than this many seconds.
+    /// Run retention on startup: delete versions superseded (corrected or
+    /// deleted) more than this many seconds ago. Current values are kept.
     #[arg(
         long = "retention-tx-age-secs",
         env = "POLARGRAPH_RETENTION_TX_AGE_SECS",
@@ -124,7 +140,8 @@ struct Cli {
     )]
     retention_tx_age_secs: Option<u64>,
 
-    /// Companion to --retention-tx-age-secs; also deletes triples with old vt_end.
+    /// Companion to --retention-tx-age-secs; also deletes triples whose versions
+    /// all ended (valid time) more than this many seconds ago.
     #[arg(
         long = "retention-vt-lookback-secs",
         env = "POLARGRAPH_RETENTION_VT_LOOKBACK_SECS",
@@ -257,6 +274,78 @@ struct Cli {
         default_value_t = false
     )]
     auto_materialize: bool,
+
+    /// Property values whose encoded payload exceeds this many bytes are
+    /// stored once, out of line, in the `blob` column family (default 256).
+    #[arg(
+        long = "inline-value-max-bytes",
+        env = "POLARGRAPH_INLINE_VALUE_MAX_BYTES",
+        value_name = "BYTES"
+    )]
+    inline_value_max_bytes: Option<usize>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Migrate a stopped server's data directory to the current storage
+    /// format (v2 → v3, see docs/design/v3-key-layout.md). Takes a backup
+    /// into --backup-dir first.
+    Migrate {
+        /// Skip the pre-migration backup (only if you already have one).
+        #[arg(long = "no-backup", default_value_t = false)]
+        no_backup: bool,
+    },
+}
+
+/// `polargraphd migrate`: back up, then rewrite the store to format 3.
+fn run_migrate(
+    data_dir: &std::path::Path,
+    backup_dir: Option<PathBuf>,
+    no_backup: bool,
+) -> Result<()> {
+    use polargraph_storage::{migrate_v3, BackupManager};
+
+    let store = migrate_v3::open_for_migration(data_dir)
+        .with_context(|| format!("failed to open {} for migration", data_dir.display()))?;
+    match (backup_dir, no_backup) {
+        (_, true) => warn!("skipping pre-migration backup (--no-backup)"),
+        (Some(dir), false) => {
+            let info = BackupManager::open(&dir, &store)
+                .and_then(|m| m.create_backup())
+                .with_context(|| format!("pre-migration backup to {} failed", dir.display()))?;
+            info!(backup = ?info, "pre-migration backup created");
+        }
+        (None, false) => anyhow::bail!(
+            "refusing to migrate without a backup: pass --backup-dir PATH, or --no-backup if you already have one"
+        ),
+    }
+    let report = migrate_v3::migrate_store(&store, data_dir).context("migration failed")?;
+    if report.already_migrated {
+        println!(
+            "{} is already in storage format 3; nothing to do.",
+            data_dir.display()
+        );
+    } else {
+        println!(
+            "Migrated {} to storage format 3 in {} ms:\n  \
+             {} quad versions ({} property versions, {} closing versions synthesized)\n  \
+             {} values moved out of line\n  \
+             {} derived facts, {} + {} edge annotations",
+            data_dir.display(),
+            report.duration_ms,
+            report.quad_versions,
+            report.property_versions,
+            report.closing_versions_synthesized,
+            report.values_out_of_line,
+            report.derived_versions,
+            report.edge_property_annotations,
+            report.edge_relation_annotations,
+        );
+    }
+    Ok(())
 }
 
 // ── Merge helpers ─────────────────────────────────────────────────────────────
@@ -294,6 +383,11 @@ async fn main() -> Result<()> {
 
     // ── Merge: CLI/env > config file > built-in defaults ─────────────────────
     let data_dir = resolve_path(cli.data_dir, cfg.server.data_dir, "/data");
+    let inline_value_max_bytes = resolve(
+        cli.inline_value_max_bytes,
+        cfg.storage.inline_value_max_bytes,
+        polargraph_storage::DEFAULT_INLINE_VALUE_MAX_BYTES,
+    );
     let listen_addr: SocketAddr = cli.listen_addr.unwrap_or_else(|| {
         cfg.server
             .grpc_port
@@ -364,6 +458,11 @@ async fn main() -> Result<()> {
         _ => {
             tracing_subscriber::fmt().with_env_filter(filter).init();
         }
+    }
+
+    // ── Subcommands (run instead of the server) ──────────────────────────────
+    if let Some(Command::Migrate { no_backup }) = cli.command {
+        return run_migrate(&data_dir, backup_dir, no_backup);
     }
 
     // ── Prometheus metrics ────────────────────────────────────────────────────
@@ -465,7 +564,8 @@ async fn main() -> Result<()> {
     } else {
         let store = TripleStore::open(&data_dir)
             .with_context(|| format!("failed to open TripleStore at {}", data_dir.display()))?;
-        info!("TripleStore ready");
+        store.set_inline_value_max_bytes(inline_value_max_bytes);
+        info!(inline_value_max_bytes, "TripleStore ready");
         (store, None)
     };
 

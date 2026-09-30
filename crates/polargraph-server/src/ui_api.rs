@@ -554,6 +554,7 @@ async fn api_insert(
                 }),
                 vt_start: 0,
                 vt_end: 0,
+                mode: crate::proto::PropertyWriteMode::Auto as i32,
             })),
         }
     };
@@ -741,6 +742,8 @@ fn format_value(v: &Value) -> String {
         Value::Text(s) => s.clone(),
         Value::Blob(b) => format!("<blob {} bytes>", b.len()),
         Value::Vector(fs) => format!("<vec dim={}>", fs.len()),
+        Value::LangText { text, lang } => format!("{text}@{lang}"),
+        Value::Typed { lexical, datatype } => format!("{lexical}^^<{datatype}>"),
     }
 }
 

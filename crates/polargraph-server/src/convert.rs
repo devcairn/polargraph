@@ -19,6 +19,7 @@ use polargraph_core::{
     value::Value,
 };
 use polargraph_query::datalog::{Bindings, Rule, Term, VarPattern};
+use polargraph_storage::WriteMode;
 use polargraph_storage::{EdgeAnnotation, EdgeAnnotationValue};
 use tonic::Status;
 use uuid::Uuid;
@@ -51,6 +52,24 @@ pub fn value_from_proto(proto: &proto::Value) -> Result<Value, Status> {
         Some(ValueKind::TextVal(s)) => Ok(Value::Text(s.clone())),
         Some(ValueKind::BlobVal(b)) => Ok(Value::Blob(b.clone())),
         Some(ValueKind::VecVal(fa)) => Ok(Value::Vector(fa.values.clone())),
+        Some(ValueKind::LangText(l)) => {
+            if l.lang.is_empty() {
+                return Err(Status::invalid_argument("lang_text.lang must not be empty"));
+            }
+            Ok(Value::LangText {
+                text: l.text.clone(),
+                lang: l.lang.clone(),
+            })
+        }
+        Some(ValueKind::Typed(t)) => {
+            if t.datatype.is_empty() {
+                return Err(Status::invalid_argument("typed.datatype must not be empty"));
+            }
+            Ok(Value::Typed {
+                lexical: t.lexical.clone(),
+                datatype: t.datatype.clone(),
+            })
+        }
     }
 }
 
@@ -63,6 +82,14 @@ pub fn value_to_proto(v: &Value) -> proto::Value {
         Value::Text(s) => ValueKind::TextVal(s.clone()),
         Value::Blob(b) => ValueKind::BlobVal(b.clone()),
         Value::Vector(fs) => ValueKind::VecVal(proto::FloatArray { values: fs.clone() }),
+        Value::LangText { text, lang } => ValueKind::LangText(proto::LangText {
+            text: text.clone(),
+            lang: lang.clone(),
+        }),
+        Value::Typed { lexical, datatype } => ValueKind::Typed(proto::TypedLiteral {
+            lexical: lexical.clone(),
+            datatype: datatype.clone(),
+        }),
     };
     proto::Value { kind: Some(kind) }
 }
@@ -100,6 +127,23 @@ pub fn triple_from_proto(proto: &proto::Triple) -> Result<Triple, Status> {
 ///   - one `Triple::Property` per edge property, with `subject = NodeId(edge_id)`
 ///
 /// Returns `(triples, edge_id)` where `edge_id` is `Some` only for relation triples.
+/// The write mode for the triples [`triples_from_proto`] produces from `proto`:
+/// a property's `mode` field; relations (and their edge properties) use `Auto`.
+pub fn write_mode_from_proto(proto: &proto::Triple) -> Result<WriteMode, Status> {
+    Ok(match &proto.kind {
+        Some(TripleKind::Property(p)) => {
+            match proto::PropertyWriteMode::try_from(p.mode).map_err(|_| {
+                Status::invalid_argument(format!("unknown property write mode {}", p.mode))
+            })? {
+                proto::PropertyWriteMode::Auto => WriteMode::Auto,
+                proto::PropertyWriteMode::Replace => WriteMode::Replace,
+                proto::PropertyWriteMode::Add => WriteMode::Add,
+            }
+        }
+        _ => WriteMode::Auto,
+    })
+}
+
 pub fn triples_from_proto(proto: &proto::Triple) -> Result<(Vec<Triple>, Option<EdgeId>), Status> {
     match &proto.kind {
         Some(TripleKind::Relation(r)) => {
@@ -191,6 +235,7 @@ pub fn term_from_proto(proto: &proto::Term) -> Result<Term, Status> {
             }
             Ok(Term::Var(name.clone()))
         }
+        Some(TermKind::Literal(v)) => Ok(Term::Literal(value_from_proto(v)?)),
         None => Ok(Term::Any),
     }
 }
@@ -220,8 +265,7 @@ pub fn var_pattern_from_proto(proto: &proto::VarPattern) -> Result<VarPattern, S
         predicate,
         predicate_var,
         object,
-        edge_var: None,
-        max_hops: None,
+        ..Default::default()
     })
 }
 

@@ -18,7 +18,23 @@ message Value {
         string     text_val   = 5;
         bytes      blob_val   = 6;
         FloatArray vec_val    = 7;
+        LangText   lang_text  = 8;
+        TypedLiteral typed    = 9;
     }
+}
+
+/// A language-tagged string (rdf:langString), e.g. "Acme"@en.
+message LangText {
+    string text = 1;
+    string lang = 2;
+}
+
+/// An RDF literal with a datatype that has no native Value kind,
+/// e.g. "2026-09-29"^^<http://www.w3.org/2001/XMLSchema#date>.
+message TypedLiteral {
+    string lexical  = 1;
+    /// Full datatype IRI.
+    string datatype = 2;
 }
 
 /// A dense float32 embedding vector.
@@ -49,12 +65,25 @@ message RelationTriple {
 }
 
 /// A scalar property on a node.
+/// How a property write treats existing values of the same
+/// (subject, predicate, graph). See docs/design/v3-key-layout.md §6.
+enum PropertyWriteMode {
+    /// REPLACE for an open-ended value (vt_end unset / end of time), ADD for
+    /// a closing write. The default — matches pre-v3 behaviour.
+    PROPERTY_WRITE_MODE_AUTO = 0;
+    /// Close every other open value of (s, p, g), then write this one.
+    PROPERTY_WRITE_MODE_REPLACE = 1;
+    /// Write alongside existing values (multi-valued properties, RDF).
+    PROPERTY_WRITE_MODE_ADD = 2;
+}
+
 message PropertyTriple {
     NodeId subject   = 1;
     string predicate = 2;
     Value  value     = 3;
     int64  vt_start  = 4;
     int64  vt_end    = 5;
+    PropertyWriteMode mode = 6;
 }
 
 message Triple {
@@ -75,6 +104,8 @@ message Term {
     oneof kind {
         NodeId bound = 1;
         string var   = 2;
+        /// Object slot only: matches property triples whose value equals this.
+        Value literal = 3;
     }
 }
 
@@ -158,6 +189,14 @@ message InsertRequest {
     /// (either from a previous insert or from a relation in `triples` above
     /// where the edge UUID must be known in advance).
     repeated EdgeAnnotation edge_annotations = 3;
+    /// IRIs of nodes written in this request, recorded in the IRI dictionary in
+    /// the same commit so export can render them. Each IRI names the node
+    /// `iri_to_node_id(iri)` (urn:uuid:<u> → u, otherwise xxHash3-128); urn:uuid
+    /// IRIs are accepted and ignored. A request may carry only IRIs.
+    repeated string iris = 4;
+    /// Named graph (IRI) every triple and annotation in this request goes to;
+    /// interned on first use. Empty = the default graph.
+    string graph = 5;
 }
 
 message InsertResponse {
@@ -567,10 +606,12 @@ message PurgeOldBackupsResponse {
 // ── Retention ─────────────────────────────────────────────────────────────────
 
 message RunRetentionRequest {
-    /// Delete triples whose transaction time is older than this many seconds.
+    /// Delete versions superseded (corrected or deleted) more than this many
+    /// seconds ago. The current version of a triple is never deleted.
     uint64 tx_age_secs = 1;
-    /// Also delete triples whose vt_end is more than this many seconds in the
-    /// past. Set to 0 to disable valid-time lookback (keep all valid-time history).
+    /// Also delete a triple entirely once all of its versions have a vt_end more
+    /// than this many seconds in the past. Set to 0 to disable valid-time
+    /// lookback (keep all valid-time history).
     uint64 vt_lookback_secs = 2;
 }
 
@@ -921,6 +962,12 @@ message DeleteTriplesRequest {
     string predicate = 2;
     /// Explicit vt_end in microseconds since Unix epoch; 0 means use server clock.
     int64 vt_end = 3;
+    /// Optional 16-byte object NodeId: only relations to this object are closed
+    /// (properties are left alone). Empty means any object.
+    bytes object_id = 4;
+    /// Optional property value: only properties with exactly this value are
+    /// closed (relations are left alone). Unset means any value.
+    Value value = 5;
 }
 
 message DeleteTriplesResponse {
@@ -949,10 +996,24 @@ message RunMaterializationResponse {
 
 // ── Service ───────────────────────────────────────────────────────────────────
 
+message ResolveIrisRequest {
+    /// Nodes to name. At most 10 000 per request.
+    repeated NodeId nodes = 1;
+}
+
+message ResolveIrisResponse {
+    /// One IRI per requested node, in request order: the stored IRI, or
+    /// `urn:uuid:<id>` when the node has no dictionary entry.
+    repeated string iris = 1;
+}
+
 service PolarGraphService {
     /// Insert one or more triples in a single atomic transaction.
     /// Returns ABORTED if a write-write conflict is detected.
     rpc Insert(InsertRequest) returns (InsertResponse);
+
+    /// Map node IDs back to IRIs via the IRI dictionary.
+    rpc ResolveIris(ResolveIrisRequest) returns (ResolveIrisResponse);
 
     /// Execute a conjunctive query and return all satisfying variable bindings.
     rpc Query(QueryRequest) returns (QueryResponse);
@@ -1032,8 +1093,8 @@ service PolarGraphService {
     /// Note: restore is an offline operation — see docs/architecture.md.
     rpc PurgeOldBackups(PurgeOldBackupsRequest) returns (PurgeOldBackupsResponse);
 
-    /// Scan all hexastore column families and delete triples whose
-    /// transaction time or valid-time window has expired per the supplied policy.
+    /// Scan all hexastore column families and delete superseded versions (and
+    /// triples whose valid-time windows have fully expired) per the policy.
     /// Triggers a full RocksDB compaction on any CF that had deletions.
     rpc RunRetention(RunRetentionRequest) returns (RunRetentionResponse);
 
