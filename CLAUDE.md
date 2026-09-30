@@ -127,16 +127,17 @@ RocksDB-backed persistence. Owns the quad-index layout (storage format v3,
 
 | Module | Contents |
 |--------|----------|
-| `store` | `TripleStore` — main handle, scans (union and per-graph), `stage_writes` (the one write-encoding path), predicate and graph interning, IRI dictionary, out-of-line values, named HNSW spaces; `StoreMode` (`Primary`/`Replica`), `open_as_replica`, `apply_replicated_batch` |
+| `store` | `TripleStore` — main handle, scans (union, per-graph and `GraphScope`-scoped), `stage_writes` (the one write-encoding path), predicate and graph interning, IRI dictionary, out-of-line values, named HNSW spaces; `StoreMode` (`Primary`/`Replica`), `open_as_replica`, `apply_replicated_batch` |
 | `mvcc` | `TimestampOracle`, `Transaction` (`insert`, `insert_in`, `bind_iri`), `WriteMode` (`Auto`/`Replace`/`Add`), `Snapshot`, `ConflictError` |
 | `keys` | `Order` (8 quad orders: encode/decode/prefix), `QuadKey`, `KeyPrefix`, `value_object`, ancillary keys; `keys::v2` read-only legacy layouts |
 | `codec` | Value serialization (discriminant + temporal + payload); `PropertyRef` and blob payloads; `valid_time`, `with_vt_end` |
 | `cf` | Column family names (`spog sopg psog posg ospg opsg gspo gpos meta hnsw trig epag epog peag drvg iri blob`); `cf::v2` legacy names |
 | `migrate_v3` | `migrate`, `open_for_migration`, `MigrationReport` — offline v2 → v3 storage migration |
+| `graphs` | Named-graph management on `TripleStore`: `create_graph`, graph metadata (system graph `urn:pg:graph:meta`), `graph_stats`, bitemporal `drop_graph`, `copy_graph` / `move_graph` (chunked, `urn:pg:copyInProgress` flag) |
 | `error` | `StorageError` |
 | `hnsw` | `HnswIndex` — pure-Rust HNSW, named-space key helpers, serialize/deserialize, mmap storage |
 | `registry` | `NodeTypeRegistry`, `EdgeTypeRegistry`, `ValidationError` |
-| `sst_import` | `SstImporter`, `ImportStats` — bulk import (Add-only, default graph) via SST ingestion into all 8 orders |
+| `sst_import` | `SstImporter`, `ImportStats` — bulk import (Add-only; `add_triple_in` for a named graph) via SST ingestion into all 8 orders |
 | `compaction` | `CompactionManager`, `RetentionStats` — history-pruning retention over the 8 orders, RocksDB compaction, blob sweep |
 | `backup` | `BackupManager` — incremental RocksDB `BackupEngine` wrapper |
 | `migrations` | `MigrationRunner`, `Migration`, `AppliedMigration` — versioned schema migrations |
@@ -155,7 +156,7 @@ Pattern-based query evaluation and view projection.
 | `planner` | `Pattern`, `IndexChoice`, `choose_index` — picks cheapest CF for a bind pattern |
 | `eval` | `evaluate(pattern, snapshot)` — drives the storage scan the planner chose; `evaluate_with_registry()` prunes patterns using `EdgeTypeRegistry` domain/range hints |
 | `projection` | `ProjectedTriple`, `apply_view` — filters and label-remaps triples for a View |
-| `datalog` | `Query`, `VarPattern`, `Term`, `Bindings`, `execute_query` — conjunctive query evaluator; `Rule`, `DerivedFacts`, `execute_recursive`, `reachable_from` — recursive / transitive-closure queries |
+| `datalog` | `Query`, `VarPattern`, `Term`, `Bindings`, `execute_query` — conjunctive query evaluator; `GraphTerm` (Union/Default/Bound/Var/Set) scopes a pattern to graphs; `Rule`, `DerivedFacts`, `execute_recursive`, `reachable_from` — recursive / transitive-closure queries |
 | `cypher` | `CypherQuery`, `CypherCompiler`, `compile_cypher()` — Cypher→Datalog compiler; MATCH/WHERE/RETURN/WITH pipeline; property equality, comparison, text predicates (CONTAINS, STARTS WITH, =~); `VECTOR_NEAR` function; CREATE/MERGE/SET/DELETE write ops |
 | `aggregation` | `AggregationPlan`, `apply_aggregations()` — COUNT(*), COUNT(var), COLLECT(), SUM, AVG, MIN, MAX; ORDER BY (multi-key, ASC/DESC); SKIP N; WITH clause pipeline |
 | `explain` | `explain_query()` — static query plan analysis, index selection, plan text output |
@@ -231,7 +232,7 @@ into RocksDB via SST file ingestion — no server required.
 | `--input FILE` | *(required)* | N-Triples input file |
 | `--batch-size N` | `100000` | Triples per SST import batch |
 | `--temp-dir PATH` | `<data-dir>/sst_tmp` | Temporary SST file directory |
-| `--format FORMAT` | `ntriples` | `ntriples`, `turtle`, or `jsonld` |
+| `--format FORMAT` | `ntriples` | `ntriples`, `turtle`, `jsonld`, `nquads` (`nq`), or `trig` |
 | `--import-id ID` | *(fresh UUIDv7)* | Blank-node skolemization scope; reuse for idempotent re-import |
 | `--skolem-base IRI` | `https://polargraph.invalid` | Base of skolem IRIs (`POLARGRAPH_SKOLEM_BASE`) |
 
@@ -257,7 +258,10 @@ Endpoints include: `POST /query`, `POST /query/stream`, `POST /insert`, `GET /tr
 `POST /cypher/stream`, `GET /sparql`, `POST /sparql`, `POST /sparql/update`,
 `POST /tx/begin`, `POST /tx/commit`, `POST /tx/rollback`, `GET /indexes`, `GET /stats`,
 `POST /materialize`, `GET /property-history`, `POST /edge-annotations`, `GET /edge-annotations/:id`,
-`POST /access/grant`, `POST /access/revoke`, `POST /access/add-user`, `GET /access/user/:id`.
+`POST /access/grant`, `POST /access/revoke`, `POST /access/add-user`, `GET /access/user/:id`,
+`POST /graphs`, `GET /graphs`, `DELETE /graphs?iri=`, `GET /graphs/stats`, `POST /graphs/copy`,
+`POST /graphs/move`, `GET /graphs/export`, `POST /import/rdf` (incl. N-Quads/TriG, `?graph=`),
+`GET /export/subgraph`. Query patterns take an optional `@default` / `@<iri>` / `@?g` graph suffix.
 See `docs/architecture.md` for full documentation including the pattern string format.
 
 ### `polargraph-sparql`
@@ -271,9 +275,9 @@ used exclusively by `polargraph-rest`.
 | `translate` | `translate_query()`, `translate_construct()`, `translate_pattern_pub()` — SPARQL algebra walker; `SparqlTranslation`, `Branch`, `SparqlFilter`, `EdgeAnnotationStep`, CONSTRUCT/DESCRIBE types |
 | `execute` | `left_join()`, `execute_sparql_aggregations()` — in-process SPARQL semantics for OPTIONAL and GROUP BY |
 | `response` | `serialize_json()`, `serialize_csv()`, `node_bindings_to_sparql()` — SPARQL results serializers |
-| `serialize` | `serialize_ntriples()`, `serialize_turtle()`, `node_id_to_iri()` — RDF output for CONSTRUCT/DESCRIBE; Turtle-star / N-Triples-star serialization for SPARQL-star results |
+| `serialize` | `serialize_ntriples()`, `serialize_turtle()`, `serialize_nquads()` / `serialize_trig()` (`RdfQuad`), `node_id_to_iri()` — RDF output for CONSTRUCT/DESCRIBE; Turtle-star / N-Triples-star serialization for SPARQL-star results |
 | `protocol` | `negotiate_format()`, `extract_query_from_form()` — HTTP content negotiation and form-encoded body parsing |
-| `rdf_import` | `parse_ntriples()`, `parse_turtle()`, `parse_jsonld()` — multi-format RDF parsing (rio_api 0.8); `uri_to_node_id`, `edge_id_for` — deterministic IRI → NodeId/EdgeId mapping; blank nodes via `ImportedTriple::subject_node_id(&ImportScope)` / `ImportedObject::node_id`; `serialize_jsonld`, `serialize_schema_rdf`, `parse_schema_rdf` |
+| `rdf_import` | `parse_ntriples()`, `parse_turtle()`, `parse_jsonld()`, `parse_nquads()`, `parse_trig()` (`ImportedTriple.graph`) — multi-format RDF parsing (rio_api 0.8); `uri_to_node_id`, `edge_id_for` — deterministic IRI → NodeId/EdgeId mapping; blank nodes via `ImportedTriple::subject_node_id(&ImportScope)` / `ImportedObject::node_id`; `serialize_jsonld`, `serialize_schema_rdf`, `parse_schema_rdf` |
 
 ---
 
@@ -463,6 +467,7 @@ entries were superseded by storage format v3 (last entries below).
 - [x] IRI dictionary — `iri` CF; `Transaction::bind_iri`, `iri_of`/`iris_of`; `InsertRequest.iris`; `ResolveIris` RPC; exports render stored IRIs via `polargraph_sparql::IriNames`, `?deskolemize=true`
 - [x] Lossless literals — `Value::LangText`, `Value::Typed`, `Value::as_text()`; proto `Value.lang_text` / `.typed`; REST JSON-LD value objects
 - [x] Storage format v3 — 8 quad orders with graph slot (`keys::Order`), value-hashed property keys + value index, graph interning (`intern_graph`), `WriteMode` Auto/Replace/Add (`InsertRequest.graph`, `PropertyTriple.mode`), out-of-line values (`blob` CF, 17-byte `PropertyRef`, retention sweep), reads default to "valid now", offline `polargraphd migrate` with verification; see `docs/design/v3-key-layout.md` (§10 as built, benchmarks)
+- [x] Named graphs (ContxtBroker plan step 4) — `GraphScope` + `Snapshot::scan_scoped`; `GraphTerm` on `VarPattern` (`?g` binds the graph IRI node, named graphs only), proto `VarPattern.graph` + `QueryRequest.graphs` dataset, REST `@graph` pattern suffix; `polargraph-storage::graphs` (metadata in system graph, bitemporal drop, copy/add/move, stats); `CreateGraph`, `ListGraphs`, `GraphStats`, `CopyGraph`, `MoveGraph`, `DropGraph`, `ExportGraph` (streaming) RPCs + REST `/graphs*`; N-Quads/TriG import (REST, `polargraph-import`) and export (`/graphs/export`, `/export/subgraph`); see "Named graphs" in `docs/architecture.md`. Limits: pending tx writes and rule-derived facts only match Union patterns; `max_hops` ignores graph terms
 
 ## Adding a new predicate
 
