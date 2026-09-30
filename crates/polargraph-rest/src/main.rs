@@ -3958,6 +3958,193 @@ async fn handle_schema_rdf_post(
     .into_response()
 }
 
+// ── Named graphs ──────────────────────────────────────────────────────────────
+//
+// Graph IRIs travel in the body or the `iri` query parameter rather than the
+// path (IRIs contain slashes). An empty / missing IRI means the default graph
+// where that makes sense (stats, copy/move source or target, drop).
+
+#[derive(Deserialize)]
+struct CreateGraphBody {
+    iri: String,
+    /// Metadata properties: predicate → JSON value (same encoding as other
+    /// property values, incl. `{"@value", "@language"}` objects).
+    #[serde(default)]
+    metadata: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct GraphIriParams {
+    #[serde(default)]
+    iri: String,
+    #[serde(default)]
+    include_system: bool,
+}
+
+#[derive(Deserialize)]
+struct CopyGraphBody {
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    target: String,
+    /// true = COPY (replace the target), false = ADD.
+    #[serde(default = "default_true")]
+    clear_target: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn graph_info_json(g: &proto::GraphInfo) -> serde_json::Value {
+    let metadata: serde_json::Map<String, serde_json::Value> = g
+        .metadata
+        .iter()
+        .map(|m| {
+            (
+                m.predicate.clone(),
+                m.value
+                    .as_ref()
+                    .map(proto_value_to_json)
+                    .unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect();
+    serde_json::json!({ "iri": g.iri, "id": g.id, "metadata": metadata })
+}
+
+async fn handle_create_graph(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateGraphBody>,
+) -> Response {
+    let req = proto::CreateGraphRequest {
+        iri: body.iri,
+        metadata: body
+            .metadata
+            .iter()
+            .map(|(predicate, v)| proto::GraphMetadata {
+                predicate: predicate.clone(),
+                value: Some(json_to_proto_value(v)),
+            })
+            .collect(),
+    };
+    match state
+        .client
+        .clone()
+        .create_graph(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => match r.into_inner().graph {
+            Some(g) => Json(graph_info_json(&g)).into_response(),
+            None => Json(serde_json::json!({})).into_response(),
+        },
+        Err(e) => grpc_error(e),
+    }
+}
+
+async fn handle_list_graphs(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<GraphIriParams>,
+) -> Response {
+    let req = proto::ListGraphsRequest {
+        filter: vec![],
+        include_system: params.include_system,
+    };
+    match state
+        .client
+        .clone()
+        .list_graphs(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            let graphs: Vec<_> = r.into_inner().graphs.iter().map(graph_info_json).collect();
+            Json(serde_json::json!({ "graphs": graphs })).into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
+async fn handle_graph_stats(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<GraphIriParams>,
+) -> Response {
+    let req = proto::GraphStatsRequest { iri: params.iri };
+    match state
+        .client
+        .clone()
+        .graph_stats(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            let s = r.into_inner();
+            Json(serde_json::json!({
+                "iri": s.iri,
+                "live_quads": s.live_quads,
+                "last_write_tt": s.last_write_tt,
+            }))
+            .into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
+async fn handle_copy_graph(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CopyGraphBody>,
+) -> Response {
+    let req = proto::CopyGraphRequest {
+        source: body.source,
+        target: body.target,
+        clear_target: body.clear_target,
+    };
+    match state
+        .client
+        .clone()
+        .copy_graph(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => Json(serde_json::json!({ "quads": r.into_inner().quads })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+async fn handle_move_graph(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CopyGraphBody>,
+) -> Response {
+    let req = proto::MoveGraphRequest {
+        source: body.source,
+        target: body.target,
+    };
+    match state
+        .client
+        .clone()
+        .move_graph(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => Json(serde_json::json!({ "quads": r.into_inner().quads })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+async fn handle_drop_graph(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<GraphIriParams>,
+) -> Response {
+    let req = proto::DropGraphRequest { iri: params.iri };
+    match state
+        .client
+        .clone()
+        .drop_graph(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            Json(serde_json::json!({ "quads_closed": r.into_inner().quads_closed })).into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
 // ── GET /stats ────────────────────────────────────────────────────────────────
 
 async fn handle_stats(State(state): State<Arc<AppState>>) -> Response {
@@ -4059,6 +4246,15 @@ async fn main() -> anyhow::Result<()> {
             "/schema/rdf",
             get(handle_schema_rdf_get).post(handle_schema_rdf_post),
         )
+        .route(
+            "/graphs",
+            get(handle_list_graphs)
+                .post(handle_create_graph)
+                .delete(handle_drop_graph),
+        )
+        .route("/graphs/stats", get(handle_graph_stats))
+        .route("/graphs/copy", post(handle_copy_graph))
+        .route("/graphs/move", post(handle_move_graph))
         .with_state(state);
 
     info!(addr = %args.listen, upstream = %args.upstream, "polargraph-rest listening");
