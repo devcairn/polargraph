@@ -633,6 +633,23 @@ impl PolarGraphServer {
         })
     }
 
+    /// Apply a `CypherQueryRequest.graphs` dataset to the MATCH patterns not
+    /// already scoped by `USE GRAPH`.
+    fn cypher_dataset(
+        &self,
+        mut compiled: polargraph_query::cypher::CompiledQuery,
+        graphs: &[String],
+    ) -> polargraph_query::cypher::CompiledQuery {
+        if !graphs.is_empty() {
+            let ids = graphs
+                .iter()
+                .filter_map(|iri| self.store.graph_id(iri))
+                .collect();
+            compiled.scope_to(&polargraph_query::GraphTerm::Set(ids));
+        }
+        compiled
+    }
+
     fn target_graph(&self, iri: &str) -> Result<polargraph_core::id::GraphId, Status> {
         if iri.is_empty() {
             return Ok(polargraph_core::id::GraphId::DEFAULT);
@@ -2348,6 +2365,7 @@ impl PolarGraphService for PolarGraphServer {
         let compiled = compiled
             .substitute_params(&params)
             .map_err(|e| Status::invalid_argument(format!("parameter error: {e}")))?;
+        let compiled = self.cypher_dataset(compiled, &req.graphs);
 
         // Resolve snapshot. If tx_id is set, read from the transaction's snapshot.
         let mut snapshot = if !req.tx_id.is_empty() {
@@ -2593,8 +2611,28 @@ impl PolarGraphService for PolarGraphServer {
             ));
         }
 
-        let compiled = polargraph_query::cypher::parse_write(&req.cypher)
+        let mut compiled = polargraph_query::cypher::parse_write(&req.cypher)
             .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
+        // `graph` on the request acts like `USE GRAPH`; both must agree.
+        let graph_iri = match (compiled.graph.clone(), req.graph.as_str()) {
+            (Some(a), b) if !b.is_empty() && a != b => {
+                return Err(Status::invalid_argument(format!(
+                    "USE GRAPH <{a}> conflicts with request graph <{b}>"
+                )))
+            }
+            (Some(a), _) => Some(a),
+            (None, "") => None,
+            (None, b) => {
+                if let Some(mq) = &mut compiled.match_query {
+                    mq.scope_to(&polargraph_query::GraphTerm::Iri(b.to_string()));
+                }
+                Some(b.to_string())
+            }
+        };
+        let write_graph = graph_iri
+            .as_deref()
+            .map(|iri| self.target_graph(iri))
+            .transpose()?;
 
         let map_write_err = |e: polargraph_query::cypher::CypherWriteError| match e {
             polargraph_query::cypher::CypherWriteError::UnboundVariable(v) => {
@@ -2634,11 +2672,12 @@ impl PolarGraphService for PolarGraphServer {
                     let mut all_deleted: u64 = 0;
                     for row in rows {
                         let mut row_bindings = row;
-                        let r = polargraph_query::cypher::execute_write_ops(
+                        let r = polargraph_query::cypher::execute_write_ops_in(
                             &compiled.writes,
                             tx,
                             &snapshot,
                             &mut row_bindings,
+                            write_graph,
                         )
                         .map_err(&map_write_err)?;
                         all_ids.extend(r.created_ids);
@@ -2652,11 +2691,12 @@ impl PolarGraphService for PolarGraphServer {
                     })
                 } else {
                     let mut bindings = HashMap::new();
-                    polargraph_query::cypher::execute_write_ops(
+                    polargraph_query::cypher::execute_write_ops_in(
                         &compiled.writes,
                         tx,
                         &snapshot,
                         &mut bindings,
+                        write_graph,
                     )
                     .map_err(map_write_err)
                 }
@@ -2902,6 +2942,7 @@ impl PolarGraphService for PolarGraphServer {
         let compiled = compiled
             .substitute_params(&params)
             .map_err(|e| Status::invalid_argument(format!("parameter error: {e}")))?;
+        let compiled = self.cypher_dataset(compiled, &req.graphs);
 
         let tx_ts = if req.as_of_tx_time != 0 {
             req.as_of_tx_time

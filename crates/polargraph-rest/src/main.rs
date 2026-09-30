@@ -799,6 +799,9 @@ struct CypherBody {
     /// Values must be JSON-encoded `Value` objects (e.g. `"\"Alice\""` for a string).
     #[serde(default)]
     params: std::collections::HashMap<String, String>,
+    /// Dataset: graph IRIs the MATCH reads (empty = every graph).
+    #[serde(default)]
+    graphs: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -807,6 +810,9 @@ struct CypherWriteBody {
     /// Open transaction ID to buffer writes into instead of auto-committing.
     #[serde(default)]
     tx_id: Option<String>,
+    /// Graph to write to and MATCH in (as `USE GRAPH`).
+    #[serde(default)]
+    graph: String,
 }
 
 async fn handle_cypher(
@@ -834,6 +840,7 @@ async fn handle_cypher(
         tx_id: body.tx_id.unwrap_or_default(),
         user_id: user_id.clone(),
         params: body.params,
+        graphs: body.graphs,
     };
 
     let mut client = state.client.clone();
@@ -870,6 +877,7 @@ async fn handle_cypher_write(
     let req = proto::CypherWriteRequest {
         cypher: body.cypher,
         tx_id: body.tx_id.unwrap_or_default(),
+        graph: body.graph,
     };
 
     let mut client = state.client.clone();
@@ -955,6 +963,7 @@ async fn handle_cypher_stream(
         vector: body.vector,
         ef: body.ef,
         params: body.params,
+        graphs: body.graphs,
         ..Default::default()
     };
 
