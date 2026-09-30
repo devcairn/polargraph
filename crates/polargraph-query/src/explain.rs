@@ -160,7 +160,13 @@ fn format_var_pattern(vp: &VarPattern) -> String {
         .map(|p| format!(":{p}"))
         .unwrap_or_else(|| "?".to_string());
     let o = format_term(&vp.object);
-    format!("[{s}, {p}, {o}]")
+    match &vp.graph {
+        crate::datalog::GraphTerm::Union => format!("[{s}, {p}, {o}]"),
+        crate::datalog::GraphTerm::Default => format!("[{s}, {p}, {o}] in default graph"),
+        crate::datalog::GraphTerm::Bound(g) => format!("[{s}, {p}, {o}] in {g}"),
+        crate::datalog::GraphTerm::Var(v) => format!("[{s}, {p}, {o}] in ?{v}"),
+        crate::datalog::GraphTerm::Set(gs) => format!("[{s}, {p}, {o}] in {} graphs", gs.len()),
+    }
 }
 
 fn format_term(term: &Term) -> String {

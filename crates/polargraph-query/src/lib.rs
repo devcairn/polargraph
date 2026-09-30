@@ -26,8 +26,8 @@ pub mod projection;
 
 pub use datalog::{
     execute_query, execute_query_hybrid, execute_query_seeded, execute_query_with_pending,
-    execute_recursive, reachable_from, reachable_from_hops, Bindings, DerivedFacts, Query,
-    QueryError, Rule, Term, VarPattern,
+    execute_recursive, reachable_from, reachable_from_hops, Bindings, DerivedFacts, GraphTerm,
+    Query, QueryError, Rule, Term, VarPattern,
 };
 pub use eval::{evaluate, evaluate_annotations, evaluate_with_registry};
 pub use explain::{explain_query, ExplainPlan, ExplainStep};

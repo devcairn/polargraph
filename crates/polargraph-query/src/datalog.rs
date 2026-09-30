@@ -46,12 +46,12 @@ use crate::{
     planner::Pattern,
 };
 use polargraph_core::{
-    id::{EdgeId, NodeId},
+    id::{EdgeId, GraphId, NodeId},
     temporal::{BiTemporalRange, Timestamp},
     triple::{Predicate, Triple},
     value::Value,
 };
-use polargraph_storage::{EdgeTypeRegistry, Snapshot, StorageError};
+use polargraph_storage::{EdgeTypeRegistry, GraphScope, Snapshot, StorageError};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -119,6 +119,28 @@ pub struct VarPattern {
     /// than a single-step triple scan. Used by the Cypher compiler for `[r*1..n]`
     /// patterns. Requires the subject to be bound before evaluation.
     pub max_hops: Option<usize>,
+    /// Which graph(s) the pattern matches in. [`GraphTerm::Union`] (the
+    /// default) keeps pre-graph behaviour.
+    pub graph: GraphTerm,
+}
+
+/// The graph slot of a pattern (plan §2.6).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum GraphTerm {
+    /// Every graph, the default graph included; each `(s, p, o)` once.
+    #[default]
+    Union,
+    /// Only the default graph.
+    Default,
+    /// One named graph.
+    Bound(GraphId),
+    /// Binds a variable to the graph of each match — a named graph's IRI node
+    /// (`TripleStore::graph_node`). Unbound, it ranges over every named graph
+    /// (never the default graph, as in SPARQL `GRAPH ?g`); already bound, it
+    /// restricts the match to that graph.
+    Var(String),
+    /// A dataset of graphs (SPARQL `FROM`).
+    Set(Vec<GraphId>),
 }
 
 impl VarPattern {
@@ -130,7 +152,13 @@ impl VarPattern {
             object: Term::Any,
             edge_var: None,
             max_hops: None,
+            graph: GraphTerm::Union,
         }
+    }
+
+    pub fn graph(mut self, g: GraphTerm) -> Self {
+        self.graph = g;
+        self
     }
 
     pub fn subject(mut self, s: Term) -> Self {
@@ -315,6 +343,70 @@ fn extend_full(
 /// - `Any`: nothing to do.
 ///
 /// Returns `None` on conflict.
+/// The storage scope for a pattern's graph term under `bindings`, or `None`
+/// for [`GraphTerm::Union`] (the ungraphed fast path). A graph variable bound
+/// to a node that isn't a named graph yields an empty `Set` (no matches).
+fn graph_scope(term: &GraphTerm, bindings: &Bindings, snapshot: &Snapshot) -> Option<GraphScope> {
+    Some(match term {
+        GraphTerm::Union => return None,
+        GraphTerm::Default => GraphScope::One(GraphId::DEFAULT),
+        GraphTerm::Bound(g) => GraphScope::One(*g),
+        GraphTerm::Set(gs) => GraphScope::set(gs.clone()),
+        GraphTerm::Var(name) => match bindings.get(name) {
+            Some(node) => match snapshot.store().graph_for_node(node) {
+                Some(g) => GraphScope::One(g),
+                None => GraphScope::Set(vec![]),
+            },
+            None => GraphScope::Named,
+        },
+    })
+}
+
+/// Match `vp` (already substituted into `pattern`) for one partial solution,
+/// returning each extended solution. Graph-scoped patterns scan quads and
+/// bind the graph variable; `Union` patterns use `ungraphed`.
+fn match_pattern(
+    vp: &VarPattern,
+    pattern: &Pattern,
+    bindings: &Bindings,
+    pred_bindings: &PredBindings,
+    snapshot: &Snapshot,
+    ungraphed: impl FnOnce(&Pattern) -> Result<Vec<Triple>, StorageError>,
+) -> Result<Vec<(Bindings, PredBindings)>, StorageError> {
+    let Some(scope) = graph_scope(&vp.graph, bindings, snapshot) else {
+        return Ok(ungraphed(pattern)?
+            .iter()
+            .filter_map(|t| extend_full(t, vp, bindings, pred_bindings))
+            .collect());
+    };
+    let quads = snapshot.scan_scoped(
+        pattern.subject.as_ref(),
+        pattern.predicate.as_deref(),
+        pattern.object.as_ref(),
+        &scope,
+    )?;
+    let mut out = Vec::with_capacity(quads.len());
+    for (g, triple) in quads {
+        let Some((mut b, pb)) = extend_full(&triple, vp, bindings, pred_bindings) else {
+            continue;
+        };
+        if let GraphTerm::Var(name) = &vp.graph {
+            let Some(node) = snapshot.store().graph_node(g) else {
+                continue; // default graph: not a named graph
+            };
+            match b.get(name) {
+                Some(existing) if *existing != node => continue,
+                Some(_) => {}
+                None => {
+                    b.insert(name.clone(), node);
+                }
+            }
+        }
+        out.push((b, pb));
+    }
+    Ok(out)
+}
+
 fn bind_term(term: &Term, value: NodeId, bindings: &Bindings) -> Option<Bindings> {
     match term {
         Term::Any | Term::Bound(_) | Term::Param(_) => Some(bindings.clone()),
@@ -429,13 +521,14 @@ fn evaluate_seeded_inner(
         } else {
             for (bindings, pred_bindings) in solutions {
                 let pattern = substitute_with_preds(vp, &bindings, &pred_bindings);
-                let triples = evaluate_with_registry(&pattern, snapshot, registry)?;
-
-                for triple in triples {
-                    if let Some(pair) = extend_full(&triple, vp, &bindings, &pred_bindings) {
-                        next.push(pair);
-                    }
-                }
+                next.extend(match_pattern(
+                    vp,
+                    &pattern,
+                    &bindings,
+                    &pred_bindings,
+                    snapshot,
+                    |p| evaluate_with_registry(p, snapshot, registry),
+                )?);
             }
         }
 
@@ -570,14 +663,17 @@ pub fn execute_query_with_pending_full(
         let mut next = Vec::new();
 
         for (bindings, pred_bindings) in solutions {
+            // Pending writes are overlaid on Union patterns only; they carry
+            // no graph in the overlay.
             let pattern = substitute_with_preds(vp, &bindings, &pred_bindings);
-            let triples = evaluate_with_overlay(&pattern, snapshot, pending, registry)?;
-
-            for triple in triples {
-                if let Some(pair) = extend_full(&triple, vp, &bindings, &pred_bindings) {
-                    next.push(pair);
-                }
-            }
+            next.extend(match_pattern(
+                vp,
+                &pattern,
+                &bindings,
+                &pred_bindings,
+                snapshot,
+                |p| evaluate_with_overlay(p, snapshot, pending, registry),
+            )?);
         }
 
         solutions = next;
@@ -876,14 +972,16 @@ pub fn execute_query_hybrid_full(
         let mut next = Vec::new();
 
         for (bindings, pred_bindings) in solutions {
+            // Derived (rule) facts have no graph: they only match Union patterns.
             let pattern = substitute_with_preds(vp, &bindings, &pred_bindings);
-            let triples = evaluate_hybrid(&pattern, snapshot, derived)?;
-
-            for triple in triples {
-                if let Some(pair) = extend_full(&triple, vp, &bindings, &pred_bindings) {
-                    next.push(pair);
-                }
-            }
+            next.extend(match_pattern(
+                vp,
+                &pattern,
+                &bindings,
+                &pred_bindings,
+                snapshot,
+                |p| evaluate_hybrid(p, snapshot, derived),
+            )?);
         }
 
         solutions = next;
@@ -1023,6 +1121,81 @@ mod tests {
         let who = collect_var(&results, "who");
         assert!(who.contains(&bob));
         assert!(who.contains(&carol));
+    }
+
+    #[test]
+    fn graph_terms_scope_matches_and_bind_graph_variables() {
+        use polargraph_storage::WriteMode;
+
+        let (store, _dir) = open();
+        let g1 = store.intern_graph("urn:g:eng").unwrap();
+        let g2 = store.intern_graph("urn:g:sales").unwrap();
+        let (svc, db, acme) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let mut tx = store.begin();
+        tx.insert_in(rel(svc, "dependsOn", db), g1, WriteMode::Add);
+        tx.insert_in(prop(svc, "owner", "team-id"), g1, WriteMode::Add);
+        tx.insert_in(rel(acme, "uses", svc), g2, WriteMode::Add);
+        tx.insert(rel(acme, "uses", db)); // default graph
+        let snap = store.snapshot(tx.commit().unwrap());
+
+        let run = |patterns: Vec<VarPattern>| {
+            let mut q = Query::new();
+            for p in patterns {
+                q = q.pattern(p);
+            }
+            execute_query(&q, &snap, None, None).unwrap()
+        };
+        let uses = |g: GraphTerm| {
+            VarPattern::new()
+                .subject(var("c"))
+                .predicate("uses")
+                .object(var("x"))
+                .graph(g)
+        };
+
+        // Union (default): both `uses` edges.
+        assert_eq!(run(vec![uses(GraphTerm::Union)]).len(), 2);
+        // Default graph only.
+        let d = run(vec![uses(GraphTerm::Default)]);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0]["x"], db);
+        // A bound named graph.
+        let b = run(vec![uses(GraphTerm::Bound(g2))]);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0]["x"], svc);
+        // Set.
+        assert_eq!(run(vec![uses(GraphTerm::Set(vec![g1, g2]))]).len(), 1);
+
+        // ?g ranges over named graphs only and binds the graph's IRI node.
+        let v = run(vec![uses(GraphTerm::Var("g".into()))]);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["g"], store.graph_node(g2).unwrap());
+
+        // A shared ?g joins two patterns within one graph.
+        let joined = run(vec![
+            VarPattern::new()
+                .subject(var("s"))
+                .predicate("dependsOn")
+                .object(var("d"))
+                .graph(GraphTerm::Var("g".into())),
+            VarPattern::new()
+                .subject(var("s"))
+                .predicate("owner")
+                .object(Term::Any)
+                .graph(GraphTerm::Var("g".into())),
+        ]);
+        assert_eq!(joined.len(), 1);
+        assert_eq!(joined[0]["g"], store.graph_node(g1).unwrap());
+
+        // ?g pre-bound to a node that isn't a graph matches nothing.
+        let none = run(vec![
+            VarPattern::new()
+                .subject(var("g"))
+                .predicate("uses")
+                .object(Term::Bound(db)),
+            uses(GraphTerm::Var("g".into())),
+        ]);
+        assert!(none.is_empty());
     }
 
     #[test]
