@@ -120,6 +120,28 @@ message VarPattern {
     /// each binding (see `Binding.predicates`). Empty string or omitted means
     /// the matched predicate is not captured.
     string predicate_var = 4;
+    /// Which graph(s) the pattern matches in. Unset = every graph (union),
+    /// or the request's `graphs` dataset when one is given.
+    GraphTerm graph = 5;
+}
+
+/// The graph slot of a pattern.
+message GraphTerm {
+    oneof kind {
+        /// true = only the default graph.
+        bool     default_graph = 1;
+        /// One named graph, by IRI. An unknown IRI matches nothing.
+        string   iri           = 2;
+        /// A graph variable: binds the IRI node of each match's named graph
+        /// (never the default graph); restricts the match when already bound.
+        string   var           = 3;
+        /// A set of named graphs, by IRI.
+        GraphSet set           = 4;
+    }
+}
+
+message GraphSet {
+    repeated string iris = 1;
 }
 
 /// A Datalog rule used in recursive queries.
@@ -235,6 +257,9 @@ message QueryRequest {
     /// Named query parameters for use with `$param` syntax. Keys are parameter names
     /// (without the `$`); values are JSON-encoded `Value` objects.
     map<string, string> params = 8;
+    /// Dataset: graph IRIs that patterns without their own `graph` term match
+    /// in (like SPARQL FROM). Empty = every graph.
+    repeated string graphs = 9;
 }
 
 /// One satisfying assignment of all variables in the query.

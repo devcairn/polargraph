@@ -148,6 +148,9 @@ struct QueryBody {
     /// Also forwarded from the `X-User-Id` HTTP header when this field is absent.
     #[serde(default)]
     user_id: Option<String>,
+    /// Dataset: graph IRIs for patterns without an `@graph` suffix.
+    #[serde(default)]
+    graphs: Vec<String>,
 }
 
 /// A scalar property to attach to an edge at insert time.
@@ -217,13 +220,19 @@ struct TripleJson {
 /// - `:predicate` or `predicate` → predicate string (leading `:` stripped)
 pub fn parse_pattern(s: &str) -> Result<proto::VarPattern, String> {
     let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() != 3 {
+    if !(parts.len() == 3 || (parts.len() == 4 && parts[3].starts_with('@'))) {
         return Err(format!(
-            "pattern must have exactly 3 whitespace-separated tokens (got {}): {:?}",
+            "pattern must be `subject predicate object [@graph]` (got {} tokens): {:?}",
             parts.len(),
             s
         ));
     }
+    let graph = match parts.get(3) {
+        Some(g) => {
+            Some(parse_graph_token(&g[1..]).map_err(|e| format!("graph in {:?}: {}", s, e))?)
+        }
+        None => None,
+    };
     let subject = parse_term(parts[0]).map_err(|e| format!("subject in {:?}: {}", s, e))?;
     let predicate = parts[1].trim_start_matches(':').to_string();
     let object = parse_term(parts[2]).map_err(|e| format!("object in {:?}: {}", s, e))?;
@@ -232,7 +241,32 @@ pub fn parse_pattern(s: &str) -> Result<proto::VarPattern, String> {
         predicate,
         object: Some(object),
         predicate_var: String::new(),
+        graph,
     })
+}
+
+/// The `@graph` suffix of a pattern string: `@default`, `@?g` (graph
+/// variable), or `@<iri>` / `@iri` (one named graph).
+fn parse_graph_token(s: &str) -> Result<proto::GraphTerm, String> {
+    use proto::graph_term::Kind;
+    let kind = if s == "default" {
+        Kind::DefaultGraph(true)
+    } else if let Some(var) = s.strip_prefix('?') {
+        if var.is_empty() {
+            return Err("empty graph variable".into());
+        }
+        Kind::Var(var.to_string())
+    } else {
+        let iri = s
+            .strip_prefix('<')
+            .and_then(|t| t.strip_suffix('>'))
+            .unwrap_or(s);
+        if iri.is_empty() {
+            return Err("empty graph IRI".into());
+        }
+        Kind::Iri(iri.to_string())
+    };
+    Ok(proto::GraphTerm { kind: Some(kind) })
 }
 
 fn parse_term(s: &str) -> Result<proto::Term, String> {
@@ -485,6 +519,7 @@ async fn handle_query(
         tx_id: body.tx_id.unwrap_or_default(),
         user_id: user_id.clone(),
         params: std::collections::HashMap::new(),
+        graphs: body.graphs.clone(),
     };
 
     let mut client = state.client.clone();
@@ -642,6 +677,7 @@ async fn handle_triples(
             predicate: predicate_filter.clone(),
             object: Some(object_term),
             predicate_var: "__p".to_string(),
+            graph: None,
         }],
         snapshot_ts: 0,
         as_of_valid_time: 0,
@@ -2092,6 +2128,7 @@ fn sparql_varpat_to_proto(vp: &polargraph_query::VarPattern) -> proto::VarPatter
         predicate: vp.predicate.clone().unwrap_or_default(),
         object: Some(sparql_term_to_proto(&vp.object)),
         predicate_var: vp.predicate_var.clone().unwrap_or_default(),
+        graph: None,
     }
 }
 
@@ -2235,6 +2272,7 @@ async fn execute_sparql_construct(
                         kind: Some(proto::term::Kind::Var("_o".to_string())),
                     }),
                     predicate_var: "_p".to_string(),
+                    graph: None,
                 }],
                 ..Default::default()
             };
@@ -3391,6 +3429,7 @@ async fn export_jsonld_for(
                         kind: Some(proto::term::Kind::Var("_o".to_string())),
                     }),
                     predicate_var: "_p".to_string(),
+                    graph: None,
                 }],
                 ..Default::default()
             };
@@ -3433,6 +3472,7 @@ async fn export_jsonld_for(
                             kind: Some(proto::term::Kind::Var("_o".to_string())),
                         }),
                         predicate_var: String::new(),
+                        graph: None,
                     }],
                     ..Default::default()
                 };
@@ -3605,6 +3645,7 @@ async fn handle_export_subgraph(
                         kind: Some(proto::term::Kind::Var("_o".to_string())),
                     }),
                     predicate_var: "_p".to_string(),
+                    graph: None,
                 }],
                 ..Default::default()
             };
@@ -4152,6 +4193,24 @@ mod tests {
         for v in [lang, typed] {
             assert_eq!(proto_value_to_json(&json_to_proto_value(&v)), v);
         }
+    }
+
+    #[test]
+    fn parse_pattern_graph_suffix() {
+        use proto::graph_term::Kind;
+        let kind = |s: &str| parse_pattern(s).unwrap().graph.and_then(|g| g.kind);
+        assert_eq!(kind("?s :knows ?o"), None);
+        assert_eq!(
+            kind("?s :knows ?o @default"),
+            Some(Kind::DefaultGraph(true))
+        );
+        assert_eq!(kind("?s :knows ?o @?g"), Some(Kind::Var("g".into())));
+        assert_eq!(
+            kind("?s :knows ?o @<https://kb.example/g/eng>"),
+            Some(Kind::Iri("https://kb.example/g/eng".into()))
+        );
+        assert!(parse_pattern("?s :knows ?o extra").is_err());
+        assert!(parse_pattern("?s :knows ?o @?").is_err());
     }
 
     #[test]

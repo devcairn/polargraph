@@ -841,11 +841,9 @@ impl PolarGraphService for PolarGraphServer {
         }
 
         // Convert proto VarPatterns → datalog VarPatterns.
-        let patterns: Vec<_> = req
-            .patterns
-            .iter()
-            .map(convert::var_pattern_from_proto)
-            .collect::<Result<_, _>>()?;
+        let patterns = convert::var_patterns_from_proto(&req.patterns, &req.graphs, &|iri| {
+            self.store.graph_id(iri)
+        })?;
 
         let pattern_count = patterns.len();
 
@@ -885,7 +883,7 @@ impl PolarGraphService for PolarGraphServer {
         let rules: Vec<_> = req
             .rules
             .iter()
-            .map(convert::rule_from_proto)
+            .map(|r| convert::rule_from_proto(r, &|iri| self.store.graph_id(iri)))
             .collect::<Result<_, _>>()?;
 
         let t0 = Instant::now();
@@ -1767,11 +1765,8 @@ impl PolarGraphService for PolarGraphServer {
                 .snapshot(polargraph_core::temporal::Timestamp(req.snapshot_ts))
         };
 
-        let patterns: Vec<_> = req
-            .patterns
-            .iter()
-            .map(convert::var_pattern_from_proto)
-            .collect::<Result<_, _>>()?;
+        let patterns =
+            convert::var_patterns_from_proto(&req.patterns, &[], &|iri| self.store.graph_id(iri))?;
 
         let mut query = Query::new();
         for p in patterns {
@@ -1963,11 +1958,9 @@ impl PolarGraphService for PolarGraphServer {
             ));
         }
 
-        let patterns: Vec<_> = req
-            .patterns
-            .iter()
-            .map(convert::var_pattern_from_proto)
-            .collect::<Result<_, _>>()?;
+        let patterns = convert::var_patterns_from_proto(&req.patterns, &req.graphs, &|iri| {
+            self.store.graph_id(iri)
+        })?;
 
         let mut query = Query::new();
         for p in patterns {
@@ -2582,11 +2575,9 @@ impl PolarGraphService for PolarGraphServer {
             ));
         }
 
-        let patterns: Vec<_> = req
-            .patterns
-            .iter()
-            .map(convert::var_pattern_from_proto)
-            .collect::<Result<_, _>>()?;
+        let patterns = convert::var_patterns_from_proto(&req.patterns, &req.graphs, &|iri| {
+            self.store.graph_id(iri)
+        })?;
 
         let pattern_count = patterns.len();
         let mut query = Query::new();
@@ -2612,7 +2603,7 @@ impl PolarGraphService for PolarGraphServer {
         let rules: Vec<_> = req
             .rules
             .iter()
-            .map(convert::rule_from_proto)
+            .map(|r| convert::rule_from_proto(r, &|iri| self.store.graph_id(iri)))
             .collect::<Result<_, _>>()?;
 
         let t0 = Instant::now();

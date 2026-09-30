@@ -106,6 +106,7 @@ fn pattern(sub: Term, pred: &str, obj: Term) -> VarPattern {
         predicate: pred.into(),
         object: Some(obj),
         predicate_var: String::new(),
+        graph: None,
     }
 }
 
@@ -4737,6 +4738,7 @@ async fn wire_tx_commit_makes_triples_visible() {
                     kind: Some(TermKind::Var("v".to_string())),
                 }),
                 predicate_var: String::new(),
+                graph: None,
             }],
             ..Default::default()
         }))
@@ -4766,6 +4768,7 @@ async fn wire_tx_commit_makes_triples_visible() {
                     kind: Some(TermKind::Var("v".to_string())),
                 }),
                 predicate_var: String::new(),
+                graph: None,
             }],
             ..Default::default()
         }))
@@ -4810,6 +4813,7 @@ async fn wire_tx_rollback_discards_triples() {
                     kind: Some(TermKind::Var("v".to_string())),
                 }),
                 predicate_var: String::new(),
+                graph: None,
             }],
             ..Default::default()
         }))
@@ -4855,6 +4859,7 @@ async fn wire_tx_write_your_own_reads() {
                     kind: Some(TermKind::Var("v".to_string())),
                 }),
                 predicate_var: String::new(),
+                graph: None,
             }],
             tx_id: tx_id.clone(),
             ..Default::default()
@@ -6923,4 +6928,73 @@ async fn insert_into_named_graph_interns_and_scopes_it() {
         .is_empty());
     // Union reads (the existing query paths) still see it.
     assert_eq!(store.scan_by_subject(&core_s).unwrap().len(), 1);
+}
+
+// ── Step 4: graph terms and datasets on Query ────────────────────────────────
+
+#[tokio::test]
+async fn query_graph_terms_and_dataset() {
+    use polargraph_server::proto::{graph_term::Kind as G, GraphSet, GraphTerm};
+
+    let (svc, _dir) = open();
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    for (graph, obj) in [("urn:g:eng", a.clone()), ("urn:g:sales", b.clone())] {
+        svc.insert(Request::new(InsertRequest {
+            triples: vec![rel(a.clone(), "knows", obj)],
+            graph: graph.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    }
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(b.clone(), "knows", a.clone())],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let q = |graph: Option<G>, graphs: Vec<&'static str>| {
+        let svc = &svc;
+        let mut p = pattern(var("s"), "knows", var("o"));
+        p.graph = graph.map(|k| GraphTerm { kind: Some(k) });
+        async move {
+            svc.query(Request::new(QueryRequest {
+                patterns: vec![p],
+                graphs: graphs.into_iter().map(String::from).collect(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .bindings
+        }
+    };
+    assert_eq!(q(None, vec![]).await.len(), 3, "union");
+    assert_eq!(q(Some(G::DefaultGraph(true)), vec![]).await.len(), 1);
+    assert_eq!(q(Some(G::Iri("urn:g:eng".into())), vec![]).await.len(), 1);
+    assert_eq!(
+        q(Some(G::Iri("urn:g:unknown".into())), vec![]).await.len(),
+        0
+    );
+    assert_eq!(
+        q(
+            Some(G::Set(GraphSet {
+                iris: vec!["urn:g:eng".into(), "urn:g:sales".into()]
+            })),
+            vec![]
+        )
+        .await
+        .len(),
+        2
+    );
+    assert_eq!(q(None, vec!["urn:g:sales"]).await.len(), 1, "dataset");
+
+    let with_g = q(Some(G::Var("g".into())), vec![]).await;
+    assert_eq!(with_g.len(), 2, "?g ranges over named graphs only");
+    let eng = polargraph_core::term::iri_to_node_id("urn:g:eng");
+    assert!(with_g
+        .iter()
+        .any(|b| b.vars["g"].bytes == eng.as_bytes().to_vec()));
 }

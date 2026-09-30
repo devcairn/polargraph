@@ -10,7 +10,7 @@ use crate::proto::{
     triple::Kind as TripleKind, value::Kind as ValueKind,
 };
 use polargraph_core::{
-    id::{EdgeId, NodeId},
+    id::{EdgeId, GraphId, NodeId},
     schema::{
         Cardinality, EdgeTypeDef, FieldDef, FieldKind, NodeTypeDef, StorageMode, VectorSpaceDef,
     },
@@ -18,7 +18,7 @@ use polargraph_core::{
     triple::{Predicate, Triple},
     value::Value,
 };
-use polargraph_query::datalog::{Bindings, Rule, Term, VarPattern};
+use polargraph_query::datalog::{Bindings, GraphTerm, Rule, Term, VarPattern};
 use polargraph_storage::WriteMode;
 use polargraph_storage::{EdgeAnnotation, EdgeAnnotationValue};
 use tonic::Status;
@@ -240,7 +240,62 @@ pub fn term_from_proto(proto: &proto::Term) -> Result<Term, Status> {
     }
 }
 
-pub fn var_pattern_from_proto(proto: &proto::VarPattern) -> Result<VarPattern, Status> {
+/// Resolves a graph IRI to its id (`TripleStore::graph_id`).
+pub type GraphResolver<'a> = &'a dyn Fn(&str) -> Option<GraphId>;
+
+/// Graph IRIs → a `Set` term; unknown IRIs are dropped (they hold no data).
+fn graph_set(iris: &[String], resolve: GraphResolver) -> GraphTerm {
+    GraphTerm::Set(iris.iter().filter_map(|iri| resolve(iri)).collect())
+}
+
+pub fn graph_term_from_proto(
+    proto: Option<&proto::GraphTerm>,
+    resolve: GraphResolver,
+) -> Result<GraphTerm, Status> {
+    use proto::graph_term::Kind;
+    Ok(match proto.and_then(|g| g.kind.as_ref()) {
+        None => GraphTerm::Union,
+        Some(Kind::DefaultGraph(true)) => GraphTerm::Default,
+        Some(Kind::DefaultGraph(false)) => GraphTerm::Union,
+        Some(Kind::Iri(iri)) => match resolve(iri) {
+            Some(g) => GraphTerm::Bound(g),
+            None => GraphTerm::Set(vec![]),
+        },
+        Some(Kind::Var(name)) => {
+            if name.is_empty() {
+                return Err(Status::invalid_argument(
+                    "graph variable name must not be empty",
+                ));
+            }
+            GraphTerm::Var(name.clone())
+        }
+        Some(Kind::Set(set)) => graph_set(&set.iris, resolve),
+    })
+}
+
+/// Convert request patterns; patterns without a graph term use `dataset`
+/// (graph IRIs) when it is non-empty.
+pub fn var_patterns_from_proto(
+    patterns: &[proto::VarPattern],
+    dataset: &[String],
+    resolve: GraphResolver,
+) -> Result<Vec<VarPattern>, Status> {
+    patterns
+        .iter()
+        .map(|p| {
+            let mut vp = var_pattern_from_proto(p, resolve)?;
+            if vp.graph == GraphTerm::Union && !dataset.is_empty() {
+                vp.graph = graph_set(dataset, resolve);
+            }
+            Ok(vp)
+        })
+        .collect()
+}
+
+pub fn var_pattern_from_proto(
+    proto: &proto::VarPattern,
+    resolve: GraphResolver,
+) -> Result<VarPattern, Status> {
     let subject = match &proto.subject {
         Some(t) => term_from_proto(t)?,
         None => Term::Any,
@@ -265,6 +320,7 @@ pub fn var_pattern_from_proto(proto: &proto::VarPattern) -> Result<VarPattern, S
         predicate,
         predicate_var,
         object,
+        graph: graph_term_from_proto(proto.graph.as_ref(), resolve)?,
         ..Default::default()
     })
 }
@@ -327,7 +383,7 @@ pub fn cypher_binding_to_proto(
 
 // ── Datalog rules ─────────────────────────────────────────────────────────────
 
-pub fn rule_from_proto(proto: &proto::DatalogRule) -> Result<Rule, Status> {
+pub fn rule_from_proto(proto: &proto::DatalogRule, resolve: GraphResolver) -> Result<Rule, Status> {
     if proto.head_predicate.is_empty() {
         return Err(Status::invalid_argument(
             "rule head_predicate must not be empty",
@@ -346,7 +402,7 @@ pub fn rule_from_proto(proto: &proto::DatalogRule) -> Result<Rule, Status> {
     let body = proto
         .body
         .iter()
-        .map(var_pattern_from_proto)
+        .map(|p| var_pattern_from_proto(p, resolve))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Rule::new(
         proto.head_predicate.clone(),

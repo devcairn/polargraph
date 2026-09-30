@@ -205,6 +205,7 @@ fn bench_point_lookup(c: &mut Criterion) {
                             predicate: "name".into(),
                             object: Some(any()),
                             predicate_var: String::new(),
+                            graph: None,
                         }],
                         ..Default::default()
                     };
@@ -295,6 +296,7 @@ fn bench_bitemporal_scan(c: &mut Criterion) {
                                 predicate: "status".into(),
                                 object: Some(any()),
                                 predicate_var: String::new(),
+                                graph: None,
                             }],
                             as_of_valid_time,
                             ..Default::default()

@@ -354,6 +354,7 @@ async fn run_read(mut client: PolarGraphServiceClient<Channel>, args: &GrpcArgs)
                     kind: Some(proto::term::Kind::Var("x".into())),
                 }),
                 predicate_var: String::new(),
+                graph: None,
             }],
             snapshot_ts: 0,
             ..Default::default()
@@ -432,6 +433,7 @@ async fn run_mixed(client: PolarGraphServiceClient<Channel>, args: &GrpcArgs) ->
                             kind: Some(proto::term::Kind::Var("x".into())),
                         }),
                         predicate_var: String::new(),
+                        graph: None,
                     }],
                     snapshot_ts: 0,
                     ..Default::default()
