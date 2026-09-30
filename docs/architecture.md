@@ -805,6 +805,7 @@ Each `VarPattern` carries a `GraphTerm` saying which graphs it matches
 | `Union` (default) | every graph, each `(s, p, o)` once | unset | none |
 | `Default` | the default graph only | `default_graph: true` | `@default` |
 | `Bound(g)` | one named graph | `iri: "<iri>"` | `@<iri>` |
+| `Iri(iri)` | one named graph by IRI, resolved at evaluation (unknown = nothing); used by the SPARQL and Cypher front ends, which have no store | — | — |
 | `Var(name)` | each named graph in turn; binds `?name` to the graph's IRI node | `var: "g"` | `@?g` |
 | `Set(gs)` | any of a set of graphs (SPARQL `FROM`-style dataset) | `set { iris }` | — |
 
@@ -916,6 +917,84 @@ flowchart LR
 
 Serialization is `polargraph_sparql::serialize_nquads` / `serialize_trig`
 over `RdfQuad { triple, graph }`.
+
+### SPARQL datasets and graph updates
+
+PolarGraph's SPARQL **default graph is the union of all graphs** (as with
+Jena's "union default graph"), so queries without a dataset clause behave as
+they did before named graphs. The translator (`polargraph-sparql::translate`)
+maps the dataset onto graph terms:
+
+| SPARQL | Translation |
+|---|---|
+| `GRAPH <iri> { … }` | inner patterns get `GraphTerm::Iri` (an IRI outside `FROM NAMED` matches nothing) |
+| `GRAPH ?g { … }` | inner patterns get `GraphTerm::Var("g")`; `?g` is listed in `SparqlTranslation.graph_vars` |
+| `FROM <a> FROM <b>` | `SparqlTranslation.dataset.default` → `QueryRequest.graphs`, applied to patterns outside `GRAPH` |
+| `FROM NAMED <c>` | REST keeps only rows whose graph variables name one of the listed graphs |
+| `FROM NAMED` without `FROM` | the default graph is empty (patterns outside `GRAPH` match nothing) |
+| `FROM` without `FROM NAMED` | no named graphs (`GRAPH` matches nothing) |
+| `default-graph-uri` / `named-graph-uri` (protocol, URL or form body) | replace the query's `FROM` / `FROM NAMED` |
+
+`scope_to_graph` (`polargraph_query::datalog`) applies a graph term to every
+unscoped pattern of a branch, its OPTIONAL branches and its property-path
+rule bodies. Patterns over rule-derived predicates stay unscoped because
+derived facts have no graph, so `GRAPH <g> { ?a :p+ ?b }` walks `:p` edges
+in `<g>`; `GRAPH ?g` around a path does not bind `?g` from the path. SELECT,
+ASK and CONSTRUCT honour datasets; DESCRIBE reads the union.
+
+SPARQL Update (`POST /sparql/update`):
+
+```mermaid
+flowchart TD
+    U["SPARQL Update (spargebra)"] --> ID["INSERT DATA { GRAPH g { … } }"]
+    U --> DD["DELETE DATA { GRAPH g { … } }"]
+    U --> DI["INSERT / DELETE … WHERE"]
+    U --> CD["CLEAR / DROP (graph, DEFAULT, NAMED, ALL)"]
+    U --> CR["CREATE GRAPH"]
+    U --> CM["ADD / COPY / MOVE"]
+    ID --> INS["Insert { graph }"]
+    DD --> DEL["DeleteTriples { graph }"]
+    DI -->|"WHERE → Query (USING → graphs)"| T["templates per solution<br/>(fixed graph or ?g)"]
+    T --> INS
+    T --> DEL
+    CD --> DG["DropGraph per target"]
+    CR --> CG["CreateGraph"]
+    CM -->|"spargebra rewrites to DROP + INSERT { GRAPH dst { ?s ?p ?o } } WHERE { GRAPH src { ?s ?p ?o } }"| DETECT{"graph_copy_shape"}
+    DETECT --> CP["CopyGraph (keeps literals and edge ids)"]
+    DETECT --> DG
+```
+
+- A quad without `GRAPH` is inserted into the default graph; a DELETE
+  without `GRAPH` closes the triple **in every graph** (the default graph is
+  the union). `DeleteTriplesRequest.graph` carries the choice.
+- `CLEAR` and `DROP` both close live quads (bitemporal); `SILENT`
+  suppresses errors for unknown graphs. `CREATE` is idempotent.
+- spargebra rewrites `ADD` / `COPY` / `MOVE` into `DROP` + a `?s ?p ?o`
+  INSERT … WHERE. Evaluated literally that would lose literal values (query
+  bindings carry NodeIds only), so the REST gateway recognizes the exact
+  shape and runs `CopyGraph` instead.
+- `LOAD` is not supported (use `POST /import/rdf`). The response is
+  `{ok, inserted, deleted, failed, errors}`.
+
+### Cypher graphs
+
+```cypher
+USE GRAPH <https://cb.ai/graph/approved>
+MATCH (s:Service)-[:dependsOn]->(d) RETURN s, d
+```
+
+A leading `USE GRAPH <iri>` (or `USE <iri>`) scopes the MATCH patterns
+(`CompiledQuery.graph`, `CompiledQuery::scope_to`). `CypherQueryRequest.graphs`
+(REST `/cypher` and `/cypher/stream` `"graphs"`) is a dataset for patterns
+`USE GRAPH` didn't scope. For writes, `USE GRAPH` or
+`CypherWriteRequest.graph` (REST `/cypher/write` `"graph"`) picks the target
+graph (interned on first use) and scopes the MATCH; the two must agree.
+`execute_write_ops_in(…, Some(g))` writes into `g` and restricts MERGE and
+DELETE lookups to `g`. Without a graph, writes go to the default graph and
+DELETE closes the node's quads in whichever graphs hold them.
+
+**Known limit.** Cypher property filters (`WHERE n.prop = …`) and projections
+(`RETURN n.prop`) read every graph.
 
 ## Cypher query surface
 

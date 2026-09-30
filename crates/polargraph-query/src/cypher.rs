@@ -34,16 +34,16 @@
 use std::collections::{HashMap, HashSet};
 
 use polargraph_core::{
-    id::{EdgeId, NodeId},
+    id::{EdgeId, GraphId, NodeId},
     temporal::{BiTemporalRange, Timestamp},
     triple::{Predicate, Triple},
     value::Value,
 };
-use polargraph_storage::{Snapshot, StorageError, Transaction};
+use polargraph_storage::{GraphScope, Snapshot, StorageError, Transaction, WriteMode};
 use uuid::Uuid;
 
 use crate::aggregation::{AggFunc, AggregationSpec, OrderSpec, SortDir};
-use crate::datalog::{Bindings, Query, Rule, Term, VarPattern};
+use crate::datalog::{scope_to_graph, Bindings, GraphTerm, Query, Rule, Term, VarPattern};
 
 // ── Error ─────────────────────────────────────────────────────────────────────
 
@@ -250,6 +250,8 @@ pub struct CypherQuery {
     pub skip: Option<usize>,
     /// Optional WITH clause between MATCH and RETURN.
     pub with_clause: Option<WithClause>,
+    /// Graph IRI from a leading `USE GRAPH <iri>` clause.
+    pub graph: Option<String>,
 }
 
 // ── Write AST ─────────────────────────────────────────────────────────────────
@@ -322,6 +324,9 @@ pub struct CompiledWrite {
     pub match_query: Option<CompiledQuery>,
     /// Sequence of write operations to execute (in order).
     pub writes: Vec<WriteOp>,
+    /// Graph IRI from `USE GRAPH <iri>`: the MATCH reads it and the writes
+    /// go to it.
+    pub graph: Option<String>,
 }
 
 /// Top-level Cypher statement — either a read query or a write statement.
@@ -407,6 +412,24 @@ pub fn execute_write_ops(
     snapshot: &Snapshot,
     bindings: &mut HashMap<String, NodeId>,
 ) -> Result<WriteResult, CypherWriteError> {
+    execute_write_ops_in(ops, tx, snapshot, bindings, None)
+}
+
+/// [`execute_write_ops`] targeting a graph. With `Some(g)`, writes go to `g`
+/// and MERGE / DELETE only see `g`. With `None`, writes go to the default
+/// graph, MERGE looks across every graph, and DELETE closes the node's
+/// triples in whichever graphs hold them.
+pub fn execute_write_ops_in(
+    ops: &[WriteOp],
+    tx: &mut Transaction,
+    snapshot: &Snapshot,
+    bindings: &mut HashMap<String, NodeId>,
+    graph: Option<GraphId>,
+) -> Result<WriteResult, CypherWriteError> {
+    let put = |tx: &mut Transaction, triple: Triple| match graph {
+        Some(g) => tx.insert_in(triple, g, WriteMode::Auto),
+        None => tx.insert(triple),
+    };
     let mut created_ids = Vec::new();
     let mut triples_written: u64 = 0;
     let mut triples_deleted: u64 = 0;
@@ -418,21 +441,27 @@ pub fn execute_write_ops(
                 let temporal = BiTemporalRange::assert_now(Timestamp::now());
 
                 if let Some(ref lbl) = label {
-                    tx.insert(Triple::Property {
-                        subject: node_id,
-                        predicate: Predicate::new("__type"),
-                        value: Value::Text(lbl.clone()),
-                        temporal,
-                    });
+                    put(
+                        tx,
+                        Triple::Property {
+                            subject: node_id,
+                            predicate: Predicate::new("__type"),
+                            value: Value::Text(lbl.clone()),
+                            temporal,
+                        },
+                    );
                     triples_written += 1;
                 }
                 for (key, val) in props {
-                    tx.insert(Triple::Property {
-                        subject: node_id,
-                        predicate: Predicate::new(key.clone()),
-                        value: val.to_core_value(),
-                        temporal,
-                    });
+                    put(
+                        tx,
+                        Triple::Property {
+                            subject: node_id,
+                            predicate: Predicate::new(key.clone()),
+                            value: val.to_core_value(),
+                            temporal,
+                        },
+                    );
                     triples_written += 1;
                 }
                 if let Some(var_name) = var {
@@ -455,13 +484,16 @@ pub fn execute_write_ops(
                     .copied()
                     .ok_or_else(|| CypherWriteError::UnboundVariable(object_var.clone()))?;
 
-                tx.insert(Triple::Relation {
-                    subject,
-                    predicate: Predicate::new(predicate.clone()),
-                    object,
-                    edge_id: EdgeId::new(),
-                    temporal: BiTemporalRange::assert_now(Timestamp::now()),
-                });
+                put(
+                    tx,
+                    Triple::Relation {
+                        subject,
+                        predicate: Predicate::new(predicate.clone()),
+                        object,
+                        edge_id: EdgeId::new(),
+                        temporal: BiTemporalRange::assert_now(Timestamp::now()),
+                    },
+                );
                 triples_written += 1;
             }
 
@@ -470,13 +502,13 @@ pub fn execute_write_ops(
                 let found = if let Some(id_node) = id_node {
                     // Caller supplied an explicit id: the node exists iff that
                     // NodeId already has data, regardless of matching props.
-                    if snapshot.scan_by_subject(&id_node)?.is_empty() {
+                    if read_scoped(snapshot, Some(&id_node), None, graph)?.is_empty() {
                         None
                     } else {
                         Some(id_node)
                     }
                 } else {
-                    find_matching_node(snapshot, label.as_deref(), props)?
+                    find_matching_node(snapshot, label.as_deref(), props, graph)?
                 };
                 let node_id = if let Some(existing) = found {
                     existing
@@ -485,21 +517,27 @@ pub fn execute_write_ops(
                     let temporal = BiTemporalRange::assert_now(Timestamp::now());
 
                     if let Some(ref lbl) = label {
-                        tx.insert(Triple::Property {
-                            subject: node_id,
-                            predicate: Predicate::new("__type"),
-                            value: Value::Text(lbl.clone()),
-                            temporal,
-                        });
+                        put(
+                            tx,
+                            Triple::Property {
+                                subject: node_id,
+                                predicate: Predicate::new("__type"),
+                                value: Value::Text(lbl.clone()),
+                                temporal,
+                            },
+                        );
                         triples_written += 1;
                     }
                     for (key, val) in props {
-                        tx.insert(Triple::Property {
-                            subject: node_id,
-                            predicate: Predicate::new(key.clone()),
-                            value: val.to_core_value(),
-                            temporal,
-                        });
+                        put(
+                            tx,
+                            Triple::Property {
+                                subject: node_id,
+                                predicate: Predicate::new(key.clone()),
+                                value: val.to_core_value(),
+                                temporal,
+                            },
+                        );
                         triples_written += 1;
                     }
                     created_ids.push(node_id);
@@ -517,12 +555,15 @@ pub fn execute_write_ops(
                         .copied()
                         .ok_or_else(|| CypherWriteError::UnboundVariable(clause.var.clone()))?;
 
-                    tx.insert(Triple::Property {
-                        subject: node_id,
-                        predicate: Predicate::new(clause.key.clone()),
-                        value: clause.value.to_core_value(),
-                        temporal: BiTemporalRange::assert_now(Timestamp::now()),
-                    });
+                    put(
+                        tx,
+                        Triple::Property {
+                            subject: node_id,
+                            predicate: Predicate::new(clause.key.clone()),
+                            value: clause.value.to_core_value(),
+                            temporal: BiTemporalRange::assert_now(Timestamp::now()),
+                        },
+                    );
                     triples_written += 1;
                 }
             }
@@ -535,9 +576,10 @@ pub fn execute_write_ops(
                         .copied()
                         .ok_or_else(|| CypherWriteError::UnboundVariable(var_name.clone()))?;
 
-                    let existing = snapshot.scan_by_subject(&node_id)?;
-                    for triple in existing {
-                        tx.insert(close_valid_time(triple, now));
+                    // Close each live quad in its own graph.
+                    let scope = graph.map_or(GraphScope::Union, GraphScope::One);
+                    for (g, triple) in snapshot.scan_scoped(Some(&node_id), None, None, &scope)? {
+                        tx.insert_in(close_valid_time(triple, now), g, WriteMode::Add);
                         triples_deleted += 1;
                     }
                 }
@@ -572,10 +614,10 @@ fn find_matching_node(
     snapshot: &Snapshot,
     label: Option<&str>,
     props: &[(String, CypherValue)],
+    graph: Option<GraphId>,
 ) -> Result<Option<NodeId>, StorageError> {
     let candidates: Vec<NodeId> = if let Some(label_str) = label {
-        snapshot
-            .scan_by_predicate("__type")?
+        read_scoped(snapshot, None, Some("__type"), graph)?
             .into_iter()
             .filter_map(|t| match t {
                 Triple::Property {
@@ -588,8 +630,7 @@ fn find_matching_node(
             .collect()
     } else if let Some((first_key, first_val)) = props.first() {
         let core_val = first_val.to_core_value();
-        snapshot
-            .scan_by_predicate(first_key)?
+        read_scoped(snapshot, None, Some(first_key), graph)?
             .into_iter()
             .filter_map(|t| match &t {
                 Triple::Property { subject, value, .. } if value == &core_val => Some(*subject),
@@ -603,8 +644,7 @@ fn find_matching_node(
     'outer: for node_id in candidates {
         for (key, val) in props {
             let core_val = val.to_core_value();
-            let matched = snapshot
-                .scan_by_subject_predicate(&node_id, key)?
+            let matched = read_scoped(snapshot, Some(&node_id), Some(key), graph)?
                 .into_iter()
                 .any(|t| matches!(&t, Triple::Property { value, .. } if value == &core_val));
             if !matched {
@@ -615,6 +655,27 @@ fn find_matching_node(
     }
 
     Ok(None)
+}
+
+/// Live triples by subject and/or predicate: in graph `g`, or across every
+/// graph (de-duplicated) when `graph` is `None`.
+fn read_scoped(
+    snapshot: &Snapshot,
+    subject: Option<&NodeId>,
+    predicate: Option<&str>,
+    graph: Option<GraphId>,
+) -> Result<Vec<Triple>, StorageError> {
+    match (graph, subject, predicate) {
+        (Some(g), s, p) => Ok(snapshot
+            .scan_scoped(s, p, None, &GraphScope::One(g))?
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect()),
+        (None, Some(s), Some(p)) => snapshot.scan_by_subject_predicate(s, p),
+        (None, Some(s), None) => snapshot.scan_by_subject(s),
+        (None, None, Some(p)) => snapshot.scan_by_predicate(p),
+        (None, None, None) => snapshot.scan_all(),
+    }
 }
 
 /// Re-insert a triple with its valid-time window closed at `now`.
@@ -808,9 +869,18 @@ pub struct CompiledQuery {
     pub edge_id_projections: Vec<EdgeIdProjection>,
     /// Node ID projections from `RETURN id(n)` / `RETURN elementId(n)` expressions.
     pub node_id_projections: Vec<NodeIdProjection>,
+    /// Graph IRI from `USE GRAPH <iri>`; the MATCH patterns are scoped to it.
+    pub graph: Option<String>,
 }
 
 impl CompiledQuery {
+    /// Scope the MATCH patterns (and variable-length path rules) that have no
+    /// graph yet to `graph` — see [`scope_to_graph`]. Property filters and
+    /// projections still read every graph.
+    pub fn scope_to(&mut self, graph: &GraphTerm) {
+        scope_to_graph(&mut self.query.patterns, &mut self.rules, graph);
+    }
+
     /// Substitute all `FilterValue::Param` placeholders in this compiled query
     /// with concrete values from `params`.
     ///
@@ -1262,6 +1332,7 @@ impl Parser {
             order_by,
             skip,
             with_clause,
+            graph: None,
         })
     }
 
@@ -2057,6 +2128,7 @@ impl Parser {
                 order_by: Vec::new(),
                 skip: None,
                 with_clause: None,
+                graph: None,
             };
             Some(compile(cypher_q))
         } else {
@@ -2076,6 +2148,7 @@ impl Parser {
         Ok(CompiledWrite {
             match_query,
             writes,
+            graph: None,
         })
     }
 }
@@ -2084,16 +2157,63 @@ impl Parser {
 
 /// Parse a Cypher query string into an AST.
 pub fn parse(input: &str) -> Result<CypherQuery, CypherError> {
+    let (graph, input) = split_use_graph(input)?;
     let tokens = Lexer::new(input).tokenize()?;
-    Parser::new(tokens).parse_query()
+    let mut query = Parser::new(tokens).parse_query()?;
+    query.graph = graph;
+    Ok(query)
+}
+
+/// Split a leading `USE GRAPH <iri>` (or `USE <iri>`) clause off `input`,
+/// returning the graph IRI and the rest of the statement.
+pub fn split_use_graph(input: &str) -> Result<(Option<String>, &str), CypherError> {
+    let trimmed = input.trim_start();
+    let starts_with_word = |s: &str, word: &str| {
+        s.len() >= word.len()
+            && s[..word.len()].eq_ignore_ascii_case(word)
+            && s[word.len()..].starts_with(|c: char| c.is_whitespace() || c == '<')
+    };
+    if !starts_with_word(trimmed, "USE") {
+        return Ok((None, input));
+    }
+    let mut rest = trimmed[3..].trim_start();
+    if starts_with_word(rest, "GRAPH") {
+        rest = rest[5..].trim_start();
+    }
+    let pos = input.len() - rest.len();
+    let Some(body) = rest.strip_prefix('<') else {
+        return Err(CypherError::at(
+            pos,
+            "USE GRAPH expects an IRI in angle brackets",
+        ));
+    };
+    let Some(end) = body.find('>') else {
+        return Err(CypherError::at(pos, "unterminated graph IRI"));
+    };
+    let iri = &body[..end];
+    if iri.is_empty() || iri.contains(char::is_whitespace) {
+        return Err(CypherError::at(pos, "invalid graph IRI"));
+    }
+    Ok((Some(iri.to_string()), &body[end + 1..]))
 }
 
 /// Parse any Cypher statement — either a read query (MATCH...RETURN) or a
 /// write statement (CREATE/MERGE/SET/DELETE).
 pub fn parse_statement(input: &str) -> Result<CypherStatement, CypherError> {
+    let (graph, input) = split_use_graph(input)?;
     let tokens = Lexer::new(input).tokenize()?;
     let mut parser = Parser::new(tokens);
-    let stmt = parser.parse_statement_inner()?;
+    let mut stmt = parser.parse_statement_inner()?;
+    match (&mut stmt, graph) {
+        (CypherStatement::Read(query), graph) => query.graph = graph,
+        (CypherStatement::Write(_), Some(_)) => {
+            return Err(CypherError::at(
+                0,
+                "USE GRAPH with a write statement: use parse_write",
+            ))
+        }
+        (CypherStatement::Write(_), None) => {}
+    }
     if let Some(tok) = parser.peek() {
         return Err(CypherError::at(
             parser.current_pos(),
@@ -2109,14 +2229,22 @@ pub fn parse_statement(input: &str) -> Result<CypherStatement, CypherError> {
 /// - Pure write: `CREATE (a:Person {name: "Alice"})`
 /// - MATCH + write: `MATCH (a:Person) WHERE a.name = "Alice" CREATE (b:Friend)`
 pub fn parse_write(input: &str) -> Result<CompiledWrite, CypherError> {
+    let (graph, input) = split_use_graph(input)?;
     let tokens = Lexer::new(input).tokenize()?;
     let mut parser = Parser::new(tokens);
-    let compiled = parser.parse_compiled_write()?;
+    let mut compiled = parser.parse_compiled_write()?;
     if let Some(tok) = parser.peek() {
         return Err(CypherError::at(
             parser.current_pos(),
             format!("unexpected token {:?} after write statement", tok),
         ));
+    }
+    if let Some(graph) = graph {
+        if let Some(query) = &mut compiled.match_query {
+            query.scope_to(&GraphTerm::Iri(graph.clone()));
+            query.graph = Some(graph.clone());
+        }
+        compiled.graph = Some(graph);
     }
     Ok(compiled)
 }
@@ -2126,6 +2254,7 @@ pub fn parse_write(input: &str) -> Result<CompiledWrite, CypherError> {
 /// Note: `MATCH ... CREATE/MERGE/SET/DELETE` (read-write combined) is not detected
 /// by this heuristic — use `parse_write` and check `match_query` for that case.
 pub fn is_write_statement(input: &str) -> bool {
+    let input = split_use_graph(input).map_or(input, |(_, rest)| rest);
     let upper = input.trim_start().to_ascii_uppercase();
     upper.starts_with("CREATE")
         || upper.starts_with("MERGE")
@@ -2135,6 +2264,7 @@ pub fn is_write_statement(input: &str) -> bool {
 
 /// Compile a parsed `CypherQuery` into the Datalog IR.
 pub fn compile(cypher: CypherQuery) -> CompiledQuery {
+    let graph = cypher.graph.clone();
     let mut patterns: Vec<VarPattern> = Vec::new();
     let mut rules: Vec<Rule> = Vec::new();
     let mut value_filters: Vec<ValueFilter> = Vec::new();
@@ -2373,7 +2503,7 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
     }
     let group_keys = return_vars.clone();
 
-    CompiledQuery {
+    let mut compiled = CompiledQuery {
         query: Query { patterns },
         rules,
         value_filters,
@@ -2391,7 +2521,13 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
         edge_prop_projections,
         edge_id_projections,
         node_id_projections,
+        graph: None,
+    };
+    if let Some(graph) = graph {
+        compiled.scope_to(&GraphTerm::Iri(graph.clone()));
+        compiled.graph = Some(graph);
     }
+    compiled
 }
 
 fn collect_rel_bound_vars(paths: &[CypherPath]) -> HashSet<String> {
@@ -3312,6 +3448,84 @@ mod tests {
         assert!(
             mq.value_filters.iter().any(|f| f.predicate == "name"),
             "match should include name filter"
+        );
+    }
+
+    #[test]
+    fn use_graph_scopes_match_patterns() {
+        assert_eq!(split_use_graph("MATCH (a) RETURN a").unwrap().0, None);
+        assert!(split_use_graph("USE GRAPH urn:g RETURN a").is_err());
+        assert!(split_use_graph("USE GRAPH <urn:g").is_err());
+        assert!(is_write_statement("USE GRAPH <urn:g> CREATE (a)"));
+        assert!(!is_write_statement("use <urn:g> MATCH (a) RETURN a"));
+
+        let q = compile(parse("use graph <urn:g:1> MATCH (a)-[:knows]->(b) RETURN a, b").unwrap());
+        assert_eq!(q.graph.as_deref(), Some("urn:g:1"));
+        assert!(q
+            .query
+            .patterns
+            .iter()
+            .all(|p| p.graph == GraphTerm::Iri("urn:g:1".into())));
+
+        let w = parse_write("USE <urn:g:2> MATCH (a:Person) CREATE (b:Friend)").unwrap();
+        assert_eq!(w.graph.as_deref(), Some("urn:g:2"));
+        let mq = w.match_query.unwrap();
+        assert!(mq
+            .query
+            .patterns
+            .iter()
+            .all(|p| p.graph == GraphTerm::Iri("urn:g:2".into())));
+        assert!(parse_statement("USE GRAPH <urn:g> CREATE (a)").is_err());
+    }
+
+    #[test]
+    fn graph_writes_and_deletes() {
+        let (store, _dir) = open();
+        let g = store.intern_graph("urn:g:1").unwrap();
+        let run = |cypher: &str, graph: Option<GraphId>| {
+            let w = parse_write(cypher).unwrap();
+            let mut tx = store.begin();
+            let snap = store.snapshot(tx.read_ts);
+            let mut bindings = HashMap::new();
+            let r = execute_write_ops_in(&w.writes, &mut tx, &snap, &mut bindings, graph).unwrap();
+            tx.commit().unwrap();
+            r
+        };
+        let created = run(r#"CREATE (a:Person {name: "Ann"})"#, Some(g)).created_ids[0];
+        let snap = store.snapshot(Timestamp(store.oracle_ts()));
+        assert_eq!(snap.scan_graph(g).unwrap().len(), 2);
+        assert!(snap.scan_graph(GraphId::DEFAULT).unwrap().is_empty());
+
+        // MERGE in the graph finds the node; in another graph it doesn't.
+        let merged = run(r#"MERGE (a:Person {name: "Ann"})"#, Some(g));
+        assert!(merged.created_ids.is_empty());
+        let other = store.intern_graph("urn:g:2").unwrap();
+        assert_eq!(
+            run(r#"MERGE (a:Person {name: "Ann"})"#, Some(other))
+                .created_ids
+                .len(),
+            1
+        );
+
+        // DELETE with no graph closes the node's quads in the graph holding them.
+        let mut tx = store.begin();
+        let snap = store.snapshot(tx.read_ts);
+        let mut bindings = HashMap::from([("a".to_string(), created)]);
+        let r = execute_write_ops_in(
+            &[WriteOp::Delete(vec!["a".into()])],
+            &mut tx,
+            &snap,
+            &mut bindings,
+            None,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(r.triples_deleted, 2);
+        let snap = store.snapshot(Timestamp(store.oracle_ts()));
+        assert!(snap.scan_graph(g).unwrap().is_empty());
+        assert!(
+            snap.scan_graph(GraphId::DEFAULT).unwrap().is_empty(),
+            "no stray closing versions in the default graph"
         );
     }
 

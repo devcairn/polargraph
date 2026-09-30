@@ -134,6 +134,10 @@ pub enum GraphTerm {
     Default,
     /// One named graph.
     Bound(GraphId),
+    /// One named graph by IRI, resolved when the pattern is evaluated (for
+    /// callers without a store, e.g. the SPARQL translator). An unknown IRI
+    /// matches nothing.
+    Iri(String),
     /// Binds a variable to the graph of each match — a named graph's IRI node
     /// (`TripleStore::graph_node`). Unbound, it ranges over every named graph
     /// (never the default graph, as in SPARQL `GRAPH ?g`); already bound, it
@@ -335,6 +339,23 @@ fn extend_full(
     Some((node_out, pred_out))
 }
 
+/// Scope every unscoped (`Union`) pattern — rule bodies included — to
+/// `graph`. Patterns over rule-derived predicates stay `Union`: derived facts
+/// have no graph. Patterns already scoped keep their graph.
+pub fn scope_to_graph(patterns: &mut [VarPattern], rules: &mut [Rule], graph: &GraphTerm) {
+    let derived: HashSet<String> = rules.iter().map(|r| r.head_predicate.clone()).collect();
+    let scope = |vp: &mut VarPattern| {
+        let over_derived = vp.predicate.as_ref().is_some_and(|p| derived.contains(p));
+        if vp.graph == GraphTerm::Union && !over_derived {
+            vp.graph = graph.clone();
+        }
+    };
+    patterns.iter_mut().for_each(scope);
+    for rule in rules {
+        rule.body.iter_mut().for_each(scope);
+    }
+}
+
 /// Attempt to bind `term` to `value` within `bindings`.
 ///
 /// - `Bound`: already substituted; returns unchanged bindings (storage
@@ -351,6 +372,10 @@ fn graph_scope(term: &GraphTerm, bindings: &Bindings, snapshot: &Snapshot) -> Op
         GraphTerm::Union => return None,
         GraphTerm::Default => GraphScope::One(GraphId::DEFAULT),
         GraphTerm::Bound(g) => GraphScope::One(*g),
+        GraphTerm::Iri(iri) => match snapshot.store().graph_id(iri) {
+            Some(g) => GraphScope::One(g),
+            None => GraphScope::Set(vec![]),
+        },
         GraphTerm::Set(gs) => GraphScope::set(gs.clone()),
         GraphTerm::Var(name) => match bindings.get(name) {
             Some(node) => match snapshot.store().graph_for_node(node) {
@@ -1165,6 +1190,11 @@ mod tests {
         assert_eq!(b[0]["x"], svc);
         // Set.
         assert_eq!(run(vec![uses(GraphTerm::Set(vec![g1, g2]))]).len(), 1);
+        // A named graph by IRI; an unknown IRI matches nothing.
+        let i = run(vec![uses(GraphTerm::Iri("urn:g:sales".into()))]);
+        assert_eq!(i.len(), 1);
+        assert_eq!(i[0]["x"], svc);
+        assert!(run(vec![uses(GraphTerm::Iri("urn:g:none".into()))]).is_empty());
 
         // ?g ranges over named graphs only and binds the graph's IRI node.
         let v = run(vec![uses(GraphTerm::Var("g".into()))]);

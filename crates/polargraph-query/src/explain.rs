@@ -164,6 +164,7 @@ fn format_var_pattern(vp: &VarPattern) -> String {
         crate::datalog::GraphTerm::Union => format!("[{s}, {p}, {o}]"),
         crate::datalog::GraphTerm::Default => format!("[{s}, {p}, {o}] in default graph"),
         crate::datalog::GraphTerm::Bound(g) => format!("[{s}, {p}, {o}] in {g}"),
+        crate::datalog::GraphTerm::Iri(iri) => format!("[{s}, {p}, {o}] in <{iri}>"),
         crate::datalog::GraphTerm::Var(v) => format!("[{s}, {p}, {o}] in ?{v}"),
         crate::datalog::GraphTerm::Set(gs) => format!("[{s}, {p}, {o}] in {} graphs", gs.len()),
     }

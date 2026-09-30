@@ -7174,3 +7174,142 @@ async fn export_graph_streams_live_quads() {
         .await;
     assert_eq!(missing.err().unwrap().code(), tonic::Code::NotFound);
 }
+
+#[tokio::test]
+async fn delete_triples_closes_quads_in_their_graphs() {
+    use polargraph_server::proto::{
+        graph_term::Kind as GraphKind, DeleteTriplesRequest, GraphStatsRequest, GraphTerm,
+    };
+
+    let (svc, _dir) = open();
+    let (_, s) = new_node();
+    let (_, o) = new_node();
+    for graph in ["", "urn:g:1", "urn:g:2"] {
+        svc.insert(Request::new(InsertRequest {
+            triples: vec![rel(s.clone(), "knows", o.clone())],
+            graph: graph.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    }
+    let live = |iri: &'static str| {
+        let svc = &svc;
+        async move {
+            svc.graph_stats(Request::new(GraphStatsRequest { iri: iri.into() }))
+                .await
+                .unwrap()
+                .into_inner()
+                .live_quads
+        }
+    };
+    let delete = |graph: Option<GraphKind>| {
+        let svc = &svc;
+        let s = s.clone();
+        async move {
+            svc.delete_triples(Request::new(DeleteTriplesRequest {
+                subject_ids: vec![s.bytes],
+                predicate: "knows".into(),
+                graph: graph.map(|k| GraphTerm { kind: Some(k) }),
+                ..Default::default()
+            }))
+            .await
+            .map(|r| r.into_inner().deleted_count)
+        }
+    };
+
+    // One named graph only.
+    assert_eq!(
+        delete(Some(GraphKind::Iri("urn:g:1".into())))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        (live("").await, live("urn:g:1").await, live("urn:g:2").await),
+        (1, 0, 1)
+    );
+    // Unset: every remaining copy, each closed in its own graph.
+    assert_eq!(delete(None).await.unwrap(), 2);
+    assert_eq!((live("").await, live("urn:g:2").await), (0, 0));
+
+    let err = delete(Some(GraphKind::Iri("urn:g:none".into())))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    let err = delete(Some(GraphKind::Var("g".into()))).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn cypher_use_graph_and_datasets() {
+    let (svc, _dir) = open();
+    let write = |cypher: &'static str, graph: &'static str| {
+        let svc = &svc;
+        async move {
+            svc.cypher_write(Request::new(CypherWriteRequest {
+                cypher: cypher.into(),
+                graph: graph.into(),
+                ..Default::default()
+            }))
+            .await
+        }
+    };
+    write(r#"CREATE (a:Person {name: "D"})"#, "").await.unwrap();
+    write(r#"CREATE (a:Person {name: "G1"})"#, "urn:g:1")
+        .await
+        .unwrap();
+    write(r#"USE GRAPH <urn:g:2> CREATE (a:Person {name: "G2"})"#, "")
+        .await
+        .unwrap();
+    let err = write(r#"USE GRAPH <urn:g:2> CREATE (a:Person)"#, "urn:g:1")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    let count = |cypher: &'static str, graphs: Vec<&'static str>| {
+        let svc = &svc;
+        async move {
+            svc.cypher_query(Request::new(CypherQueryRequest {
+                cypher: cypher.into(),
+                graphs: graphs.into_iter().map(String::from).collect(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .rows
+            .len()
+        }
+    };
+    assert_eq!(count("MATCH (a:Person) RETURN a", vec![]).await, 3);
+    assert_eq!(
+        count("USE GRAPH <urn:g:1> MATCH (a:Person) RETURN a", vec![]).await,
+        1
+    );
+    assert_eq!(count("MATCH (a:Person) RETURN a", vec!["urn:g:2"]).await, 1);
+    assert_eq!(
+        count("MATCH (a:Person) RETURN a", vec!["urn:g:1", "urn:g:2"]).await,
+        2
+    );
+    assert_eq!(
+        count("MATCH (a:Person) RETURN a", vec!["urn:g:none"]).await,
+        0
+    );
+    // USE GRAPH wins over the request dataset.
+    assert_eq!(
+        count(
+            "USE GRAPH <urn:g:1> MATCH (a:Person) RETURN a",
+            vec!["urn:g:2"]
+        )
+        .await,
+        1
+    );
+
+    // A MATCH + DELETE in one graph leaves the others alone.
+    write("USE GRAPH <urn:g:1> MATCH (a:Person) DELETE a", "")
+        .await
+        .unwrap();
+    assert_eq!(count("MATCH (a:Person) RETURN a", vec![]).await, 2);
+    assert_eq!(count("MATCH (a:Person) RETURN a", vec!["urn:g:1"]).await, 0);
+}

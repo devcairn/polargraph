@@ -466,27 +466,87 @@ fn having_filter_execution() {
 
 // ── Phase 2: named graphs ─────────────────────────────────────────────────────
 
-/// Translation: GRAPH <iri> { ... } populates `graph_iri` on the branch and
-/// preserves the inner patterns.
+/// Translation: `GRAPH <iri>` scopes the inner patterns to that graph.
 #[test]
 fn named_graph_scoping_translation() {
+    use polargraph_query::GraphTerm;
     let q = spargebra::Query::parse(
-        "SELECT ?s ?o WHERE { GRAPH <urn:view:my-view> { ?s <http://example.org/knows> ?o } }",
+        "SELECT ?s ?o WHERE { ?s <http://ex/a> ?x . GRAPH <urn:g:1> { ?s <http://example.org/knows> ?o } }",
         None,
     )
     .unwrap();
     let t = translate_query(&q).unwrap();
     assert_eq!(t.branches.len(), 1);
+    let ps = &t.branches[0].patterns;
+    assert_eq!(ps.len(), 2);
+    assert_eq!(ps[0].graph, GraphTerm::Union, "outside GRAPH: unscoped");
+    assert_eq!(ps[1].graph, GraphTerm::Iri("urn:g:1".into()));
+    assert!(t.dataset.is_none());
+}
+
+/// `GRAPH ?g` binds a graph variable, OPTIONAL inside it is scoped too, and
+/// property paths keep derived-predicate patterns unscoped.
+#[test]
+fn graph_variable_translation() {
+    use polargraph_query::GraphTerm;
+    let q = spargebra::Query::parse(
+        "SELECT * WHERE { GRAPH ?g { ?s <http://ex/p> ?o OPTIONAL { ?o <http://ex/q> ?v } ?o <http://ex/r>+ ?z } }",
+        None,
+    )
+    .unwrap();
+    let t = translate_query(&q).unwrap();
+    assert_eq!(t.graph_vars, vec!["g".to_string()]);
+    let b = &t.branches[0];
+    let g = GraphTerm::Var("g".into());
+    assert_eq!(b.patterns[0].graph, g);
+    assert_eq!(b.optional_branches[0].patterns[0].graph, g);
+    let heads: Vec<_> = b.rules.iter().map(|r| r.head_predicate.clone()).collect();
+    assert!(!heads.is_empty());
+    for p in &b.patterns {
+        let derived = p.predicate.as_ref().is_some_and(|p| heads.contains(p));
+        assert_eq!(p.graph == GraphTerm::Union, derived, "{p:?}");
+    }
+    for r in &b.rules {
+        for p in &r.body {
+            let derived = p.predicate.as_ref().is_some_and(|p| heads.contains(p));
+            assert_eq!(p.graph == GraphTerm::Union, derived, "{p:?}");
+        }
+    }
+}
+
+/// `FROM` / `FROM NAMED` become the translation's dataset; with only
+/// `FROM NAMED` the default graph is empty, and `GRAPH <iri>` outside the
+/// named set matches nothing.
+#[test]
+fn dataset_translation() {
+    use polargraph_query::GraphTerm;
+    use polargraph_sparql::SparqlDataset;
+    let q = spargebra::Query::parse(
+        "SELECT * FROM <urn:g:1> FROM <urn:g:2> WHERE { ?s ?p ?o }",
+        None,
+    )
+    .unwrap();
+    let t = translate_query(&q).unwrap();
     assert_eq!(
-        t.branches[0].graph_iri.as_deref(),
-        Some("urn:view:my-view"),
-        "graph_iri should be populated from GRAPH clause"
+        t.dataset,
+        Some(SparqlDataset {
+            default: vec!["urn:g:1".into(), "urn:g:2".into()],
+            named: Some(vec![]),
+        }),
+        "FROM without FROM NAMED: no named graphs"
     );
-    assert_eq!(t.branches[0].patterns.len(), 1);
-    assert_eq!(
-        t.branches[0].patterns[0].predicate.as_deref(),
-        Some("http://example.org/knows")
-    );
+    assert_eq!(t.branches[0].patterns[0].graph, GraphTerm::Union);
+
+    let q = spargebra::Query::parse(
+        "SELECT * FROM NAMED <urn:g:1> WHERE { ?s ?p ?o GRAPH <urn:g:1> { ?s ?q ?v } GRAPH <urn:g:9> { ?s ?r ?w } }",
+        None,
+    )
+    .unwrap();
+    let t = translate_query(&q).unwrap();
+    let ps = &t.branches[0].patterns;
+    assert_eq!(ps[0].graph, GraphTerm::Set(vec![]), "empty default graph");
+    assert_eq!(ps[1].graph, GraphTerm::Iri("urn:g:1".into()));
+    assert_eq!(ps[2].graph, GraphTerm::Set(vec![]), "not in FROM NAMED");
 }
 
 // ── Phase 2: filter evaluation ────────────────────────────────────────────────

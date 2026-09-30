@@ -799,6 +799,9 @@ struct CypherBody {
     /// Values must be JSON-encoded `Value` objects (e.g. `"\"Alice\""` for a string).
     #[serde(default)]
     params: std::collections::HashMap<String, String>,
+    /// Dataset: graph IRIs the MATCH reads (empty = every graph).
+    #[serde(default)]
+    graphs: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -807,6 +810,9 @@ struct CypherWriteBody {
     /// Open transaction ID to buffer writes into instead of auto-committing.
     #[serde(default)]
     tx_id: Option<String>,
+    /// Graph to write to and MATCH in (as `USE GRAPH`).
+    #[serde(default)]
+    graph: String,
 }
 
 async fn handle_cypher(
@@ -834,6 +840,7 @@ async fn handle_cypher(
         tx_id: body.tx_id.unwrap_or_default(),
         user_id: user_id.clone(),
         params: body.params,
+        graphs: body.graphs,
     };
 
     let mut client = state.client.clone();
@@ -870,6 +877,7 @@ async fn handle_cypher_write(
     let req = proto::CypherWriteRequest {
         cypher: body.cypher,
         tx_id: body.tx_id.unwrap_or_default(),
+        graph: body.graph,
     };
 
     let mut client = state.client.clone();
@@ -955,6 +963,7 @@ async fn handle_cypher_stream(
         vector: body.vector,
         ef: body.ef,
         params: body.params,
+        graphs: body.graphs,
         ..Default::default()
     };
 
@@ -1558,16 +1567,32 @@ struct SparqlGetParams {
 async fn handle_sparql_get(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
     QueryParams(params): QueryParams<SparqlGetParams>,
 ) -> Response {
-    execute_sparql_query(state, headers, params.query).await
+    let dataset = polargraph_sparql::protocol::dataset_from_params(&[raw.as_deref().unwrap_or("")]);
+    execute_sparql_query(state, headers, params.query, dataset).await
 }
 
 async fn handle_sparql_post(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
     body: axum::body::Bytes,
 ) -> Response {
+    let form_body = if headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("application/x-www-form-urlencoded"))
+    {
+        String::from_utf8_lossy(&body).into_owned()
+    } else {
+        String::new()
+    };
+    let dataset = polargraph_sparql::protocol::dataset_from_params(&[
+        raw.as_deref().unwrap_or(""),
+        &form_body,
+    ]);
     let content_type = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -1619,7 +1644,7 @@ async fn handle_sparql_post(
         }
     };
 
-    execute_sparql_query(state, headers, query_string).await
+    execute_sparql_query(state, headers, query_string, dataset).await
 }
 
 // ── SPARQL-star runtime execution helpers ────────────────────────────────────
@@ -1847,16 +1872,19 @@ async fn execute_annotation_object_steps(
     result
 }
 
+/// Run a SPARQL query; `protocol_dataset` (`default-graph-uri` /
+/// `named-graph-uri`) replaces the query's own `FROM` / `FROM NAMED`.
 async fn execute_sparql_query(
     state: Arc<AppState>,
     headers: axum::http::HeaderMap,
     query_string: String,
+    protocol_dataset: Option<polargraph_sparql::SparqlDataset>,
 ) -> Response {
     use polargraph_sparql::response::ResponseFormat;
     use polargraph_sparql::{translate_query, SparqlBindings, SparqlError, SparqlValue};
 
     // 1. Parse
-    let parsed = match spargebra::Query::parse(&query_string, None) {
+    let mut parsed = match spargebra::Query::parse(&query_string, None) {
         Ok(q) => q,
         Err(e) => {
             return (
@@ -1866,6 +1894,15 @@ async fn execute_sparql_query(
                 .into_response()
         }
     };
+    if let Some(ds) = &protocol_dataset {
+        if let Err(e) = polargraph_sparql::protocol::apply_protocol_dataset(&mut parsed, ds) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    }
 
     // Dispatch CONSTRUCT / DESCRIBE to the dedicated handler.
     if matches!(
@@ -1897,18 +1934,28 @@ async fn execute_sparql_query(
     // 3. Execute each branch against gRPC; collect as SparqlBindings.
     let mut all_bindings: Vec<SparqlBindings> = Vec::new();
 
-    for branch in &translation.branches {
-        if branch.graph_iri.is_some() {
-            // Named-graph / view scoping is tracked in the translation but
-            // full enforcement requires a future View-query RPC.  We proceed
-            // without filtering and note this in a debug log so tests can
-            // observe the field was set.
-            tracing::debug!(
-                graph_iri = branch.graph_iri.as_deref().unwrap_or(""),
-                "SPARQL GRAPH clause detected; view scoping not enforced at runtime yet"
-            );
-        }
+    // Dataset: FROM graphs scope the patterns outside GRAPH; FROM NAMED
+    // limits what GRAPH ?g may bind (a graph variable binds the graph IRI's
+    // node, so the check is on NodeIds).
+    let dataset_graphs: Vec<String> = translation
+        .dataset
+        .as_ref()
+        .map(|d| d.default.clone())
+        .unwrap_or_default();
+    let named_nodes: Option<std::collections::HashSet<NodeId>> = translation
+        .dataset
+        .as_ref()
+        .and_then(|d| d.named.as_ref())
+        .map(|named| named.iter().map(|iri| iri_to_node_id(iri)).collect());
+    let graph_vars_ok = |b: &SparqlBindings| match &named_nodes {
+        None => true,
+        Some(named) => translation.graph_vars.iter().all(|gv| match b.get(gv) {
+            Some(SparqlValue::Uri(id)) => named.contains(id),
+            _ => true,
+        }),
+    };
 
+    for branch in &translation.branches {
         let patterns: Vec<proto::VarPattern> =
             branch.patterns.iter().map(sparql_varpat_to_proto).collect();
         let rules: Vec<proto::DatalogRule> =
@@ -1917,6 +1964,7 @@ async fn execute_sparql_query(
         let req = proto::QueryRequest {
             patterns,
             rules,
+            graphs: dataset_graphs.clone(),
             ..Default::default()
         };
 
@@ -1940,7 +1988,7 @@ async fn execute_sparql_query(
                         }
                     }
                 }
-                if sparql_filter_bindings(&b, &branch.filters) {
+                if graph_vars_ok(&b) && sparql_filter_bindings(&b, &branch.filters) {
                     Some(b)
                 } else {
                     None
@@ -1955,6 +2003,7 @@ async fn execute_sparql_query(
             let opt_req = proto::QueryRequest {
                 patterns: opt_patterns,
                 rules: opt_rules,
+                graphs: dataset_graphs.clone(),
                 ..Default::default()
             };
             let opt_resp = match client.query(tonic::Request::new(opt_req)).await {
@@ -1977,7 +2026,7 @@ async fn execute_sparql_query(
                             }
                         }
                     }
-                    if sparql_filter_bindings(&b, &opt.filters) {
+                    if graph_vars_ok(&b) && sparql_filter_bindings(&b, &opt.filters) {
                         Some(b)
                     } else {
                         None
@@ -2128,8 +2177,25 @@ fn sparql_varpat_to_proto(vp: &polargraph_query::VarPattern) -> proto::VarPatter
         predicate: vp.predicate.clone().unwrap_or_default(),
         object: Some(sparql_term_to_proto(&vp.object)),
         predicate_var: vp.predicate_var.clone().unwrap_or_default(),
-        graph: None,
+        graph: sparql_graph_to_proto(&vp.graph),
     }
+}
+
+/// Proto form of a translated pattern's graph term (`None` = union).
+fn sparql_graph_to_proto(graph: &polargraph_query::GraphTerm) -> Option<proto::GraphTerm> {
+    use polargraph_query::GraphTerm;
+    use proto::graph_term::Kind;
+    let kind = match graph {
+        GraphTerm::Union => return None,
+        GraphTerm::Default => Kind::DefaultGraph(true),
+        GraphTerm::Iri(iri) => Kind::Iri(iri.clone()),
+        GraphTerm::Var(v) => Kind::Var(v.clone()),
+        // The translator only produces the empty set (a graph outside the
+        // dataset); GraphIds have no meaning outside the server, so any
+        // other id-based term also matches nothing.
+        GraphTerm::Bound(_) | GraphTerm::Set(_) => Kind::Set(proto::GraphSet { iris: vec![] }),
+    };
+    Some(proto::GraphTerm { kind: Some(kind) })
 }
 
 fn sparql_term_to_proto(term: &polargraph_query::Term) -> proto::Term {
@@ -2195,6 +2261,18 @@ async fn execute_sparql_construct(
         }
     };
 
+    // Dataset handling as in `execute_sparql_query`.
+    let dataset_graphs: Vec<String> = ct
+        .dataset
+        .as_ref()
+        .map(|d| d.default.clone())
+        .unwrap_or_default();
+    let named_nodes: Option<HashSet<NodeId>> = ct
+        .dataset
+        .as_ref()
+        .and_then(|d| d.named.as_ref())
+        .map(|named| named.iter().map(|iri| iri_to_node_id(iri)).collect());
+
     // Execute WHERE clause branches and collect SparqlBindings.
     let mut all_bindings: Vec<polargraph_sparql::SparqlBindings> = Vec::new();
     for branch in &ct.branches {
@@ -2210,6 +2288,7 @@ async fn execute_sparql_construct(
         let req = proto::QueryRequest {
             patterns,
             rules,
+            graphs: dataset_graphs.clone(),
             ..Default::default()
         };
         let mut client = state.client.clone();
@@ -2221,6 +2300,18 @@ async fn execute_sparql_construct(
         let branch_bindings: Vec<polargraph_sparql::SparqlBindings> = resp
             .bindings
             .into_iter()
+            .filter(|pb| {
+                // FROM NAMED: graph variables must name one of the graphs.
+                let Some(named) = &named_nodes else {
+                    return true;
+                };
+                ct.graph_vars
+                    .iter()
+                    .all(|gv| match pb.vars.get(gv).and_then(proto_node_id) {
+                        Some(id) => named.contains(&id),
+                        None => true,
+                    })
+            })
             .map(|pb| {
                 let mut b: polargraph_sparql::SparqlBindings = std::collections::HashMap::new();
                 for (k, v) in pb.vars {
@@ -2453,6 +2544,9 @@ async fn handle_sparql_update(
     // Quads that couldn't be applied (unsupported terms or RPC errors) — reported
     // rather than silently dropped.
     let mut failed: u64 = 0;
+    // Messages for operations that failed as a whole (unsupported, or a
+    // graph operation the server rejected without SILENT).
+    let mut errors: Vec<String> = Vec::new();
 
     for operation in update.operations {
         match operation {
@@ -2485,6 +2579,7 @@ async fn handle_sparql_update(
                         let req = proto::InsertRequest {
                             triples: vec![triple],
                             iris: sparql_quad_iris(quad),
+                            graph: graph_name_iri(&quad.graph_name),
                             ..Default::default()
                         };
                         if client.insert(tonic::Request::new(req)).await.is_ok() {
@@ -2526,14 +2621,17 @@ async fn handle_sparql_update(
                                 failed += 1;
                                 continue;
                             };
-                            let req = exact_delete_request(
+                            let mut req = exact_delete_request(
                                 iri_to_node_id(n.as_str()),
                                 gq.predicate.as_str(),
                                 target,
                             );
+                            req.graph = delete_graph_term(&gq.graph_name);
                             let mut client = state.client.clone();
                             match client.delete_triples(tonic::Request::new(req)).await {
                                 Ok(r) => deleted += r.into_inner().deleted_count,
+                                // A graph that doesn't exist holds nothing to delete.
+                                Err(e) if e.code() == tonic::Code::NotFound => {}
                                 Err(_) => failed += 1,
                             }
                         }
@@ -2545,11 +2643,48 @@ async fn handle_sparql_update(
             spargebra::GraphUpdateOperation::DeleteInsert {
                 delete,
                 insert,
+                using,
                 pattern,
-                ..
             } => {
+                // ADD / COPY / MOVE arrive rewritten as `INSERT { GRAPH dst
+                // { ?s ?p ?o } } WHERE { GRAPH src { ?s ?p ?o } }` (after a
+                // DROP for COPY / MOVE). Run that as a server-side graph copy,
+                // which keeps literal values and edge ids.
+                if let Some((source, target)) =
+                    graph_copy_shape(&delete, &insert, using.as_ref(), &pattern)
+                {
+                    let req = proto::CopyGraphRequest {
+                        source,
+                        target,
+                        clear_target: false,
+                    };
+                    match state
+                        .client
+                        .clone()
+                        .copy_graph(tonic::Request::new(req))
+                        .await
+                    {
+                        Ok(r) => inserted += r.into_inner().quads,
+                        // An absent source graph is empty.
+                        Err(e) if e.code() == tonic::Code::NotFound => {}
+                        Err(e) => errors.push(format!("copy: {}", e.message())),
+                    }
+                    continue;
+                }
+
                 // INSERT/DELETE WHERE: evaluate WHERE clause, then apply templates.
-                let mut dummy = polargraph_sparql::SparqlTranslation::default();
+                // USING / USING NAMED set the WHERE clause's dataset.
+                let using_dataset = using.as_ref().map(|ds| polargraph_sparql::SparqlDataset {
+                    default: ds.default.iter().map(|n| n.as_str().to_string()).collect(),
+                    named: ds
+                        .named
+                        .as_ref()
+                        .map(|ns| ns.iter().map(|n| n.as_str().to_string()).collect()),
+                });
+                let mut dummy = polargraph_sparql::SparqlTranslation {
+                    dataset: using_dataset.clone(),
+                    ..Default::default()
+                };
                 let mut counter = 0usize;
                 let branches = match polargraph_sparql::translate_pattern_pub(
                     &pattern,
@@ -2573,6 +2708,10 @@ async fn handle_sparql_update(
                     let req = proto::QueryRequest {
                         patterns,
                         rules,
+                        graphs: using_dataset
+                            .as_ref()
+                            .map(|d| d.default.clone())
+                            .unwrap_or_default(),
                         ..Default::default()
                     };
                     let mut client = state.client.clone();
@@ -2596,6 +2735,24 @@ async fn handle_sparql_update(
                     }
                 }
 
+                // IRIs of graph nodes bound by `GRAPH ?g`, for templates
+                // whose graph is a variable.
+                let graph_var_templates = delete
+                    .iter()
+                    .map(|q| &q.graph_name)
+                    .chain(insert.iter().map(|q| &q.graph_name))
+                    .any(|g| matches!(g, spargebra::term::GraphNamePattern::Variable(_)));
+                let graph_names = if graph_var_templates {
+                    resolve_names(
+                        &mut state.client.clone(),
+                        polargraph_sparql::node_ids_in_bindings(&where_bindings),
+                        false,
+                    )
+                    .await
+                } else {
+                    polargraph_sparql::IriNames::new(Default::default(), false)
+                };
+
                 // Apply DELETE templates: each GroundQuadPattern has subject/object as
                 // GroundTermPattern (variable or bound IRI) and predicate as NamedNodePattern.
                 for gqp in &delete {
@@ -2615,10 +2772,24 @@ async fn handle_sparql_update(
                                 failed += 1;
                                 continue;
                             };
-                            let req = exact_delete_request(subj_id, &pred, target);
+                            let mut req = exact_delete_request(subj_id, &pred, target);
+                            req.graph = match template_graph(&gqp.graph_name, binding, &graph_names)
+                            {
+                                Some(TemplateGraph::Default) => {
+                                    delete_graph_term(&spargebra::term::GraphName::DefaultGraph)
+                                }
+                                Some(TemplateGraph::Iri(iri)) => Some(proto::GraphTerm {
+                                    kind: Some(proto::graph_term::Kind::Iri(iri)),
+                                }),
+                                None => {
+                                    failed += 1;
+                                    continue;
+                                }
+                            };
                             let mut client = state.client.clone();
                             match client.delete_triples(tonic::Request::new(req)).await {
                                 Ok(r) => deleted += r.into_inner().deleted_count,
+                                Err(e) if e.code() == tonic::Code::NotFound => {}
                                 Err(_) => failed += 1,
                             }
                         }
@@ -2629,32 +2800,217 @@ async fn handle_sparql_update(
                 for qp in &insert {
                     for binding in &where_bindings {
                         if let Some(triple) = resolve_quad_pattern_to_proto(qp, binding) {
+                            let graph = match template_graph(&qp.graph_name, binding, &graph_names)
+                            {
+                                Some(TemplateGraph::Default) => String::new(),
+                                Some(TemplateGraph::Iri(iri)) => iri,
+                                None => {
+                                    failed += 1;
+                                    continue;
+                                }
+                            };
                             let mut client = state.client.clone();
                             let req = proto::InsertRequest {
                                 triples: vec![triple],
+                                iris: quad_pattern_iris(qp),
+                                graph,
                                 ..Default::default()
                             };
                             if client.insert(tonic::Request::new(req)).await.is_ok() {
                                 inserted += 1;
+                            } else {
+                                failed += 1;
                             }
                         }
                     }
                 }
             }
-            // CLEAR, DROP, LOAD, CREATE — not implemented.
-            other => {
-                tracing::debug!("SPARQL Update operation not implemented: {:?}", other);
+            // CLEAR and DROP both close every live quad of the target
+            // graphs (bitemporal: history stays queryable).
+            spargebra::GraphUpdateOperation::Clear { silent, graph }
+            | spargebra::GraphUpdateOperation::Drop { silent, graph } => {
+                let mut client = state.client.clone();
+                let iris = match update_graph_targets(&mut client, &graph).await {
+                    Ok(iris) => iris,
+                    Err(e) => {
+                        errors.push(format!("list graphs: {}", e.message()));
+                        continue;
+                    }
+                };
+                for iri in iris {
+                    let req = proto::DropGraphRequest { iri: iri.clone() };
+                    match client.drop_graph(tonic::Request::new(req)).await {
+                        Ok(r) => deleted += r.into_inner().quads_closed,
+                        Err(_) if silent => {}
+                        Err(e) => errors.push(format!("drop <{iri}>: {}", e.message())),
+                    }
+                }
+            }
+            spargebra::GraphUpdateOperation::Create { graph, .. } => {
+                // Idempotent: creating an existing graph is not an error.
+                let req = proto::CreateGraphRequest {
+                    iri: graph.as_str().to_string(),
+                    metadata: vec![],
+                };
+                if let Err(e) = state
+                    .client
+                    .clone()
+                    .create_graph(tonic::Request::new(req))
+                    .await
+                {
+                    errors.push(format!("create <{}>: {}", graph.as_str(), e.message()));
+                }
+            }
+            spargebra::GraphUpdateOperation::Load { silent, source, .. } => {
+                if !silent {
+                    errors.push(format!(
+                        "LOAD <{}> is not supported; use POST /import/rdf",
+                        source.as_str()
+                    ));
+                }
             }
         }
     }
 
     Json(serde_json::json!({
-        "ok": failed == 0,
+        "ok": failed == 0 && errors.is_empty(),
         "inserted": inserted,
         "deleted": deleted,
         "failed": failed,
+        "errors": errors,
     }))
     .into_response()
+}
+
+/// A SPARQL graph name as an `InsertRequest.graph` IRI ("" = default graph).
+fn graph_name_iri(graph: &spargebra::term::GraphName) -> String {
+    match graph {
+        spargebra::term::GraphName::NamedNode(n) => n.as_str().to_string(),
+        spargebra::term::GraphName::DefaultGraph => String::new(),
+    }
+}
+
+/// The `DeleteTriplesRequest.graph` for a quad's graph name. The SPARQL
+/// default graph is the union of all graphs, so a delete without `GRAPH`
+/// closes the triple wherever it lives.
+fn delete_graph_term(graph: &spargebra::term::GraphName) -> Option<proto::GraphTerm> {
+    match graph {
+        spargebra::term::GraphName::NamedNode(n) => Some(proto::GraphTerm {
+            kind: Some(proto::graph_term::Kind::Iri(n.as_str().to_string())),
+        }),
+        spargebra::term::GraphName::DefaultGraph => None,
+    }
+}
+
+/// The graph of a template quad for one WHERE solution.
+enum TemplateGraph {
+    Default,
+    Iri(String),
+}
+
+/// Resolve a template's graph: a fixed IRI, the default graph, or a variable
+/// bound (by `GRAPH ?g` in the WHERE clause) to a graph IRI node. `None` when
+/// the variable is unbound.
+fn template_graph(
+    graph: &spargebra::term::GraphNamePattern,
+    binding: &polargraph_sparql::SparqlBindings,
+    names: &polargraph_sparql::IriNames,
+) -> Option<TemplateGraph> {
+    use spargebra::term::GraphNamePattern;
+    match graph {
+        GraphNamePattern::NamedNode(n) => Some(TemplateGraph::Iri(n.as_str().to_string())),
+        GraphNamePattern::DefaultGraph => Some(TemplateGraph::Default),
+        GraphNamePattern::Variable(v) => match binding.get(v.as_str()) {
+            Some(polargraph_sparql::SparqlValue::Uri(id)) => {
+                Some(TemplateGraph::Iri(names.iri(id)))
+            }
+            _ => None,
+        },
+    }
+}
+
+/// `(source, target)` graph IRIs ("" = default graph) when a DeleteInsert is
+/// spargebra's rewriting of ADD / COPY / MOVE: no DELETE or USING, one
+/// `?s ?p ?o` INSERT template into a fixed graph, and a WHERE clause that is
+/// exactly `?s ?p ?o` (default graph) or `GRAPH <src> { ?s ?p ?o }`.
+fn graph_copy_shape(
+    delete: &[spargebra::term::GroundQuadPattern],
+    insert: &[spargebra::term::QuadPattern],
+    using: Option<&spargebra::algebra::QueryDataset>,
+    pattern: &spargebra::algebra::GraphPattern,
+) -> Option<(String, String)> {
+    use spargebra::algebra::GraphPattern;
+    use spargebra::term::{GraphNamePattern, NamedNodePattern, TermPattern};
+
+    if !delete.is_empty() || using.is_some() {
+        return None;
+    }
+    let [template] = insert else { return None };
+    let (TermPattern::Variable(s), NamedNodePattern::Variable(p), TermPattern::Variable(o)) =
+        (&template.subject, &template.predicate, &template.object)
+    else {
+        return None;
+    };
+    let target = match &template.graph_name {
+        GraphNamePattern::NamedNode(n) => n.as_str().to_string(),
+        GraphNamePattern::DefaultGraph => String::new(),
+        GraphNamePattern::Variable(_) => return None,
+    };
+    let (source, bgp) = match pattern {
+        GraphPattern::Graph {
+            name: NamedNodePattern::NamedNode(n),
+            inner,
+        } => (n.as_str().to_string(), inner.as_ref()),
+        other => (String::new(), other),
+    };
+    let GraphPattern::Bgp { patterns } = bgp else {
+        return None;
+    };
+    let [tp] = patterns.as_slice() else {
+        return None;
+    };
+    let same = matches!(
+        (&tp.subject, &tp.predicate, &tp.object),
+        (TermPattern::Variable(ws), NamedNodePattern::Variable(wp), TermPattern::Variable(wo))
+            if ws == s && wp == p && wo == o
+    );
+    same.then_some((source, target))
+}
+
+/// Graph IRIs ("" = default graph) that a CLEAR / DROP target names.
+async fn update_graph_targets(
+    client: &mut GrpcClient,
+    target: &spargebra::algebra::GraphTarget,
+) -> Result<Vec<String>, tonic::Status> {
+    use spargebra::algebra::GraphTarget;
+    let named = |client: &mut GrpcClient| {
+        let mut client = client.clone();
+        async move {
+            let req = proto::ListGraphsRequest {
+                filter: vec![],
+                include_system: false,
+            };
+            let graphs = client.list_graphs(tonic::Request::new(req)).await?;
+            Ok::<_, tonic::Status>(
+                graphs
+                    .into_inner()
+                    .graphs
+                    .into_iter()
+                    .map(|g| g.iri)
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    Ok(match target {
+        GraphTarget::NamedNode(n) => vec![n.as_str().to_string()],
+        GraphTarget::DefaultGraph => vec![String::new()],
+        GraphTarget::NamedGraphs => named(client).await?,
+        GraphTarget::AllGraphs => {
+            let mut all = vec![String::new()];
+            all.extend(named(client).await?);
+            all
+        }
+    })
 }
 
 // ── POST /delete ──────────────────────────────────────────────────────────────
@@ -2825,6 +3181,21 @@ fn sparql_quad_iris(quad: &spargebra::term::Quad) -> Vec<String> {
     if let Term::NamedNode(n) = &quad.object {
         iris.push(n.as_str().to_string());
     }
+    iris.retain(|i| polargraph_core::term::needs_dictionary(i));
+    iris
+}
+
+/// IRIs named directly (not via variables) by an INSERT template, for the
+/// IRI dictionary.
+fn quad_pattern_iris(qp: &spargebra::term::QuadPattern) -> Vec<String> {
+    use spargebra::term::TermPattern;
+    let mut iris: Vec<String> = [&qp.subject, &qp.object]
+        .into_iter()
+        .filter_map(|t| match t {
+            TermPattern::NamedNode(n) => Some(n.as_str().to_string()),
+            _ => None,
+        })
+        .collect();
     iris.retain(|i| polargraph_core::term::needs_dictionary(i));
     iris
 }
@@ -4656,6 +5027,42 @@ mod tests {
         for v in [lang, typed] {
             assert_eq!(proto_value_to_json(&json_to_proto_value(&v)), v);
         }
+    }
+
+    #[test]
+    fn graph_copy_shape_recognises_add_copy_move() {
+        let shapes = |update: &str| -> Vec<Option<(String, String)>> {
+            spargebra::Update::parse(update, None)
+                .unwrap()
+                .operations
+                .iter()
+                .filter_map(|op| match op {
+                    spargebra::GraphUpdateOperation::DeleteInsert {
+                        delete,
+                        insert,
+                        using,
+                        pattern,
+                    } => Some(graph_copy_shape(delete, insert, using.as_ref(), pattern)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let pair = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
+        assert_eq!(
+            shapes("ADD <urn:a> TO <urn:b>"),
+            vec![pair("urn:a", "urn:b")]
+        );
+        assert_eq!(shapes("COPY DEFAULT TO <urn:b>"), vec![pair("", "urn:b")]);
+        assert_eq!(shapes("MOVE <urn:a> TO DEFAULT"), vec![pair("urn:a", "")]);
+        // A general INSERT … WHERE is not a copy.
+        assert_eq!(
+            shapes("INSERT { GRAPH <urn:b> { ?s ?p ?x } } WHERE { ?s ?p ?o }"),
+            vec![None]
+        );
+        assert_eq!(
+            shapes("INSERT { GRAPH <urn:b> { ?s ?p ?o } } WHERE { ?s ?p ?o . ?o ?q ?r }"),
+            vec![None]
+        );
     }
 
     #[test]

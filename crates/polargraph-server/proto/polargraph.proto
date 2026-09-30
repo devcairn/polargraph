@@ -780,6 +780,9 @@ message CypherQueryRequest {
     /// Named query parameters for `$param` substitution. Keys are parameter names
     /// (without the `$`); values are JSON-encoded `Value` objects.
     map<string, string> params = 8;
+    /// Dataset: graph IRIs the MATCH patterns read (unknown IRIs match
+    /// nothing). Empty = every graph. A `USE GRAPH` clause takes precedence.
+    repeated string graphs = 9;
 }
 
 /// One result row from a CypherQuery.
@@ -813,6 +816,10 @@ message CypherWriteRequest {
     /// Optional open-transaction ID. When set, writes are buffered into the
     /// named transaction rather than auto-committed.
     string tx_id = 2;
+    /// Graph IRI to write to and to MATCH in (interned on first use), as
+    /// `USE GRAPH <iri>`. Empty = the default graph for writes and every
+    /// graph for MATCH / MERGE / DELETE.
+    string graph = 3;
 }
 
 message CypherWriteResponse {
@@ -993,6 +1000,10 @@ message DeleteTriplesRequest {
     /// Optional property value: only properties with exactly this value are
     /// closed (relations are left alone). Unset means any value.
     Value value = 5;
+    /// Graphs to close the triples in: unset = every graph; `default_graph`,
+    /// `iri` or `set` restrict it (a graph variable is invalid). An unknown
+    /// IRI is NOT_FOUND.
+    GraphTerm graph = 6;
 }
 
 message DeleteTriplesResponse {
