@@ -339,6 +339,23 @@ fn extend_full(
     Some((node_out, pred_out))
 }
 
+/// Scope every unscoped (`Union`) pattern — rule bodies included — to
+/// `graph`. Patterns over rule-derived predicates stay `Union`: derived facts
+/// have no graph. Patterns already scoped keep their graph.
+pub fn scope_to_graph(patterns: &mut [VarPattern], rules: &mut [Rule], graph: &GraphTerm) {
+    let derived: HashSet<String> = rules.iter().map(|r| r.head_predicate.clone()).collect();
+    let scope = |vp: &mut VarPattern| {
+        let over_derived = vp.predicate.as_ref().is_some_and(|p| derived.contains(p));
+        if vp.graph == GraphTerm::Union && !over_derived {
+            vp.graph = graph.clone();
+        }
+    };
+    patterns.iter_mut().for_each(scope);
+    for rule in rules {
+        rule.body.iter_mut().for_each(scope);
+    }
+}
+
 /// Attempt to bind `term` to `value` within `bindings`.
 ///
 /// - `Bound`: already substituted; returns unchanged bindings (storage

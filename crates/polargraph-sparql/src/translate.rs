@@ -275,21 +275,7 @@ fn scope_empty_default_graph(dataset: &Option<SparqlDataset>, branches: &mut [Br
 /// their graph, and patterns over rule-derived predicates (property paths)
 /// stay unscoped because derived facts have no graph.
 fn scope_branch(branch: &mut Branch, graph: &GraphTerm) {
-    let derived: std::collections::HashSet<String> = branch
-        .rules
-        .iter()
-        .map(|r| r.head_predicate.clone())
-        .collect();
-    let scope = |vp: &mut VarPattern| {
-        let over_derived = vp.predicate.as_ref().is_some_and(|p| derived.contains(p));
-        if vp.graph == GraphTerm::Union && !over_derived {
-            vp.graph = graph.clone();
-        }
-    };
-    branch.patterns.iter_mut().for_each(scope);
-    for rule in &mut branch.rules {
-        rule.body.iter_mut().for_each(scope);
-    }
+    polargraph_query::scope_to_graph(&mut branch.patterns, &mut branch.rules, graph);
     for optional in &mut branch.optional_branches {
         scope_branch(optional, graph);
     }
