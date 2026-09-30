@@ -6998,3 +6998,116 @@ async fn query_graph_terms_and_dataset() {
         .iter()
         .any(|b| b.vars["g"].bytes == eng.as_bytes().to_vec()));
 }
+
+// ── Step 4: graph management RPCs ────────────────────────────────────────────
+
+#[tokio::test]
+async fn graph_management_rpcs() {
+    use polargraph_server::proto::{
+        CopyGraphRequest, CreateGraphRequest, DropGraphRequest, GraphMetadata, GraphStatsRequest,
+        ListGraphsRequest, MoveGraphRequest,
+    };
+
+    let (svc, _dir) = open();
+    let status = |s: &str| GraphMetadata {
+        predicate: "cb:status".into(),
+        value: Some(Value {
+            kind: Some(ValueKind::TextVal(s.into())),
+        }),
+    };
+    let created = svc
+        .create_graph(Request::new(CreateGraphRequest {
+            iri: "urn:g:p1".into(),
+            metadata: vec![status("Proposed")],
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .graph
+        .unwrap();
+    assert_eq!(created.iri, "urn:g:p1");
+    assert_eq!(created.metadata.len(), 1);
+
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            rel(a.clone(), "dependsOn", b.clone()),
+            text_prop(a, "owner", "t"),
+        ],
+        graph: "urn:g:p1".into(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let list = |filter: Vec<GraphMetadata>| {
+        let svc = &svc;
+        async move {
+            svc.list_graphs(Request::new(ListGraphsRequest {
+                filter,
+                include_system: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .graphs
+        }
+    };
+    assert_eq!(list(vec![]).await.len(), 1, "system graph hidden");
+    assert_eq!(list(vec![status("Proposed")]).await.len(), 1);
+    assert!(list(vec![status("Approved")]).await.is_empty());
+
+    let stats = |iri: &'static str| {
+        let svc = &svc;
+        async move {
+            svc.graph_stats(Request::new(GraphStatsRequest { iri: iri.into() }))
+                .await
+                .unwrap()
+                .into_inner()
+                .live_quads
+        }
+    };
+    assert_eq!(stats("urn:g:p1").await, 2);
+
+    let copied = svc
+        .copy_graph(Request::new(CopyGraphRequest {
+            source: "urn:g:p1".into(),
+            target: "urn:g:approved".into(),
+            clear_target: true,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .quads;
+    assert_eq!(copied, 2);
+    assert_eq!(stats("urn:g:approved").await, 2);
+
+    svc.move_graph(Request::new(MoveGraphRequest {
+        source: "urn:g:approved".into(),
+        target: "urn:g:archive".into(),
+    }))
+    .await
+    .unwrap();
+    assert_eq!(stats("urn:g:approved").await, 0);
+    assert_eq!(stats("urn:g:archive").await, 2);
+
+    let closed = svc
+        .drop_graph(Request::new(DropGraphRequest {
+            iri: "urn:g:p1".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .quads_closed;
+    assert_eq!(closed, 2);
+    assert_eq!(stats("urn:g:p1").await, 0);
+
+    let err = svc
+        .graph_stats(Request::new(GraphStatsRequest {
+            iri: "urn:g:nope".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+}
