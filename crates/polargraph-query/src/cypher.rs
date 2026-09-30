@@ -2318,10 +2318,8 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
                 patterns.push(VarPattern {
                     subject: Term::Var(vf.var.clone()),
                     predicate: Some(vf.predicate.clone()),
-                    predicate_var: None,
                     object: Term::Any,
-                    edge_var: None,
-                    max_hops: None,
+                    ..Default::default()
                 });
             }
         }
@@ -2330,10 +2328,8 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
                 patterns.push(VarPattern {
                     subject: Term::Var(tf.var.clone()),
                     predicate: Some(tf.predicate.clone()),
-                    predicate_var: None,
                     object: Term::Any,
-                    edge_var: None,
-                    max_hops: None,
+                    ..Default::default()
                 });
             }
         }
@@ -2474,10 +2470,9 @@ fn compile_path(
                 patterns.push(VarPattern {
                     subject: subj,
                     predicate: Some(pred.clone()),
-                    predicate_var: None,
                     object: obj,
-                    edge_var: None,
                     max_hops: Some(max_hops),
+                    ..Default::default()
                 });
             } else {
                 // Unlimited transitive: emit TC Datalog rules + query pattern.
@@ -2489,10 +2484,8 @@ fn compile_path(
                         Rule::new(tc_pred.clone(), "x", "y").with_body(vec![VarPattern {
                             subject: Term::Var("x".into()),
                             predicate: Some(pred.clone()),
-                            predicate_var: None,
                             object: Term::Var("y".into()),
-                            edge_var: None,
-                            max_hops: None,
+                            ..Default::default()
                         }]),
                     );
                     // Recursive rule: __tc_pred(x, z) :- __tc_pred(x, y), pred(y, z)
@@ -2500,18 +2493,14 @@ fn compile_path(
                         VarPattern {
                             subject: Term::Var("x".into()),
                             predicate: Some(tc_pred.clone()),
-                            predicate_var: None,
                             object: Term::Var("y".into()),
-                            edge_var: None,
-                            max_hops: None,
+                            ..Default::default()
                         },
                         VarPattern {
                             subject: Term::Var("y".into()),
                             predicate: Some(pred.clone()),
-                            predicate_var: None,
                             object: Term::Var("z".into()),
-                            edge_var: None,
-                            max_hops: None,
+                            ..Default::default()
                         },
                     ]));
                 }
@@ -2523,10 +2512,8 @@ fn compile_path(
                 patterns.push(VarPattern {
                     subject: subj,
                     predicate: Some(tc_pred),
-                    predicate_var: None,
                     object: obj,
-                    edge_var: None,
-                    max_hops: None,
+                    ..Default::default()
                 });
             }
         } else {
@@ -2542,10 +2529,9 @@ fn compile_path(
             patterns.push(VarPattern {
                 subject: subj,
                 predicate: Some(hop.rel.predicate.clone()),
-                predicate_var: None,
                 object: obj,
                 edge_var: edge_var_name,
-                max_hops: None,
+                ..Default::default()
             });
         }
 
@@ -2570,10 +2556,8 @@ fn emit_node_binding(
             patterns.push(VarPattern {
                 subject: Term::Var(var.to_string()),
                 predicate: Some("__type".into()),
-                predicate_var: None,
                 object: Term::Any,
-                edge_var: None,
-                max_hops: None,
+                ..Default::default()
             });
         }
         value_filters.push(ValueFilter {
@@ -2589,10 +2573,8 @@ fn emit_node_binding(
             patterns.push(VarPattern {
                 subject: Term::Var(var.to_string()),
                 predicate: Some(key.clone()),
-                predicate_var: None,
                 object: Term::Any,
-                edge_var: None,
-                max_hops: None,
+                ..Default::default()
             });
             first_prop = false;
         }

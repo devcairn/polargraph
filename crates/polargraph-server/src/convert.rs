@@ -220,8 +220,7 @@ pub fn var_pattern_from_proto(proto: &proto::VarPattern) -> Result<VarPattern, S
         predicate,
         predicate_var,
         object,
-        edge_var: None,
-        max_hops: None,
+        ..Default::default()
     })
 }
 

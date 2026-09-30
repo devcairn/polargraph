@@ -117,12 +117,12 @@ impl SstImporter {
         };
 
         // ── 3. Build per-CF key-value buffers ────────────────────────────────
-        let mut spo_buf: Vec<([u8; 44], Vec<u8>)> = Vec::with_capacity(n);
-        let mut sop_buf: Vec<([u8; 44], Vec<u8>)> = Vec::with_capacity(n);
-        let mut pso_buf: Vec<([u8; 44], Vec<u8>)> = Vec::with_capacity(n);
-        let mut pos_buf: Vec<([u8; 44], Vec<u8>)> = Vec::with_capacity(n);
-        let mut osp_buf: Vec<([u8; 44], Vec<u8>)> = Vec::with_capacity(n);
-        let mut ops_buf: Vec<([u8; 44], Vec<u8>)> = Vec::with_capacity(n);
+        let mut spo_buf: Vec<(keys::HexKey, Vec<u8>)> = Vec::with_capacity(n);
+        let mut sop_buf: Vec<(keys::HexKey, Vec<u8>)> = Vec::with_capacity(n);
+        let mut pso_buf: Vec<(keys::HexKey, Vec<u8>)> = Vec::with_capacity(n);
+        let mut pos_buf: Vec<(keys::HexKey, Vec<u8>)> = Vec::with_capacity(n);
+        let mut osp_buf: Vec<(keys::HexKey, Vec<u8>)> = Vec::with_capacity(n);
+        let mut ops_buf: Vec<(keys::HexKey, Vec<u8>)> = Vec::with_capacity(n);
 
         for triple in &self.triples {
             // EdgeProperty / EdgeRelation go to EPA/EPO via WriteBatch below.
@@ -161,7 +161,7 @@ impl SstImporter {
         let opts = Options::default();
 
         #[allow(clippy::type_complexity)]
-        let cf_data: [(&str, &Vec<([u8; 44], Vec<u8>)>); 6] = [
+        let cf_data: [(&str, &Vec<(keys::HexKey, Vec<u8>)>); 6] = [
             (cf::SPO, &spo_buf),
             (cf::SOP, &sop_buf),
             (cf::PSO, &pso_buf),
@@ -248,7 +248,7 @@ impl SstImporter {
 fn object_of(triple: &Triple) -> NodeId {
     match triple {
         Triple::Relation { object, .. } => *object,
-        Triple::Property { .. } => NodeId(uuid::Uuid::from_bytes(keys::PROPERTY_SENTINEL)),
+        Triple::Property { .. } => keys::property_sentinel_node(),
         // EdgeProperty/EdgeRelation don't go through the hexastore loop.
         Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => unreachable!(),
     }

@@ -76,7 +76,7 @@ Recorded after auditing this plan against the code at `849839a`.
 | Step | Work | Migration | Status |
 |------|------|-----------|--------|
 | 0 | Retention fix (1.5); bnode skolemization (1.1); trigram size cap (1.4) | none | ✅ `5cb5af4`, `d2ae884`, `b3536c5` |
-| 1 | Refactor only: key-width constants/accessors in `keys::`, `VarPattern: Default`, `Quad` type in core. No behaviour change. | none | |
+| 1 | Refactor only: key-width constants/accessors in `keys::`, `VarPattern` literals via `..Default::default()`. No behaviour change. (`Quad` type moved to step 3, where it's first used.) | none | ✅ |
 | 2 | Term identity + IRI dictionary (1.6) | additive CF, no rewrite | |
 | 3 | New key layout: value-hashed property keys (1.2), 48-byte keys with `g` (2.3), `GSPO`/`GPOS`, `BLOB` CF + value refs (1.3), conflict detection on `(s,p,o,g)`, graph interning | **v3** offline rewrite | |
 | 4 | `GraphTerm` in Datalog/planner; graph RPCs; N-Quads/TriG | — | |

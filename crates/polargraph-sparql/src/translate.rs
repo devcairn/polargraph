@@ -480,9 +480,7 @@ fn translate_triple_pattern(
         subject: subj,
         predicate,
         object: obj,
-        edge_var: None,
-        max_hops: None,
-        predicate_var: None,
+        ..Default::default()
     })
 }
 
@@ -820,9 +818,7 @@ fn translate_path(
                 subject,
                 predicate: Some(n.as_str().to_string()),
                 object,
-                edge_var: None,
-                max_hops: None,
-                predicate_var: None,
+                ..Default::default()
             });
             Ok(())
         }
@@ -894,9 +890,7 @@ fn translate_one_or_more(
             subject: Term::Var(x.clone()),
             predicate: Some(base_pred.clone()),
             object: Term::Var(y.clone()),
-            edge_var: None,
-            max_hops: None,
-            predicate_var: None,
+            ..Default::default()
         }]));
 
     branch
@@ -906,17 +900,13 @@ fn translate_one_or_more(
                 subject: Term::Var(x.clone()),
                 predicate: Some(tc_name.clone()),
                 object: Term::Var(y.clone()),
-                edge_var: None,
-                max_hops: None,
-                predicate_var: None,
+                ..Default::default()
             },
             VarPattern {
                 subject: Term::Var(y.clone()),
                 predicate: Some(base_pred.clone()),
                 object: Term::Var(z.clone()),
-                edge_var: None,
-                max_hops: None,
-                predicate_var: None,
+                ..Default::default()
             },
         ]));
 
@@ -924,9 +914,7 @@ fn translate_one_or_more(
         subject,
         predicate: Some(tc_name),
         object,
-        edge_var: None,
-        max_hops: None,
-        predicate_var: None,
+        ..Default::default()
     });
 
     Ok(())

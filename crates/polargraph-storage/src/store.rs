@@ -1079,7 +1079,7 @@ impl TripleStore {
                 break;
             }
 
-            // Fast path: tt is always the last 8 bytes of a 44-byte hexastore key.
+            // Fast path: tt is always the last 8 bytes of a hexastore key.
             // Check it against snapshot_ts before calling decode_key (which allocates
             // value.to_vec()). This avoids allocations for the common case of
             // multiple historical versions where only the newest is needed.
@@ -1572,18 +1572,12 @@ impl TripleStore {
             None => return Ok(vec![]),
         };
 
-        // Build the 36-byte SPO prefix: [subject(16)][pred_id(4)][sentinel(16)]
-        let mut prefix = [0u8; 36];
-        prefix[0..16].copy_from_slice(subject.as_bytes());
-        prefix[16..20].copy_from_slice(&pred_id.to_be_bytes());
-        prefix[20..36].copy_from_slice(&keys::PROPERTY_SENTINEL);
+        let prefix = keys::spo_property_prefix(&subject, pred_id);
 
         // Scan backward from the maximum possible tt for this (subject, pred, sentinel)
         // so we get newest-first order and can stop as soon as we reach `limit`.
         // This avoids collecting all historical versions only to reverse and truncate.
-        let mut start = [0xFFu8; 44];
-        start[0..36].copy_from_slice(&prefix);
-        // tt bytes are already 0xFF (i64::MAX in big-endian) from the initializer.
+        let start = keys::spo_tuple_end(&prefix);
 
         let cf = self.cf_handle(cf::SPO)?;
         let iter = self
@@ -1597,10 +1591,10 @@ impl TripleStore {
             if !key.starts_with(&prefix) {
                 break;
             }
-            if key.len() < 44 {
+            if key.len() != keys::HEXASTORE_KEY_LEN {
                 continue;
             }
-            let tt = i64::from_be_bytes(key[36..44].try_into().unwrap());
+            let tt = keys::hexastore_tt(&key).0;
             match codec::decode_value(&value_bytes) {
                 Ok(codec::DecodedValue::Property { value, .. }) => {
                     versions.push((value, tt));
@@ -1757,7 +1751,7 @@ impl TripleStore {
             } => {
                 let temporal_stamped = BiTemporalRange { tt, ..*temporal };
                 let value_bytes = codec::encode_property(value, &temporal_stamped)?;
-                let sentinel = NodeId(uuid::Uuid::from_bytes(keys::PROPERTY_SENTINEL));
+                let sentinel = keys::property_sentinel_node();
                 let p = self.intern_predicate(&predicate.0)?;
                 self.batch_triple(&mut batch, *subject, p, sentinel, tt, &value_bytes)?;
                 // Trigram index for text properties.

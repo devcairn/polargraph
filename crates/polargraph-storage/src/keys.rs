@@ -36,6 +36,32 @@ pub const HEXASTORE_KEY_LEN: usize = 44;
 /// oldest `tt` first.
 pub const HEXASTORE_TUPLE_LEN: usize = HEXASTORE_KEY_LEN - 8;
 
+/// A full hexastore key: `[slot_a][slot_b][slot_c][tt]`.
+pub type HexKey = [u8; HEXASTORE_KEY_LEN];
+
+/// The tuple prefix of a hexastore key (all versions of one triple).
+pub type HexTuple = [u8; HEXASTORE_TUPLE_LEN];
+
+/// The tuple prefix of a hexastore key.
+#[inline]
+pub fn hexastore_tuple(key: &[u8]) -> &[u8] {
+    &key[..HEXASTORE_TUPLE_LEN]
+}
+
+/// The SPO tuple prefix for a property's current versions:
+/// `[subject][pred_id][PROPERTY_SENTINEL]`.
+pub fn spo_property_prefix(s: &NodeId, p: PredId) -> HexTuple {
+    spo_prefix_spo(s, p, &property_sentinel_node())
+}
+
+/// The SPO key that sorts after every version of `tuple` (its `tt` bytes set to
+/// 0xFF), for newest-first reverse scans.
+pub fn spo_tuple_end(tuple: &HexTuple) -> HexKey {
+    let mut k = [0xFFu8; HEXASTORE_KEY_LEN];
+    k[..HEXASTORE_TUPLE_LEN].copy_from_slice(tuple);
+    k
+}
+
 /// Read the transaction time from the last 8 bytes of a hexastore key.
 #[inline]
 pub fn hexastore_tt(key: &[u8]) -> Timestamp {
@@ -44,6 +70,12 @@ pub fn hexastore_tt(key: &[u8]) -> Timestamp {
 
 /// Sentinel NodeId used in the object slot for property triples.
 pub const PROPERTY_SENTINEL: [u8; 16] = [0xFF; 16];
+
+/// The property sentinel as a `NodeId`, for the object slot of property keys.
+#[inline]
+pub fn property_sentinel_node() -> NodeId {
+    NodeId(Uuid::from_bytes(PROPERTY_SENTINEL))
+}
 
 /// Returns true if a 16-byte NodeId slot bytes are the property sentinel.
 #[inline]
@@ -106,52 +138,52 @@ pub struct DecodedOsp {
 // ── encode ────────────────────────────────────────────────────────────────────
 
 // SPO: [subject(16)][pred(4)][object(16)][tt(8)]
-pub fn encode_spo(s: &NodeId, p: PredId, o: &NodeId, tt: Timestamp) -> [u8; 44] {
-    let mut k = [0u8; 44];
+pub fn encode_spo(s: &NodeId, p: PredId, o: &NodeId, tt: Timestamp) -> HexKey {
+    let mut k = [0u8; HEXASTORE_KEY_LEN];
     k[0..16].copy_from_slice(s.as_bytes());
     k[16..20].copy_from_slice(&p.to_be_bytes());
     k[20..36].copy_from_slice(o.as_bytes());
-    k[36..44].copy_from_slice(&tt.to_be_bytes());
+    k[HEXASTORE_TUPLE_LEN..].copy_from_slice(&tt.to_be_bytes());
     k
 }
 
 // SOP: [subject(16)][object(16)][pred(4)][tt(8)]
-pub fn encode_sop(s: &NodeId, o: &NodeId, p: PredId, tt: Timestamp) -> [u8; 44] {
-    let mut k = [0u8; 44];
+pub fn encode_sop(s: &NodeId, o: &NodeId, p: PredId, tt: Timestamp) -> HexKey {
+    let mut k = [0u8; HEXASTORE_KEY_LEN];
     k[0..16].copy_from_slice(s.as_bytes());
     k[16..32].copy_from_slice(o.as_bytes());
     k[32..36].copy_from_slice(&p.to_be_bytes());
-    k[36..44].copy_from_slice(&tt.to_be_bytes());
+    k[HEXASTORE_TUPLE_LEN..].copy_from_slice(&tt.to_be_bytes());
     k
 }
 
 // PSO: [pred(4)][subject(16)][object(16)][tt(8)]
-pub fn encode_pso(p: PredId, s: &NodeId, o: &NodeId, tt: Timestamp) -> [u8; 44] {
-    let mut k = [0u8; 44];
+pub fn encode_pso(p: PredId, s: &NodeId, o: &NodeId, tt: Timestamp) -> HexKey {
+    let mut k = [0u8; HEXASTORE_KEY_LEN];
     k[0..4].copy_from_slice(&p.to_be_bytes());
     k[4..20].copy_from_slice(s.as_bytes());
     k[20..36].copy_from_slice(o.as_bytes());
-    k[36..44].copy_from_slice(&tt.to_be_bytes());
+    k[HEXASTORE_TUPLE_LEN..].copy_from_slice(&tt.to_be_bytes());
     k
 }
 
 // POS: [pred(4)][object(16)][subject(16)][tt(8)]
-pub fn encode_pos(p: PredId, o: &NodeId, s: &NodeId, tt: Timestamp) -> [u8; 44] {
-    let mut k = [0u8; 44];
+pub fn encode_pos(p: PredId, o: &NodeId, s: &NodeId, tt: Timestamp) -> HexKey {
+    let mut k = [0u8; HEXASTORE_KEY_LEN];
     k[0..4].copy_from_slice(&p.to_be_bytes());
     k[4..20].copy_from_slice(o.as_bytes());
     k[20..36].copy_from_slice(s.as_bytes());
-    k[36..44].copy_from_slice(&tt.to_be_bytes());
+    k[HEXASTORE_TUPLE_LEN..].copy_from_slice(&tt.to_be_bytes());
     k
 }
 
 // OSP: [object(16)][subject(16)][pred(4)][tt(8)]
-pub fn encode_osp(o: &NodeId, s: &NodeId, p: PredId, tt: Timestamp) -> [u8; 44] {
-    let mut k = [0u8; 44];
+pub fn encode_osp(o: &NodeId, s: &NodeId, p: PredId, tt: Timestamp) -> HexKey {
+    let mut k = [0u8; HEXASTORE_KEY_LEN];
     k[0..16].copy_from_slice(o.as_bytes());
     k[16..32].copy_from_slice(s.as_bytes());
     k[32..36].copy_from_slice(&p.to_be_bytes());
-    k[36..44].copy_from_slice(&tt.to_be_bytes());
+    k[HEXASTORE_TUPLE_LEN..].copy_from_slice(&tt.to_be_bytes());
     k
 }
 
@@ -203,64 +235,64 @@ pub fn decode_tri_subject(key: &[u8]) -> Result<NodeId, StorageError> {
 }
 
 // OPS: [object(16)][pred(4)][subject(16)][tt(8)]
-pub fn encode_ops(o: &NodeId, p: PredId, s: &NodeId, tt: Timestamp) -> [u8; 44] {
-    let mut k = [0u8; 44];
+pub fn encode_ops(o: &NodeId, p: PredId, s: &NodeId, tt: Timestamp) -> HexKey {
+    let mut k = [0u8; HEXASTORE_KEY_LEN];
     k[0..16].copy_from_slice(o.as_bytes());
     k[16..20].copy_from_slice(&p.to_be_bytes());
     k[20..36].copy_from_slice(s.as_bytes());
-    k[36..44].copy_from_slice(&tt.to_be_bytes());
+    k[HEXASTORE_TUPLE_LEN..].copy_from_slice(&tt.to_be_bytes());
     k
 }
 
 // ── decode ────────────────────────────────────────────────────────────────────
 
 pub fn decode_spo(key: &[u8]) -> Result<DecodedSpo, StorageError> {
-    check_len(key, 44, "SPO")?;
+    check_len(key, HEXASTORE_KEY_LEN, "SPO")?;
     Ok(DecodedSpo {
         subject: node_id_from(&key[0..16]),
         pred_id: pred_from(&key[16..20]),
         object: node_id_from(&key[20..36]),
-        tt: tt_from(&key[36..44]),
+        tt: tt_from(&key[HEXASTORE_TUPLE_LEN..]),
     })
 }
 
 pub fn decode_sop(key: &[u8]) -> Result<DecodedSop, StorageError> {
-    check_len(key, 44, "SOP")?;
+    check_len(key, HEXASTORE_KEY_LEN, "SOP")?;
     Ok(DecodedSop {
         subject: node_id_from(&key[0..16]),
         object: node_id_from(&key[16..32]),
         pred_id: pred_from(&key[32..36]),
-        tt: tt_from(&key[36..44]),
+        tt: tt_from(&key[HEXASTORE_TUPLE_LEN..]),
     })
 }
 
 pub fn decode_pso(key: &[u8]) -> Result<DecodedPso, StorageError> {
-    check_len(key, 44, "PSO")?;
+    check_len(key, HEXASTORE_KEY_LEN, "PSO")?;
     Ok(DecodedPso {
         pred_id: pred_from(&key[0..4]),
         subject: node_id_from(&key[4..20]),
         object: node_id_from(&key[20..36]),
-        tt: tt_from(&key[36..44]),
+        tt: tt_from(&key[HEXASTORE_TUPLE_LEN..]),
     })
 }
 
 pub fn decode_pos(key: &[u8]) -> Result<DecodedPos, StorageError> {
-    check_len(key, 44, "POS")?;
+    check_len(key, HEXASTORE_KEY_LEN, "POS")?;
     Ok(DecodedPos {
         pred_id: pred_from(&key[0..4]),
         object: node_id_from(&key[4..20]),
         subject: node_id_from(&key[20..36]),
-        tt: tt_from(&key[36..44]),
+        tt: tt_from(&key[HEXASTORE_TUPLE_LEN..]),
     })
 }
 
 pub fn decode_osp(key: &[u8]) -> Result<DecodedOsp, StorageError> {
-    check_len(key, 44, "OSP")?;
+    check_len(key, HEXASTORE_KEY_LEN, "OSP")?;
     Ok(DecodedOsp {
         object: node_id_from(&key[0..16]),
         subject: node_id_from(&key[16..32]),
         pred_id: pred_from(&key[32..36]),
-        tt: tt_from(&key[36..44]),
+        tt: tt_from(&key[HEXASTORE_TUPLE_LEN..]),
     })
 }
 
@@ -405,8 +437,8 @@ pub fn spo_prefix_sp(s: &NodeId, p: PredId) -> [u8; 20] {
 }
 
 /// SPO prefix: exactly the triple (subject, predicate, object) — all tt variants.
-pub fn spo_prefix_spo(s: &NodeId, p: PredId, o: &NodeId) -> [u8; 36] {
-    let mut k = [0u8; 36];
+pub fn spo_prefix_spo(s: &NodeId, p: PredId, o: &NodeId) -> HexTuple {
+    let mut k = [0u8; HEXASTORE_TUPLE_LEN];
     k[0..16].copy_from_slice(s.as_bytes());
     k[16..20].copy_from_slice(&p.to_be_bytes());
     k[20..36].copy_from_slice(o.as_bytes());

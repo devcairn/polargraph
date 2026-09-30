@@ -328,10 +328,8 @@ impl Transaction {
 
         // Scan the SPO key range for this exact (S,P,O) and check if any
         // entry has tt in (read_ts, commit_ts].
-        let prefix = keys::encode_spo(&s, p, &o, Timestamp(0));
-        // We use the full 44-byte key up to (but not including) the tt part
-        // as our prefix — that's the first 36 bytes.
-        let spo_prefix = &prefix[..36];
+        let prefix = keys::spo_prefix_spo(&s, p, &o);
+        let spo_prefix = &prefix[..];
 
         let cf = self.store.cf_handle(cf::SPO)?;
         let db = self.store.db_ref();
@@ -488,7 +486,7 @@ fn object_of(triple: &Triple) -> NodeId {
             // Property triples and edge annotations use the sentinel.
             // (EdgeProperty/EdgeRelation are handled separately before this
             // function would be reached, but we need an arm to satisfy Rust.)
-            NodeId(uuid::Uuid::from_bytes(keys::PROPERTY_SENTINEL))
+            keys::property_sentinel_node()
         }
     }
 }
