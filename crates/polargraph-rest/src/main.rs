@@ -1558,16 +1558,32 @@ struct SparqlGetParams {
 async fn handle_sparql_get(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
     QueryParams(params): QueryParams<SparqlGetParams>,
 ) -> Response {
-    execute_sparql_query(state, headers, params.query).await
+    let dataset = polargraph_sparql::protocol::dataset_from_params(&[raw.as_deref().unwrap_or("")]);
+    execute_sparql_query(state, headers, params.query, dataset).await
 }
 
 async fn handle_sparql_post(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
     body: axum::body::Bytes,
 ) -> Response {
+    let form_body = if headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("application/x-www-form-urlencoded"))
+    {
+        String::from_utf8_lossy(&body).into_owned()
+    } else {
+        String::new()
+    };
+    let dataset = polargraph_sparql::protocol::dataset_from_params(&[
+        raw.as_deref().unwrap_or(""),
+        &form_body,
+    ]);
     let content_type = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -1619,7 +1635,7 @@ async fn handle_sparql_post(
         }
     };
 
-    execute_sparql_query(state, headers, query_string).await
+    execute_sparql_query(state, headers, query_string, dataset).await
 }
 
 // ── SPARQL-star runtime execution helpers ────────────────────────────────────
@@ -1847,16 +1863,19 @@ async fn execute_annotation_object_steps(
     result
 }
 
+/// Run a SPARQL query; `protocol_dataset` (`default-graph-uri` /
+/// `named-graph-uri`) replaces the query's own `FROM` / `FROM NAMED`.
 async fn execute_sparql_query(
     state: Arc<AppState>,
     headers: axum::http::HeaderMap,
     query_string: String,
+    protocol_dataset: Option<polargraph_sparql::SparqlDataset>,
 ) -> Response {
     use polargraph_sparql::response::ResponseFormat;
     use polargraph_sparql::{translate_query, SparqlBindings, SparqlError, SparqlValue};
 
     // 1. Parse
-    let parsed = match spargebra::Query::parse(&query_string, None) {
+    let mut parsed = match spargebra::Query::parse(&query_string, None) {
         Ok(q) => q,
         Err(e) => {
             return (
@@ -1866,6 +1885,15 @@ async fn execute_sparql_query(
                 .into_response()
         }
     };
+    if let Some(ds) = &protocol_dataset {
+        if let Err(e) = polargraph_sparql::protocol::apply_protocol_dataset(&mut parsed, ds) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    }
 
     // Dispatch CONSTRUCT / DESCRIBE to the dedicated handler.
     if matches!(
@@ -2224,6 +2252,18 @@ async fn execute_sparql_construct(
         }
     };
 
+    // Dataset handling as in `execute_sparql_query`.
+    let dataset_graphs: Vec<String> = ct
+        .dataset
+        .as_ref()
+        .map(|d| d.default.clone())
+        .unwrap_or_default();
+    let named_nodes: Option<HashSet<NodeId>> = ct
+        .dataset
+        .as_ref()
+        .and_then(|d| d.named.as_ref())
+        .map(|named| named.iter().map(|iri| iri_to_node_id(iri)).collect());
+
     // Execute WHERE clause branches and collect SparqlBindings.
     let mut all_bindings: Vec<polargraph_sparql::SparqlBindings> = Vec::new();
     for branch in &ct.branches {
@@ -2239,6 +2279,7 @@ async fn execute_sparql_construct(
         let req = proto::QueryRequest {
             patterns,
             rules,
+            graphs: dataset_graphs.clone(),
             ..Default::default()
         };
         let mut client = state.client.clone();
@@ -2250,6 +2291,18 @@ async fn execute_sparql_construct(
         let branch_bindings: Vec<polargraph_sparql::SparqlBindings> = resp
             .bindings
             .into_iter()
+            .filter(|pb| {
+                // FROM NAMED: graph variables must name one of the graphs.
+                let Some(named) = &named_nodes else {
+                    return true;
+                };
+                ct.graph_vars
+                    .iter()
+                    .all(|gv| match pb.vars.get(gv).and_then(proto_node_id) {
+                        Some(id) => named.contains(&id),
+                        None => true,
+                    })
+            })
             .map(|pb| {
                 let mut b: polargraph_sparql::SparqlBindings = std::collections::HashMap::new();
                 for (k, v) in pb.vars {

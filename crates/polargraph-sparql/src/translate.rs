@@ -204,21 +204,7 @@ pub fn translate_query(query: &spargebra::Query) -> Result<SparqlTranslation, Sp
     let mut translation = SparqlTranslation::default();
     let mut counter = 0usize;
 
-    if let spargebra::Query::Select {
-        dataset: Some(ds), ..
-    }
-    | spargebra::Query::Ask {
-        dataset: Some(ds), ..
-    } = query
-    {
-        translation.dataset = Some(SparqlDataset {
-            default: ds.default.iter().map(|n| n.as_str().to_string()).collect(),
-            named: ds
-                .named
-                .as_ref()
-                .map(|ns| ns.iter().map(|n| n.as_str().to_string()).collect()),
-        });
-    }
+    translation.dataset = dataset_of(query);
 
     match query {
         spargebra::Query::Select { pattern, .. } => {
@@ -244,23 +230,45 @@ pub fn translate_query(query: &spargebra::Query) -> Result<SparqlTranslation, Sp
         translation.branches.push(Branch::default());
     }
 
-    // FROM NAMED without FROM: the default graph is empty.
-    if let Some(SparqlDataset {
-        default,
-        named: Some(_),
-    }) = &translation.dataset
-    {
-        if default.is_empty() {
-            for b in &mut translation.branches {
-                scope_branch(b, &GraphTerm::Set(vec![]));
-            }
-        }
-    }
+    scope_empty_default_graph(&translation.dataset, &mut translation.branches);
 
     Ok(translation)
 }
 
 // ── Internal algebra walker ───────────────────────────────────────────────────
+
+/// The `FROM` / `FROM NAMED` dataset of a SELECT, ASK or CONSTRUCT query.
+fn dataset_of(query: &spargebra::Query) -> Option<SparqlDataset> {
+    let (spargebra::Query::Select { dataset, .. }
+    | spargebra::Query::Ask { dataset, .. }
+    | spargebra::Query::Construct { dataset, .. }) = query
+    else {
+        return None;
+    };
+    dataset.as_ref().map(|ds| SparqlDataset {
+        default: ds.default.iter().map(|n| n.as_str().to_string()).collect(),
+        named: ds
+            .named
+            .as_ref()
+            .map(|ns| ns.iter().map(|n| n.as_str().to_string()).collect()),
+    })
+}
+
+/// `FROM NAMED` without `FROM`: the default graph is empty, so patterns
+/// outside `GRAPH` match nothing.
+fn scope_empty_default_graph(dataset: &Option<SparqlDataset>, branches: &mut [Branch]) {
+    if let Some(SparqlDataset {
+        default,
+        named: Some(_),
+    }) = dataset
+    {
+        if default.is_empty() {
+            for b in branches {
+                scope_branch(b, &GraphTerm::Set(vec![]));
+            }
+        }
+    }
+}
 
 /// Scope the patterns of `branch` (optional branches and rule bodies
 /// included) to `graph`. Patterns already scoped by an inner `GRAPH` keep
@@ -1048,6 +1056,10 @@ pub struct ConstructTranslation {
     pub describe_iri: Option<String>,
     /// True when this is a DESCRIBE query (vs. CONSTRUCT).
     pub is_describe: bool,
+    /// As [`SparqlTranslation::dataset`] (CONSTRUCT only).
+    pub dataset: Option<SparqlDataset>,
+    /// As [`SparqlTranslation::graph_vars`].
+    pub graph_vars: Vec<String>,
 }
 
 // ── translate_construct entry point ──────────────────────────────────────────
@@ -1067,9 +1079,13 @@ pub fn translate_construct(query: &spargebra::Query) -> Result<ConstructTranslat
         spargebra::Query::Construct {
             template, pattern, ..
         } => {
-            let mut dummy = SparqlTranslation::default();
+            let mut dummy = SparqlTranslation {
+                dataset: dataset_of(query),
+                ..Default::default()
+            };
             let mut counter = 0usize;
-            let branches = translate_pattern(pattern, &mut counter, &mut dummy)?;
+            let mut branches = translate_pattern(pattern, &mut counter, &mut dummy)?;
+            scope_empty_default_graph(&dummy.dataset, &mut branches);
             let mut templates = Vec::new();
             for tp in template {
                 templates.push(translate_construct_triple(tp)?);
@@ -1079,6 +1095,8 @@ pub fn translate_construct(query: &spargebra::Query) -> Result<ConstructTranslat
                 templates,
                 describe_iri: None,
                 is_describe: false,
+                dataset: dummy.dataset,
+                graph_vars: dummy.graph_vars,
             })
         }
 
@@ -1088,6 +1106,7 @@ pub fn translate_construct(query: &spargebra::Query) -> Result<ConstructTranslat
             let mut dummy = SparqlTranslation::default();
             let mut counter = 0usize;
             let branches = translate_pattern(pattern, &mut counter, &mut dummy)?;
+            let graph_vars = dummy.graph_vars;
 
             // Check whether this is a bare DESCRIBE <iri> (no WHERE bindings).
             // spargebra puts the IRIs being described into `dataset.default`.
@@ -1101,6 +1120,8 @@ pub fn translate_construct(query: &spargebra::Query) -> Result<ConstructTranslat
                 templates: vec![],
                 describe_iri,
                 is_describe: true,
+                dataset: None,
+                graph_vars,
             })
         }
 
