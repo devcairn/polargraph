@@ -1,7 +1,8 @@
 # Implementation Plan: ContxtBroker Knowledge Platform on PolarGraph
 
 **Date**: 2026-09-29
-**Status**: Draft
+**Status**: Draft — engine decisions recorded 2026-09-29 (see §0.1); engine work
+in progress on branch `db/ws1-foundations`
 **Scope**: Everything needed to turn PolarGraph from a triple store into a shared
 knowledge platform where humans and LLMs build, trust, render, and retrieve
 context together. Ten workstreams; engine work lives in this repo, platform
@@ -44,7 +45,7 @@ embeddability first). Nothing in this plan should violate those.
 
 | # | Workstream | Where | Depends on | Effort (1 eng + agents) |
 |---|------------|-------|------------|-------------------------|
-| WS1 | Foundation fixes (bnodes, value index, out-of-line text, trigram scope) | engine | — | 3–4 wks |
+| WS1 | Foundation fixes (bnodes, term identity / IRI dictionary, value-hashed property keys, out-of-line text, trigram scope, retention) | engine | — | 4–6 wks |
 | WS2 | Named graphs (quads) | engine | WS1 | 6–8 wks |
 | WS3 | Trust layer (provenance, proposals, SHACL) | engine | WS2 | 6–8 wks |
 | WS4 | Open type registry + instance pinning | registry repo + engine | WS2, WS3 (SHACL) | 5–7 wks |
@@ -58,6 +59,33 @@ embeddability first). Nothing in this plan should violate those.
 **Critical path**: WS1 → WS2 → WS3 → WS8. WS4 and WS5 run in parallel after
 WS2; WS6 can start as soon as WS2's key layout is fixed.
 
+### 0.1 Engine decisions (2026-09-29)
+
+Recorded after auditing this plan against the code at `849839a`.
+
+| # | Decision | Replaces |
+|---|----------|----------|
+| D1 | **Value-hashed property keys** (§1.2): the object slot of a property key holds a hash of the value instead of the `0xFF×16` sentinel. `POS` becomes the value index, and a subject can hold several values for one predicate. | The separate `VAL` CF and its v3 backfill |
+| D2 | **IRI dictionary and one term-identity layer in WS1** (§1.6), before WS2. | IRIs being one-way hashes; each import/query path mapping terms its own way |
+| D3 | **One offline key rewrite** (migration **v3**) carries value-hashed property keys, the graph slot, `GSPO`/`GPOS`, and out-of-line value refs together (§2.9). | Separate migrations v3 (VAL), v4 (BLOB rewrite), v5 (48-byte keys) |
+| D4 | **Retention prunes history, never live state** — fixed as a bug, not a profile default (§1.5). | "Off by default + startup warning" |
+| D5 | **Engine sequencing** as in §0.2. | — |
+
+### 0.2 Engine sequencing
+
+| Step | Work | Migration | Status |
+|------|------|-----------|--------|
+| 0 | Retention fix (1.5); bnode skolemization (1.1); trigram size cap (1.4) | none | ✅ `5cb5af4`, `d2ae884`, `b3536c5` |
+| 1 | Refactor only: key-width constants/accessors in `keys::`, `VarPattern: Default`, `Quad` type in core. No behaviour change. | none | |
+| 2 | Term identity + IRI dictionary (1.6) | additive CF, no rewrite | |
+| 3 | New key layout: value-hashed property keys (1.2), 48-byte keys with `g` (2.3), `GSPO`/`GPOS`, `BLOB` CF + value refs (1.3), conflict detection on `(s,p,o,g)`, graph interning | **v3** offline rewrite | |
+| 4 | `GraphTerm` in Datalog/planner; graph RPCs; N-Quads/TriG | — | |
+| 5 | SPARQL dataset semantics + graph Update ops; Cypher `USE GRAPH` | — | |
+| 6 | Graph-bitmap ACL inside scans (2.8) | — | |
+| 7 | `Subscribe` change feed (WS6) | — | |
+| 8 | WS3 engine parts: provenance enforcement, proposal RPCs, `polargraph-shacl` | — | |
+| 9 | DRed, `STATS` CF, int8 quantization | — | |
+
 ---
 
 ## 1. Current state (what research found)
@@ -67,17 +95,19 @@ Audit of the repo as of commit `849839a`.
 | Area | Finding | Implication |
 |------|---------|-------------|
 | Key layout | Fixed 44-byte keys, six hexastore CFs, `tt` last (`docs/architecture.md` §Key layout) | Adding a graph dimension changes key width → migration by rewrite |
-| Value storage | `batch_triple()` writes the **same value bytes** into all six CFs (`store.rs`) | Long text is stored 6×; needs out-of-line storage |
-| Property triples | Use a sentinel object `0xFF×16` in every index | `POS` cannot look up a property by value; `status = "blocked"` is a scan + post-filter |
-| Trigram index | `batch_text_trigrams()` runs for **every** `Text` property | Descriptions and chunk text explode the `tri` CF |
-| Blank nodes | REST/SPARQL import hashes `"_:bnode_" + label` with no import scope (`rdf_import.rs`); bulk importer skips bnodes | Two files with `_:b0` collide; bulk loads silently drop structure |
+| Value storage | `batch_triple()` writes the **same value bytes** into all six CFs (`store.rs`) — including `Value::Vector`, so a 384-dim embedding is ~1.5 KB × 6 on top of the HNSW CF | Long text and vectors are stored 6×; needs out-of-line storage |
+| Property triples | Use a sentinel object `0xFF×16` in every index | `POS` cannot look up a property by value; `status = "blocked"` is a scan + post-filter. **Also: one value per `(s,p)`** — two literals for the same subject and predicate share a key, so the second overwrites the first (`rdfs:label "Acme"@en, "Acmé"@fr` keeps one) |
+| Term identity | IRIs are hashed to `NodeId` and **never stored**; export renders `urn:uuid:`. REST import hashes every IRI, SPARQL `INSERT DATA` silently skips IRIs that aren't `urn:uuid:`, REST import lets the server assign edge IDs while the bulk importer derives them; language tags are dropped | RDF round-trips lose IRIs; the same data gets different IDs depending on the path it came in by. Fixed by §1.6 |
+| Trigram index | `batch_text_trigrams()` runs for **every** `Text` property. Cypher `CONTAINS`/`STARTS WITH`/`=~` **do not use it** (post-filter in `apply_text_filters`); only `Snapshot::text_search` reads it | Descriptions and chunk text explode the `tri` CF for almost no query benefit. Capped at 512 bytes (§1.4, done) |
+| Blank nodes | REST/SPARQL import hashes `"_:bnode_" + label` with no import scope (`rdf_import.rs`); bulk importer's N-Triples path skips bnodes (Turtle/JSON-LD paths keep them, unscoped); JSON-LD `_:` ids treated as IRIs | Two files with `_:b0` collide; bulk loads silently drop structure. Fixed by §1.1 (done) |
 | Named graphs | None. SPARQL `GRAPH <iri>` maps to a `View` (a projection, not a partition) | No per-source partitioning, promotion, or graph-level ACL |
 | Views | `View { node_filter, visible_predicates, edge_presentations }` | Good fit for **render presets** (WS5), not for data partitioning |
 | Schema registry | Node/edge types, field kinds, cardinality, inverse, parent types, `ValidateOntology` | Advisory only; no closed-world gate; no SHACL |
 | OWL 2 RL | 12 rules, full forward-chaining run into `DRV` | No incremental maintenance; retraction handling unclear |
 | Access control | `AccessCache: HashMap<user, HashSet<NodeId>>`, post-filter on bindings | Per-node sets won't scale to tens of millions of nodes |
 | Change feed | Only `StreamWal` for replicas | No public subscription for renderers, embedders, notifications |
-| Retention | Deletes by transaction-time age | Destroys history if enabled on a knowledge base |
+| Retention | Deletes **every** version older than `tx_age`, including the current value of a fact that hasn't changed; `vt_lookback` can delete a DELETE tombstone alone and resurrect the fact | Destroys **live data**, not just history. Fixed by §1.5 (done) |
+| Column families | 13, not 12 (`PEA` predicate-first annotation index exists) | — |
 | Vector index | Pure-Rust HNSW, memory/mmap, named spaces | No quantization; RAM heavy at 10M+ vectors |
 
 ---
@@ -87,6 +117,10 @@ Audit of the repo as of commit `849839a`.
 Small, independent changes that the rest of the plan relies on.
 
 ### 1.1 Blank-node skolemization
+
+> **Done** (`d2ae884`). `polargraph-core::skolem::ImportScope`; REST
+> `?import_id=` + `--skolem-base`; `polargraph-import --import-id --skolem-base`;
+> JSON-LD `_:` ids are blank nodes. De-skolemizing export waits on §1.6.
 
 **Problem.** `bnode_to_node_id(label)` is deterministic on the label alone, so
 `_:b0` in two separate imports is the same node. The bulk importer drops
@@ -115,31 +149,62 @@ https://{instance-host}/.well-known/genid/{import_id}/{label}
 **Tests.** Two files both using `_:b0` produce distinct nodes; re-import with
 the same `import_id` is idempotent; bulk import preserves bnode structure.
 
-### 1.2 Value-indexed properties
+### 1.2 Value-hashed property keys
 
-**Problem.** Because property keys carry a sentinel object, equality lookups on
-property values (`status = "blocked"`, `external_id = "SF-0042"`) can't use an
-index. These are exactly the lookups entity resolution and cross-department
-queries need.
+*(Decision D1 — replaces the separate `VAL` CF.)*
 
-**Design.** A new `VAL` CF for properties the schema marks `indexed: true`:
+**Problem.** Property keys carry a sentinel object, so
+
+- equality lookups on property values (`status = "blocked"`,
+  `external_id = "SF-0042"`) can't use an index — exactly the lookups entity
+  resolution and cross-department queries need; and
+- a subject can hold only **one** value per predicate: every value of
+  `(s, p)` has the same key, so a second value overwrites the first. RDF data
+  with several labels, aliases or emails per subject is silently truncated.
+
+**Design.** Put a hash of the value in the object slot:
 
 ```
-VAL  [pred_id(4)][value_hash(16)][subject(16)][tt(8)]   = 44 bytes
+SPO  [s16][p4][value_hash16][tt8]      (property)   — was [s][p][0xFF×16][tt]
+POS  [p4][value_hash16][s16][tt8]      (property)   — the value index
 ```
 
-- `value_hash` = xxHash3-128 of the canonical value encoding (type tag + bytes).
-- Planner: `(?s, :p, "literal")` with `p` indexed → prefix scan on
-  `[pred_id][value_hash]`; verify value on hit to rule out collisions.
-- Written in the same `WriteBatch` as the hexastore entries.
+- `value_hash` = xxHash3-128 of the canonical value encoding: a type tag plus
+  the value bytes (and, after §1.6, the datatype IRI / language tag), so
+  `"30"` and `30` differ and `"Acme"@en` ≠ `"Acme"@fr`.
+- Relation vs property is decided by the value's discriminant byte (already
+  read with every key), not by the key. A value hash equal to a real
+  `NodeId` is a 2⁻¹²⁸ event; lookups verify the discriminant and the value on
+  every hit.
+- **Value lookup** `(?s, :p, "literal")` → `POS` prefix `[p][value_hash]`,
+  verify value. No extra CF, no extra write, available for every property
+  (no `indexed: true` flag needed).
+- **Current value(s) of `s.p`** → `SPO` prefix `[s][p]` (was
+  `[s][p][sentinel]`) — same cost; returns every live value.
+- Out-of-line values (§1.3) hash the value, not the ref, so the key doesn't
+  depend on where the bytes live.
+
+**Write semantics.** With distinct keys per value, "replace" is no longer
+implicit:
+
+| Mode | Behaviour | Used by |
+|------|-----------|---------|
+| `Replace` (default) | Close `vt_end` on every live value of `(s,p)`, then insert the new value | Existing `Insert` RPC callers, Cypher `SET`, REST `/insert` — preserves today's behaviour |
+| `Add` | Insert alongside existing values | RDF import, SPARQL `INSERT DATA`, multi-valued fields |
+
+`PropertyWriteMode` is a new optional field on the proto property triple.
+Conflict detection: `Replace` checks the `[s][p]` prefix; `Add` checks the
+exact `[s][p][value_hash]`.
 
 **Modelling guidance (documented, not enforced).** Low-cardinality states
-should be **IRIs, not literals** (`work:status work:Blocked`). Relations are
-already fully indexed; this avoids the `VAL` CF for most enums.
+should still be **IRIs, not literals** (`work:status work:Blocked`) so they
+participate in reasoning and rendering.
 
-**Changes.** `polargraph-core::schema::FieldDef` (`indexed: bool`),
-`polargraph-storage::{cf, keys, store}`, `polargraph-query::planner`
-(`choose_index`), migration **v3** to backfill `VAL` for fields flagged indexed.
+**Changes.** `polargraph-storage::{keys, store, mvcc, sst_import, compaction}`
+(the five sentinel call sites plus `scan_property_history`),
+`polargraph-query::planner` (`choose_index` for bound literal objects),
+Cypher `SET`, proto `PropertyWriteMode`. Lands in migration **v3** together
+with the WS2 key layout (D3).
 
 ### 1.3 Out-of-line large values
 
@@ -160,10 +225,17 @@ Value     [0x04][vt_start:8][vt_end:8][content_hash:16]   = PropertyRef, 33 byte
   retention/compaction runs.
 
 **Changes.** `codec.rs` (new discriminant), `store.rs` (write + resolve),
-`compaction.rs` (GC), migration **v4** (optional rewrite of existing large
-values). Config: `[storage] inline_value_max_bytes = 256`.
+`compaction.rs` (GC). Existing large values are moved out of line during
+migration **v3** (D3), since every key is rewritten then anyway. Config: `[storage] inline_value_max_bytes = 256`.
 
 ### 1.4 Trigram scoping
+
+> **Size cap done** (`b3536c5`): values over 512 bytes are not indexed, at the
+> single write choke point. Safe for correctness because Cypher text
+> predicates don't read `TRI` today. The per-field `text_index` override
+> below needs the registry consulted at write time and is still open; wiring
+> Cypher text predicates to `TRI` (with a scan fallback over the cap) is a
+> separate follow-up.
 
 **Design.** Add `text_index: Option<bool>` to `FieldDef`. Default: index text
 properties ≤ 512 bytes, skip larger ones. Explicit `true/false` overrides.
@@ -175,13 +247,65 @@ consults the registry; `ShowIndexes` reports skipped-field counts.
 
 ### 1.5 Retention safety
 
-- Change the documented default so retention is **off** for knowledge-base
-  deployments; add a startup `WARN` when retention is enabled alongside
-  `--profile knowledge-base`.
-- After WS2: per-graph retention exemptions (`cb:retain cb:Forever` on graph
-  metadata) so record graphs can expire while approved state never does.
+> **Done** (`5cb5af4`), as a bug fix rather than a profile default (D4).
+
+- `tx_age_secs` now bounds **history**: a version is deleted only when a newer
+  version with the same `vt_start` was committed before the cutoff (a
+  correction or DELETE tombstone). The current value is never deleted, and
+  valid-time history (later `vt_start`) is kept.
+- `vt_lookback_secs` removes a triple only once **every** version is closed
+  before the cutoff, so a tombstone is never removed alone (which previously
+  resurrected deleted facts).
+- Still to do after WS2: per-graph retention exemptions (`cb:retain
+  cb:Forever` on graph metadata) so record graphs can expire while approved
+  state never does.
+
+### 1.6 Term identity and IRI dictionary
+
+*(Decision D2 — new in WS1, before WS2.)*
+
+**Problem.** IRIs are hashed to `NodeId`s and never stored, so export can only
+render `urn:uuid:…`; skolem IRIs can't be de-skolemized; graph IRIs, type
+package terms and provenance agents (WS2–WS4, WS8) can't be shown to people or
+LLMs. Each path also maps terms differently (REST import hashes every IRI,
+SPARQL `INSERT DATA` only accepts `urn:uuid:`, edge IDs are derived on one path
+and server-assigned on another), and literal datatypes and language tags are
+dropped.
+
+**Design.**
+
+- One `polargraph-core::term` module owns IRI ↔ `NodeId` mapping, used by every
+  import, query translation and export path:
+  - `urn:uuid:<u>` ↔ `NodeId(u)` (no hashing, so native IDs round-trip);
+  - any other IRI → `NodeId::from_iri(iri)` (xxHash3-128);
+  - blank nodes → skolem IRI via `ImportScope` (§1.1), then as above;
+  - relation edge IDs for RDF paths → `edge_id_for(s_iri, p, o_iri)`, one
+    implementation.
+- New `IRI` CF: `[node_id(16)] → iri (UTF-8)`, written in the same
+  `WriteBatch` as the triple whenever a write carries an IRI. On write, an
+  existing entry with a different IRI is a hash collision → hard error.
+- Export (`serialize`, SPARQL results, JSON-LD) looks up the dictionary and
+  falls back to `urn:uuid:`; skolem IRIs export as `_:` labels on request
+  (`?deskolemize=true`).
+- Literals keep datatype and language: a language-tagged text value variant
+  in `polargraph-core::value`, and the datatype IRI for non-native XSD types,
+  included in the §1.2 value hash.
+- SPARQL `INSERT DATA`/`DELETE DATA` map terms through the same module instead
+  of dropping non-`urn:uuid` IRIs, and report failures rather than skipping.
+
+**Migration.** Additive (new CF); no rewrite. Existing hashed IRIs can't be
+recovered (hashes are one-way), so pre-existing data exports as `urn:uuid:`
+until re-imported. `urn:uuid:` IRIs imported via REST before this change were
+hashed rather than parsed; those nodes keep their old IDs — document, don't
+migrate.
+
+**Tests.** Round-trip N-Triples/Turtle/JSON-LD preserves IRIs, language tags
+and datatypes; the same document through REST import, bulk import and SPARQL
+`INSERT DATA` yields identical `NodeId`s and `EdgeId`s; collision detection.
 
 ---
+
+## WS2. Named graphs (quads)---
 
 ## WS2. Named graphs (quads)
 
@@ -233,7 +357,9 @@ GPOS [g4][p4][o16][s16][tt8]   new — "in graph g, who has p = o"
   together and MVCC snapshot filtering is unchanged.
 - Union (all-graph) queries use the existing six orders; results are
   de-duplicated on `(s,p,o)` unless the query binds `?g`.
-- `VAL`, `TRI`, `DRV`, `EPA`, `EPO` gain `g` in the same position before `tt`.
+- Property keys use the §1.2 value hash in the object slot in every order.
+- `TRI`, `DRV`, `EPA`, `EPO`, `PEA` gain `g` (`TRI` gets it before the subject,
+  so graph ACL applies to text-search candidates too).
 - Write amplification rises from 6 to 8 CF writes per quad. Budget: ≤ 30%
   insert-throughput regression on `polargraph-bench`.
 
@@ -345,10 +471,17 @@ Replace the per-user `HashSet<NodeId>` post-filter as the primary mechanism:
 
 ### 2.9 Migration
 
-Migration **v5**: key rewrite from 44-byte to 48-byte layout.
+Migration **v3** (D3): a single key rewrite from the 44-byte layout to the
+48-byte layout, which also replaces property sentinels with value hashes
+(§1.2), moves large values out of line (§1.3), and populates `GSPO`/`GPOS`.
 
-- Offline path (recommended): export all CFs → rewrite keys with `g = 0` →
-  SST ingest into new CFs → swap. Reuses `SstImporter`.
+- Offline path (recommended): export all CFs → rewrite keys with `g = 0`
+  (and value hashes / refs) → SST ingest into new CFs → swap. Reuses
+  `SstImporter`. Verify per-CF entry counts and a checksum of decoded
+  `(s,p,o,value,tt)` tuples before the swap.
+- Two versions of one property written in the **same** commit collided under
+  the old layout, so there's nothing to split; distinct historical values
+  become distinct keys naturally.
 - Online path (later): dual-write period + background backfill; not needed
   for the first release.
 - Replicas: primary performs the migration; replicas re-bootstrap from a
@@ -849,7 +982,7 @@ connector ──► normalize ──► store ──► chunk ──► embed �
 | Store | Blob via out-of-line storage (WS1.3); envelope quads into a `RecordGraph` per source |
 | Chunk | Structure-aware: speaker turns for conversations, headings for docs, fields for tickets. Target 300–800 tokens. Chunk IRI `rec/<id>#c<n>`, span `[start,end)` in chars |
 | Embed | Model per vector space from the registry's `VectorSpaceDef`; batch via `BatchInsertVectors` |
-| Link | Entity mentions: exact external-ID match → `VAL` index; name match → trigram; ambiguous → vector over candidate set (`SearchVectorInSet`). Confidence ≥ 0.9 writes `rec:mentions` directly into the record graph; lower becomes a proposal |
+| Link | Entity mentions: exact external-ID match → value index (`POS` on value-hashed keys, §1.2); name match → trigram; ambiguous → vector over candidate set (`SearchVectorInSet`). Confidence ≥ 0.9 writes `rec:mentions` directly into the record graph; lower becomes a proposal |
 | Extract | LLM with structured output. The **JSON schema is generated from SHACL shapes** of the target types, so outputs are valid-by-construction for field kinds and enums |
 | Propose | `ProposeGraph` with `cb:ModelAgent` provenance and per-fact `cb:sourceSpan` + `cb:confidence` |
 
@@ -863,7 +996,7 @@ The entity spine only works if "Acme", "ACME Inc." and CRM account `0014…`
 resolve to one node.
 
 1. **Candidate generation** (per new or changed entity):
-   - exact `ExternalId` match (`VAL` index) — deterministic merge
+   - exact `ExternalId` match (value index, §1.2) — deterministic merge
    - normalized-name trigram similarity above threshold
    - embedding similarity of label + key properties
    - neighbourhood overlap (Jaccard of linked accounts/contacts/services)
@@ -1102,7 +1235,7 @@ vector for records older than a configurable age).
 
 | Milestone | Contents | Exit criteria |
 |-----------|----------|---------------|
-| **M1 Foundations** | WS1 all; WS2 key layout, migration, Datalog/SPARQL graph terms, N-Quads/TriG | W3C SPARQL dataset subset passes; bench regression within budget; existing tests green on migrated data |
+| **M1 Foundations** | WS1 all (incl. term identity, §1.6); WS2 key layout + migration v3, Datalog/SPARQL graph terms, N-Quads/TriG | W3C SPARQL dataset subset passes; bench regression within budget; existing tests green on migrated data |
 | **M2 Trust** | WS2 ACL + graph RPCs; WS3 all | Proposal → validate → promote works end to end with provenance; SHACL core subset passes |
 | **M3 Types + render** | WS4 registry repo, seed packages, instance CLI; WS5 renderer + UI tab | Install/upgrade/rollback `org` package on a populated instance; diagrams render from active types |
 | **M4 LLM** | WS6; WS8 MCP + context assembly + eval harness | Golden-question recall ≥ 0.8 on `cb-bench`; zero ACL leaks |

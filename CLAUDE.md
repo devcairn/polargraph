@@ -28,7 +28,8 @@ polargraph/
 ├── CLAUDE.md                   # this file
 ├── docs/
 │   ├── architecture.md         # design narrative
-│   └── api-reference.md        # public API surface
+│   ├── api-reference.md        # public API surface
+│   └── contxtbroker-platform-plan.md  # knowledge-platform roadmap; §0.1–0.2 = engine decisions + sequencing
 ├── clients/
 │   ├── python/                 # Python SDK (sync + async, grpc)
 │   ├── go/                     # Go SDK (functional options, full RPC surface)
