@@ -3658,7 +3658,30 @@ async fn handle_export_subgraph(
         .map(str::to_string)
         .collect();
 
+    let accept = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // Quad formats query the default graph and each named graph (`?_g`)
+    // separately so every triple keeps its graph; otherwise one union query.
+    let quads = accept.contains("application/n-quads") || accept.contains("application/trig");
+    let graph_terms: Vec<Option<proto::GraphTerm>> = if quads {
+        vec![
+            Some(proto::GraphTerm {
+                kind: Some(proto::graph_term::Kind::DefaultGraph(true)),
+            }),
+            Some(proto::GraphTerm {
+                kind: Some(proto::graph_term::Kind::Var("_g".to_string())),
+            }),
+        ]
+    } else {
+        vec![None]
+    };
+
     let mut all_rdf: Vec<RdfTriple> = Vec::new();
+    // Graph of each `all_rdf` entry as a `<urn:uuid:…>` term (None = default).
+    let mut rdf_graphs: Vec<Option<String>> = Vec::new();
     let mut client = state.client.clone();
 
     for subj_uuid in &subject_uuids {
@@ -3673,41 +3696,49 @@ async fn handle_export_subgraph(
         };
 
         for pred in &query_predicates {
-            let req = proto::QueryRequest {
-                patterns: vec![proto::VarPattern {
-                    subject: Some(proto::Term {
-                        kind: Some(proto::term::Kind::Bound(proto::NodeId {
-                            bytes: subj_bytes.clone(),
-                        })),
-                    }),
-                    predicate: pred.clone(),
-                    object: Some(proto::Term {
-                        kind: Some(proto::term::Kind::Var("_o".to_string())),
-                    }),
-                    predicate_var: "_p".to_string(),
-                    graph: None,
-                }],
-                ..Default::default()
-            };
-            if let Ok(resp) = client.query(tonic::Request::new(req)).await {
-                for pb in resp.into_inner().bindings {
-                    if let Some(obj_val) = pb.vars.get("_o") {
-                        if obj_val.bytes.len() == 16 {
-                            if let Ok(arr) = obj_val.bytes[..16].try_into() {
-                                let obj_id =
-                                    polargraph_core::id::NodeId(uuid::Uuid::from_bytes(arr));
-                                let pred_iri = if !pred.is_empty() {
-                                    format!("<{}>", pred)
-                                } else if let Some(p) = pb.predicates.get("_p") {
-                                    format!("<{}>", p)
-                                } else {
-                                    "<urn:polargraph:unknownPredicate>".to_string()
-                                };
-                                all_rdf.push(RdfTriple {
-                                    subject: subject_iri.clone(),
-                                    predicate: pred_iri,
-                                    object: node_id_to_iri(&obj_id),
-                                });
+            for graph in &graph_terms {
+                let req = proto::QueryRequest {
+                    patterns: vec![proto::VarPattern {
+                        subject: Some(proto::Term {
+                            kind: Some(proto::term::Kind::Bound(proto::NodeId {
+                                bytes: subj_bytes.clone(),
+                            })),
+                        }),
+                        predicate: pred.clone(),
+                        object: Some(proto::Term {
+                            kind: Some(proto::term::Kind::Var("_o".to_string())),
+                        }),
+                        predicate_var: "_p".to_string(),
+                        graph: graph.clone(),
+                    }],
+                    ..Default::default()
+                };
+                if let Ok(resp) = client.query(tonic::Request::new(req)).await {
+                    for pb in resp.into_inner().bindings {
+                        if let Some(obj_val) = pb.vars.get("_o") {
+                            if obj_val.bytes.len() == 16 {
+                                if let Ok(arr) = obj_val.bytes[..16].try_into() {
+                                    let obj_id =
+                                        polargraph_core::id::NodeId(uuid::Uuid::from_bytes(arr));
+                                    let pred_iri = if !pred.is_empty() {
+                                        format!("<{}>", pred)
+                                    } else if let Some(p) = pb.predicates.get("_p") {
+                                        format!("<{}>", p)
+                                    } else {
+                                        "<urn:polargraph:unknownPredicate>".to_string()
+                                    };
+                                    all_rdf.push(RdfTriple {
+                                        subject: subject_iri.clone(),
+                                        predicate: pred_iri,
+                                        object: node_id_to_iri(&obj_id),
+                                    });
+                                    rdf_graphs.push(
+                                        pb.vars
+                                            .get("_g")
+                                            .and_then(proto_node_id)
+                                            .map(|g| node_id_to_iri(&g)),
+                                    );
+                                }
                             }
                         }
                     }
@@ -3781,6 +3812,7 @@ async fn handle_export_subgraph(
                                             predicate: pred_iri,
                                             object: obj_str,
                                         });
+                                        rdf_graphs.push(None);
                                     }
                                 }
                             }
@@ -3791,18 +3823,48 @@ async fn handle_export_subgraph(
         }
     }
 
-    let names = resolve_names(
-        &mut state.client.clone(),
-        polargraph_sparql::node_ids_in_triples(&all_rdf),
-        params.deskolemize,
-    )
-    .await;
+    let mut ids = polargraph_sparql::node_ids_in_triples(&all_rdf);
+    ids.extend(
+        rdf_graphs
+            .iter()
+            .flatten()
+            .filter_map(|g| {
+                g.strip_prefix("<urn:uuid:")?
+                    .strip_suffix('>')?
+                    .parse()
+                    .ok()
+            })
+            .map(NodeId),
+    );
+    let names = resolve_names(&mut state.client.clone(), ids, params.deskolemize).await;
     names.rewrite_triples(&mut all_rdf);
 
-    let accept = headers
-        .get("accept")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    if quads {
+        let quads: Vec<polargraph_sparql::RdfQuad> = all_rdf
+            .into_iter()
+            .zip(rdf_graphs)
+            .map(|(triple, graph)| polargraph_sparql::RdfQuad {
+                triple,
+                graph: graph.map(|g| names.rewrite_term(&g)),
+            })
+            .collect();
+        let (content_type, body) = if accept.contains("application/trig") {
+            (
+                "application/trig",
+                polargraph_sparql::serialize_trig(&quads),
+            )
+        } else {
+            (
+                "application/n-quads",
+                polargraph_sparql::serialize_nquads(&quads),
+            )
+        };
+        return axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", content_type)
+            .body(axum::body::boxed(axum::body::Full::from(body)))
+            .unwrap();
+    }
 
     if accept.contains("application/ld+json") {
         let body = polargraph_sparql::serialize_jsonld(&all_rdf);
