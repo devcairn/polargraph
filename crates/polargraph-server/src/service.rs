@@ -605,6 +605,34 @@ impl PolarGraphServer {
 
     /// A write target: empty IRI = default graph; interned on first use.
     #[allow(clippy::result_large_err)]
+    /// Graph scope for `DeleteTriples`: unset = every graph (quads are not
+    /// de-duplicated across graphs, so each copy is closed).
+    fn delete_scope(
+        &self,
+        graph: Option<&crate::proto::GraphTerm>,
+    ) -> Result<polargraph_storage::GraphScope, Status> {
+        use crate::proto::graph_term::Kind;
+        use polargraph_storage::GraphScope;
+        Ok(match graph.and_then(|g| g.kind.as_ref()) {
+            None | Some(Kind::DefaultGraph(false)) => GraphScope::Union,
+            Some(Kind::DefaultGraph(true)) => {
+                GraphScope::One(polargraph_core::id::GraphId::DEFAULT)
+            }
+            Some(Kind::Iri(iri)) => GraphScope::One(self.existing_graph(iri)?),
+            Some(Kind::Set(set)) => GraphScope::set(
+                set.iris
+                    .iter()
+                    .filter_map(|iri| self.store.graph_id(iri))
+                    .collect(),
+            ),
+            Some(Kind::Var(_)) => {
+                return Err(Status::invalid_argument(
+                    "DeleteTriples.graph cannot be a variable",
+                ))
+            }
+        })
+    }
+
     fn target_graph(&self, iri: &str) -> Result<polargraph_core::id::GraphId, Status> {
         if iri.is_empty() {
             return Ok(polargraph_core::id::GraphId::DEFAULT);
@@ -3677,6 +3705,8 @@ impl PolarGraphService for PolarGraphServer {
                 "object_id and value are mutually exclusive",
             ));
         }
+        let scope = self.delete_scope(req.graph.as_ref())?;
+        let snapshot = self.store.snapshot(self.store.begin().read_ts);
         let mut deleted_count: u64 = 0;
 
         for id_bytes in &req.subject_ids {
@@ -3685,18 +3715,14 @@ impl PolarGraphService for PolarGraphServer {
                     .map_err(|_| Status::invalid_argument("subject_ids must be 16-byte UUIDs"))?,
             );
 
-            let triples = if let Some(ref pred) = pred_filter {
-                self.store
-                    .scan_by_subject_predicate(&subject, pred)
-                    .map_err(storage_err_to_status)?
-            } else {
-                self.store
-                    .scan_by_subject(&subject)
-                    .map_err(storage_err_to_status)?
-            };
+            // Every live quad of the subject in scope, each closed in its own
+            // graph.
+            let quads = snapshot
+                .scan_scoped(Some(&subject), pred_filter.as_deref(), None, &scope)
+                .map_err(storage_err_to_status)?;
 
             let mut tx = self.store.begin();
-            for triple in triples {
+            for (g, triple) in quads {
                 let selected = match &triple {
                     Triple::Relation { object, .. } => {
                         value_filter.is_none() && object_filter.map_or(true, |o| o == *object)
@@ -3719,17 +3745,21 @@ impl PolarGraphService for PolarGraphServer {
                         temporal,
                     } => {
                         if temporal.vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME {
-                            tx.insert(Triple::Relation {
-                                subject: *s,
-                                predicate: p.clone(),
-                                object: *o,
-                                edge_id: *edge_id,
-                                temporal: polargraph_core::temporal::BiTemporalRange {
-                                    vt_start: temporal.vt_start,
-                                    vt_end: vt_end_ts,
-                                    tt: polargraph_core::temporal::Timestamp::now(),
+                            tx.insert_in(
+                                Triple::Relation {
+                                    subject: *s,
+                                    predicate: p.clone(),
+                                    object: *o,
+                                    edge_id: *edge_id,
+                                    temporal: polargraph_core::temporal::BiTemporalRange {
+                                        vt_start: temporal.vt_start,
+                                        vt_end: vt_end_ts,
+                                        tt: polargraph_core::temporal::Timestamp::now(),
+                                    },
                                 },
-                            });
+                                g,
+                                polargraph_storage::WriteMode::Add,
+                            );
                             deleted_count += 1;
                         }
                     }
@@ -3739,16 +3769,20 @@ impl PolarGraphService for PolarGraphServer {
                         value: v,
                         temporal,
                     } if temporal.vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME => {
-                        tx.insert(Triple::Property {
-                            subject: *s,
-                            predicate: p.clone(),
-                            value: v.clone(),
-                            temporal: polargraph_core::temporal::BiTemporalRange {
-                                vt_start: temporal.vt_start,
-                                vt_end: vt_end_ts,
-                                tt: polargraph_core::temporal::Timestamp::now(),
+                        tx.insert_in(
+                            Triple::Property {
+                                subject: *s,
+                                predicate: p.clone(),
+                                value: v.clone(),
+                                temporal: polargraph_core::temporal::BiTemporalRange {
+                                    vt_start: temporal.vt_start,
+                                    vt_end: vt_end_ts,
+                                    tt: polargraph_core::temporal::Timestamp::now(),
+                                },
                             },
-                        });
+                            g,
+                            polargraph_storage::WriteMode::Add,
+                        );
                         deleted_count += 1;
                     }
                     // EdgeProperty / EdgeRelation — not soft-deleted here.

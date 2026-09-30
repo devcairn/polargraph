@@ -993,6 +993,10 @@ message DeleteTriplesRequest {
     /// Optional property value: only properties with exactly this value are
     /// closed (relations are left alone). Unset means any value.
     Value value = 5;
+    /// Graphs to close the triples in: unset = every graph; `default_graph`,
+    /// `iri` or `set` restrict it (a graph variable is invalid). An unknown
+    /// IRI is NOT_FOUND.
+    GraphTerm graph = 6;
 }
 
 message DeleteTriplesResponse {
