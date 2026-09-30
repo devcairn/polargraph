@@ -3179,12 +3179,14 @@ async fn insert_proto_triples(
     client: &mut GrpcClient,
     triples: Vec<proto::Triple>,
     iris: Vec<String>,
+    graph: String,
 ) -> Result<usize, tonic::Status> {
     let n = triples.len();
     client
         .insert(tonic::Request::new(proto::InsertRequest {
             triples,
             iris,
+            graph,
             ..Default::default()
         }))
         .await?;
@@ -3223,6 +3225,9 @@ fn imported_iris(
 #[derive(Deserialize, Default)]
 struct ImportRdfParams {
     import_id: Option<String>,
+    /// Target graph (IRI) for triples that don't name one — all triples of
+    /// a triple format. Omitted = the default graph.
+    graph: Option<String>,
 }
 
 /// An `import_id` becomes a path segment of every skolem IRI, so keep it to
@@ -3266,7 +3271,29 @@ async fn handle_import_rdf(
 
     let start = Instant::now();
 
-    let imported_triples = if content_type.contains("application/n-triples") {
+    let imported_triples = if content_type.contains("application/n-quads") {
+        match polargraph_sparql::parse_nquads(&body) {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response()
+            }
+        }
+    } else if content_type.contains("application/trig") {
+        match polargraph_sparql::parse_trig(&body) {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response()
+            }
+        }
+    } else if content_type.contains("application/n-triples") {
         match parse_ntriples(&body) {
             Ok(t) => t,
             Err(e) => {
@@ -3320,23 +3347,36 @@ async fn handle_import_rdf(
     } else {
         return (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Json(serde_json::json!({ "error": format!("unsupported Content-Type: {}; supported: application/n-triples, text/turtle, application/ld+json", content_type) })),
+            Json(serde_json::json!({ "error": format!("unsupported Content-Type: {}; supported: application/n-triples, text/turtle, application/ld+json, application/n-quads, application/trig", content_type) })),
         )
             .into_response();
     };
 
     let total = imported_triples.len();
 
-    // Insert in batches of 1 000, each carrying the IRIs it names.
+    // Group by target graph (quad formats name it per triple; `?graph=` is
+    // the fallback), then insert in batches of 1 000, each carrying the IRIs
+    // it names.
+    let mut by_graph: std::collections::BTreeMap<String, Vec<polargraph_sparql::ImportedTriple>> =
+        std::collections::BTreeMap::new();
+    for t in imported_triples {
+        let graph = t
+            .graph_iri(&scope)
+            .or_else(|| params.graph.clone())
+            .unwrap_or_default();
+        by_graph.entry(graph).or_default().push(t);
+    }
     const BATCH: usize = 1_000;
     let mut imported = 0usize;
     let mut client = state.client.clone();
-    for chunk in imported_triples.chunks(BATCH) {
-        let triples = imported_triples_to_proto(chunk, &scope);
-        let iris = imported_iris(chunk, &scope);
-        match insert_proto_triples(&mut client, triples, iris).await {
-            Ok(n) => imported += n,
-            Err(e) => return grpc_error(e),
+    for (graph, triples_in_graph) in &by_graph {
+        for chunk in triples_in_graph.chunks(BATCH) {
+            let triples = imported_triples_to_proto(chunk, &scope);
+            let iris = imported_iris(chunk, &scope);
+            match insert_proto_triples(&mut client, triples, iris, graph.clone()).await {
+                Ok(n) => imported += n,
+                Err(e) => return grpc_error(e),
+            }
         }
     }
 
