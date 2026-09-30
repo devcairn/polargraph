@@ -1897,18 +1897,28 @@ async fn execute_sparql_query(
     // 3. Execute each branch against gRPC; collect as SparqlBindings.
     let mut all_bindings: Vec<SparqlBindings> = Vec::new();
 
-    for branch in &translation.branches {
-        if branch.graph_iri.is_some() {
-            // Named-graph / view scoping is tracked in the translation but
-            // full enforcement requires a future View-query RPC.  We proceed
-            // without filtering and note this in a debug log so tests can
-            // observe the field was set.
-            tracing::debug!(
-                graph_iri = branch.graph_iri.as_deref().unwrap_or(""),
-                "SPARQL GRAPH clause detected; view scoping not enforced at runtime yet"
-            );
-        }
+    // Dataset: FROM graphs scope the patterns outside GRAPH; FROM NAMED
+    // limits what GRAPH ?g may bind (a graph variable binds the graph IRI's
+    // node, so the check is on NodeIds).
+    let dataset_graphs: Vec<String> = translation
+        .dataset
+        .as_ref()
+        .map(|d| d.default.clone())
+        .unwrap_or_default();
+    let named_nodes: Option<std::collections::HashSet<NodeId>> = translation
+        .dataset
+        .as_ref()
+        .and_then(|d| d.named.as_ref())
+        .map(|named| named.iter().map(|iri| iri_to_node_id(iri)).collect());
+    let graph_vars_ok = |b: &SparqlBindings| match &named_nodes {
+        None => true,
+        Some(named) => translation.graph_vars.iter().all(|gv| match b.get(gv) {
+            Some(SparqlValue::Uri(id)) => named.contains(id),
+            _ => true,
+        }),
+    };
 
+    for branch in &translation.branches {
         let patterns: Vec<proto::VarPattern> =
             branch.patterns.iter().map(sparql_varpat_to_proto).collect();
         let rules: Vec<proto::DatalogRule> =
@@ -1917,6 +1927,7 @@ async fn execute_sparql_query(
         let req = proto::QueryRequest {
             patterns,
             rules,
+            graphs: dataset_graphs.clone(),
             ..Default::default()
         };
 
@@ -1940,7 +1951,7 @@ async fn execute_sparql_query(
                         }
                     }
                 }
-                if sparql_filter_bindings(&b, &branch.filters) {
+                if graph_vars_ok(&b) && sparql_filter_bindings(&b, &branch.filters) {
                     Some(b)
                 } else {
                     None
@@ -1955,6 +1966,7 @@ async fn execute_sparql_query(
             let opt_req = proto::QueryRequest {
                 patterns: opt_patterns,
                 rules: opt_rules,
+                graphs: dataset_graphs.clone(),
                 ..Default::default()
             };
             let opt_resp = match client.query(tonic::Request::new(opt_req)).await {
@@ -1977,7 +1989,7 @@ async fn execute_sparql_query(
                             }
                         }
                     }
-                    if sparql_filter_bindings(&b, &opt.filters) {
+                    if graph_vars_ok(&b) && sparql_filter_bindings(&b, &opt.filters) {
                         Some(b)
                     } else {
                         None
@@ -2128,8 +2140,25 @@ fn sparql_varpat_to_proto(vp: &polargraph_query::VarPattern) -> proto::VarPatter
         predicate: vp.predicate.clone().unwrap_or_default(),
         object: Some(sparql_term_to_proto(&vp.object)),
         predicate_var: vp.predicate_var.clone().unwrap_or_default(),
-        graph: None,
+        graph: sparql_graph_to_proto(&vp.graph),
     }
+}
+
+/// Proto form of a translated pattern's graph term (`None` = union).
+fn sparql_graph_to_proto(graph: &polargraph_query::GraphTerm) -> Option<proto::GraphTerm> {
+    use polargraph_query::GraphTerm;
+    use proto::graph_term::Kind;
+    let kind = match graph {
+        GraphTerm::Union => return None,
+        GraphTerm::Default => Kind::DefaultGraph(true),
+        GraphTerm::Iri(iri) => Kind::Iri(iri.clone()),
+        GraphTerm::Var(v) => Kind::Var(v.clone()),
+        // The translator only produces the empty set (a graph outside the
+        // dataset); GraphIds have no meaning outside the server, so any
+        // other id-based term also matches nothing.
+        GraphTerm::Bound(_) | GraphTerm::Set(_) => Kind::Set(proto::GraphSet { iris: vec![] }),
+    };
+    Some(proto::GraphTerm { kind: Some(kind) })
 }
 
 fn sparql_term_to_proto(term: &polargraph_query::Term) -> proto::Term {

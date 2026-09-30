@@ -38,7 +38,7 @@ pub use serialize::{
 pub use translate::{
     translate_construct, translate_pattern_pub, translate_query, Branch, ConstructTemplate,
     ConstructTranslation, EdgeAnnotationObjectStep, EdgeAnnotationStep, SparqlAggFunc,
-    SparqlAggregateSpec, SparqlFilter, SparqlLiteral, SparqlTranslation,
+    SparqlAggregateSpec, SparqlDataset, SparqlFilter, SparqlLiteral, SparqlTranslation,
 };
 
 #[derive(Debug, thiserror::Error)]

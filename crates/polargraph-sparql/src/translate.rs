@@ -2,7 +2,7 @@
 
 use crate::SparqlError;
 use polargraph_core::term::iri_to_node_id;
-use polargraph_query::{Rule, Term, VarPattern};
+use polargraph_query::{GraphTerm, Rule, Term, VarPattern};
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, GraphPattern, PropertyPathExpression,
 };
@@ -124,11 +124,19 @@ pub struct Branch {
     /// Each step resolves the quoted triple to an edge ID, then finds annotation values
     /// on that edge for `annotation_predicate` and binds the value NodeId to `result_var`.
     pub edge_annotation_object_steps: Vec<EdgeAnnotationObjectStep>,
-    /// Named graph IRI (from `GRAPH <iri> { ... }`).
-    ///
-    /// When set, pattern evaluation is scoped to the named graph / View
-    /// identified by this IRI.
-    pub graph_iri: Option<String>,
+}
+
+/// The RDF dataset of a query (`FROM` / `FROM NAMED`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SparqlDataset {
+    /// `FROM` graph IRIs: the default graph is their merge. Empty means the
+    /// store's default (every graph) unless `named` is set, in which case the
+    /// default graph is empty (SPARQL 1.1 §13.2).
+    pub default: Vec<String>,
+    /// `FROM NAMED` graph IRIs that `GRAPH` may range over. `None` (no
+    /// dataset clause) = every named graph; `Some(vec![])` (`FROM` without
+    /// `FROM NAMED`) = none.
+    pub named: Option<Vec<String>>,
 }
 
 /// A post-filter applied in-process after gRPC query results are received.
@@ -180,6 +188,13 @@ pub struct SparqlTranslation {
     pub aggregates: Vec<SparqlAggregateSpec>,
     /// HAVING filter applied after aggregation.
     pub having_filter: Option<SparqlFilter>,
+    /// `FROM` / `FROM NAMED` dataset. Patterns outside `GRAPH` carry no
+    /// graph term; executors pass `default` as the request dataset.
+    pub dataset: Option<SparqlDataset>,
+    /// Variables bound by `GRAPH ?g` (each binds a named graph's IRI node).
+    /// With `dataset.named`, executors keep only rows whose graph variables
+    /// name one of those graphs.
+    pub graph_vars: Vec<String>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -188,6 +203,22 @@ pub struct SparqlTranslation {
 pub fn translate_query(query: &spargebra::Query) -> Result<SparqlTranslation, SparqlError> {
     let mut translation = SparqlTranslation::default();
     let mut counter = 0usize;
+
+    if let spargebra::Query::Select {
+        dataset: Some(ds), ..
+    }
+    | spargebra::Query::Ask {
+        dataset: Some(ds), ..
+    } = query
+    {
+        translation.dataset = Some(SparqlDataset {
+            default: ds.default.iter().map(|n| n.as_str().to_string()).collect(),
+            named: ds
+                .named
+                .as_ref()
+                .map(|ns| ns.iter().map(|n| n.as_str().to_string()).collect()),
+        });
+    }
 
     match query {
         spargebra::Query::Select { pattern, .. } => {
@@ -213,10 +244,48 @@ pub fn translate_query(query: &spargebra::Query) -> Result<SparqlTranslation, Sp
         translation.branches.push(Branch::default());
     }
 
+    // FROM NAMED without FROM: the default graph is empty.
+    if let Some(SparqlDataset {
+        default,
+        named: Some(_),
+    }) = &translation.dataset
+    {
+        if default.is_empty() {
+            for b in &mut translation.branches {
+                scope_branch(b, &GraphTerm::Set(vec![]));
+            }
+        }
+    }
+
     Ok(translation)
 }
 
 // ── Internal algebra walker ───────────────────────────────────────────────────
+
+/// Scope the patterns of `branch` (optional branches and rule bodies
+/// included) to `graph`. Patterns already scoped by an inner `GRAPH` keep
+/// their graph, and patterns over rule-derived predicates (property paths)
+/// stay unscoped because derived facts have no graph.
+fn scope_branch(branch: &mut Branch, graph: &GraphTerm) {
+    let derived: std::collections::HashSet<String> = branch
+        .rules
+        .iter()
+        .map(|r| r.head_predicate.clone())
+        .collect();
+    let scope = |vp: &mut VarPattern| {
+        let over_derived = vp.predicate.as_ref().is_some_and(|p| derived.contains(p));
+        if vp.graph == GraphTerm::Union && !over_derived {
+            vp.graph = graph.clone();
+        }
+    };
+    branch.patterns.iter_mut().for_each(scope);
+    for rule in &mut branch.rules {
+        rule.body.iter_mut().for_each(scope);
+    }
+    for optional in &mut branch.optional_branches {
+        scope_branch(optional, graph);
+    }
+}
 
 /// Translate a [`GraphPattern`] into a list of [`Branch`]es.
 ///
@@ -294,8 +363,6 @@ pub(crate) fn translate_pattern(
                     combined
                         .optional_branches
                         .extend(rb.optional_branches.clone());
-                    // Named graph: prefer the most specific (non-None) graph_iri
-                    combined.graph_iri = lb.graph_iri.clone().or_else(|| rb.graph_iri.clone());
                     merged.push(combined);
                 }
             }
@@ -372,18 +439,27 @@ pub(crate) fn translate_pattern(
 
         // ── Named graph ───────────────────────────────────────────────────────
         GraphPattern::Graph { name, inner } => {
-            let iri = match name {
-                NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
+            let term = match name {
+                NamedNodePattern::NamedNode(n) => {
+                    let iri = n.as_str();
+                    let named = translation.dataset.as_ref().and_then(|d| d.named.as_ref());
+                    match named {
+                        // Outside FROM NAMED: no such graph in the dataset.
+                        Some(named) if !named.iter().any(|g| g == iri) => GraphTerm::Set(vec![]),
+                        _ => GraphTerm::Iri(iri.to_string()),
+                    }
+                }
                 NamedNodePattern::Variable(v) => {
-                    return Err(SparqlError::Unsupported(format!(
-                        "variable graph name (?{}) not supported",
-                        v.as_str()
-                    )))
+                    let name = v.as_str().to_string();
+                    if !translation.graph_vars.contains(&name) {
+                        translation.graph_vars.push(name.clone());
+                    }
+                    GraphTerm::Var(name)
                 }
             };
             let mut branches = translate_pattern(inner, counter, translation)?;
             for b in &mut branches {
-                b.graph_iri = Some(iri.clone());
+                scope_branch(b, &term);
             }
             Ok(branches)
         }
