@@ -2128,10 +2128,10 @@ async fn run_retention_deletes_superseded_versions() {
         .unwrap()
         .into_inner();
 
-    // 6 CF copies of the superseded version should be gone; the current
+    // The 8 index entries of the superseded version should be gone; the current
     // value of every triple (including the correction) survives.
-    assert_eq!(resp.triples_deleted, 6);
-    assert!(resp.triples_scanned >= 6);
+    assert_eq!(resp.triples_deleted, 8);
+    assert!(resp.triples_scanned >= 8);
 }
 
 #[tokio::test]
@@ -4915,7 +4915,8 @@ async fn show_indexes_returns_all_cfs() {
         .map(|cf| cf.name.as_str())
         .collect();
     for expected in &[
-        "spo", "sop", "pso", "pos", "osp", "ops", "meta", "hnsw", "tri",
+        "spog", "sopg", "psog", "posg", "ospg", "opsg", "gspo", "gpos", "meta", "hnsw", "trig",
+        "blob", "iri",
     ] {
         assert!(
             cf_names.contains(expected),

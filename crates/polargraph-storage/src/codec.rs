@@ -14,6 +14,15 @@
 //!   [vt_start: 8 bytes  ]
 //!   [vt_end:   8 bytes  ]
 //!   [json_value: N bytes ]   ← serde_json-encoded Value
+//!
+//! Property reference (17 bytes) — the value lives out of line in the `blob`
+//! CF under its content hash, which is also the key's object slot:
+//!   [0x04 discriminant (1)]
+//!   [vt_start: 8 bytes  ]
+//!   [vt_end:   8 bytes  ]
+//!
+//! Blob payload (`blob` CF value): `[0x02 json | 0x03 vector][payload]` — the
+//! property encoding without its 16 temporal bytes.
 
 use polargraph_core::{
     id::EdgeId,
@@ -29,6 +38,84 @@ pub const DISC_PROPERTY: u8 = 0x02;
 /// Binary-encoded `Value::Vector` — avoids JSON overhead for float arrays.
 /// Layout: [0x03][vt_start: 8 BE][vt_end: 8 BE][len: 4 LE][f32 × len LE]
 pub const DISC_VECTOR: u8 = 0x03;
+/// Property stored out of line in the `blob` CF (see module docs).
+pub const DISC_PROPERTY_REF: u8 = 0x04;
+
+/// Byte range of `vt_start` / `vt_end` for each discriminant.
+fn vt_offsets(disc: u8) -> Option<(usize, usize, usize)> {
+    match disc {
+        DISC_RELATION => Some((17, 25, 33)),
+        DISC_PROPERTY | DISC_VECTOR | DISC_PROPERTY_REF => Some((1, 9, 17)),
+        _ => None,
+    }
+}
+
+/// `(vt_start, vt_end)` of an encoded value without a full decode.
+pub fn valid_time(bytes: &[u8]) -> Option<(Timestamp, Timestamp)> {
+    let (s, e, min) = vt_offsets(*bytes.first()?)?;
+    if bytes.len() < min {
+        return None;
+    }
+    Some((
+        Timestamp::from_be_bytes(bytes[s..e].try_into().unwrap()),
+        Timestamp::from_be_bytes(bytes[e..e + 8].try_into().unwrap()),
+    ))
+}
+
+/// A copy of an encoded value with its `vt_end` replaced — used to write the
+/// closing version of a replaced property value.
+pub fn with_vt_end(bytes: &[u8], vt_end: Timestamp) -> Result<Vec<u8>, StorageError> {
+    let (_, e, min) = bytes
+        .first()
+        .and_then(|d| vt_offsets(*d))
+        .ok_or_else(|| StorageError::KeyDecode("unknown value discriminant".into()))?;
+    if bytes.len() < min {
+        return Err(StorageError::KeyDecode("value too short".into()));
+    }
+    let mut out = bytes.to_vec();
+    out[e..e + 8].copy_from_slice(&vt_end.to_be_bytes());
+    Ok(out)
+}
+
+/// A property reference: the value itself is in the `blob` CF.
+pub fn encode_property_ref(temporal: &BiTemporalRange) -> Vec<u8> {
+    let mut v = Vec::with_capacity(17);
+    v.push(DISC_PROPERTY_REF);
+    v.extend_from_slice(&temporal.vt_start.to_be_bytes());
+    v.extend_from_slice(&temporal.vt_end.to_be_bytes());
+    v
+}
+
+/// The blob-CF payload for `value`: its property encoding minus the temporal bytes.
+pub fn encode_blob(value: &Value) -> Result<Vec<u8>, StorageError> {
+    let zero = BiTemporalRange {
+        vt_start: Timestamp(0),
+        vt_end: Timestamp(0),
+        tt: Timestamp(0),
+    };
+    let full = encode_property(value, &zero)?;
+    let mut out = Vec::with_capacity(full.len() - 16);
+    out.push(full[0]);
+    out.extend_from_slice(&full[17..]);
+    Ok(out)
+}
+
+/// Decode a blob-CF payload written by [`encode_blob`].
+pub fn decode_blob(bytes: &[u8]) -> Result<Value, StorageError> {
+    let disc = *bytes
+        .first()
+        .ok_or_else(|| StorageError::KeyDecode("empty blob".into()))?;
+    let mut full = Vec::with_capacity(bytes.len() + 16);
+    full.push(disc);
+    full.extend_from_slice(&[0u8; 16]);
+    full.extend_from_slice(&bytes[1..]);
+    match decode_value(&full)? {
+        DecodedValue::Property { value, .. } => Ok(value),
+        _ => Err(StorageError::KeyDecode(format!(
+            "blob has non-property discriminant 0x{disc:02x}"
+        ))),
+    }
+}
 
 // ── encode ───────────────────────────────────────────────────────────────────
 
@@ -76,6 +163,8 @@ pub enum DecodedValue {
         value: Value,
         temporal: BiTemporalRange,
     },
+    /// The value is in the `blob` CF under the key's object slot.
+    PropertyRef { temporal: BiTemporalRange },
 }
 
 pub fn decode_value(bytes: &[u8]) -> Result<DecodedValue, StorageError> {
@@ -139,6 +228,17 @@ pub fn decode_value(bytes: &[u8]) -> Result<DecodedValue, StorageError> {
                 },
             })
         }
+        DISC_PROPERTY_REF => {
+            let (vt_start, vt_end) = valid_time(bytes)
+                .ok_or_else(|| StorageError::KeyDecode("property ref too short".into()))?;
+            Ok(DecodedValue::PropertyRef {
+                temporal: BiTemporalRange {
+                    vt_start,
+                    vt_end,
+                    tt: Timestamp(0),
+                },
+            })
+        }
         d => Err(StorageError::KeyDecode(format!(
             "unknown discriminant 0x{d:02x}"
         ))),
@@ -168,6 +268,55 @@ mod tests {
         EdgeId(uuid::Uuid::from_bytes([seed; 16]))
     }
 
+    // ── out-of-line values ────────────────────────────────────────────────────
+
+    #[test]
+    fn blob_payload_round_trips_json_and_vector_values() {
+        for v in [
+            Value::Text("x".repeat(1000)),
+            Value::Vector(vec![0.5; 384]),
+            Value::LangText {
+                text: "Acme".into(),
+                lang: "en".into(),
+            },
+        ] {
+            let blob = encode_blob(&v).unwrap();
+            assert_eq!(decode_blob(&blob).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn property_ref_carries_only_valid_time() {
+        let t = temporal(10, 20, 0);
+        let r = encode_property_ref(&t);
+        assert_eq!(r.len(), 17);
+        match decode_value(&r).unwrap() {
+            DecodedValue::PropertyRef { temporal } => {
+                assert_eq!(
+                    (temporal.vt_start, temporal.vt_end),
+                    (Timestamp(10), Timestamp(20))
+                )
+            }
+            other => panic!("expected PropertyRef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_vt_end_and_valid_time_cover_every_discriminant() {
+        let t = temporal(10, i64::MAX, 0);
+        let encoded = [
+            encode_relation(&edge_id_from_seed(1), &t),
+            encode_property(&Value::Int(1), &t).unwrap(),
+            encode_property(&Value::Vector(vec![1.0]), &t).unwrap(),
+            encode_property_ref(&t),
+        ];
+        for bytes in encoded {
+            let closed = with_vt_end(&bytes, Timestamp(15)).unwrap();
+            assert_eq!(valid_time(&closed), Some((Timestamp(10), Timestamp(15))));
+            assert_eq!(closed.len(), bytes.len());
+        }
+    }
+
     // ── relation round-trips ──────────────────────────────────────────────────
 
     #[test]
@@ -187,7 +336,7 @@ mod tests {
                 // tt is placeholder (key-derived); caller fills it in
                 assert_eq!(temporal.tt, Timestamp(0));
             }
-            DecodedValue::Property { .. } => panic!("expected Relation"),
+            other => panic!("expected Relation, got {other:?}"),
         }
     }
 
@@ -218,7 +367,7 @@ mod tests {
                 assert_eq!(temporal.vt_end, Timestamp(i64::MAX));
                 v
             }
-            DecodedValue::Relation { .. } => panic!("expected Property"),
+            other => panic!("expected Property, got {other:?}"),
         }
     }
 

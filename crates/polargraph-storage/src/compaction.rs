@@ -25,21 +25,27 @@
 //!   versions could let an older, still-open version win again and resurrect
 //!   a deleted fact, so partial removal is never done.
 //!
-//! META and HNSW column families are never touched.
+//! Afterwards, out-of-line values in the `blob` CF that no index entry
+//! references any more are swept (mark-and-sweep over `spog`).
+//!
+//! META, HNSW and IRI column families are never touched.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use polargraph_core::{schema::RetentionPolicy, temporal::Timestamp};
 
-use crate::{cf, error::StorageError, keys, store::TripleStore};
-
-const HEXASTORE_CFS: &[&str] = &[cf::SPO, cf::SOP, cf::PSO, cf::POS, cf::OSP, cf::OPS];
+use crate::{codec, error::StorageError, keys, store::TripleStore};
 
 /// Statistics returned by a completed retention run.
+///
+/// `triples_scanned` / `triples_deleted` count index entries across all
+/// eight quad orders (one quad version = 8 entries).
 #[derive(Debug, Clone, Default)]
 pub struct RetentionStats {
     pub triples_scanned: usize,
     pub triples_deleted: usize,
+    /// Out-of-line values no longer referenced by any index entry.
+    pub blobs_deleted: usize,
     pub duration_ms: u64,
 }
 
@@ -53,7 +59,8 @@ impl CompactionManager {
         Self { store }
     }
 
-    /// Scan all six hexastore CFs and delete versions that `policy` expires.
+    /// Scan all eight quad CFs and delete versions that `policy` expires,
+    /// then sweep unreferenced out-of-line values.
     ///
     /// After deletion, triggers a full compaction on every CF that had at
     /// least one deletion so that RocksDB reclaims disk space promptly.
@@ -70,10 +77,11 @@ impl CompactionManager {
         let mut total_scanned = 0usize;
         let mut total_deleted = 0usize;
 
-        for &cf_name in HEXASTORE_CFS {
+        for order in keys::Order::ALL {
+            let cf_name = order.cf();
             let (cf_scanned, cf_deleted) =
                 self.store
-                    .prune_cf_groups(cf_name, keys::HEXASTORE_TUPLE_LEN, |versions| {
+                    .prune_cf_groups(cf_name, keys::QUAD_TUPLE_LEN, |versions| {
                         select_expired(versions, tx_cutoff, vt_cutoff)
                     })?;
 
@@ -85,9 +93,16 @@ impl CompactionManager {
             }
         }
 
+        let blobs_deleted = if total_deleted > 0 {
+            self.store.sweep_unreferenced_blobs()?
+        } else {
+            0
+        };
+
         Ok(RetentionStats {
             triples_scanned: total_scanned,
             triples_deleted: total_deleted,
+            blobs_deleted,
             duration_ms: start.elapsed().as_millis() as u64,
         })
     }
@@ -113,8 +128,8 @@ fn select_expired<K: AsRef<[u8]>, V: AsRef<[u8]>>(
             if k.len() < 8 {
                 return None;
             }
-            let (vt_start, vt_end) = extract_vt(v.as_ref())?;
-            Some((keys::hexastore_tt(k), vt_start, vt_end))
+            let (vt_start, vt_end) = codec::valid_time(v.as_ref())?;
+            Some((keys::key_tt(k), vt_start, vt_end))
         })
         .collect();
 
@@ -149,21 +164,6 @@ fn select_expired<K: AsRef<[u8]>, V: AsRef<[u8]>>(
     (0..versions.len()).filter(|&i| expired[i]).collect()
 }
 
-/// Extract `(vt_start, vt_end)` from a raw value blob without a full decode.
-///
-/// Layout by discriminant:
-/// - 0x01 (Relation): `[disc(1)][edge_id(16)][vt_start(8)][vt_end(8)]`
-/// - 0x02 (Property): `[disc(1)][vt_start(8)][vt_end(8)][json]`
-/// - 0x03 (Vector):   `[disc(1)][vt_start(8)][vt_end(8)][...]`
-fn extract_vt(value: &[u8]) -> Option<(Timestamp, Timestamp)> {
-    let at = |off: usize| Timestamp::from_be_bytes(value[off..off + 8].try_into().unwrap());
-    match *value.first()? {
-        0x01 if value.len() >= 33 => Some((at(17), at(25))),
-        0x02 | 0x03 if value.len() >= 17 => Some((at(1), at(9))),
-        _ => None,
-    }
-}
-
 fn now_micros() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -182,8 +182,8 @@ mod tests {
     const OPEN: i64 = i64::MAX;
 
     fn version(tt: i64, vt_start: i64, vt_end: i64) -> (Vec<u8>, Vec<u8>) {
-        let mut key = vec![0u8; keys::HEXASTORE_KEY_LEN];
-        key[keys::HEXASTORE_TUPLE_LEN..].copy_from_slice(&Timestamp(tt).to_be_bytes());
+        let mut key = vec![0u8; keys::QUAD_KEY_LEN];
+        key[keys::QUAD_TUPLE_LEN..].copy_from_slice(&Timestamp(tt).to_be_bytes());
         let t = BiTemporalRange {
             vt_start: Timestamp(vt_start),
             vt_end: Timestamp(vt_end),
@@ -194,32 +194,6 @@ mod tests {
 
     fn select(versions: &[(Vec<u8>, Vec<u8>)], tx_cut: i64, vt_cut: Option<i64>) -> Vec<usize> {
         select_expired(versions, Timestamp(tx_cut), vt_cut.map(Timestamp))
-    }
-
-    #[test]
-    fn extract_vt_from_relation_value() {
-        use polargraph_core::id::EdgeId;
-        let eid = EdgeId(uuid::Uuid::from_bytes([0xAB; 16]));
-        let t = BiTemporalRange {
-            vt_start: Timestamp(100),
-            vt_end: Timestamp(999),
-            tt: Timestamp(0),
-        };
-        let encoded = codec::encode_relation(&eid, &t);
-        assert_eq!(extract_vt(&encoded), Some((Timestamp(100), Timestamp(999))));
-    }
-
-    #[test]
-    fn extract_vt_from_property_and_vector_values() {
-        let t = BiTemporalRange {
-            vt_start: Timestamp(200),
-            vt_end: Timestamp(888),
-            tt: Timestamp(0),
-        };
-        let p = codec::encode_property(&Value::Int(42), &t).unwrap();
-        assert_eq!(extract_vt(&p), Some((Timestamp(200), Timestamp(888))));
-        let v = codec::encode_property(&Value::Vector(vec![1.0, 2.0]), &t).unwrap();
-        assert_eq!(extract_vt(&v), Some((Timestamp(200), Timestamp(888))));
     }
 
     #[test]

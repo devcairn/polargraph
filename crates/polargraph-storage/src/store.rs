@@ -1,6 +1,6 @@
 //! TripleStore — the main storage handle.
 //!
-//! # Public API (Phase 2)
+//! # Public API
 //!
 //! ```text
 //! let store = TripleStore::open(path)?;
@@ -10,8 +10,8 @@
 //!
 //! // Multi-triple transaction with conflict detection.
 //! let mut tx = store.begin();
-//! tx.insert(triple_a);
-//! tx.insert(triple_b);
+//! tx.insert(triple_a);                          // default graph
+//! tx.insert_in(triple_b, graph, WriteMode::Add); // named graph
 //! let commit_ts = tx.commit()?;          // Err(StorageError::WriteConflict) if racing
 //!
 //! // Point-in-time snapshot read.
@@ -21,23 +21,27 @@
 //!
 //! # Internal responsibilities
 //!
-//! - Open RocksDB with 7 column families (6 triple indexes + META).
-//! - Predicate interning: string ↔ u32 ID, persisted to META CF.
-//! - `batch_triple`: write one logical triple into all 6 indexes via a
-//!   caller-supplied WriteBatch (used by `insert` and `Transaction::commit`).
+//! - Storage format v3 (`docs/design/v3-key-layout.md`): every quad is written
+//!   to eight 48-byte-key orders; property keys carry the value's content hash;
+//!   large values live once in the `blob` CF.
+//! - Predicate and graph interning: string ↔ u32 ID, persisted to META CF.
+//! - `stage_writes`: encode buffered writes (incl. `Replace` closing versions)
+//!   into a caller-supplied WriteBatch (used by `Transaction::commit` and
+//!   `insert_at_ts`).
 //! - Snapshot scan helpers (`scan_by_*_at`): prefix-scan + filter to
-//!   `tt <= snapshot_ts` + deduplicate (S,P,O) to latest version.
+//!   `tt <= snapshot_ts` + pick the governing version per quad + valid-time
+//!   filter (default: valid now).
 
 use crate::{
     cf,
     codec::{self, DecodedValue},
     error::StorageError,
     hnsw::{self, HnswIndex, MmapState},
-    keys::{self, PredId},
-    mvcc::{Snapshot, TimestampOracle, Transaction, META_ORACLE_CTR},
+    keys::{self, Order, PredId, QuadKey},
+    mvcc::{Snapshot, TimestampOracle, Transaction, WriteMode, META_ORACLE_CTR},
 };
 use polargraph_core::{
-    id::{EdgeId, NodeId},
+    id::{EdgeId, GraphId, NodeId},
     schema::StorageMode,
     temporal::{BiTemporalRange, Timestamp},
     term,
@@ -49,9 +53,12 @@ use rocksdb::{
     MultiThreaded, Options, WriteBatch,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, RwLock,
+    },
 };
 use tracing::info;
 
@@ -103,6 +110,23 @@ type DB = DBWithThreadMode<MultiThreaded>;
 const META_PRED_PREFIX: &[u8] = b"p/";
 const META_PRED_CTR: &[u8] = b"__pred_ctr";
 
+// META key namespace for the graph table. Graph 0 is the default graph and
+// has no IRI; named graphs are numbered from 1.
+const META_GRAPH_PREFIX: &[u8] = b"g/";
+const META_GRAPH_REV_PREFIX: &[u8] = b"gid/";
+const META_GRAPH_CTR: &[u8] = b"__graph_ctr";
+
+/// META key holding the on-disk storage format (u32 BE). Distinct from the
+/// logical schema-migration counter in `migrations.rs`.
+pub(crate) const META_STORAGE_FORMAT: &[u8] = b"__storage__/format";
+
+/// The storage format this build reads and writes.
+pub const STORAGE_FORMAT: u32 = 3;
+
+/// Default for [`TripleStore::set_inline_value_max_bytes`]: property payloads
+/// larger than this are stored once in the `blob` CF.
+pub const DEFAULT_INLINE_VALUE_MAX_BYTES: usize = 256;
+
 fn meta_forward_key(pred: &str) -> Vec<u8> {
     let mut k = META_PRED_PREFIX.to_vec();
     k.extend_from_slice(pred.as_bytes());
@@ -112,6 +136,25 @@ fn meta_reverse_key(id: PredId) -> Vec<u8> {
     let mut k = b"pid/".to_vec();
     k.extend_from_slice(&id.to_be_bytes());
     k
+}
+fn meta_graph_key(iri: &str) -> Vec<u8> {
+    let mut k = META_GRAPH_PREFIX.to_vec();
+    k.extend_from_slice(iri.as_bytes());
+    k
+}
+fn meta_graph_rev_key(id: GraphId) -> Vec<u8> {
+    let mut k = META_GRAPH_REV_PREFIX.to_vec();
+    k.extend_from_slice(&id.to_be_bytes());
+    k
+}
+
+/// How `open_db` treats a store still in storage format v2.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum V2Policy {
+    /// Refuse to open (`StorageError::NeedsMigration`).
+    Refuse,
+    /// Open as-is so `migrate_v3` can read the v2 column families.
+    AllowForMigration,
 }
 
 // ── public handle ─────────────────────────────────────────────────────────────
@@ -127,6 +170,11 @@ struct Inner {
     fwd: RwLock<HashMap<String, PredId>>, // predicate → id
     rev: RwLock<HashMap<PredId, String>>, // id → predicate
     next_pred_id: RwLock<PredId>,
+    graph_fwd: RwLock<HashMap<String, GraphId>>, // graph IRI → id
+    graph_rev: RwLock<HashMap<GraphId, String>>, // id → graph IRI
+    next_graph_id: RwLock<u32>,
+    /// Property payloads above this many bytes go to the `blob` CF.
+    inline_value_max_bytes: AtomicUsize,
     /// Named HNSW spaces: space_name → index.
     hnsw_spaces: RwLock<HashMap<String, HnswIndex>>,
     /// Path passed to `open()`, used to locate mmap `.vecs` files.
@@ -147,59 +195,47 @@ pub const TRIGRAM_MAX_TEXT_BYTES: usize = 512;
 /// A raw (key, value) entry read straight from a column family.
 pub type RawEntry = (Box<[u8]>, Box<[u8]>);
 
-/// Per-key winner while deduplicating versions in `snapshot_scan_cf`:
+/// Per-quad winner while deduplicating versions in `snapshot_scan`:
 /// `(vt_start, tt, vt_end, value_bytes)`.
 type VersionSlot = (i64, Timestamp, i64, Vec<u8>);
+
+/// Property values staged in one write batch, per `(s, p, g)`.
+type StagedValues = HashMap<(NodeId, PredId, GraphId), Vec<(NodeId, Vec<u8>)>>;
+
+/// Which graphs a scan returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GraphFilter {
+    /// Every graph; results de-duplicated on `(s, p, o)`.
+    Union,
+    One(GraphId),
+}
+
+impl GraphFilter {
+    #[inline]
+    fn admits(self, g: GraphId) -> bool {
+        match self {
+            GraphFilter::Union => true,
+            GraphFilter::One(want) => want == g,
+        }
+    }
+}
+
+/// A buffered write: the triple, the graph it goes to, and how properties
+/// treat existing values of the same `(subject, predicate, graph)`.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingWrite {
+    pub triple: Triple,
+    pub graph: GraphId,
+    pub mode: WriteMode,
+}
 
 impl TripleStore {
     // ── lifecycle ─────────────────────────────────────────────────────────────
 
+    /// Open (or create) a store. A store still in storage format v2 is
+    /// refused with [`StorageError::NeedsMigration`] — run `polargraphd migrate`.
     pub fn open(path: &Path) -> Result<Self, StorageError> {
-        let mut db_opts = Options::default();
-        db_opts.create_if_missing(true);
-        db_opts.create_missing_column_families(true);
-        // Keep WAL files for up to 1 hour so replicas can catch up after a gap.
-        db_opts.set_wal_ttl_seconds(3600);
-        db_opts.set_wal_size_limit_mb(512);
-
-        let cf_descriptors: Vec<ColumnFamilyDescriptor> = cf::ALL
-            .iter()
-            .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()))
-            .collect();
-
-        let db = DB::open_cf_descriptors(&db_opts, path, cf_descriptors)?;
-
-        // Ensure the vectors/ subdirectory exists for any mmap spaces.
-        let vectors_dir = path.join("vectors");
-        std::fs::create_dir_all(&vectors_dir)?;
-
-        let (fwd, rev, next_pred_id) = Self::load_predicates(&db)?;
-        let oracle_ts = Self::load_oracle_ts(&db)?;
-        let oracle = TimestampOracle::new(oracle_ts);
-        let hnsw_spaces = Self::load_hnsw_spaces(&db, &vectors_dir)?;
-
-        let total_nodes: usize = hnsw_spaces.values().map(|i| i.len()).sum();
-        info!(
-            path = %path.display(),
-            predicates = fwd.len(),
-            oracle_ts,
-            hnsw_spaces = hnsw_spaces.len(),
-            hnsw_nodes = total_nodes,
-            "TripleStore opened"
-        );
-
-        Ok(Self {
-            inner: Arc::new(Inner {
-                db,
-                oracle,
-                fwd: RwLock::new(fwd),
-                rev: RwLock::new(rev),
-                next_pred_id: RwLock::new(next_pred_id),
-                hnsw_spaces: RwLock::new(hnsw_spaces),
-                data_dir: path.to_path_buf(),
-                mode: StoreMode::Primary,
-            }),
-        })
+        Self::open_db(path, StoreMode::Primary, V2Policy::Refuse)
     }
 
     /// Open a replica store at `path`.
@@ -213,23 +249,48 @@ impl TripleStore {
     /// `"http://192.168.1.10:50051"`. It is stored for use by the caller to
     /// create a `WalReplicationClient`.
     pub fn open_as_replica(path: &Path, primary_address: String) -> Result<Self, StorageError> {
+        Self::open_db(
+            path,
+            StoreMode::Replica { primary_address },
+            V2Policy::Refuse,
+        )
+    }
+
+    pub(crate) fn open_db(
+        path: &Path,
+        mode: StoreMode,
+        v2: V2Policy,
+    ) -> Result<Self, StorageError> {
         let mut db_opts = Options::default();
         db_opts.create_if_missing(true);
         db_opts.create_missing_column_families(true);
+        // Keep WAL files for up to 1 hour so replicas can catch up after a gap.
         db_opts.set_wal_ttl_seconds(3600);
         db_opts.set_wal_size_limit_mb(512);
 
-        let cf_descriptors: Vec<ColumnFamilyDescriptor> = cf::ALL
+        // RocksDB requires every existing CF to be opened, so include any
+        // v2 CFs still on disk alongside the current set.
+        let existing = DB::list_cf(&db_opts, path).unwrap_or_default();
+        let mut names: Vec<String> = cf::ALL.iter().map(|s| s.to_string()).collect();
+        for name in existing {
+            if !names.contains(&name) && name != "default" {
+                names.push(name);
+            }
+        }
+        let cf_descriptors: Vec<ColumnFamilyDescriptor> = names
             .iter()
-            .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()))
+            .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
             .collect();
 
         let db = DB::open_cf_descriptors(&db_opts, path, cf_descriptors)?;
+        Self::check_format(&db, v2)?;
 
+        // Ensure the vectors/ subdirectory exists for any mmap spaces.
         let vectors_dir = path.join("vectors");
         std::fs::create_dir_all(&vectors_dir)?;
 
         let (fwd, rev, next_pred_id) = Self::load_predicates(&db)?;
+        let (graph_fwd, graph_rev, next_graph_id) = Self::load_graphs(&db)?;
         let oracle_ts = Self::load_oracle_ts(&db)?;
         let oracle = TimestampOracle::new(oracle_ts);
         let hnsw_spaces = Self::load_hnsw_spaces(&db, &vectors_dir)?;
@@ -237,12 +298,13 @@ impl TripleStore {
         let total_nodes: usize = hnsw_spaces.values().map(|i| i.len()).sum();
         info!(
             path = %path.display(),
-            primary_address = %primary_address,
+            replica = matches!(mode, StoreMode::Replica { .. }),
             predicates = fwd.len(),
+            graphs = graph_fwd.len(),
             oracle_ts,
             hnsw_spaces = hnsw_spaces.len(),
             hnsw_nodes = total_nodes,
-            "TripleStore opened as replica"
+            "TripleStore opened"
         );
 
         Ok(Self {
@@ -252,11 +314,69 @@ impl TripleStore {
                 fwd: RwLock::new(fwd),
                 rev: RwLock::new(rev),
                 next_pred_id: RwLock::new(next_pred_id),
+                graph_fwd: RwLock::new(graph_fwd),
+                graph_rev: RwLock::new(graph_rev),
+                next_graph_id: RwLock::new(next_graph_id),
+                inline_value_max_bytes: AtomicUsize::new(DEFAULT_INLINE_VALUE_MAX_BYTES),
                 hnsw_spaces: RwLock::new(hnsw_spaces),
                 data_dir: path.to_path_buf(),
-                mode: StoreMode::Replica { primary_address },
+                mode,
             }),
         })
+    }
+
+    /// The storage format recorded in META, if any.
+    pub(crate) fn stored_format(db: &DB) -> Result<Option<u32>, StorageError> {
+        let meta = db
+            .cf_handle(cf::META)
+            .ok_or_else(|| StorageError::MissingCf(cf::META.into()))?;
+        Ok(match db.get_cf(&meta, META_STORAGE_FORMAT)? {
+            Some(v) if v.len() == 4 => Some(u32::from_be_bytes(v[..4].try_into().unwrap())),
+            _ => None,
+        })
+    }
+
+    /// True if any v2 data column family exists and holds at least one key.
+    pub(crate) fn has_v2_data(db: &DB) -> bool {
+        cf::v2::ALL.iter().any(|name| {
+            db.cf_handle(name)
+                .and_then(|h| db.iterator_cf(&h, IteratorMode::Start).next())
+                .is_some()
+        })
+    }
+
+    /// Drop any v2 column families still present (all data is in v3 CFs).
+    pub(crate) fn drop_v2_cfs(db: &DB) -> Result<(), StorageError> {
+        for name in cf::v2::ALL {
+            if db.cf_handle(name).is_some() {
+                db.drop_cf(name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Enforce the storage format on open:
+    /// - format 3 → fine (finish dropping v2 CFs if a migration was interrupted
+    ///   after its commit point);
+    /// - no format and no v2 data → a new store: record format 3;
+    /// - no format but v2 data → refuse unless opening for migration.
+    fn check_format(db: &DB, v2: V2Policy) -> Result<(), StorageError> {
+        match Self::stored_format(db)? {
+            Some(STORAGE_FORMAT) => Self::drop_v2_cfs(db),
+            Some(other) => Err(StorageError::UnsupportedFormat(other)),
+            None if Self::has_v2_data(db) => match v2 {
+                V2Policy::Refuse => Err(StorageError::NeedsMigration),
+                V2Policy::AllowForMigration => Ok(()),
+            },
+            None => {
+                Self::drop_v2_cfs(db)?;
+                let meta = db
+                    .cf_handle(cf::META)
+                    .ok_or_else(|| StorageError::MissingCf(cf::META.into()))?;
+                db.put_cf(&meta, META_STORAGE_FORMAT, STORAGE_FORMAT.to_be_bytes())?;
+                Ok(())
+            }
+        }
     }
 
     /// Return `true` if this store is a replica (write ops blocked at the API level).
@@ -303,6 +423,10 @@ impl TripleStore {
         *self.inner.fwd.write().unwrap() = fwd;
         *self.inner.rev.write().unwrap() = rev;
         *self.inner.next_pred_id.write().unwrap() = next_pred_id;
+        let (graph_fwd, graph_rev, next_graph_id) = Self::load_graphs(&self.inner.db)?;
+        *self.inner.graph_fwd.write().unwrap() = graph_fwd;
+        *self.inner.graph_rev.write().unwrap() = graph_rev;
+        *self.inner.next_graph_id.write().unwrap() = next_graph_id;
         self.inner
             .oracle
             .advance_to(polargraph_core::temporal::Timestamp(oracle_ts));
@@ -382,6 +506,41 @@ impl TripleStore {
         };
 
         Ok((fwd, rev, next_pred_id))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn load_graphs(
+        db: &DB,
+    ) -> Result<(HashMap<String, GraphId>, HashMap<GraphId, String>, u32), StorageError> {
+        let meta_cf = db
+            .cf_handle(cf::META)
+            .ok_or_else(|| StorageError::MissingCf(cf::META.into()))?;
+        let mut fwd = HashMap::new();
+        let mut rev = HashMap::new();
+        let iter = db.iterator_cf(
+            &meta_cf,
+            IteratorMode::From(META_GRAPH_PREFIX, Direction::Forward),
+        );
+        for item in iter {
+            let (k, v) = item?;
+            if !k.starts_with(META_GRAPH_PREFIX) {
+                break;
+            }
+            let iri = std::str::from_utf8(&k[META_GRAPH_PREFIX.len()..])
+                .map_err(|e| StorageError::KeyDecode(e.to_string()))?
+                .to_owned();
+            if v.len() != 4 {
+                return Err(StorageError::KeyDecode(format!("bad graph id for {iri}")));
+            }
+            let id = GraphId(u32::from_be_bytes(v[..4].try_into().unwrap()));
+            fwd.insert(iri.clone(), id);
+            rev.insert(id, iri);
+        }
+        let next = match db.get_cf(&meta_cf, META_GRAPH_CTR)? {
+            Some(v) if v.len() == 4 => u32::from_be_bytes(v[..4].try_into().unwrap()),
+            _ => 1,
+        };
+        Ok((fwd, rev, next))
     }
 
     /// Load all named HNSW spaces from the `hnsw` CF.
@@ -708,9 +867,9 @@ impl TripleStore {
     }
 
     /// Fast approximate triple count using RocksDB's built-in key estimate on
-    /// the SPO column family. Not exact — use for monitoring/health only.
+    /// the `spog` column family. Not exact — use for monitoring/health only.
     pub fn estimate_triple_count(&self) -> u64 {
-        self.cf_handle(cf::SPO)
+        self.cf_handle(cf::SPOG)
             .ok()
             .and_then(|cf| {
                 self.inner
@@ -854,7 +1013,115 @@ impl TripleStore {
         self.inner.fwd.read().unwrap().get(pred).copied()
     }
 
-    /// Scan the SPO CF for all MVCC-visible EdgeIds matching exactly (subject, pred_id, object).
+    // ── graph interning ───────────────────────────────────────────────────────
+
+    /// The id for graph `iri`, assigning one on first use. The default graph
+    /// has no IRI — use [`GraphId::DEFAULT`].
+    pub fn intern_graph(&self, iri: &str) -> Result<GraphId, StorageError> {
+        if iri.is_empty() {
+            return Err(StorageError::Validation(
+                "graph IRI must not be empty".into(),
+            ));
+        }
+        if let Some(&id) = self.inner.graph_fwd.read().unwrap().get(iri) {
+            return Ok(id);
+        }
+        if self.is_replica() {
+            return Err(Self::read_only_err());
+        }
+        let mut fwd = self.inner.graph_fwd.write().unwrap();
+        if let Some(&id) = fwd.get(iri) {
+            return Ok(id);
+        }
+        let mut next = self.inner.next_graph_id.write().unwrap();
+        let id = GraphId(*next);
+        *next += 1;
+
+        let meta_cf = self.cf_handle(cf::META)?;
+        let mut batch = WriteBatch::default();
+        batch.put_cf(&meta_cf, meta_graph_key(iri), id.to_be_bytes());
+        batch.put_cf(&meta_cf, meta_graph_rev_key(id), iri.as_bytes());
+        batch.put_cf(&meta_cf, META_GRAPH_CTR, next.to_be_bytes());
+        self.inner.db.write(batch)?;
+
+        fwd.insert(iri.to_owned(), id);
+        self.inner
+            .graph_rev
+            .write()
+            .unwrap()
+            .insert(id, iri.to_owned());
+        Ok(id)
+    }
+
+    /// The id of graph `iri` if it has been interned.
+    pub fn graph_id(&self, iri: &str) -> Option<GraphId> {
+        self.inner.graph_fwd.read().unwrap().get(iri).copied()
+    }
+
+    /// The IRI of a named graph (`None` for the default graph or unknown ids).
+    pub fn graph_iri(&self, id: GraphId) -> Option<String> {
+        self.inner.graph_rev.read().unwrap().get(&id).cloned()
+    }
+
+    /// Every interned named graph, ordered by id.
+    pub fn list_graphs(&self) -> Vec<(GraphId, String)> {
+        let mut out: Vec<(GraphId, String)> = self
+            .inner
+            .graph_rev
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(id, iri)| (*id, iri.clone()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    // ── out-of-line values ────────────────────────────────────────────────────
+
+    /// Property payloads larger than `n` bytes are written once to the `blob`
+    /// CF (default [`DEFAULT_INLINE_VALUE_MAX_BYTES`]). Affects new writes only.
+    pub fn set_inline_value_max_bytes(&self, n: usize) {
+        self.inner
+            .inline_value_max_bytes
+            .store(n, Ordering::Relaxed);
+    }
+
+    pub fn inline_value_max_bytes(&self) -> usize {
+        self.inner.inline_value_max_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Encode a property value for an index entry, moving it to the `blob` CF
+    /// (in `batch`) when its payload is over the inline threshold.
+    pub(crate) fn encode_property_entry(
+        &self,
+        batch: &mut WriteBatch,
+        value: &Value,
+        temporal: &BiTemporalRange,
+    ) -> Result<Vec<u8>, StorageError> {
+        let inline = codec::encode_property(value, temporal)?;
+        if inline.len() - 17 <= self.inline_value_max_bytes() {
+            return Ok(inline);
+        }
+        batch.put_cf(
+            &self.cf_handle(cf::BLOB)?,
+            value.content_hash(),
+            codec::encode_blob(value)?,
+        );
+        Ok(codec::encode_property_ref(temporal))
+    }
+
+    /// Resolve an out-of-line value by its content hash.
+    fn load_blob(&self, hash: &NodeId) -> Result<Value, StorageError> {
+        let cf = self.cf_handle(cf::BLOB)?;
+        let bytes = self.inner.db.get_cf(&cf, hash.as_bytes())?.ok_or_else(|| {
+            StorageError::KeyDecode(format!("missing blob for value hash {hash}"))
+        })?;
+        codec::decode_blob(&bytes)
+    }
+
+    /// All MVCC-visible EdgeIds of the relation `(subject, pred_id, object)`
+    /// in any graph, newest first.
     ///
     /// Used by the SPARQL-star executor to resolve a quoted triple `<< S P O >>` to its
     /// stored edge UUID(s) so that edge annotations can be retrieved via
@@ -866,45 +1133,49 @@ impl TripleStore {
         object: NodeId,
         snapshot_ts: Timestamp,
     ) -> Result<Vec<EdgeId>, StorageError> {
-        use rocksdb::{Direction, IteratorMode};
-
-        let prefix = keys::spo_prefix_spo(&subject, pred_id, &object);
-        let cf = self.cf_handle(cf::SPO)?;
+        let prefix = Order::Spog.prefix(Some(&subject), Some(pred_id), Some(&object), None);
+        let cf = self.cf_handle(Order::Spog.cf())?;
         let iter = self
             .inner
             .db
             .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
 
-        // Collect edge_ids from all MVCC versions visible at snapshot_ts,
-        // keeping the latest per (S, pred, O) key group (same semantics as snapshot_scan_cf).
-        let mut best: Option<(Timestamp, EdgeId)> = None;
-
+        // Latest version per graph, then newest first overall.
+        let mut best: HashMap<GraphId, (Timestamp, EdgeId)> = HashMap::new();
         for item in iter {
             let (key, value) = item?;
             if !key.starts_with(&prefix) {
                 break;
             }
-            if key.len() < 8 {
-                continue;
-            }
-            let raw_tt = i64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
-            let tt = Timestamp(raw_tt);
+            let tt = keys::key_tt(&key);
             if tt > snapshot_ts {
                 continue;
             }
             if let Ok(DecodedValue::Relation { edge_id, .. }) = codec::decode_value(&value) {
-                match best {
-                    None => best = Some((tt, edge_id)),
-                    Some((prev_tt, _)) if tt > prev_tt => best = Some((tt, edge_id)),
-                    _ => {}
+                let g = Order::Spog.graph_of(&key);
+                match best.get(&g) {
+                    Some((prev, _)) if *prev >= tt => {}
+                    _ => {
+                        best.insert(g, (tt, edge_id));
+                    }
                 }
             }
         }
-
-        Ok(best.map(|(_, eid)| eid).into_iter().collect())
+        let mut found: Vec<(Timestamp, EdgeId)> = best.into_values().collect();
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut seen = HashSet::new();
+        Ok(found
+            .into_iter()
+            .map(|(_, e)| e)
+            .filter(|e| seen.insert(*e))
+            .collect())
     }
 
     // ── snapshot scans ────────────────────────────────────────────────────────
+    //
+    // `vt_as_of: None` means "valid now": closed (deleted / replaced) facts are
+    // hidden. Pass `Some(t)` for valid-time travel. Scans without a graph
+    // argument cover every graph and de-duplicate on (s, p, o).
 
     /// All triples for `subject` visible at `snapshot_ts`.
     pub(crate) fn scan_by_subject_at(
@@ -913,8 +1184,8 @@ impl TripleStore {
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
-        let prefix = keys::spo_prefix_s(subject);
-        self.snapshot_scan_spo(&prefix, snapshot_ts, vt_as_of)
+        let prefix = Order::Spog.prefix(Some(subject), None, None, None);
+        self.scan_union(Order::Spog, &prefix, snapshot_ts, vt_as_of)
     }
 
     pub(crate) fn scan_by_subject_predicate_at(
@@ -924,12 +1195,11 @@ impl TripleStore {
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
-        let p = match self.predicate_id(predicate) {
-            Some(id) => id,
-            None => return Ok(vec![]),
+        let Some(p) = self.predicate_id(predicate) else {
+            return Ok(vec![]);
         };
-        let prefix = keys::spo_prefix_sp(subject, p);
-        self.snapshot_scan_spo(&prefix, snapshot_ts, vt_as_of)
+        let prefix = Order::Spog.prefix(Some(subject), Some(p), None, None);
+        self.scan_union(Order::Spog, &prefix, snapshot_ts, vt_as_of)
     }
 
     pub(crate) fn scan_by_predicate_at(
@@ -938,17 +1208,15 @@ impl TripleStore {
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
-        let p = match self.predicate_id(predicate) {
-            Some(id) => id,
-            None => return Ok(vec![]),
+        let Some(p) = self.predicate_id(predicate) else {
+            return Ok(vec![]);
         };
-        let prefix = keys::pso_prefix_p(p);
-        self.snapshot_scan_cf(cf::PSO, &prefix, snapshot_ts, vt_as_of, |key, value| {
-            let dk = keys::decode_pso(key)?;
-            Ok((dk.subject, dk.pred_id, dk.object, dk.tt, value.to_vec()))
-        })
+        let prefix = Order::Psog.prefix(None, Some(p), None, None);
+        self.scan_union(Order::Psog, &prefix, snapshot_ts, vt_as_of)
     }
 
+    /// Triples with `(predicate, object)`. `object` may be a node or — for
+    /// properties — a value's content hash ([`keys::value_object`]).
     pub(crate) fn scan_by_predicate_object_at(
         &self,
         predicate: &str,
@@ -956,15 +1224,27 @@ impl TripleStore {
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
-        let p = match self.predicate_id(predicate) {
-            Some(id) => id,
-            None => return Ok(vec![]),
+        let Some(p) = self.predicate_id(predicate) else {
+            return Ok(vec![]);
         };
-        let prefix = keys::pos_prefix_po(p, object);
-        self.snapshot_scan_cf(cf::POS, &prefix, snapshot_ts, vt_as_of, |key, value| {
-            let dk = keys::decode_pos(key)?;
-            Ok((dk.subject, dk.pred_id, dk.object, dk.tt, value.to_vec()))
-        })
+        let prefix = Order::Posg.prefix(None, Some(p), Some(object), None);
+        self.scan_union(Order::Posg, &prefix, snapshot_ts, vt_as_of)
+    }
+
+    /// Property triples whose value equals `value` — an index lookup on the
+    /// `posg` value hash, verified against the decoded value.
+    pub(crate) fn scan_by_predicate_value_at(
+        &self,
+        predicate: &str,
+        value: &Value,
+        snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
+    ) -> Result<Vec<Triple>, StorageError> {
+        let object = keys::value_object(value);
+        let mut triples =
+            self.scan_by_predicate_object_at(predicate, &object, snapshot_ts, vt_as_of)?;
+        triples.retain(|t| matches!(t, Triple::Property { value: v, .. } if v == value));
+        Ok(triples)
     }
 
     pub(crate) fn scan_by_object_at(
@@ -973,14 +1253,11 @@ impl TripleStore {
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
-        let prefix = keys::osp_prefix_o(object);
-        self.snapshot_scan_cf(cf::OSP, &prefix, snapshot_ts, vt_as_of, |key, value| {
-            let dk = keys::decode_osp(key)?;
-            Ok((dk.subject, dk.pred_id, dk.object, dk.tt, value.to_vec()))
-        })
+        let prefix = Order::Ospg.prefix(None, None, Some(object), None);
+        self.scan_union(Order::Ospg, &prefix, snapshot_ts, vt_as_of)
     }
 
-    /// All triples for (subject, object) visible at `snapshot_ts` — uses the SOP CF.
+    /// All triples for (subject, object) visible at `snapshot_ts` — uses `sopg`.
     pub(crate) fn scan_by_subject_object_at(
         &self,
         subject: &NodeId,
@@ -988,209 +1265,312 @@ impl TripleStore {
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
-        let prefix = keys::sop_prefix_so(subject, object);
-        self.snapshot_scan_cf(cf::SOP, &prefix, snapshot_ts, vt_as_of, |key, value| {
-            let dk = keys::decode_sop(key)?;
-            Ok((dk.subject, dk.pred_id, dk.object, dk.tt, value.to_vec()))
-        })
+        let prefix = Order::Sopg.prefix(Some(subject), None, Some(object), None);
+        self.scan_union(Order::Sopg, &prefix, snapshot_ts, vt_as_of)
     }
 
-    /// All triples in the store visible at `snapshot_ts` — full SPO scan.
+    /// All triples in the store visible at `snapshot_ts` — full `spog` scan.
     pub(crate) fn scan_all_at(
         &self,
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
-        // Empty prefix matches every key in the CF.
-        self.snapshot_scan_spo(&[], snapshot_ts, vt_as_of)
+        self.scan_union(Order::Spog, &[], snapshot_ts, vt_as_of)
+    }
+
+    /// Every triple in graph `g` — a `gspo` prefix scan.
+    pub(crate) fn scan_graph_at(
+        &self,
+        g: GraphId,
+        snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
+    ) -> Result<Vec<Triple>, StorageError> {
+        let prefix = Order::Gspo.prefix(None, None, None, Some(g));
+        Ok(self
+            .snapshot_scan(
+                Order::Gspo.cf(),
+                Order::Gspo,
+                &prefix,
+                snapshot_ts,
+                vt_as_of,
+                GraphFilter::One(g),
+            )?
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect())
+    }
+
+    /// Triples of `subject` in graph `g` — a `gspo` prefix scan.
+    pub(crate) fn scan_by_subject_in_graph_at(
+        &self,
+        g: GraphId,
+        subject: &NodeId,
+        snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
+    ) -> Result<Vec<Triple>, StorageError> {
+        let prefix = Order::Gspo.prefix(Some(subject), None, None, Some(g));
+        Ok(self
+            .snapshot_scan(
+                Order::Gspo.cf(),
+                Order::Gspo,
+                &prefix,
+                snapshot_ts,
+                vt_as_of,
+                GraphFilter::One(g),
+            )?
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect())
     }
 
     // ── snapshot scan implementation ──────────────────────────────────────────
 
-    /// Snapshot scan over the SPO column family.
-    fn snapshot_scan_spo(
+    /// Scan across all graphs and de-duplicate on (s, p, o).
+    fn scan_union(
         &self,
+        order: Order,
         prefix: &[u8],
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.snapshot_scan_cf(cf::SPO, prefix, snapshot_ts, vt_as_of, |key, value| {
-            let dk = keys::decode_spo(key)?;
-            Ok((dk.subject, dk.pred_id, dk.object, dk.tt, value.to_vec()))
-        })
+        let quads = self.snapshot_scan(
+            order.cf(),
+            order,
+            prefix,
+            snapshot_ts,
+            vt_as_of,
+            GraphFilter::Union,
+        )?;
+        // Keep one triple per (s, p, o): the one from the lowest graph id.
+        let mut by_spo: HashMap<(NodeId, String, NodeId), (GraphId, Triple)> = HashMap::new();
+        for (g, t) in quads {
+            let o = match &t {
+                Triple::Relation { object, .. } => *object,
+                Triple::Property { value, .. } => keys::value_object(value),
+                _ => continue,
+            };
+            let key = (t.subject(), t.predicate().0.clone(), o);
+            match by_spo.get(&key) {
+                Some((prev, _)) if *prev <= g => {}
+                _ => {
+                    by_spo.insert(key, (g, t));
+                }
+            }
+        }
+        Ok(by_spo.into_values().map(|(_, t)| t).collect())
     }
 
-    /// Generic snapshot scan:
+    /// Generic snapshot scan over one quad order:
     ///
-    /// 1. Prefix-scan the given CF.
+    /// 1. Prefix-scan `cf_name` (keys in `order`'s layout), skipping graphs
+    ///    `graphs` doesn't admit.
     /// 2. Discard entries with `tt > snapshot_ts` (not yet committed at our snapshot).
-    /// 3. If `vt_as_of` is `None` (no valid-time filtering requested — used
-    ///    internally by transactional reads), group by (subject, pred_id,
-    ///    object) and keep only the entry with the highest `tt`, ignoring
-    ///    valid-time windows entirely.
-    /// 4. If `vt_as_of` is `Some(vt)`, the winning version per key is chosen
-    ///    by *valid-time start*, not raw `tt`: among entries whose window has
-    ///    already begun as of `vt` (`vt_start <= vt`), keep the one with the
-    ///    latest `vt_start` (ties broken by highest `tt`). This correctly
-    ///    distinguishes two cases that both show up as a new row with a
-    ///    higher `tt`:
-    ///      - A **new temporal version** (e.g. a property changing from
-    ///        "active" to "retired" at t=2000) has a `vt_start` strictly
-    ///        after the previous version's `vt_start`, so it only takes over
-    ///        once its own window has begun — earlier `vt_as_of` points still
-    ///        correctly resolve to the older version.
-    ///      - A **DELETE** (or in-place correction) reuses the *same*
-    ///        `vt_start` as the version it corrects, just with an earlier
-    ///        `vt_end`. Because the `vt_start` ties, the higher-`tt` (i.e.
-    ///        the correcting) entry always wins the tie-break, so once its
-    ///        own window closes the fact is hidden rather than falling back
-    ///        to the older, still-open-ended version.
-    ///
-    ///    The winning entry is then only returned if its own window actually
-    ///    covers `vt` (`vt < vt_end`); otherwise the key is dropped entirely
-    ///    (this is what makes DELETE hide data instead of resurrecting an
-    ///    older version).
-    /// 5. Reconstruct and return `Triple` values.
-    fn snapshot_scan_cf(
+    /// 3. Per quad, the governing version as of valid time `vt` (`vt_as_of`,
+    ///    or now when `None`) is the one with the latest `vt_start <= vt`,
+    ///    ties broken by highest `tt`. This distinguishes:
+    ///      - a **new temporal version** (a later `vt_start`), which only takes
+    ///        over once its own window has begun — earlier `vt` points still
+    ///        resolve to the older version; and
+    ///      - a **DELETE / correction / replaced value**, which reuses the
+    ///        original `vt_start` with an earlier `vt_end`, so it wins the
+    ///        tie-break and hides the fact rather than letting the older,
+    ///        still-open-ended version win.
+    /// 4. The winner is returned only if its window covers `vt` (`vt < vt_end`).
+    /// 5. Reconstruct `Triple`s (resolving out-of-line values).
+    pub(crate) fn snapshot_scan(
         &self,
         cf_name: &str,
+        order: Order,
         prefix: &[u8],
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
-        decode_key: impl Fn(
-            &[u8],
-            &[u8],
-        )
-            -> Result<(NodeId, PredId, NodeId, Timestamp, Vec<u8>), StorageError>,
-    ) -> Result<Vec<Triple>, StorageError> {
+        graphs: GraphFilter,
+    ) -> Result<Vec<(GraphId, Triple)>, StorageError> {
+        let vt = vt_as_of.unwrap_or_else(|| Timestamp::now().0);
         let cf = self.cf_handle(cf_name)?;
         let iter = self
             .inner
             .db
             .iterator_cf(&cf, IteratorMode::From(prefix, Direction::Forward));
 
-        // Map: (subject, pred_id, object) → (vt_start, tt, vt_end, value_bytes)
-        // `vt_start`/`vt_end` are only meaningful (and only populated) when
-        // `vt_as_of` is `Some`; in the `None` case we only ever compare `tt`.
-        let mut latest: HashMap<(NodeId, PredId, NodeId), VersionSlot> = HashMap::new();
+        let mut latest: HashMap<(NodeId, PredId, NodeId, GraphId), VersionSlot> = HashMap::new();
 
         for item in iter {
             let (key, value) = item?;
             if !key.starts_with(prefix) {
                 break;
             }
-
-            // Fast path: tt is always the last 8 bytes of a hexastore key.
-            // Check it against snapshot_ts before calling decode_key (which allocates
-            // value.to_vec()). This avoids allocations for the common case of
-            // multiple historical versions where only the newest is needed.
-            if key.len() >= 8 {
-                let raw_tt = i64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
-                if raw_tt > snapshot_ts.0 {
-                    continue;
-                }
-            }
-
-            let (subject, pred_id, object, tt, value_bytes) = decode_key(&key, &value)?;
-
-            // Skip uncommitted-at-snapshot entries.
-            if tt > snapshot_ts {
+            // Cheap checks before decoding: tt, then graph.
+            if keys::key_tt(&key) > snapshot_ts || !graphs.admits(order.graph_of(&key)) {
                 continue;
             }
-
-            let key_tuple = (subject, pred_id, object);
-
-            if let Some(vt) = vt_as_of {
-                let temporal = match codec::decode_value(&value_bytes) {
-                    Ok(DecodedValue::Relation { temporal, .. }) => temporal,
-                    Ok(DecodedValue::Property { temporal, .. }) => temporal,
-                    Err(_) => continue,
-                };
-
-                // This version hasn't started yet as of `vt` — it can't be
-                // the governing version for this point in valid time.
-                if temporal.vt_start.0 > vt {
-                    continue;
-                }
-
-                let slot = latest.entry(key_tuple).or_insert((
-                    i64::MIN,
-                    Timestamp(i64::MIN),
-                    i64::MIN,
-                    vec![],
-                ));
-                if temporal.vt_start.0 > slot.0 || (temporal.vt_start.0 == slot.0 && tt > slot.1) {
-                    *slot = (temporal.vt_start.0, tt, temporal.vt_end.0, value_bytes);
-                }
-            } else {
-                let slot = latest
-                    .entry(key_tuple)
-                    .or_insert((0, Timestamp(i64::MIN), 0, vec![]));
-                if tt > slot.1 {
-                    *slot = (0, tt, 0, value_bytes);
-                }
+            let Some((vt_start, vt_end)) = codec::valid_time(&value) else {
+                continue;
+            };
+            if vt_start.0 > vt {
+                continue;
+            }
+            let q = order.decode(&key)?;
+            let tt = q.tt;
+            let slot = latest.entry((q.s, q.p, q.o, q.g)).or_insert((
+                i64::MIN,
+                Timestamp(i64::MIN),
+                i64::MIN,
+                vec![],
+            ));
+            if vt_start.0 > slot.0 || (vt_start.0 == slot.0 && tt > slot.1) {
+                *slot = (vt_start.0, tt, vt_end.0, value.to_vec());
             }
         }
 
-        let mut triples = Vec::with_capacity(latest.len());
-        for ((subject, pred_id, object), (_vt_start, tt, vt_end, value_bytes)) in latest {
-            if let Some(vt) = vt_as_of {
-                // The winning version's own window must actually cover `vt`;
-                // otherwise it was closed (e.g. by a DELETE) before this
-                // point and the key is not visible here.
-                if vt >= vt_end {
-                    continue;
-                }
+        let mut out = Vec::with_capacity(latest.len());
+        for ((s, p, o, g), (_vt_start, tt, vt_end, value_bytes)) in latest {
+            if vt >= vt_end {
+                continue;
             }
-
-            let triple = self.reconstruct(subject, pred_id, object, tt, &value_bytes)?;
-            triples.push(triple);
+            out.push((g, self.reconstruct(s, p, o, tt, &value_bytes)?));
         }
-        Ok(triples)
+        Ok(out)
     }
 
-    // ── internal write helpers (used by Transaction) ──────────────────────────
+    // ── internal write helpers ────────────────────────────────────────────────
 
-    /// Write one logical triple into all 6 index CFs via a caller-supplied batch.
-    pub(crate) fn batch_triple(
+    /// Write one quad version into all eight orders.
+    pub(crate) fn batch_quad(
         &self,
         batch: &mut WriteBatch,
-        s: NodeId,
-        p: PredId,
-        o: NodeId,
-        tt: Timestamp,
+        q: &QuadKey,
         value: &[u8],
     ) -> Result<(), StorageError> {
-        batch.put_cf(
-            &self.cf_handle(cf::SPO)?,
-            keys::encode_spo(&s, p, &o, tt),
-            value,
-        );
-        batch.put_cf(
-            &self.cf_handle(cf::SOP)?,
-            keys::encode_sop(&s, &o, p, tt),
-            value,
-        );
-        batch.put_cf(
-            &self.cf_handle(cf::PSO)?,
-            keys::encode_pso(p, &s, &o, tt),
-            value,
-        );
-        batch.put_cf(
-            &self.cf_handle(cf::POS)?,
-            keys::encode_pos(p, &o, &s, tt),
-            value,
-        );
-        batch.put_cf(
-            &self.cf_handle(cf::OSP)?,
-            keys::encode_osp(&o, &s, p, tt),
-            value,
-        );
-        batch.put_cf(
-            &self.cf_handle(cf::OPS)?,
-            keys::encode_ops(&o, p, &s, tt),
-            value,
-        );
+        for order in Order::ALL {
+            batch.put_cf(&self.cf_handle(order.cf())?, order.encode(q), value);
+        }
+        Ok(())
+    }
+
+    /// The latest committed version of every property value of `(s, p, g)`
+    /// that is still open at `at` — the values a `Replace` write closes.
+    fn open_values(
+        &self,
+        s: &NodeId,
+        p: PredId,
+        g: GraphId,
+        at: Timestamp,
+    ) -> Result<Vec<(NodeId, Vec<u8>)>, StorageError> {
+        let prefix = Order::Gspo.prefix(Some(s), Some(p), None, Some(g));
+        let cf = self.cf_handle(Order::Gspo.cf())?;
+        let iter = self
+            .inner
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+        // Keys sort oldest-first within a value, so the last one seen wins.
+        let mut latest: Vec<(NodeId, Vec<u8>)> = Vec::new();
+        for item in iter {
+            let (key, value) = item?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            let o = Order::Gspo.decode(&key)?.o;
+            match latest.last_mut() {
+                Some((prev, bytes)) if *prev == o => *bytes = value.to_vec(),
+                _ => latest.push((o, value.to_vec())),
+            }
+        }
+        Ok(latest
+            .into_iter()
+            .filter(|(_, bytes)| {
+                bytes.first() != Some(&codec::DISC_RELATION)
+                    && codec::valid_time(bytes).is_some_and(|(_, end)| end > at)
+            })
+            .collect())
+    }
+
+    /// Encode `writes` at transaction time `tt` into `batch`: every index
+    /// entry, out-of-line values, trigrams, annotations, and — for `Replace`
+    /// property writes — closing versions of the other open values of the
+    /// same `(subject, predicate, graph)`. Conflict checks are the caller's.
+    pub(crate) fn stage_writes(
+        &self,
+        batch: &mut WriteBatch,
+        writes: &[PendingWrite],
+        tt: Timestamp,
+    ) -> Result<(), StorageError> {
+        // Property values staged in this batch, per (s, p, g): a later Replace
+        // in the same batch must close them too.
+        let mut staged: StagedValues = HashMap::new();
+
+        for w in writes {
+            let temporal = BiTemporalRange {
+                tt,
+                ..*w.triple.temporal()
+            };
+            let p = self.intern_predicate(w.triple.predicate().0.as_str())?;
+            let g = w.graph;
+            match &w.triple {
+                Triple::Relation {
+                    subject,
+                    object,
+                    edge_id,
+                    ..
+                } => {
+                    let q = QuadKey {
+                        s: *subject,
+                        p,
+                        o: *object,
+                        g,
+                        tt,
+                    };
+                    self.batch_quad(batch, &q, &codec::encode_relation(edge_id, &temporal))?;
+                }
+                Triple::Property { subject, value, .. } => {
+                    let o = keys::value_object(value);
+                    let bytes = self.encode_property_entry(batch, value, &temporal)?;
+                    let slot = staged.entry((*subject, p, g)).or_default();
+                    if w.mode.resolve(&w.triple) == WriteMode::Replace {
+                        let closing_at = temporal.vt_start;
+                        let mut to_close = self.open_values(subject, p, g, closing_at)?;
+                        to_close.append(slot);
+                        for (other, other_bytes) in to_close {
+                            if other == o {
+                                continue;
+                            }
+                            let q = QuadKey {
+                                s: *subject,
+                                p,
+                                o: other,
+                                g,
+                                tt,
+                            };
+                            self.batch_quad(
+                                batch,
+                                &q,
+                                &codec::with_vt_end(&other_bytes, closing_at)?,
+                            )?;
+                        }
+                    }
+                    slot.push((o, bytes.clone()));
+                    let q = QuadKey {
+                        s: *subject,
+                        p,
+                        o,
+                        g,
+                        tt,
+                    };
+                    self.batch_quad(batch, &q, &bytes)?;
+                    if let Some(text) = value.as_text() {
+                        self.batch_text_trigrams(batch, subject, p, g, text)?;
+                    }
+                }
+                Triple::EdgeProperty { edge, value, .. } => {
+                    let value_bytes = codec::encode_property(value, &temporal)?;
+                    self.batch_epa(batch, *edge, p, g, tt, &value_bytes)?;
+                }
+                Triple::EdgeRelation { edge, object, .. } => {
+                    let epo_val = encode_epo_value(&temporal);
+                    self.batch_epo(batch, *edge, p, *object, g, tt, &epo_val)?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1294,6 +1674,7 @@ impl TripleStore {
         batch: &mut WriteBatch,
         subject: &NodeId,
         pred_id: PredId,
+        g: GraphId,
         text: &str,
     ) -> Result<(), StorageError> {
         if text.len() > TRIGRAM_MAX_TEXT_BYTES {
@@ -1301,7 +1682,7 @@ impl TripleStore {
         }
         let tri_cf = self.cf_handle(cf::TRI)?;
         for trigram in keys::extract_trigrams(text) {
-            batch.put_cf(&tri_cf, keys::encode_tri(trigram, pred_id, subject), b"");
+            batch.put_cf(&tri_cf, keys::encode_tri(trigram, pred_id, g, subject), b"");
         }
         Ok(())
     }
@@ -1314,39 +1695,19 @@ impl TripleStore {
         &self,
         batch: &mut WriteBatch,
         edge: EdgeId,
-        pred_id: keys::PredId,
+        pred_id: PredId,
+        g: GraphId,
         tt: Timestamp,
         value_bytes: &[u8],
     ) -> Result<(), StorageError> {
         batch.put_cf(
             &self.cf_handle(cf::EPA)?,
-            keys::encode_epa_key(&edge, pred_id, tt),
+            keys::encode_epa_key(&edge, pred_id, g, tt),
             value_bytes,
         );
         batch.put_cf(
             &self.cf_handle(cf::PEA)?,
-            keys::encode_pea_key(pred_id, &edge, tt),
-            value_bytes,
-        );
-        Ok(())
-    }
-
-    /// Write one PEA (predicate-first annotation index) entry into a caller-supplied batch.
-    ///
-    /// Normally called indirectly through `batch_epa`. Use this directly only
-    /// when the EPA entry has already been written separately.
-    #[allow(dead_code)]
-    pub(crate) fn batch_pea(
-        &self,
-        batch: &mut WriteBatch,
-        pred_id: keys::PredId,
-        edge: EdgeId,
-        tt: Timestamp,
-        value_bytes: &[u8],
-    ) -> Result<(), StorageError> {
-        batch.put_cf(
-            &self.cf_handle(cf::PEA)?,
-            keys::encode_pea_key(pred_id, &edge, tt),
+            keys::encode_pea_key(pred_id, &edge, g, tt),
             value_bytes,
         );
         Ok(())
@@ -1355,29 +1716,34 @@ impl TripleStore {
     /// Write one EPO (edge relation annotation) entry into a caller-supplied batch.
     ///
     /// Value layout: `[vt_start BE(8)][vt_end BE(8)]` = 16 bytes.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn batch_epo(
         &self,
         batch: &mut WriteBatch,
         edge: EdgeId,
-        pred_id: keys::PredId,
+        pred_id: PredId,
         object: NodeId,
+        g: GraphId,
         tt: Timestamp,
         value_bytes: &[u8],
     ) -> Result<(), StorageError> {
         batch.put_cf(
             &self.cf_handle(cf::EPO)?,
-            keys::encode_epo_key(&edge, pred_id, &object, tt),
+            keys::encode_epo_key(&edge, pred_id, &object, g, tt),
             value_bytes,
         );
         Ok(())
     }
 
     // ── RDF-star scan methods ─────────────────────────────────────────────────
+    //
+    // Annotations are read across all graphs; the newest version per
+    // (predicate[, object]) wins.
 
     /// Scan all annotations (property + relation) on a given edge visible at `snapshot_ts`.
     ///
-    /// Returns a deduplicated list: for each (pred_id) group in EPA and each
-    /// (pred_id, obj_id) group in EPO, only the entry with the highest
+    /// Returns a deduplicated list: for each predicate in EPA and each
+    /// (predicate, object) in EPO, only the entry with the highest
     /// `tt <= snapshot_ts` is returned.
     pub fn scan_edge_annotations(
         &self,
@@ -1385,18 +1751,17 @@ impl TripleStore {
         snapshot_ts: Timestamp,
     ) -> Result<Vec<EdgeAnnotation>, StorageError> {
         let mut result = Vec::new();
+        let prefix = keys::annotation_prefix_edge(&edge);
 
         // ── EPA (property annotations) ────────────────────────────────────────
         {
             let cf = self.cf_handle(cf::EPA)?;
-            let prefix = keys::epa_prefix_edge(&edge);
             let iter = self
                 .inner
                 .db
                 .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
 
-            // Map: pred_id → (tt, value_bytes)
-            let mut latest: HashMap<keys::PredId, (Timestamp, Vec<u8>)> = HashMap::new();
+            let mut latest: HashMap<PredId, (Timestamp, Vec<u8>)> = HashMap::new();
             for item in iter {
                 let (key, value) = item?;
                 if !key.starts_with(&prefix) {
@@ -1418,8 +1783,7 @@ impl TripleStore {
                 let pred_str = self
                     .predicate_string(pred_id)
                     .ok_or_else(|| StorageError::KeyDecode(format!("unknown pred_id {pred_id}")))?;
-                let decoded = codec::decode_value(&value_bytes)?;
-                if let codec::DecodedValue::Property { value, .. } = decoded {
+                if let DecodedValue::Property { value, .. } = codec::decode_value(&value_bytes)? {
                     result.push(EdgeAnnotation {
                         predicate: Predicate::new(pred_str),
                         value: EdgeAnnotationValue::Scalar(value),
@@ -1431,14 +1795,12 @@ impl TripleStore {
         // ── EPO (relation annotations) ────────────────────────────────────────
         {
             let cf = self.cf_handle(cf::EPO)?;
-            let prefix = keys::epo_prefix_edge(&edge);
             let iter = self
                 .inner
                 .db
                 .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
 
-            // Map: (pred_id, obj_id) → tt
-            let mut latest: HashMap<(keys::PredId, NodeId), Timestamp> = HashMap::new();
+            let mut latest: HashMap<(PredId, NodeId), Timestamp> = HashMap::new();
             for item in iter {
                 let (key, _value) = item?;
                 if !key.starts_with(&prefix) {
@@ -1480,15 +1842,14 @@ impl TripleStore {
         predicate: &str,
         snapshot_ts: Timestamp,
     ) -> Result<Option<EdgeAnnotation>, StorageError> {
-        let pred_id = match self.predicate_id(predicate) {
-            Some(id) => id,
-            None => return Ok(None),
+        let Some(pred_id) = self.predicate_id(predicate) else {
+            return Ok(None);
         };
+        let prefix = keys::annotation_prefix_edge_pred(&edge, pred_id);
 
         // Check EPA.
         {
             let cf = self.cf_handle(cf::EPA)?;
-            let prefix = keys::epa_prefix_edge_pred(&edge, pred_id);
             let iter = self
                 .inner
                 .db
@@ -1509,8 +1870,7 @@ impl TripleStore {
                 }
             }
             if let Some((_, value_bytes)) = best {
-                let decoded = codec::decode_value(&value_bytes)?;
-                if let codec::DecodedValue::Property { value, .. } = decoded {
+                if let DecodedValue::Property { value, .. } = codec::decode_value(&value_bytes)? {
                     return Ok(Some(EdgeAnnotation {
                         predicate: Predicate::new(predicate.to_owned()),
                         value: EdgeAnnotationValue::Scalar(value),
@@ -1522,7 +1882,6 @@ impl TripleStore {
         // Check EPO.
         {
             let cf = self.cf_handle(cf::EPO)?;
-            let prefix = keys::epa_prefix_edge_pred(&edge, pred_id); // same first 20 bytes
             let iter = self
                 .inner
                 .db
@@ -1532,9 +1891,6 @@ impl TripleStore {
                 let (key, _) = item?;
                 if !key.starts_with(&prefix) {
                     break;
-                }
-                if key.len() != 44 {
-                    continue;
                 }
                 let dk = keys::decode_epo_key(&key)?;
                 if dk.tt > snapshot_ts {
@@ -1565,9 +1921,8 @@ impl TripleStore {
         predicate: &str,
         snapshot_ts: Timestamp,
     ) -> Result<Vec<Triple>, StorageError> {
-        let pred_id = match self.predicate_id(predicate) {
-            Some(id) => id,
-            None => return Ok(vec![]),
+        let Some(pred_id) = self.predicate_id(predicate) else {
+            return Ok(vec![]);
         };
 
         let cf = self.cf_handle(cf::PEA)?;
@@ -1599,8 +1954,7 @@ impl TripleStore {
         let mut triples = Vec::with_capacity(latest.len());
         let pred = Predicate::new(predicate.to_owned());
         for (edge_id, (tt, value_bytes)) in latest {
-            let decoded = codec::decode_value(&value_bytes)?;
-            if let codec::DecodedValue::Property { value, temporal } = decoded {
+            if let DecodedValue::Property { value, temporal } = codec::decode_value(&value_bytes)? {
                 triples.push(Triple::EdgeProperty {
                     edge: edge_id,
                     predicate: pred.clone(),
@@ -1639,12 +1993,14 @@ impl TripleStore {
         Ok(triples)
     }
 
-    /// Return all historical versions of a node property ordered newest-first by
-    /// transaction time.
+    /// Return the historical values of a node property, newest-first by
+    /// transaction time, across all graphs.
     ///
-    /// Unlike the snapshot-based scans, this does **not** deduplicate: every
+    /// Unlike the snapshot-based scans this does **not** deduplicate: every
     /// committed write to `(subject, predicate)` is returned so callers can
-    /// inspect the full audit trail.
+    /// inspect the full audit trail — except the closing versions a `Replace`
+    /// writes for the values it supersedes (same `tt` as the new open value),
+    /// which record the replacement rather than a write of their own.
     ///
     /// `limit` is the maximum number of versions to return; 0 means 50.
     pub fn scan_property_history(
@@ -1654,53 +2010,60 @@ impl TripleStore {
         limit: u32,
     ) -> Result<Vec<(Value, i64)>, StorageError> {
         let limit = if limit == 0 { 50 } else { limit as usize };
-
-        let pred_id = match self.predicate_id(predicate) {
-            Some(id) => id,
-            None => return Ok(vec![]),
+        let Some(pred_id) = self.predicate_id(predicate) else {
+            return Ok(vec![]);
         };
 
-        let prefix = keys::spo_property_prefix(&subject, pred_id);
-
-        // Scan backward from the maximum possible tt for this (subject, pred, sentinel)
-        // so we get newest-first order and can stop as soon as we reach `limit`.
-        // This avoids collecting all historical versions only to reverse and truncate.
-        let start = keys::spo_tuple_end(&prefix);
-
-        let cf = self.cf_handle(cf::SPO)?;
+        let prefix = Order::Spog.prefix(Some(&subject), Some(pred_id), None, None);
+        let cf = self.cf_handle(Order::Spog.cf())?;
         let iter = self
             .inner
             .db
-            .iterator_cf(&cf, IteratorMode::From(&start, Direction::Reverse));
+            .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
 
-        let mut versions: Vec<(Value, i64)> = Vec::new();
+        // (tt, open?, object slot, value bytes) for every property version.
+        let mut versions: Vec<(i64, bool, NodeId, Vec<u8>)> = Vec::new();
         for item in iter {
             let (key, value_bytes) = item?;
             if !key.starts_with(&prefix) {
                 break;
             }
-            if key.len() != keys::HEXASTORE_KEY_LEN {
+            if value_bytes.first() == Some(&codec::DISC_RELATION) {
                 continue;
             }
-            let tt = keys::hexastore_tt(&key).0;
-            match codec::decode_value(&value_bytes) {
-                Ok(codec::DecodedValue::Property { value, .. }) => {
-                    versions.push((value, tt));
-                    if versions.len() >= limit {
-                        break;
-                    }
-                }
-                Ok(codec::DecodedValue::Relation { .. }) => {}
-                Err(_) => {}
-            }
+            let Some((_, vt_end)) = codec::valid_time(&value_bytes) else {
+                continue;
+            };
+            let q = Order::Spog.decode(&key)?;
+            versions.push((
+                q.tt.0,
+                vt_end == Timestamp::END_OF_TIME,
+                q.o,
+                value_bytes.to_vec(),
+            ));
         }
 
-        // Already newest-first from reverse iteration; no reverse needed.
-        Ok(versions)
+        // A closed version committed alongside an open version of another
+        // value is a Replace's closing entry, not a write of its own.
+        let open_at: HashSet<i64> = versions.iter().filter(|v| v.1).map(|v| v.0).collect();
+        versions.retain(|(tt, open, _, _)| *open || !open_at.contains(tt));
+        versions.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let mut out = Vec::new();
+        for (tt, _, o, bytes) in versions.into_iter().take(limit) {
+            let value = match codec::decode_value(&bytes)? {
+                DecodedValue::Property { value, .. } => value,
+                DecodedValue::PropertyRef { .. } => self.load_blob(&o)?,
+                DecodedValue::Relation { .. } => continue,
+            };
+            out.push((value, tt));
+        }
+        Ok(out)
     }
 
-    /// Prefix-scan the `tri` CF for all subjects that contain `trigram` under `pred_id`.
-    pub fn scan_trigram_candidates(&self, pred_id: keys::PredId, trigram: [u8; 3]) -> Vec<NodeId> {
+    /// Prefix-scan the trigram CF for all subjects that contain `trigram`
+    /// under `pred_id`, in any graph.
+    pub fn scan_trigram_candidates(&self, pred_id: PredId, trigram: [u8; 3]) -> Vec<NodeId> {
         let prefix = keys::tri_prefix_tp(trigram, pred_id);
         let cf = match self.cf_handle(cf::TRI) {
             Ok(cf) => cf,
@@ -1716,7 +2079,7 @@ impl TripleStore {
             if !key.starts_with(&prefix) {
                 break;
             }
-            if let Ok(node_id) = keys::decode_tri_subject(&key) {
+            if let Ok((_, node_id)) = keys::decode_tri(&key) {
                 candidates.push(node_id);
             }
         }
@@ -1804,7 +2167,8 @@ impl TripleStore {
             .ok_or_else(|| StorageError::MissingCf(name.to_owned()))
     }
 
-    /// Insert a triple at an explicit transaction timestamp, bypassing the oracle.
+    /// Insert a triple (default graph, [`WriteMode::Auto`]) at an explicit
+    /// transaction timestamp, bypassing the oracle and conflict checks.
     ///
     /// Advances the oracle to at least `tt` so that subsequent reads see this
     /// triple. Useful in tests and offline tools that need control over `tt`.
@@ -1813,58 +2177,12 @@ impl TripleStore {
             return Err(Self::read_only_err());
         }
         let mut batch = WriteBatch::default();
-        match triple {
-            Triple::Relation {
-                subject,
-                predicate,
-                object,
-                edge_id,
-                temporal,
-            } => {
-                let temporal_stamped = BiTemporalRange { tt, ..*temporal };
-                let value_bytes = codec::encode_relation(edge_id, &temporal_stamped);
-                let p = self.intern_predicate(&predicate.0)?;
-                self.batch_triple(&mut batch, *subject, p, *object, tt, &value_bytes)?;
-            }
-            Triple::Property {
-                subject,
-                predicate,
-                value,
-                temporal,
-            } => {
-                let temporal_stamped = BiTemporalRange { tt, ..*temporal };
-                let value_bytes = codec::encode_property(value, &temporal_stamped)?;
-                let sentinel = keys::property_sentinel_node();
-                let p = self.intern_predicate(&predicate.0)?;
-                self.batch_triple(&mut batch, *subject, p, sentinel, tt, &value_bytes)?;
-                // Trigram index for text properties.
-                if let Some(text) = value.as_text() {
-                    self.batch_text_trigrams(&mut batch, subject, p, text)?;
-                }
-            }
-            Triple::EdgeProperty {
-                edge,
-                predicate,
-                value,
-                temporal,
-            } => {
-                let temporal_stamped = BiTemporalRange { tt, ..*temporal };
-                let value_bytes = codec::encode_property(value, &temporal_stamped)?;
-                let p = self.intern_predicate(&predicate.0)?;
-                self.batch_epa(&mut batch, *edge, p, tt, &value_bytes)?;
-            }
-            Triple::EdgeRelation {
-                edge,
-                predicate,
-                object,
-                temporal,
-            } => {
-                let temporal_stamped = BiTemporalRange { tt, ..*temporal };
-                let epo_val = encode_epo_value(&temporal_stamped);
-                let p = self.intern_predicate(&predicate.0)?;
-                self.batch_epo(&mut batch, *edge, p, *object, tt, &epo_val)?;
-            }
-        }
+        let write = PendingWrite {
+            triple: triple.clone(),
+            graph: GraphId::DEFAULT,
+            mode: WriteMode::Auto,
+        };
+        self.stage_writes(&mut batch, std::slice::from_ref(&write), tt)?;
         self.db_write(batch)?;
         // Advance oracle so subsequent scans can see this triple.
         self.inner.oracle.advance_to(tt);
@@ -1889,8 +2207,8 @@ impl TripleStore {
     /// entries whose first `group_len` key bytes are equal, and delete the
     /// entries `select` picks from each group.
     ///
-    /// For hexastore CFs with `group_len = keys::HEXASTORE_TUPLE_LEN`, each
-    /// group is every stored version of one logical triple, oldest `tt` first.
+    /// For quad CFs with `group_len = keys::QUAD_TUPLE_LEN`, each
+    /// group is every stored version of one quad, oldest `tt` first.
     /// `select` returns indices into the group slice. Used by
     /// `CompactionManager`. Returns `(entries_scanned, entries_deleted)`.
     pub fn prune_cf_groups<F>(
@@ -1950,11 +2268,49 @@ impl TripleStore {
         Ok((scanned, deleted))
     }
 
+    /// Delete `blob` entries no `spog` entry references (mark-and-sweep).
+    /// Returns the number deleted. Called by retention after it deletes
+    /// index entries; blobs are content-addressed, so a still-referenced
+    /// blob is never touched.
+    pub fn sweep_unreferenced_blobs(&self) -> Result<usize, StorageError> {
+        if self.is_replica() {
+            return Err(Self::read_only_err());
+        }
+        // Mark: every value hash behind a PropertyRef.
+        let mut live: HashSet<[u8; 16]> = HashSet::new();
+        let spog = self.cf_handle(Order::Spog.cf())?;
+        for item in self.inner.db.iterator_cf(&spog, IteratorMode::Start) {
+            let (key, value) = item?;
+            if value.first() == Some(&codec::DISC_PROPERTY_REF) {
+                live.insert(*Order::Spog.decode(&key)?.o.as_bytes());
+            }
+        }
+        // Sweep.
+        let blob = self.cf_handle(cf::BLOB)?;
+        let mut batch = WriteBatch::default();
+        let mut deleted = 0;
+        for item in self.inner.db.iterator_cf(&blob, IteratorMode::Start) {
+            let (key, _) = item?;
+            let hash: [u8; 16] = match key.as_ref().try_into() {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+            if !live.contains(&hash) {
+                batch.delete_cf(&blob, key);
+                deleted += 1;
+            }
+        }
+        if deleted > 0 {
+            self.db_write(batch)?;
+        }
+        Ok(deleted)
+    }
+
     // ── Derived triple store (DRV CF) ─────────────────────────────────────────
 
     /// Insert a batch of derived (inferred) Relation triples into the DRV CF.
     ///
-    /// Uses the same SPO key layout as the hexastore CFs. Each fact is written
+    /// Uses the `spog` key layout (default graph). Each fact is written
     /// with a timestamp of `Timestamp::now()` so that subsequent `scan_derived()`
     /// calls see it. Deduplication (same S,P,O already in DRV) is left to the
     /// caller — the materializer builds its own in-memory dedup set.
@@ -1974,12 +2330,15 @@ impl TripleStore {
         let temporal = BiTemporalRange::assert_now(tt);
         let value_bytes = codec::encode_relation(&edge_id, &temporal);
         let mut batch = WriteBatch::default();
-        for &(subject, pred_id, object) in facts {
-            batch.put_cf(
-                &drv_cf,
-                keys::encode_spo(&subject, pred_id, &object, tt),
-                &value_bytes,
-            );
+        for &(s, p, o) in facts {
+            let q = QuadKey {
+                s,
+                p,
+                o,
+                g: GraphId::DEFAULT,
+                tt,
+            };
+            batch.put_cf(&drv_cf, Order::Spog.encode(&q), &value_bytes);
         }
         self.inner.db.write(batch)?;
         self.inner.oracle.advance_to(tt);
@@ -2021,10 +2380,18 @@ impl TripleStore {
 
     /// Scan all derived (inferred) Relation triples visible at `snapshot_ts`.
     pub fn scan_derived_at(&self, snapshot_ts: Timestamp) -> Result<Vec<Triple>, StorageError> {
-        self.snapshot_scan_cf(cf::DRV, &[], snapshot_ts, None, |key, value| {
-            let dk = keys::decode_spo(key)?;
-            Ok((dk.subject, dk.pred_id, dk.object, dk.tt, value.to_vec()))
-        })
+        Ok(self
+            .snapshot_scan(
+                cf::DRV,
+                Order::Spog,
+                &[],
+                snapshot_ts,
+                None,
+                GraphFilter::Union,
+            )?
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect())
     }
 
     /// Approximate count of derived triples in the DRV CF (for Prometheus gauge).
@@ -2071,6 +2438,16 @@ impl TripleStore {
                     subject,
                     predicate,
                     value,
+                    temporal,
+                }
+            }
+            // Out-of-line value: the object slot is its content hash.
+            DecodedValue::PropertyRef { mut temporal } => {
+                temporal.tt = tt;
+                Triple::Property {
+                    subject,
+                    predicate,
+                    value: self.load_blob(&object)?,
                     temporal,
                 }
             }

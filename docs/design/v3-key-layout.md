@@ -188,3 +188,54 @@ bitmaps) follow in steps 4–6 and don't change the on-disk format again.
 | C | Inline threshold | 256 bytes, configurable |
 | D | Blob GC | Mark-and-sweep during retention |
 | E | CF names | New names (`spog`…) so v2 and v3 data can coexist during migration and a store's version is visible from its CFs |
+
+## 10. As built (implementation notes)
+
+Deviations from and details beyond §1–§8, recorded as the code landed on
+`db/ws1-foundations`:
+
+- **Format marker.** The on-disk format is `__storage__/format` (u32 BE) in
+  `meta`, separate from the logical schema-migration counter
+  (`__migrations__/version`, still at 2) so the automatic startup runner can
+  never trigger the offline rewrite. `TripleStore::open` on a store with v2
+  data returns `StorageError::NeedsMigration`; a new store (or one whose v2
+  CFs are empty) is stamped format 3 and its empty v2 CFs dropped.
+- **Column family names.** Every CF whose key format changed got a new name:
+  `spog sopg psog posg ospg opsg gspo gpos` (quads), `trig` (trigrams),
+  `epag epog peag` (annotations), `drvg` (derived), plus `blob`. `meta`,
+  `hnsw` and `iri` are unchanged. TRI keys are `[trigram3][p4 BE][g4][s16]`.
+- **Write modes.** `WriteMode::{Auto, Replace, Add}`; `Auto` (the default for
+  `Transaction::insert`, `insert_at_ts` and the Insert RPC) is `Replace` for an
+  open-ended property and `Add` for anything else, so a DELETE (a closing
+  write) only ever touches its own value. SST bulk import is `Add`-only.
+- **Reads default to "valid now".** A scan with no explicit valid time
+  (`TripleStore::scan_*`, transaction reads) now filters to facts valid now,
+  like `Snapshot` already did. With one key per value this is required —
+  otherwise a replaced value's closed version would reappear.
+- **Union reads** (`scan_*` without a graph) de-duplicate `(s,p,o)` across
+  graphs, keeping the lowest graph id. Graph-scoped reads:
+  `Snapshot::scan_graph`, `scan_by_subject_in_graph`; value lookup:
+  `Snapshot::scan_by_predicate_value`.
+- **Property history** hides the closing versions a `Replace` writes (a
+  closed version committed at the same `tt` as an open value of the same
+  property), so it lists writes, as in v2.
+- **Migration replay.** v2 kept all values of a property under one key, so a
+  correction implicitly replaced the old value. The migration replays each
+  v2 property's versions in `tt` order as `Auto` writes, synthesizing the
+  closing versions a live `Replace` would have written
+  (`MigrationReport::closing_versions_synthesized`). The one case this can't
+  reproduce exactly: a correction whose `vt_start` is *earlier* than the
+  value it corrects. v2 kept showing the old value from its own later
+  `vt_start` onward; v3 treats the correction as authoritative from its
+  `vt_start`. Verification checksums what was written (including
+  synthesized versions) against what was read, and counts all eight orders.
+- **CLI.** `polargraphd migrate --data-dir D --backup-dir B` (or
+  `--no-backup`); `--inline-value-max-bytes` / `POLARGRAPH_INLINE_VALUE_MAX_BYTES`
+  / `[storage] inline_value_max_bytes` (default 256).
+- **Retention** counts index entries across the eight orders (one quad
+  version = 8) and reports `blobs_deleted` from the sweep.
+
+Docs still describing the v2 layout (for the docs pass): the key-layout,
+column-family, retention and bulk-import sections of `docs/architecture.md`,
+the storage tables in `CLAUDE.md`, and `docs/api-reference.md`'s key-encoding
+section.

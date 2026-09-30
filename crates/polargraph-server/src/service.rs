@@ -3674,6 +3674,9 @@ fn storage_err_to_status(err: StorageError) -> Status {
         StorageError::Io(_) => Status::internal(err.to_string()),
         StorageError::ReadOnly(_) => Status::failed_precondition(err.to_string()),
         StorageError::Validation(_) => Status::failed_precondition(err.to_string()),
+        StorageError::NeedsMigration | StorageError::UnsupportedFormat(_) => {
+            Status::failed_precondition(err.to_string())
+        }
         StorageError::IriCollision { .. } => {
             warn!("{err}");
             Status::already_exists(err.to_string())

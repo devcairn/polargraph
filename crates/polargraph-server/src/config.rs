@@ -86,6 +86,10 @@ pub struct StorageConfig {
     /// Run OWL 2 RL materialization at startup (primary only).
     /// Equivalent to `--auto-materialize` / `POLARGRAPH_AUTO_MATERIALIZE`.
     pub auto_materialize: Option<bool>,
+    /// Property payloads larger than this many bytes are stored once in the
+    /// `blob` column family.  Equivalent to `--inline-value-max-bytes` /
+    /// `POLARGRAPH_INLINE_VALUE_MAX_BYTES`.  Default 256.
+    pub inline_value_max_bytes: Option<usize>,
 }
 
 /// Configuration for the periodic scheduled retention task.

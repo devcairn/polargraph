@@ -101,7 +101,7 @@ fn old_current_fact_survives_tx_age() {
         .unwrap();
 
     assert_eq!(stats.triples_deleted, 0);
-    assert!(stats.triples_scanned >= 6);
+    assert!(stats.triples_scanned >= 8);
     assert_eq!(label_of(&store, &s), vec!["old".to_string()]);
 }
 
@@ -124,8 +124,10 @@ fn superseded_versions_deleted_by_tx_age() {
         .run_retention(&policy)
         .unwrap();
 
-    // Only v1's 6 CF copies go; v2 is the current value.
-    assert_eq!(stats.triples_deleted, 6);
+    // Only v1's original version goes (8 index entries): v2 is the current
+    // value, and v1's closing version (written by the replace) is kept as the
+    // newest version of v1.
+    assert_eq!(stats.triples_deleted, 8);
     assert_eq!(label_of(&store, &s), vec!["v2".to_string()]);
     assert_eq!(
         store.scan_property_history(s, "label", 10).unwrap().len(),
@@ -212,7 +214,7 @@ fn expired_vt_end_deleted_by_lookback() {
     let mgr = CompactionManager::new(store.clone());
     let stats = mgr.run_retention(&policy).unwrap();
 
-    assert_eq!(stats.triples_deleted, 6);
+    assert_eq!(stats.triples_deleted, 8);
 
     let after = store.scan_by_subject(&s).unwrap();
     assert!(after.is_empty());
@@ -293,7 +295,7 @@ fn mixed_old_and_new_corrections() {
         .run_retention(&policy)
         .unwrap();
 
-    assert_eq!(stats.triples_deleted, 6);
+    assert_eq!(stats.triples_deleted, 8);
     assert_eq!(label_of(&store, &old_subject), vec!["b".to_string()]);
     assert_eq!(
         store

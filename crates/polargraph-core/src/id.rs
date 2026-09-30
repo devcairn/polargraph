@@ -72,3 +72,32 @@ impl fmt::Display for EdgeId {
         write!(f, "{}", self.0)
     }
 }
+
+/// Interned identifier of a named graph. Graph IRIs are interned to `u32`s in
+/// storage exactly like predicates; `GraphId::DEFAULT` (0) is the default
+/// graph, which every write lands in unless a graph is named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GraphId(pub u32);
+
+impl GraphId {
+    /// The default graph.
+    pub const DEFAULT: GraphId = GraphId(0);
+
+    /// Big-endian bytes, as stored in index keys.
+    #[inline]
+    pub fn to_be_bytes(self) -> [u8; 4] {
+        self.0.to_be_bytes()
+    }
+}
+
+impl Default for GraphId {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl fmt::Display for GraphId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "g{}", self.0)
+    }
+}

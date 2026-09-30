@@ -1,86 +1,240 @@
-//! Index key encoding and decoding.
+//! Index key encoding and decoding (storage format v3).
 //!
 //! Keys are fixed-width byte sequences so that RocksDB's default
-//! lexicographic ordering gives us correct sorted-range scans.
+//! lexicographic ordering gives correct sorted-range scans.
 //!
 //! Component widths:
-//!   NodeId  = 16 bytes (UUID v7, big-endian)
+//!   NodeId  = 16 bytes (UUID bytes)
 //!   PredId  = 4 bytes  (u32 big-endian interned ID)
+//!   GraphId = 4 bytes  (u32 big-endian interned ID; 0 = default graph)
 //!   tt      = 8 bytes  (i64 big-endian microseconds since epoch)
 //!
-//! Total key size per CF: 16 + 4 + 16 + 8 = 44 bytes
+//! Every quad is written to eight orders (`docs/design/v3-key-layout.md` §3):
 //!
-//! CF permutations and their byte layout:
-//!   SPO  [subject(16)][pred(4)][object(16)][tt(8)]
-//!   SOP  [subject(16)][object(16)][pred(4)][tt(8)]
-//!   PSO  [pred(4)][subject(16)][object(16)][tt(8)]
-//!   POS  [pred(4)][object(16)][subject(16)][tt(8)]
-//!   OSP  [object(16)][subject(16)][pred(4)][tt(8)]
-//!   OPS  [object(16)][pred(4)][subject(16)][tt(8)]
+//! ```text
+//! spog [s][p][o][g][tt]   sopg [s][o][p][g][tt]   psog [p][s][o][g][tt]
+//! posg [p][o][s][g][tt]   ospg [o][s][p][g][tt]   opsg [o][p][s][g][tt]
+//! gspo [g][s][p][o][tt]   gpos [g][p][o][s][tt]
+//! ```
+//!
+//! All are 48 bytes; the first 40 (the quad) are shared by every version of
+//! one quad, and `tt` sorts versions oldest-first. For property triples the
+//! object slot holds the value's content hash ([`value_object`]).
 
 use crate::error::StorageError;
 use polargraph_core::{
-    id::{EdgeId, NodeId},
+    id::{EdgeId, GraphId, NodeId},
     temporal::Timestamp,
+    value::Value,
 };
 use uuid::Uuid;
 
 /// Interned predicate ID — 32-bit so keys stay compact.
 pub type PredId = u32;
 
-/// Width of a hexastore key: the (S,P,O) tuple in CF order plus `tt`.
-pub const HEXASTORE_KEY_LEN: usize = 44;
+/// Width of a quad index key.
+pub const QUAD_KEY_LEN: usize = 48;
 
-/// Width of the (S,P,O) tuple prefix of a hexastore key — everything but `tt`.
-/// All versions of one logical triple share this prefix and sort together,
-/// oldest `tt` first.
-pub const HEXASTORE_TUPLE_LEN: usize = HEXASTORE_KEY_LEN - 8;
+/// Width of the quad prefix of a key — everything but `tt`. All versions of
+/// one quad share this prefix and sort together, oldest `tt` first.
+pub const QUAD_TUPLE_LEN: usize = QUAD_KEY_LEN - 8;
 
-/// A full hexastore key: `[slot_a][slot_b][slot_c][tt]`.
-pub type HexKey = [u8; HEXASTORE_KEY_LEN];
+/// A full quad index key.
+pub type QuadKeyBytes = [u8; QUAD_KEY_LEN];
 
-/// The tuple prefix of a hexastore key (all versions of one triple).
-pub type HexTuple = [u8; HEXASTORE_TUPLE_LEN];
+/// The quad prefix of a key.
+pub type QuadTuple = [u8; QUAD_TUPLE_LEN];
 
-/// The tuple prefix of a hexastore key.
-#[inline]
-pub fn hexastore_tuple(key: &[u8]) -> &[u8] {
-    &key[..HEXASTORE_TUPLE_LEN]
+/// Offset of the graph slot in the six orders that don't lead with `g`.
+pub const GRAPH_OFFSET_NON_LEADING: usize = 36;
+
+/// A decoded quad key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuadKey {
+    pub s: NodeId,
+    pub p: PredId,
+    /// Object node, or the value hash for property triples.
+    pub o: NodeId,
+    pub g: GraphId,
+    pub tt: Timestamp,
 }
 
-/// The SPO tuple prefix for a property's current versions:
-/// `[subject][pred_id][PROPERTY_SENTINEL]`.
-pub fn spo_property_prefix(s: &NodeId, p: PredId) -> HexTuple {
-    spo_prefix_spo(s, p, &property_sentinel_node())
+#[derive(Clone, Copy)]
+enum Slot {
+    S,
+    P,
+    O,
+    G,
 }
 
-/// The SPO key that sorts after every version of `tuple` (its `tt` bytes set to
+impl Slot {
+    const fn width(self) -> usize {
+        match self {
+            Slot::S | Slot::O => 16,
+            Slot::P | Slot::G => 4,
+        }
+    }
+}
+
+/// One of the eight quad index orders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Order {
+    Spog,
+    Sopg,
+    Psog,
+    Posg,
+    Ospg,
+    Opsg,
+    Gspo,
+    Gpos,
+}
+
+impl Order {
+    /// Every order a quad is written to.
+    pub const ALL: [Order; 8] = [
+        Order::Spog,
+        Order::Sopg,
+        Order::Psog,
+        Order::Posg,
+        Order::Ospg,
+        Order::Opsg,
+        Order::Gspo,
+        Order::Gpos,
+    ];
+
+    /// The column family holding this order.
+    pub const fn cf(self) -> &'static str {
+        match self {
+            Order::Spog => crate::cf::SPOG,
+            Order::Sopg => crate::cf::SOPG,
+            Order::Psog => crate::cf::PSOG,
+            Order::Posg => crate::cf::POSG,
+            Order::Ospg => crate::cf::OSPG,
+            Order::Opsg => crate::cf::OPSG,
+            Order::Gspo => crate::cf::GSPO,
+            Order::Gpos => crate::cf::GPOS,
+        }
+    }
+
+    const fn slots(self) -> [Slot; 4] {
+        use Slot::*;
+        match self {
+            Order::Spog => [S, P, O, G],
+            Order::Sopg => [S, O, P, G],
+            Order::Psog => [P, S, O, G],
+            Order::Posg => [P, O, S, G],
+            Order::Ospg => [O, S, P, G],
+            Order::Opsg => [O, P, S, G],
+            Order::Gspo => [G, S, P, O],
+            Order::Gpos => [G, P, O, S],
+        }
+    }
+
+    /// Encode `k` in this order.
+    pub fn encode(self, k: &QuadKey) -> QuadKeyBytes {
+        let mut out = [0u8; QUAD_KEY_LEN];
+        let mut at = 0;
+        for slot in self.slots() {
+            let w = slot.width();
+            match slot {
+                Slot::S => out[at..at + w].copy_from_slice(k.s.as_bytes()),
+                Slot::P => out[at..at + w].copy_from_slice(&k.p.to_be_bytes()),
+                Slot::O => out[at..at + w].copy_from_slice(k.o.as_bytes()),
+                Slot::G => out[at..at + w].copy_from_slice(&k.g.to_be_bytes()),
+            }
+            at += w;
+        }
+        out[QUAD_TUPLE_LEN..].copy_from_slice(&k.tt.to_be_bytes());
+        out
+    }
+
+    /// Decode a key written in this order.
+    pub fn decode(self, key: &[u8]) -> Result<QuadKey, StorageError> {
+        check_len(key, QUAD_KEY_LEN, self.cf())?;
+        let mut k = QuadKey {
+            s: NodeId(Uuid::nil()),
+            p: 0,
+            o: NodeId(Uuid::nil()),
+            g: GraphId::DEFAULT,
+            tt: tt_from(&key[QUAD_TUPLE_LEN..]),
+        };
+        let mut at = 0;
+        for slot in self.slots() {
+            let w = slot.width();
+            let b = &key[at..at + w];
+            match slot {
+                Slot::S => k.s = node_id_from(b),
+                Slot::P => k.p = u32_from(b),
+                Slot::O => k.o = node_id_from(b),
+                Slot::G => k.g = GraphId(u32_from(b)),
+            }
+            at += w;
+        }
+        Ok(k)
+    }
+
+    /// Key prefix for a scan: the leading slots of this order that are bound,
+    /// stopping at the first unbound one.
+    pub fn prefix(
+        self,
+        s: Option<&NodeId>,
+        p: Option<PredId>,
+        o: Option<&NodeId>,
+        g: Option<GraphId>,
+    ) -> Vec<u8> {
+        let mut out = Vec::with_capacity(QUAD_TUPLE_LEN);
+        for slot in self.slots() {
+            match slot {
+                Slot::S => match s {
+                    Some(s) => out.extend_from_slice(s.as_bytes()),
+                    None => break,
+                },
+                Slot::P => match p {
+                    Some(p) => out.extend_from_slice(&p.to_be_bytes()),
+                    None => break,
+                },
+                Slot::O => match o {
+                    Some(o) => out.extend_from_slice(o.as_bytes()),
+                    None => break,
+                },
+                Slot::G => match g {
+                    Some(g) => out.extend_from_slice(&g.to_be_bytes()),
+                    None => break,
+                },
+            }
+        }
+        out
+    }
+
+    /// The graph of a key in this order, read without a full decode.
+    #[inline]
+    pub fn graph_of(self, key: &[u8]) -> GraphId {
+        let at = match self {
+            Order::Gspo | Order::Gpos => 0,
+            _ => GRAPH_OFFSET_NON_LEADING,
+        };
+        GraphId(u32_from(&key[at..at + 4]))
+    }
+}
+
+/// The key that sorts after every version of `tuple` (its `tt` bytes set to
 /// 0xFF), for newest-first reverse scans.
-pub fn spo_tuple_end(tuple: &HexTuple) -> HexKey {
-    let mut k = [0xFFu8; HEXASTORE_KEY_LEN];
-    k[..HEXASTORE_TUPLE_LEN].copy_from_slice(tuple);
+pub fn tuple_end(tuple: &[u8]) -> Vec<u8> {
+    let mut k = tuple.to_vec();
+    k.resize(QUAD_KEY_LEN.max(tuple.len() + 8), 0xFF);
     k
 }
 
-/// Read the transaction time from the last 8 bytes of a hexastore key.
+/// Read the transaction time from the last 8 bytes of a versioned key.
 #[inline]
-pub fn hexastore_tt(key: &[u8]) -> Timestamp {
+pub fn key_tt(key: &[u8]) -> Timestamp {
     tt_from(&key[key.len() - 8..])
 }
 
-/// Sentinel NodeId used in the object slot for property triples.
-pub const PROPERTY_SENTINEL: [u8; 16] = [0xFF; 16];
-
-/// The property sentinel as a `NodeId`, for the object slot of property keys.
+/// The object slot of a property triple: the value's content hash as a NodeId.
 #[inline]
-pub fn property_sentinel_node() -> NodeId {
-    NodeId(Uuid::from_bytes(PROPERTY_SENTINEL))
-}
-
-/// Returns true if a 16-byte NodeId slot bytes are the property sentinel.
-#[inline]
-pub fn is_property_sentinel(bytes: &[u8]) -> bool {
-    bytes == PROPERTY_SENTINEL
+pub fn value_object(value: &Value) -> NodeId {
+    NodeId(Uuid::from_bytes(value.content_hash()))
 }
 
 // ── private decode helpers ────────────────────────────────────────────────────
@@ -90,7 +244,7 @@ fn node_id_from(b: &[u8]) -> NodeId {
     NodeId(Uuid::from_bytes(b.try_into().expect("16 bytes")))
 }
 #[inline]
-fn pred_from(b: &[u8]) -> PredId {
+fn u32_from(b: &[u8]) -> u32 {
     u32::from_be_bytes(b.try_into().expect("4 bytes"))
 }
 #[inline]
@@ -98,96 +252,19 @@ fn tt_from(b: &[u8]) -> Timestamp {
     Timestamp::from_be_bytes(b.try_into().expect("8 bytes"))
 }
 
-// ── decoded key types ─────────────────────────────────────────────────────────
-
-pub struct DecodedSpo {
-    pub subject: NodeId,
-    pub pred_id: PredId,
-    pub object: NodeId,
-    pub tt: Timestamp,
+#[inline]
+fn check_len(key: &[u8], expected: usize, name: &str) -> Result<(), StorageError> {
+    if key.len() != expected {
+        Err(StorageError::KeyDecode(format!(
+            "{name} key must be {expected} bytes, got {}",
+            key.len()
+        )))
+    } else {
+        Ok(())
+    }
 }
 
-pub struct DecodedPso {
-    pub pred_id: PredId,
-    pub subject: NodeId,
-    pub object: NodeId,
-    pub tt: Timestamp,
-}
-
-pub struct DecodedPos {
-    pub pred_id: PredId,
-    pub object: NodeId,
-    pub subject: NodeId,
-    pub tt: Timestamp,
-}
-
-pub struct DecodedSop {
-    pub subject: NodeId,
-    pub object: NodeId,
-    pub pred_id: PredId,
-    pub tt: Timestamp,
-}
-
-pub struct DecodedOsp {
-    pub object: NodeId,
-    pub subject: NodeId,
-    pub pred_id: PredId,
-    pub tt: Timestamp,
-}
-
-// ── encode ────────────────────────────────────────────────────────────────────
-
-// SPO: [subject(16)][pred(4)][object(16)][tt(8)]
-pub fn encode_spo(s: &NodeId, p: PredId, o: &NodeId, tt: Timestamp) -> HexKey {
-    let mut k = [0u8; HEXASTORE_KEY_LEN];
-    k[0..16].copy_from_slice(s.as_bytes());
-    k[16..20].copy_from_slice(&p.to_be_bytes());
-    k[20..36].copy_from_slice(o.as_bytes());
-    k[HEXASTORE_TUPLE_LEN..].copy_from_slice(&tt.to_be_bytes());
-    k
-}
-
-// SOP: [subject(16)][object(16)][pred(4)][tt(8)]
-pub fn encode_sop(s: &NodeId, o: &NodeId, p: PredId, tt: Timestamp) -> HexKey {
-    let mut k = [0u8; HEXASTORE_KEY_LEN];
-    k[0..16].copy_from_slice(s.as_bytes());
-    k[16..32].copy_from_slice(o.as_bytes());
-    k[32..36].copy_from_slice(&p.to_be_bytes());
-    k[HEXASTORE_TUPLE_LEN..].copy_from_slice(&tt.to_be_bytes());
-    k
-}
-
-// PSO: [pred(4)][subject(16)][object(16)][tt(8)]
-pub fn encode_pso(p: PredId, s: &NodeId, o: &NodeId, tt: Timestamp) -> HexKey {
-    let mut k = [0u8; HEXASTORE_KEY_LEN];
-    k[0..4].copy_from_slice(&p.to_be_bytes());
-    k[4..20].copy_from_slice(s.as_bytes());
-    k[20..36].copy_from_slice(o.as_bytes());
-    k[HEXASTORE_TUPLE_LEN..].copy_from_slice(&tt.to_be_bytes());
-    k
-}
-
-// POS: [pred(4)][object(16)][subject(16)][tt(8)]
-pub fn encode_pos(p: PredId, o: &NodeId, s: &NodeId, tt: Timestamp) -> HexKey {
-    let mut k = [0u8; HEXASTORE_KEY_LEN];
-    k[0..4].copy_from_slice(&p.to_be_bytes());
-    k[4..20].copy_from_slice(o.as_bytes());
-    k[20..36].copy_from_slice(s.as_bytes());
-    k[HEXASTORE_TUPLE_LEN..].copy_from_slice(&tt.to_be_bytes());
-    k
-}
-
-// OSP: [object(16)][subject(16)][pred(4)][tt(8)]
-pub fn encode_osp(o: &NodeId, s: &NodeId, p: PredId, tt: Timestamp) -> HexKey {
-    let mut k = [0u8; HEXASTORE_KEY_LEN];
-    k[0..16].copy_from_slice(o.as_bytes());
-    k[16..32].copy_from_slice(s.as_bytes());
-    k[32..36].copy_from_slice(&p.to_be_bytes());
-    k[HEXASTORE_TUPLE_LEN..].copy_from_slice(&tt.to_be_bytes());
-    k
-}
-
-// ── Trigram CF key encoding ───────────────────────────────────────────────────
+// ── Trigram CF ────────────────────────────────────────────────────────────────
 
 /// Extract all 3-gram byte sequences from `text` (UTF-8 byte-level sliding window).
 ///
@@ -211,111 +288,41 @@ pub fn extract_trigrams(text: &str) -> Vec<[u8; 3]> {
     set.into_iter().collect()
 }
 
-/// TRI key layout: `[trigram(3)][pred_id LE(4)][subject(16)]` = 23 bytes. Value is empty.
-pub fn encode_tri(trigram: [u8; 3], pred_id: PredId, subject: &NodeId) -> [u8; 23] {
-    let mut k = [0u8; 23];
+/// TRI key: `[trigram(3)][pred_id BE(4)][g BE(4)][subject(16)]` = 27 bytes.
+/// Value is empty. The graph precedes the subject so graph ACLs can skip
+/// candidates without decoding them.
+pub fn encode_tri(trigram: [u8; 3], pred_id: PredId, g: GraphId, subject: &NodeId) -> [u8; 27] {
+    let mut k = [0u8; 27];
     k[0..3].copy_from_slice(&trigram);
-    k[3..7].copy_from_slice(&pred_id.to_le_bytes());
-    k[7..23].copy_from_slice(subject.as_bytes());
+    k[3..7].copy_from_slice(&pred_id.to_be_bytes());
+    k[7..11].copy_from_slice(&g.to_be_bytes());
+    k[11..27].copy_from_slice(subject.as_bytes());
     k
 }
 
-/// TRI prefix for scanning all subjects that have `(trigram, pred_id)`.
+/// TRI prefix for all subjects that have `(trigram, pred_id)` in any graph.
 pub fn tri_prefix_tp(trigram: [u8; 3], pred_id: PredId) -> [u8; 7] {
     let mut k = [0u8; 7];
     k[0..3].copy_from_slice(&trigram);
-    k[3..7].copy_from_slice(&pred_id.to_le_bytes());
+    k[3..7].copy_from_slice(&pred_id.to_be_bytes());
     k
 }
 
-/// Extract the subject `NodeId` from a 23-byte TRI key.
-pub fn decode_tri_subject(key: &[u8]) -> Result<NodeId, StorageError> {
-    check_len(key, 23, "TRI")?;
-    Ok(node_id_from(&key[7..23]))
+/// `(graph, subject)` of a TRI key.
+pub fn decode_tri(key: &[u8]) -> Result<(GraphId, NodeId), StorageError> {
+    check_len(key, 27, "TRI")?;
+    Ok((GraphId(u32_from(&key[7..11])), node_id_from(&key[11..27])))
 }
 
-// OPS: [object(16)][pred(4)][subject(16)][tt(8)]
-pub fn encode_ops(o: &NodeId, p: PredId, s: &NodeId, tt: Timestamp) -> HexKey {
-    let mut k = [0u8; HEXASTORE_KEY_LEN];
-    k[0..16].copy_from_slice(o.as_bytes());
-    k[16..20].copy_from_slice(&p.to_be_bytes());
-    k[20..36].copy_from_slice(s.as_bytes());
-    k[HEXASTORE_TUPLE_LEN..].copy_from_slice(&tt.to_be_bytes());
-    k
-}
+// ── RDF-star annotations (EPA / EPO / PEA) ───────────────────────────────────
 
-// ── decode ────────────────────────────────────────────────────────────────────
-
-pub fn decode_spo(key: &[u8]) -> Result<DecodedSpo, StorageError> {
-    check_len(key, HEXASTORE_KEY_LEN, "SPO")?;
-    Ok(DecodedSpo {
-        subject: node_id_from(&key[0..16]),
-        pred_id: pred_from(&key[16..20]),
-        object: node_id_from(&key[20..36]),
-        tt: tt_from(&key[HEXASTORE_TUPLE_LEN..]),
-    })
-}
-
-pub fn decode_sop(key: &[u8]) -> Result<DecodedSop, StorageError> {
-    check_len(key, HEXASTORE_KEY_LEN, "SOP")?;
-    Ok(DecodedSop {
-        subject: node_id_from(&key[0..16]),
-        object: node_id_from(&key[16..32]),
-        pred_id: pred_from(&key[32..36]),
-        tt: tt_from(&key[HEXASTORE_TUPLE_LEN..]),
-    })
-}
-
-pub fn decode_pso(key: &[u8]) -> Result<DecodedPso, StorageError> {
-    check_len(key, HEXASTORE_KEY_LEN, "PSO")?;
-    Ok(DecodedPso {
-        pred_id: pred_from(&key[0..4]),
-        subject: node_id_from(&key[4..20]),
-        object: node_id_from(&key[20..36]),
-        tt: tt_from(&key[HEXASTORE_TUPLE_LEN..]),
-    })
-}
-
-pub fn decode_pos(key: &[u8]) -> Result<DecodedPos, StorageError> {
-    check_len(key, HEXASTORE_KEY_LEN, "POS")?;
-    Ok(DecodedPos {
-        pred_id: pred_from(&key[0..4]),
-        object: node_id_from(&key[4..20]),
-        subject: node_id_from(&key[20..36]),
-        tt: tt_from(&key[HEXASTORE_TUPLE_LEN..]),
-    })
-}
-
-pub fn decode_osp(key: &[u8]) -> Result<DecodedOsp, StorageError> {
-    check_len(key, HEXASTORE_KEY_LEN, "OSP")?;
-    Ok(DecodedOsp {
-        object: node_id_from(&key[0..16]),
-        subject: node_id_from(&key[16..32]),
-        pred_id: pred_from(&key[32..36]),
-        tt: tt_from(&key[HEXASTORE_TUPLE_LEN..]),
-    })
-}
-
-#[inline]
-fn check_len(key: &[u8], expected: usize, name: &str) -> Result<(), StorageError> {
-    if key.len() != expected {
-        Err(StorageError::KeyDecode(format!(
-            "{name} key must be {expected} bytes, got {}",
-            key.len()
-        )))
-    } else {
-        Ok(())
-    }
-}
-
-// ── RDF-star EPA / EPO key encoding ──────────────────────────────────────────
-
-/// EPA key layout: `[edge_id(16)][pred_id BE(4)][tt BE(8)]` = 28 bytes.
-pub fn encode_epa_key(edge: &EdgeId, pred_id: PredId, tt: Timestamp) -> [u8; 28] {
-    let mut k = [0u8; 28];
+/// EPA key: `[edge(16)][pred_id(4)][g(4)][tt(8)]` = 32 bytes.
+pub fn encode_epa_key(edge: &EdgeId, pred_id: PredId, g: GraphId, tt: Timestamp) -> [u8; 32] {
+    let mut k = [0u8; 32];
     k[0..16].copy_from_slice(edge.as_bytes());
     k[16..20].copy_from_slice(&pred_id.to_be_bytes());
-    k[20..28].copy_from_slice(&tt.to_be_bytes());
+    k[20..24].copy_from_slice(&g.to_be_bytes());
+    k[24..32].copy_from_slice(&tt.to_be_bytes());
     k
 }
 
@@ -323,25 +330,34 @@ pub fn encode_epa_key(edge: &EdgeId, pred_id: PredId, tt: Timestamp) -> [u8; 28]
 pub struct DecodedEpa {
     pub edge_id: EdgeId,
     pub pred_id: PredId,
+    pub g: GraphId,
     pub tt: Timestamp,
 }
 
 pub fn decode_epa_key(key: &[u8]) -> Result<DecodedEpa, StorageError> {
-    check_len(key, 28, "EPA")?;
+    check_len(key, 32, "EPA")?;
     Ok(DecodedEpa {
         edge_id: EdgeId(Uuid::from_bytes(key[0..16].try_into().expect("16 bytes"))),
-        pred_id: pred_from(&key[16..20]),
-        tt: tt_from(&key[20..28]),
+        pred_id: u32_from(&key[16..20]),
+        g: GraphId(u32_from(&key[20..24])),
+        tt: tt_from(&key[24..32]),
     })
 }
 
-/// EPO key layout: `[edge_id(16)][pred_id BE(4)][obj_id(16)][tt BE(8)]` = 44 bytes.
-pub fn encode_epo_key(edge: &EdgeId, pred_id: PredId, obj: &NodeId, tt: Timestamp) -> [u8; 44] {
-    let mut k = [0u8; 44];
+/// EPO key: `[edge(16)][pred_id(4)][obj(16)][g(4)][tt(8)]` = 48 bytes.
+pub fn encode_epo_key(
+    edge: &EdgeId,
+    pred_id: PredId,
+    obj: &NodeId,
+    g: GraphId,
+    tt: Timestamp,
+) -> [u8; 48] {
+    let mut k = [0u8; 48];
     k[0..16].copy_from_slice(edge.as_bytes());
     k[16..20].copy_from_slice(&pred_id.to_be_bytes());
     k[20..36].copy_from_slice(obj.as_bytes());
-    k[36..44].copy_from_slice(&tt.to_be_bytes());
+    k[36..40].copy_from_slice(&g.to_be_bytes());
+    k[40..48].copy_from_slice(&tt.to_be_bytes());
     k
 }
 
@@ -350,45 +366,41 @@ pub struct DecodedEpo {
     pub edge_id: EdgeId,
     pub pred_id: PredId,
     pub object: NodeId,
+    pub g: GraphId,
     pub tt: Timestamp,
 }
 
 pub fn decode_epo_key(key: &[u8]) -> Result<DecodedEpo, StorageError> {
-    check_len(key, 44, "EPO")?;
+    check_len(key, 48, "EPO")?;
     Ok(DecodedEpo {
         edge_id: EdgeId(Uuid::from_bytes(key[0..16].try_into().expect("16 bytes"))),
-        pred_id: pred_from(&key[16..20]),
+        pred_id: u32_from(&key[16..20]),
         object: node_id_from(&key[20..36]),
-        tt: tt_from(&key[36..44]),
+        g: GraphId(u32_from(&key[36..40])),
+        tt: tt_from(&key[40..48]),
     })
 }
 
-/// EPA prefix: all property annotations for a given edge.
-pub fn epa_prefix_edge(edge: &EdgeId) -> [u8; 16] {
+/// EPA / EPO prefix: all annotations for a given edge.
+pub fn annotation_prefix_edge(edge: &EdgeId) -> [u8; 16] {
     *edge.as_bytes()
 }
 
-/// EPA prefix: all property annotations for (edge, predicate).
-pub fn epa_prefix_edge_pred(edge: &EdgeId, pred_id: PredId) -> [u8; 20] {
+/// EPA / EPO prefix: all annotations for (edge, predicate).
+pub fn annotation_prefix_edge_pred(edge: &EdgeId, pred_id: PredId) -> [u8; 20] {
     let mut k = [0u8; 20];
     k[0..16].copy_from_slice(edge.as_bytes());
     k[16..20].copy_from_slice(&pred_id.to_be_bytes());
     k
 }
 
-/// EPO prefix: all relation annotations for a given edge.
-pub fn epo_prefix_edge(edge: &EdgeId) -> [u8; 16] {
-    *edge.as_bytes()
-}
-
-// ── PEA (predicate-first annotation index) key encoding ──────────────────────
-
-/// PEA key layout: `[pred_id BE(4)][edge_id(16)][tt BE(8)]` = 28 bytes.
-pub fn encode_pea_key(pred_id: PredId, edge: &EdgeId, tt: Timestamp) -> [u8; 28] {
-    let mut k = [0u8; 28];
+/// PEA key: `[pred_id(4)][edge(16)][g(4)][tt(8)]` = 32 bytes.
+pub fn encode_pea_key(pred_id: PredId, edge: &EdgeId, g: GraphId, tt: Timestamp) -> [u8; 32] {
+    let mut k = [0u8; 32];
     k[0..4].copy_from_slice(&pred_id.to_be_bytes());
     k[4..20].copy_from_slice(edge.as_bytes());
-    k[20..28].copy_from_slice(&tt.to_be_bytes());
+    k[20..24].copy_from_slice(&g.to_be_bytes());
+    k[24..32].copy_from_slice(&tt.to_be_bytes());
     k
 }
 
@@ -396,15 +408,17 @@ pub fn encode_pea_key(pred_id: PredId, edge: &EdgeId, tt: Timestamp) -> [u8; 28]
 pub struct DecodedPea {
     pub pred_id: PredId,
     pub edge_id: EdgeId,
+    pub g: GraphId,
     pub tt: Timestamp,
 }
 
 pub fn decode_pea_key(key: &[u8]) -> Result<DecodedPea, StorageError> {
-    check_len(key, 28, "PEA")?;
+    check_len(key, 32, "PEA")?;
     Ok(DecodedPea {
-        pred_id: pred_from(&key[0..4]),
+        pred_id: u32_from(&key[0..4]),
         edge_id: EdgeId(Uuid::from_bytes(key[4..20].try_into().expect("16 bytes"))),
-        tt: tt_from(&key[20..28]),
+        g: GraphId(u32_from(&key[20..24])),
+        tt: tt_from(&key[24..32]),
     })
 }
 
@@ -413,62 +427,90 @@ pub fn pea_prefix_pred(pred_id: PredId) -> [u8; 4] {
     pred_id.to_be_bytes()
 }
 
-/// PEA prefix: all annotations for a specific (predicate, edge) pair.
-pub fn pea_prefix_pred_edge(pred_id: PredId, edge: &EdgeId) -> [u8; 20] {
-    let mut k = [0u8; 20];
-    k[0..4].copy_from_slice(&pred_id.to_be_bytes());
-    k[4..20].copy_from_slice(edge.as_bytes());
-    k
-}
+// ── Storage format v2 (read-only, for migration) ─────────────────────────────
 
-// ── prefix helpers for range scans ───────────────────────────────────────────
+/// The v2 (pre-graph) key layouts, kept only so `migrate_v3` can read old
+/// stores. Encoders exist for building v2 fixtures in tests.
+pub mod v2 {
+    use super::*;
 
-/// SPO prefix: all triples with the given subject.
-pub fn spo_prefix_s(s: &NodeId) -> [u8; 16] {
-    *s.as_bytes()
-}
+    /// v2 hexastore key width: `[a16|4][b][c][tt8]` = 44 bytes.
+    pub const KEY_LEN: usize = 44;
 
-/// SPO prefix: all triples with given (subject, predicate).
-pub fn spo_prefix_sp(s: &NodeId, p: PredId) -> [u8; 20] {
-    let mut k = [0u8; 20];
-    k[0..16].copy_from_slice(s.as_bytes());
-    k[16..20].copy_from_slice(&p.to_be_bytes());
-    k
-}
+    /// Object slot of v2 property keys.
+    pub const PROPERTY_SENTINEL: [u8; 16] = [0xFF; 16];
 
-/// SPO prefix: exactly the triple (subject, predicate, object) — all tt variants.
-pub fn spo_prefix_spo(s: &NodeId, p: PredId, o: &NodeId) -> HexTuple {
-    let mut k = [0u8; HEXASTORE_TUPLE_LEN];
-    k[0..16].copy_from_slice(s.as_bytes());
-    k[16..20].copy_from_slice(&p.to_be_bytes());
-    k[20..36].copy_from_slice(o.as_bytes());
-    k
-}
+    /// A decoded v2 SPO / DRV key.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Spo {
+        pub s: NodeId,
+        pub p: PredId,
+        pub o: NodeId,
+        pub tt: Timestamp,
+    }
 
-/// SOP prefix: all triples with given (subject, object).
-pub fn sop_prefix_so(s: &NodeId, o: &NodeId) -> [u8; 32] {
-    let mut k = [0u8; 32];
-    k[0..16].copy_from_slice(s.as_bytes());
-    k[16..32].copy_from_slice(o.as_bytes());
-    k
-}
+    impl Spo {
+        pub fn is_property(&self) -> bool {
+            self.o.as_bytes() == &PROPERTY_SENTINEL
+        }
+    }
 
-/// PSO prefix: all triples with the given predicate.
-pub fn pso_prefix_p(p: PredId) -> [u8; 4] {
-    p.to_be_bytes()
-}
+    pub fn decode_spo(key: &[u8]) -> Result<Spo, StorageError> {
+        check_len(key, KEY_LEN, "v2 SPO")?;
+        Ok(Spo {
+            s: node_id_from(&key[0..16]),
+            p: u32_from(&key[16..20]),
+            o: node_id_from(&key[20..36]),
+            tt: tt_from(&key[36..44]),
+        })
+    }
 
-/// POS prefix: all triples with given (predicate, object).
-pub fn pos_prefix_po(p: PredId, o: &NodeId) -> [u8; 20] {
-    let mut k = [0u8; 20];
-    k[0..4].copy_from_slice(&p.to_be_bytes());
-    k[4..20].copy_from_slice(o.as_bytes());
-    k
-}
+    pub fn encode_spo(s: &NodeId, p: PredId, o: &NodeId, tt: Timestamp) -> [u8; KEY_LEN] {
+        let mut k = [0u8; KEY_LEN];
+        k[0..16].copy_from_slice(s.as_bytes());
+        k[16..20].copy_from_slice(&p.to_be_bytes());
+        k[20..36].copy_from_slice(o.as_bytes());
+        k[36..44].copy_from_slice(&tt.to_be_bytes());
+        k
+    }
 
-/// OSP prefix: all triples with the given object.
-pub fn osp_prefix_o(o: &NodeId) -> [u8; 16] {
-    *o.as_bytes()
+    /// `(edge, pred, tt)` of a v2 EPA key `[edge16][p4][tt8]`.
+    pub fn decode_epa(key: &[u8]) -> Result<(EdgeId, PredId, Timestamp), StorageError> {
+        check_len(key, 28, "v2 EPA")?;
+        Ok((
+            EdgeId(Uuid::from_bytes(key[0..16].try_into().expect("16 bytes"))),
+            u32_from(&key[16..20]),
+            tt_from(&key[20..28]),
+        ))
+    }
+
+    pub fn encode_epa(edge: &EdgeId, p: PredId, tt: Timestamp) -> [u8; 28] {
+        let mut k = [0u8; 28];
+        k[0..16].copy_from_slice(edge.as_bytes());
+        k[16..20].copy_from_slice(&p.to_be_bytes());
+        k[20..28].copy_from_slice(&tt.to_be_bytes());
+        k
+    }
+
+    /// `(edge, pred, object, tt)` of a v2 EPO key `[edge16][p4][o16][tt8]`.
+    pub fn decode_epo(key: &[u8]) -> Result<(EdgeId, PredId, NodeId, Timestamp), StorageError> {
+        check_len(key, 44, "v2 EPO")?;
+        Ok((
+            EdgeId(Uuid::from_bytes(key[0..16].try_into().expect("16 bytes"))),
+            u32_from(&key[16..20]),
+            node_id_from(&key[20..36]),
+            tt_from(&key[36..44]),
+        ))
+    }
+
+    pub fn encode_epo(edge: &EdgeId, p: PredId, o: &NodeId, tt: Timestamp) -> [u8; 44] {
+        let mut k = [0u8; 44];
+        k[0..16].copy_from_slice(edge.as_bytes());
+        k[16..20].copy_from_slice(&p.to_be_bytes());
+        k[20..36].copy_from_slice(o.as_bytes());
+        k[36..44].copy_from_slice(&tt.to_be_bytes());
+        k
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -476,329 +518,142 @@ pub fn osp_prefix_o(o: &NodeId) -> [u8; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polargraph_core::{id::NodeId, temporal::Timestamp};
-    use uuid::Uuid;
 
     fn node(seed: u8) -> NodeId {
         NodeId(Uuid::from_bytes([seed; 16]))
     }
 
-    fn ts(v: i64) -> Timestamp {
-        Timestamp(v)
-    }
-
-    // ── encode/decode round-trips ─────────────────────────────────────────────
-
-    #[test]
-    fn spo_round_trip() {
-        let s = node(0xAA);
-        let o = node(0xBB);
-        let p: PredId = 0x0000_0042;
-        let tt = ts(999_999);
-
-        let key = encode_spo(&s, p, &o, tt);
-        let d = decode_spo(&key).unwrap();
-
-        assert_eq!(d.subject, s);
-        assert_eq!(d.pred_id, p);
-        assert_eq!(d.object, o);
-        assert_eq!(d.tt, tt);
+    fn quad(s: u8, p: PredId, o: u8, g: u32, tt: i64) -> QuadKey {
+        QuadKey {
+            s: node(s),
+            p,
+            o: node(o),
+            g: GraphId(g),
+            tt: Timestamp(tt),
+        }
     }
 
     #[test]
-    fn pso_round_trip() {
-        let s = node(0x01);
-        let o = node(0x02);
-        let p: PredId = 7;
-        let tt = ts(12345);
-
-        let key = encode_pso(p, &s, &o, tt);
-        let d = decode_pso(&key).unwrap();
-
-        assert_eq!(d.pred_id, p);
-        assert_eq!(d.subject, s);
-        assert_eq!(d.object, o);
-        assert_eq!(d.tt, tt);
+    fn every_order_round_trips() {
+        let k = quad(0xAA, 0x42, 0xBB, 7, 999_999);
+        for order in Order::ALL {
+            let bytes = order.encode(&k);
+            assert_eq!(bytes.len(), QUAD_KEY_LEN);
+            assert_eq!(order.decode(&bytes).unwrap(), k, "{order:?}");
+            assert_eq!(order.graph_of(&bytes), GraphId(7), "{order:?}");
+            assert_eq!(key_tt(&bytes), Timestamp(999_999));
+        }
     }
 
     #[test]
-    fn pos_round_trip() {
-        let s = node(0x03);
-        let o = node(0x04);
-        let p: PredId = 255;
-        let tt = ts(0);
-
-        let key = encode_pos(p, &o, &s, tt);
-        let d = decode_pos(&key).unwrap();
-
-        assert_eq!(d.pred_id, p);
-        assert_eq!(d.object, o);
-        assert_eq!(d.subject, s);
-        assert_eq!(d.tt, tt);
+    fn slot_positions_match_the_design() {
+        let k = quad(0x11, 0x22, 0x33, 0x44, 0x55);
+        let spog = Order::Spog.encode(&k);
+        assert_eq!(&spog[0..16], &[0x11; 16]);
+        assert_eq!(&spog[16..20], &0x22u32.to_be_bytes());
+        assert_eq!(&spog[20..36], &[0x33; 16]);
+        assert_eq!(&spog[36..40], &0x44u32.to_be_bytes());
+        let gpos = Order::Gpos.encode(&k);
+        assert_eq!(&gpos[0..4], &0x44u32.to_be_bytes());
+        assert_eq!(&gpos[4..8], &0x22u32.to_be_bytes());
+        assert_eq!(&gpos[8..24], &[0x33; 16]);
+        assert_eq!(&gpos[24..40], &[0x11; 16]);
     }
 
     #[test]
-    fn osp_round_trip() {
-        let s = node(0x05);
-        let o = node(0x06);
-        let p: PredId = u32::MAX;
-        let tt = ts(i64::MAX);
-
-        let key = encode_osp(&o, &s, p, tt);
-        let d = decode_osp(&key).unwrap();
-
-        assert_eq!(d.object, o);
-        assert_eq!(d.subject, s);
-        assert_eq!(d.pred_id, p);
-        assert_eq!(d.tt, tt);
+    fn prefixes_stop_at_the_first_unbound_slot() {
+        let k = quad(1, 2, 3, 4, 5);
+        let s = node(1);
+        let o = node(3);
+        for (order, prefix) in [
+            (
+                Order::Spog,
+                Order::Spog.prefix(Some(&s), Some(2), None, None),
+            ),
+            (
+                Order::Posg,
+                Order::Posg.prefix(None, Some(2), Some(&o), None),
+            ),
+            (
+                Order::Gspo,
+                Order::Gspo.prefix(Some(&s), Some(2), None, Some(GraphId(4))),
+            ),
+        ] {
+            assert_eq!(prefix.len(), 20 + if order == Order::Gspo { 4 } else { 0 });
+            assert!(order.encode(&k).starts_with(&prefix), "{order:?}");
+        }
+        // Unbound leading slot → empty prefix (full scan).
+        assert!(Order::Spog.prefix(None, Some(2), None, None).is_empty());
+        // Every slot bound → the whole quad.
+        assert_eq!(
+            Order::Spog
+                .prefix(Some(&s), Some(2), Some(&o), Some(GraphId(4)))
+                .len(),
+            QUAD_TUPLE_LEN
+        );
     }
 
     #[test]
-    fn sop_round_trip() {
-        let s = node(0x07);
-        let o = node(0x08);
-        let p: PredId = 42;
-        let tt = ts(7777);
-
-        let key = encode_sop(&s, &o, p, tt);
-        let d = decode_sop(&key).unwrap();
-
-        assert_eq!(d.subject, s);
-        assert_eq!(d.object, o);
-        assert_eq!(d.pred_id, p);
-        assert_eq!(d.tt, tt);
+    fn versions_of_one_quad_sort_together_oldest_first() {
+        let a = Order::Spog.encode(&quad(1, 2, 3, 0, 10));
+        let b = Order::Spog.encode(&quad(1, 2, 3, 0, 20));
+        let other_graph = Order::Spog.encode(&quad(1, 2, 3, 1, 5));
+        assert!(a < b);
+        assert!(b < other_graph, "graph sorts before tt");
+        assert_eq!(a[..QUAD_TUPLE_LEN], b[..QUAD_TUPLE_LEN]);
+        assert!(tuple_end(&a[..QUAD_TUPLE_LEN]).as_slice() > b.as_slice());
     }
 
     #[test]
-    fn sop_prefix_so_is_prefix_of_sop_key() {
-        let s = node(0x07);
-        let o = node(0x08);
-        let key = encode_sop(&s, &o, 1, ts(0));
-        let prefix = sop_prefix_so(&s, &o);
-        assert!(key.starts_with(&prefix));
+    fn value_objects_are_content_hashes() {
+        let v = Value::Text("hello".into());
+        assert_eq!(value_object(&v).as_bytes(), &v.content_hash());
+        assert_ne!(value_object(&v), value_object(&Value::Text("world".into())));
     }
 
     #[test]
-    fn sop_encode_is_44_bytes() {
-        let s = node(0x07);
-        let o = node(0x08);
-        assert_eq!(encode_sop(&s, &o, 1, ts(0)).len(), 44);
+    fn ancillary_keys_round_trip() {
+        let e = EdgeId(Uuid::from_bytes([9; 16]));
+        let d = decode_epa_key(&encode_epa_key(&e, 3, GraphId(2), Timestamp(7))).unwrap();
+        assert_eq!(
+            (d.edge_id, d.pred_id, d.g, d.tt),
+            (e, 3, GraphId(2), Timestamp(7))
+        );
+        let d = decode_epo_key(&encode_epo_key(&e, 3, &node(5), GraphId(2), Timestamp(7))).unwrap();
+        assert_eq!((d.object, d.g, d.tt), (node(5), GraphId(2), Timestamp(7)));
+        let d = decode_pea_key(&encode_pea_key(3, &e, GraphId(2), Timestamp(7))).unwrap();
+        assert_eq!((d.pred_id, d.edge_id, d.g), (3, e, GraphId(2)));
+        let tri = encode_tri(*b"abc", 3, GraphId(2), &node(5));
+        assert!(tri.starts_with(&tri_prefix_tp(*b"abc", 3)));
+        assert_eq!(decode_tri(&tri).unwrap(), (GraphId(2), node(5)));
     }
 
     #[test]
-    fn ops_encode_is_44_bytes() {
-        let s = node(0x09);
-        let o = node(0x0A);
-        assert_eq!(encode_ops(&o, 1, &s, ts(0)).len(), 44);
-    }
-
-    // ── keys sort in the right order ──────────────────────────────────────────
-
-    #[test]
-    fn spo_keys_sort_by_subject_first() {
-        let s1 = node(0x01);
-        let s2 = node(0x02);
-        let o = node(0xCC);
-        let p = 1u32;
-
-        let k1 = encode_spo(&s1, p, &o, ts(0));
-        let k2 = encode_spo(&s2, p, &o, ts(0));
-        assert!(k1 < k2, "key for lower subject should sort first");
+    fn wrong_lengths_are_errors() {
+        assert!(Order::Spog.decode(&[0u8; 44]).is_err());
+        assert!(decode_epa_key(&[0u8; 28]).is_err());
+        assert!(v2::decode_spo(&[0u8; 48]).is_err());
     }
 
     #[test]
-    fn spo_keys_sort_by_predicate_second() {
-        let s = node(0xAA);
-        let o = node(0xBB);
-
-        let k1 = encode_spo(&s, 1, &o, ts(0));
-        let k2 = encode_spo(&s, 2, &o, ts(0));
-        assert!(k1 < k2);
+    fn v2_keys_round_trip() {
+        let k = v2::encode_spo(
+            &node(1),
+            2,
+            &NodeId(Uuid::from_bytes(v2::PROPERTY_SENTINEL)),
+            Timestamp(3),
+        );
+        let d = v2::decode_spo(&k).unwrap();
+        assert!(d.is_property());
+        assert_eq!((d.s, d.p, d.tt), (node(1), 2, Timestamp(3)));
     }
 
     #[test]
-    fn spo_keys_sort_by_tt_last() {
-        let s = node(0xAA);
-        let o = node(0xBB);
-        let p = 5u32;
-
-        let k1 = encode_spo(&s, p, &o, ts(100));
-        let k2 = encode_spo(&s, p, &o, ts(200));
-        assert!(k1 < k2);
-    }
-
-    // ── prefix helpers ────────────────────────────────────────────────────────
-
-    #[test]
-    fn spo_prefix_s_is_prefix_of_spo_key() {
-        let s = node(0xAA);
-        let o = node(0xBB);
-        let key = encode_spo(&s, 1, &o, ts(0));
-        let prefix = spo_prefix_s(&s);
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
-    fn spo_prefix_sp_is_prefix_of_spo_key() {
-        let s = node(0xAA);
-        let o = node(0xBB);
-        let p = 42u32;
-        let key = encode_spo(&s, p, &o, ts(0));
-        let prefix = spo_prefix_sp(&s, p);
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
-    fn pso_prefix_p_is_prefix_of_pso_key() {
-        let s = node(0xCC);
-        let o = node(0xDD);
-        let p = 9u32;
-        let key = encode_pso(p, &s, &o, ts(0));
-        let prefix = pso_prefix_p(p);
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
-    fn pos_prefix_po_is_prefix_of_pos_key() {
-        let s = node(0xEE);
-        let o = node(0xFF);
-        let p = 3u32;
-        let key = encode_pos(p, &o, &s, ts(0));
-        let prefix = pos_prefix_po(p, &o);
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
-    fn osp_prefix_o_is_prefix_of_osp_key() {
-        let s = node(0x11);
-        let o = node(0x22);
-        let key = encode_osp(&o, &s, 1, ts(0));
-        let prefix = osp_prefix_o(&o);
-        assert!(key.starts_with(&prefix));
-    }
-
-    // ── non-prefix keys do NOT start with a different node's prefix ───────────
-
-    #[test]
-    fn spo_prefix_does_not_match_different_subject() {
-        let s1 = node(0x01);
-        let s2 = node(0x02);
-        let o = node(0xBB);
-        let key = encode_spo(&s1, 1, &o, ts(0));
-        let wrong_prefix = spo_prefix_s(&s2);
-        assert!(!key.starts_with(&wrong_prefix));
-    }
-
-    // ── property sentinel ─────────────────────────────────────────────────────
-
-    #[test]
-    fn property_sentinel_detected() {
-        assert!(is_property_sentinel(&PROPERTY_SENTINEL));
-    }
-
-    #[test]
-    fn normal_node_id_not_sentinel() {
-        let n = node(0xAB);
-        assert!(!is_property_sentinel(n.as_bytes()));
-    }
-
-    // ── decode error on wrong length ──────────────────────────────────────────
-
-    #[test]
-    fn decode_spo_wrong_length_errors() {
-        assert!(decode_spo(&[0u8; 43]).is_err());
-        assert!(decode_spo(&[0u8; 45]).is_err());
-        assert!(decode_spo(&[]).is_err());
-    }
-
-    #[test]
-    fn decode_pso_wrong_length_errors() {
-        assert!(decode_pso(&[0u8; 43]).is_err());
-    }
-
-    #[test]
-    fn decode_pos_wrong_length_errors() {
-        assert!(decode_pos(&[0u8; 43]).is_err());
-    }
-
-    #[test]
-    fn decode_osp_wrong_length_errors() {
-        assert!(decode_osp(&[0u8; 43]).is_err());
-    }
-
-    // ── PEA encode/decode round-trips ─────────────────────────────────────────
-
-    #[test]
-    fn pea_round_trip() {
-        use polargraph_core::id::EdgeId;
-        let edge = EdgeId(Uuid::from_bytes([0xAB; 16]));
-        let pred: PredId = 0x0000_007F;
-        let tt = ts(123_456_789);
-
-        let key = encode_pea_key(pred, &edge, tt);
-        assert_eq!(key.len(), 28);
-        let d = decode_pea_key(&key).unwrap();
-
-        assert_eq!(d.pred_id, pred);
-        assert_eq!(d.edge_id.as_bytes(), edge.as_bytes());
-        assert_eq!(d.tt, tt);
-    }
-
-    #[test]
-    fn pea_prefix_pred_is_prefix_of_pea_key() {
-        use polargraph_core::id::EdgeId;
-        let edge = EdgeId(Uuid::from_bytes([0xCD; 16]));
-        let pred: PredId = 42;
-        let key = encode_pea_key(pred, &edge, ts(0));
-        let prefix = pea_prefix_pred(pred);
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
-    fn pea_prefix_pred_edge_is_prefix_of_pea_key() {
-        use polargraph_core::id::EdgeId;
-        let edge = EdgeId(Uuid::from_bytes([0xEF; 16]));
-        let pred: PredId = 7;
-        let key = encode_pea_key(pred, &edge, ts(999));
-        let prefix = pea_prefix_pred_edge(pred, &edge);
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
-    fn pea_different_pred_does_not_match_prefix() {
-        use polargraph_core::id::EdgeId;
-        let edge = EdgeId(Uuid::from_bytes([0x11; 16]));
-        let key = encode_pea_key(1, &edge, ts(0));
-        let wrong_prefix = pea_prefix_pred(2);
-        assert!(!key.starts_with(&wrong_prefix));
-    }
-
-    #[test]
-    fn decode_pea_wrong_length_errors() {
-        assert!(decode_pea_key(&[0u8; 27]).is_err());
-        assert!(decode_pea_key(&[0u8; 29]).is_err());
-        assert!(decode_pea_key(&[]).is_err());
-    }
-
-    #[test]
-    fn pea_keys_sort_by_pred_then_edge_then_tt() {
-        use polargraph_core::id::EdgeId;
-        let edge1 = EdgeId(Uuid::from_bytes([0x01; 16]));
-        let edge2 = EdgeId(Uuid::from_bytes([0x02; 16]));
-
-        // Same pred, different edge
-        let k1 = encode_pea_key(5, &edge1, ts(0));
-        let k2 = encode_pea_key(5, &edge2, ts(0));
-        assert!(k1 < k2, "lower edge bytes should sort first");
-
-        // Different pred
-        let k3 = encode_pea_key(4, &edge2, ts(0));
-        let k4 = encode_pea_key(5, &edge1, ts(0));
-        assert!(k3 < k4, "lower pred_id should sort first");
-
-        // Same pred+edge, different tt
-        let k5 = encode_pea_key(5, &edge1, ts(100));
-        let k6 = encode_pea_key(5, &edge1, ts(200));
-        assert!(k5 < k6, "lower tt should sort first");
+    fn trigram_extraction() {
+        assert!(extract_trigrams("").is_empty());
+        assert_eq!(extract_trigrams("ab"), vec![[b'a', b'b', 0]]);
+        let mut t = extract_trigrams("abcd");
+        t.sort();
+        assert_eq!(t, vec![*b"abc", *b"bcd"]);
     }
 }
