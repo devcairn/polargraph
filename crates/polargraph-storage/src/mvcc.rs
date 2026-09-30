@@ -36,6 +36,7 @@ use polargraph_core::{
 };
 use rocksdb::{Direction, IteratorMode, WriteBatch};
 use std::{
+    collections::HashMap,
     sync::{
         atomic::{AtomicI64, Ordering},
         Arc, Mutex, MutexGuard,
@@ -151,6 +152,8 @@ pub struct Transaction {
     pub(crate) store: TripleStore,
     pub read_ts: Timestamp,
     write_buffer: Vec<Triple>,
+    /// IRIs to record in the IRI dictionary on commit.
+    iris: Vec<String>,
 }
 
 impl Transaction {
@@ -159,7 +162,15 @@ impl Transaction {
             store,
             read_ts,
             write_buffer: Vec::new(),
+            iris: Vec::new(),
         }
+    }
+
+    /// Record `iri` in the IRI dictionary when this transaction commits, so
+    /// the node it names (`term::iri_to_node_id(iri)`) can be exported under
+    /// its IRI. `urn:uuid:` IRIs are ignored (they carry their ID).
+    pub fn bind_iri(&mut self, iri: impl Into<String>) {
+        self.iris.push(iri.into());
     }
 
     /// Buffer a triple for insertion at commit time.
@@ -234,7 +245,7 @@ impl Transaction {
     ///   4. Persist updated oracle counter to META CF.
     ///   5. Release commit lock.
     pub fn commit(self) -> Result<Timestamp, StorageError> {
-        if self.write_buffer.is_empty() {
+        if self.write_buffer.is_empty() && self.iris.is_empty() {
             return Ok(self.read_ts);
         }
 
@@ -300,6 +311,13 @@ impl Transaction {
                         .batch_epo(&mut batch, *edge, pred_id, *object, commit_ts, &epo_val)?;
                 }
             }
+        }
+
+        // IRI dictionary entries — checked and written under the commit lock,
+        // so concurrent bindings of one node are serialized.
+        let mut pending_iris = HashMap::new();
+        for iri in &self.iris {
+            self.store.batch_iri(&mut batch, iri, &mut pending_iris)?;
         }
 
         // Persist oracle counter so restarts don't reuse timestamps.

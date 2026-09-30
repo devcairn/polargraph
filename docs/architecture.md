@@ -142,6 +142,8 @@ PolarGraph opens twelve RocksDB column families:
 | `drv` | OWL 2 RL derived (materialized) facts — same SPO key layout, separate CF |
 | `epa` | Edge property annotations (key: `[edge_id:16][pred_id:4][tt:8]`) |
 | `epo` | Edge relation annotations (key: `[edge_id:16][pred_id:4][obj_id:16][tt:8]`) |
+| `pea` | Predicate-first index over `epa` (key: `[pred_id:4][edge_id:16][tt:8]`) |
+| `iri` | IRI dictionary: `[node_id:16]` → IRI (UTF-8), for hashed (non-`urn:uuid:`) IRIs |
 
 The six `spo`/`sop`/`pso`/`pos`/`osp`/`ops` CFs implement the **hexastore** pattern. Every insert
 writes atomically to all six via a single `WriteBatch`. This makes every
@@ -2810,9 +2812,20 @@ with `--skolem-base` on `polargraph-rest` (`POLARGRAPH_REST_SKOLEM_BASE`) and
 `polargraph-import` (`POLARGRAPH_SKOLEM_BASE`). In JSON-LD, an `@id` of the
 form `_:label` is a blank node.
 
-Skolem IRIs are not yet stored (NodeIds are one-way hashes), so export still
-renders blank nodes as `urn:uuid:` IRIs; de-skolemizing export needs the
-IRI dictionary.
+Skolem IRIs are recorded in the IRI dictionary (below) like any other IRI.
+
+#### IRI dictionary
+
+NodeIds for IRIs are one-way hashes, so the `iri` column family records the
+IRI behind each hashed NodeId (`[node_id:16] → IRI`). Every import path writes
+it in the same commit as the triples: REST `/import/rdf` and SPARQL
+`INSERT DATA` send `InsertRequest.iris`, `polargraph-import` calls
+`SstImporter::add_iri`. `urn:uuid:` IRIs aren't stored — they carry their ID.
+A different IRI for an already-named NodeId (a 128-bit hash collision) is
+rejected with `IriCollision`. `ResolveIris` maps NodeIds back to IRIs, falling
+back to `urn:uuid:`. Entries are never rewritten or deleted. Data imported
+before the dictionary existed has no entries and still resolves to
+`urn:uuid:` until re-imported.
 
 RDF-star quoted triples (as subject or object) are stored as the N-Triples-star
 string representation.

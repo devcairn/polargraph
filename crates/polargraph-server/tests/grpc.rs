@@ -6722,3 +6722,62 @@ async fn query_literal_term_matches_equal_property_values_only() {
     assert_eq!(resp.bindings.len(), 1, "literal must not act as a wildcard");
     assert_eq!(resp.bindings[0].vars["s"].bytes, alice.bytes);
 }
+
+// ── IRI dictionary ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn insert_iris_then_resolve_iris_round_trips() {
+    use polargraph_server::proto::ResolveIrisRequest;
+
+    let (svc, _dir) = open();
+    let alice_iri = "http://example.org/Alice";
+    let alice = polargraph_core::term::iri_to_node_id(alice_iri);
+    let alice_proto = NodeId {
+        bytes: alice.as_bytes().to_vec(),
+    };
+    let (native, native_proto) = new_node();
+
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(alice_proto.clone(), "knows", native_proto.clone())],
+        iris: vec![alice_iri.into()],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .resolve_iris(Request::new(ResolveIrisRequest {
+            nodes: vec![alice_proto, native_proto],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        resp.iris,
+        vec![
+            alice_iri.to_string(),
+            polargraph_core::term::fallback_iri(&native),
+        ],
+        "stored IRI, then urn:uuid fallback, in request order"
+    );
+}
+
+#[tokio::test]
+async fn insert_accepts_iri_only_requests_and_rejects_empty_iris() {
+    let (svc, _dir) = open();
+    svc.insert(Request::new(InsertRequest {
+        iris: vec!["http://example.org/Bob".into()],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let err = svc
+        .insert(Request::new(InsertRequest {
+            iris: vec![String::new()],
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}

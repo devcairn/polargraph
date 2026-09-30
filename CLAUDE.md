@@ -12,7 +12,7 @@ PolarGraph is a purpose-built, Rust-based graph database engine. The core
 data model is a **triple store** (subject → predicate → object) with:
 
 - **Bitemporal versioning** on every fact (valid time + transaction time)
-- A **hexastore index** (6 RocksDB column families + 7 ancillary CFs) for O(log n) lookups on
+- A **hexastore index** (6 RocksDB column families + 8 ancillary CFs) for O(log n) lookups on
   any (S, P, O) bind pattern
 - **Optimistic MVCC** for snapshot-isolated reads and conflict-detected writes
 - A **View** system for projecting subsets of the graph with label overrides
@@ -110,6 +110,7 @@ Dependency-free. No I/O, no async. Contains every shared type.
 | `view` | `View`, `ViewId`, `NodeFilter`, `EdgePresentation` |
 | `schema` | `FieldKind`, `FieldDef`, `NodeTypeDef`, `EdgeTypeDef`, `VectorSpaceDef` |
 | `skolem` | `ImportScope` — per-import blank-node skolemization (`{base}/.well-known/genid/{import_id}/{label}`) |
+| `term` | `iri_to_node_id`, `fallback_iri`, `edge_id_for` — the one IRI ↔ NodeId mapping every path uses |
 
 **Do not add I/O or async imports here.**
 
@@ -123,7 +124,7 @@ RocksDB-backed persistence. Owns the hexastore layout and MVCC layer.
 | `mvcc` | `TimestampOracle`, `Transaction`, `Snapshot`, `ConflictError` |
 | `keys` | Fixed-width key encoding/decoding for all hexastore CFs |
 | `codec` | Value serialization (discriminant + temporal + payload) |
-| `cf` | Column family name constants (SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, DRV, EPA, EPO, PEA) |
+| `cf` | Column family name constants (SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, DRV, EPA, EPO, PEA, IRI) |
 | `error` | `StorageError` |
 | `hnsw` | `HnswIndex` — pure-Rust HNSW, named-space key helpers, serialize/deserialize, mmap storage |
 | `registry` | `NodeTypeRegistry`, `EdgeTypeRegistry`, `ValidationError` |
@@ -277,7 +278,7 @@ every index key, so both variants share the same index structure.
 
 ### Column families
 
-PolarGraph uses 13 RocksDB column families. Every triple is written atomically
+PolarGraph uses 14 RocksDB column families. Every triple is written atomically
 to all 6 hexastore CFs via a single `WriteBatch`; the others are written in the
 same batch or separately as appropriate:
 
@@ -291,6 +292,7 @@ same batch or separately as appropriate:
 | EPA | Edge property annotations (key: `[edge_id:16][pred_id:4][tt:8]`) |
 | EPO | Edge relation annotations (key: `[edge_id:16][pred_id:4][obj_id:16][tt:8]`) |
 | PEA | Predicate-first secondary index over EPA (key: `[pred_id:4][edge_id:16][tt:8]`) |
+| IRI | IRI dictionary: `[node_id:16]` → IRI for hashed NodeIds (`Transaction::bind_iri`, `iri_of`, `iris_of`) |
 
 ### Hexastore (6-CF sub-index)
 

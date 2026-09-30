@@ -57,6 +57,7 @@ pub struct ImportStats {
 pub struct SstImporter {
     output_dir: PathBuf,
     triples: Vec<Triple>,
+    iris: Vec<String>,
 }
 
 impl SstImporter {
@@ -68,7 +69,14 @@ impl SstImporter {
         Ok(Self {
             output_dir: output_dir.to_path_buf(),
             triples: Vec::new(),
+            iris: Vec::new(),
         })
+    }
+
+    /// Record `iri` in the IRI dictionary as part of this import (see
+    /// `Transaction::bind_iri`). Duplicates are fine.
+    pub fn add_iri(&mut self, iri: impl Into<String>) {
+        self.iris.push(iri.into());
     }
 
     /// Buffer a triple for import. The triple's `tt` field is ignored;
@@ -90,7 +98,7 @@ impl SstImporter {
         let start = Instant::now();
         let n = self.triples.len();
 
-        if n == 0 {
+        if n == 0 && self.iris.is_empty() {
             return Ok(ImportStats {
                 triples_imported: 0,
                 duration_ms: 0,
@@ -231,7 +239,13 @@ impl SstImporter {
             }
         }
 
-        // ── 6. Persist oracle counter ─────────────────────────────────────────
+        // ── 6. IRI dictionary entries ─────────────────────────────────────────
+        let mut pending_iris = std::collections::HashMap::new();
+        for iri in &self.iris {
+            store.batch_iri(&mut tri_batch, iri, &mut pending_iris)?;
+        }
+
+        // ── 7. Persist oracle counter ─────────────────────────────────────────
         let meta_cf = store.cf_handle(cf::META)?;
         tri_batch.put_cf(&meta_cf, META_ORACLE_CTR, commit_ts.0.to_be_bytes());
         store.db_write(tri_batch)?;

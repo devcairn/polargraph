@@ -67,6 +67,24 @@ impl ImportedTriple {
     }
 }
 
+impl ImportedTriple {
+    /// The IRIs this triple names nodes by — subject and IRI/blank-node object,
+    /// with blank nodes as their skolem IRIs — for the IRI dictionary.
+    pub fn node_iris(&self, scope: &ImportScope) -> impl Iterator<Item = String> {
+        let subject = if self.subject_is_bnode {
+            scope.skolem_iri(&self.subject)
+        } else {
+            self.subject.clone()
+        };
+        let object = match &self.object {
+            ImportedObject::Iri(iri) => Some(iri.clone()),
+            ImportedObject::BlankNode(label) => Some(scope.skolem_iri(label)),
+            ImportedObject::Literal { .. } => None,
+        };
+        std::iter::once(subject).chain(object)
+    }
+}
+
 impl ImportedObject {
     /// The object's `NodeId` for IRIs and blank nodes (skolemized within
     /// `scope`); `None` for literals.

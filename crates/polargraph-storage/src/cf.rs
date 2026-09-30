@@ -39,6 +39,11 @@ pub const PEA: &str = "pea";
 /// Derived triples are kept separate from base data and can be wiped and rebuilt cleanly.
 pub const DRV: &str = "drv";
 
+/// IRI dictionary: the IRI behind each hashed `NodeId`.
+/// Key: `[node_id(16)]`. Value: the IRI as UTF-8. Only IRIs that don't carry
+/// their ID (i.e. not `urn:uuid:`) are stored; entries are never rewritten.
+pub const IRI: &str = "iri";
+
 pub const ALL: &[&str] = &[
-    SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, EPA, EPO, PEA, DRV,
+    SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, EPA, EPO, PEA, DRV, IRI,
 ];

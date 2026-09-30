@@ -40,6 +40,7 @@ use polargraph_core::{
     id::{EdgeId, NodeId},
     schema::StorageMode,
     temporal::{BiTemporalRange, Timestamp},
+    term,
     triple::{Predicate, Triple},
     value::Value,
 };
@@ -1193,6 +1194,93 @@ impl TripleStore {
         Ok(())
     }
 
+    // ── IRI dictionary ────────────────────────────────────────────────────────
+
+    /// Add an IRI dictionary entry for `iri` to `batch`.
+    ///
+    /// No-op for `urn:uuid:` IRIs and for IRIs already stored. `pending`
+    /// carries entries added earlier in the same batch. Returns
+    /// [`StorageError::IriCollision`] if a different IRI already names the node.
+    pub(crate) fn batch_iri(
+        &self,
+        batch: &mut WriteBatch,
+        iri: &str,
+        pending: &mut HashMap<NodeId, String>,
+    ) -> Result<(), StorageError> {
+        if !term::needs_dictionary(iri) {
+            return Ok(());
+        }
+        let node = term::iri_to_node_id(iri);
+        let existing = match pending.get(&node) {
+            Some(p) => Some(p.clone()),
+            None => self.iri_of(&node)?,
+        };
+        match existing {
+            Some(e) if e == iri => Ok(()),
+            Some(e) => Err(StorageError::IriCollision {
+                node,
+                existing: e,
+                new: iri.to_string(),
+            }),
+            None => {
+                batch.put_cf(&self.cf_handle(cf::IRI)?, node.as_bytes(), iri.as_bytes());
+                pending.insert(node, iri.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    /// The IRI stored for `node`, if any. `urn:uuid:` nodes have no entry —
+    /// use [`term::fallback_iri`].
+    pub fn iri_of(&self, node: &NodeId) -> Result<Option<String>, StorageError> {
+        let cf = self.cf_handle(cf::IRI)?;
+        match self.inner.db.get_cf(&cf, node.as_bytes())? {
+            Some(bytes) => Ok(Some(String::from_utf8(bytes).map_err(|e| {
+                StorageError::KeyDecode(format!("IRI for {node} is not UTF-8: {e}"))
+            })?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Stored IRIs for `nodes`; nodes without an entry are omitted.
+    pub fn iris_of(&self, nodes: &[NodeId]) -> Result<HashMap<NodeId, String>, StorageError> {
+        let cf = self.cf_handle(cf::IRI)?;
+        let results = self
+            .inner
+            .db
+            .multi_get_cf(nodes.iter().map(|n| (&cf, n.as_bytes())));
+        let mut out = HashMap::new();
+        for (node, res) in nodes.iter().zip(results) {
+            if let Some(bytes) = res? {
+                let iri = String::from_utf8(bytes).map_err(|e| {
+                    StorageError::KeyDecode(format!("IRI for {node} is not UTF-8: {e}"))
+                })?;
+                out.insert(*node, iri);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Record IRIs in the dictionary in their own write (no triples).
+    /// Used by offline tools; transactional callers use `Transaction::bind_iri`.
+    pub fn bind_iris<'a>(
+        &self,
+        iris: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), StorageError> {
+        if self.is_replica() {
+            return Err(Self::read_only_err());
+        }
+        let mut batch = WriteBatch::default();
+        let mut pending = HashMap::new();
+        for iri in iris {
+            self.batch_iri(&mut batch, iri, &mut pending)?;
+        }
+        if !batch.is_empty() {
+            self.db_write(batch)?;
+        }
+        Ok(())
+    }
+
     // ── trigram index ─────────────────────────────────────────────────────────
 
     /// Write trigram index entries for a text property into a caller-supplied batch.
@@ -1993,5 +2081,39 @@ impl TripleStore {
             }
         };
         Ok(triple)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conflicting_iri_for_a_node_is_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = TripleStore::open(dir.path()).unwrap();
+        let iri = "http://example.org/Alice";
+        let node = term::iri_to_node_id(iri);
+
+        // Simulate an xxHash3-128 collision: another IRI already names `node`.
+        let cf = store.cf_handle(cf::IRI).unwrap();
+        store
+            .inner
+            .db
+            .put_cf(&cf, node.as_bytes(), b"http://example.org/Other")
+            .unwrap();
+
+        match store.bind_iris([iri]) {
+            Err(StorageError::IriCollision { existing, new, .. }) => {
+                assert_eq!(existing, "http://example.org/Other");
+                assert_eq!(new, iri);
+            }
+            other => panic!("expected IriCollision, got {other:?}"),
+        }
+        // The same batch can't bind two different IRIs to one node either.
+        let mut batch = WriteBatch::default();
+        let mut pending = HashMap::new();
+        pending.insert(node, "http://example.org/Pending".to_string());
+        assert!(store.batch_iri(&mut batch, iri, &mut pending).is_err());
     }
 }

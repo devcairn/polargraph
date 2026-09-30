@@ -26,4 +26,12 @@ pub enum StorageError {
 
     #[error("Validation error: {0}")]
     Validation(String),
+
+    /// Two different IRIs hash to the same `NodeId` (xxHash3-128 collision).
+    #[error("IRI collision on node {node}: {existing:?} already stored, {new:?} rejected")]
+    IriCollision {
+        node: polargraph_core::id::NodeId,
+        existing: String,
+        new: String,
+    },
 }

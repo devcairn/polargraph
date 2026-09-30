@@ -2403,6 +2403,7 @@ async fn handle_sparql_update(
                         let mut client = state.client.clone();
                         let req = proto::InsertRequest {
                             triples: vec![triple],
+                            iris: sparql_quad_iris(quad),
                             ..Default::default()
                         };
                         if client.insert(tonic::Request::new(req)).await.is_ok() {
@@ -2732,6 +2733,21 @@ async fn sparql_star_quad_to_annotation(
 /// Returns `None` if the quad cannot be mapped (e.g. blank-node subjects).
 /// Quoted-triple subjects `<< S P O >>` are converted to edge annotation inserts via the
 /// separate `sparql_quad_to_edge_annotation` path (handled by the caller).
+/// IRIs a ground quad names nodes by (subject and IRI object), for the IRI
+/// dictionary.
+fn sparql_quad_iris(quad: &spargebra::term::Quad) -> Vec<String> {
+    use spargebra::term::{Subject, Term};
+    let mut iris = Vec::new();
+    if let Subject::NamedNode(n) = &quad.subject {
+        iris.push(n.as_str().to_string());
+    }
+    if let Term::NamedNode(n) = &quad.object {
+        iris.push(n.as_str().to_string());
+    }
+    iris.retain(|i| polargraph_core::term::needs_dictionary(i));
+    iris
+}
+
 fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Triple> {
     use spargebra::term::{Subject, Term};
 
@@ -3047,19 +3063,39 @@ fn imported_triples_to_proto(
         .collect()
 }
 
-/// Insert a batch of proto triples via the gRPC Insert RPC.
+/// Insert a batch of proto triples via the gRPC Insert RPC, recording `iris`
+/// in the IRI dictionary in the same commit.
 async fn insert_proto_triples(
     client: &mut GrpcClient,
     triples: Vec<proto::Triple>,
+    iris: Vec<String>,
 ) -> Result<usize, tonic::Status> {
     let n = triples.len();
     client
         .insert(tonic::Request::new(proto::InsertRequest {
             triples,
+            iris,
             ..Default::default()
         }))
         .await?;
     Ok(n)
+}
+
+/// Distinct IRIs (including skolem IRIs) named by `triples`, for the IRI
+/// dictionary. `urn:uuid:` IRIs are left out — they carry their ID.
+fn imported_iris(
+    triples: &[polargraph_sparql::ImportedTriple],
+    scope: &polargraph_sparql::ImportScope,
+) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for t in triples {
+        for iri in t.node_iris(scope) {
+            if polargraph_core::term::needs_dictionary(&iri) {
+                seen.insert(iri);
+            }
+        }
+    }
+    seen.into_iter().collect()
 }
 
 // ── POST /import/rdf ──────────────────────────────────────────────────────────
@@ -3180,14 +3216,15 @@ async fn handle_import_rdf(
     };
 
     let total = imported_triples.len();
-    let proto_triples = imported_triples_to_proto(&imported_triples, &scope);
 
-    // Insert in batches of 1 000.
+    // Insert in batches of 1 000, each carrying the IRIs it names.
     const BATCH: usize = 1_000;
     let mut imported = 0usize;
     let mut client = state.client.clone();
-    for chunk in proto_triples.chunks(BATCH) {
-        match insert_proto_triples(&mut client, chunk.to_vec()).await {
+    for chunk in imported_triples.chunks(BATCH) {
+        let triples = imported_triples_to_proto(chunk, &scope);
+        let iris = imported_iris(chunk, &scope);
+        match insert_proto_triples(&mut client, triples, iris).await {
             Ok(n) => imported += n,
             Err(e) => return grpc_error(e),
         }
@@ -4012,6 +4049,26 @@ mod tests {
         assert!(!valid_import_id("a/b"));
         assert!(!valid_import_id("has space"));
         assert!(!valid_import_id(&"x".repeat(129)));
+    }
+
+    #[test]
+    fn imported_iris_are_distinct_hashed_iris_including_skolems() {
+        use polargraph_sparql::{parse_ntriples, ImportScope};
+
+        let doc = concat!(
+            "<http://ex/a> <http://ex/p> _:b0 .\n",
+            "<http://ex/a> <http://ex/name> \"A\" .\n",
+            "<http://ex/a> <http://ex/p> <urn:uuid:0191c1f6-2b1e-7c3a-9f00-000000000001> .\n",
+        );
+        let parsed = parse_ntriples(doc.as_bytes()).unwrap();
+        let iris = imported_iris(&parsed, &ImportScope::new("https://kb.example.com", "i1"));
+        assert_eq!(
+            iris,
+            vec![
+                "http://ex/a".to_string(),
+                "https://kb.example.com/.well-known/genid/i1/b0".to_string(),
+            ]
+        );
     }
 
     #[test]

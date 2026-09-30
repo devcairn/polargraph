@@ -347,6 +347,15 @@ txn.insert(triple: Triple)
 Buffers the triple. The `tt` field is ignored at this point; the actual
 commit timestamp is assigned at `commit()`.
 
+```rust
+txn.bind_iri(iri: impl Into<String>)
+```
+
+Records `iri` in the IRI dictionary on commit, naming the node
+`term::iri_to_node_id(iri)`. `urn:uuid:` IRIs are ignored. See
+`TripleStore::iri_of` / `iris_of` for lookups and `bind_iris` for a
+triple-less write.
+
 #### Snapshot reads (via `read_ts`)
 
 ```rust
@@ -428,8 +437,14 @@ pub enum StorageError {
     KeyDecode(String),
     MissingCf(String),
     WriteConflict(ConflictError),
+    ReadOnly(String),
+    Validation(String),
+    IriCollision { node: NodeId, existing: String, new: String },
 }
 ```
+
+`IriCollision` means two different IRIs hash to one `NodeId`; the gRPC layer
+maps it to `ALREADY_EXISTS`.
 
 ---
 
@@ -550,6 +565,27 @@ hexastore scan.
 Service: `polargraph.v1.PolarGraphService`
 
 Proto source: `crates/polargraph-server/proto/polargraph.proto`
+
+---
+
+### `Insert` — IRI bindings
+
+`InsertRequest.iris` (`repeated string`) lists IRIs of nodes written in the
+request. They are recorded in the IRI dictionary in the same commit (or
+buffered into the open transaction when `tx_id` is set). Each IRI names
+`iri_to_node_id(iri)`, so a client can't attach a name to the wrong node;
+`urn:uuid:` IRIs are ignored. A request may carry only IRIs. Empty strings are
+`INVALID_ARGUMENT`; an IRI that collides with a different stored IRI is
+`ALREADY_EXISTS`.
+
+### `ResolveIris`
+
+```
+rpc ResolveIris(ResolveIrisRequest) returns (ResolveIrisResponse)
+```
+
+`nodes` (≤ 10 000) → `iris`, one per node in request order: the stored IRI,
+or `urn:uuid:<id>` when the node has none.
 
 ---
 

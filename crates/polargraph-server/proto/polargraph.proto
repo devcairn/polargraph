@@ -160,6 +160,11 @@ message InsertRequest {
     /// (either from a previous insert or from a relation in `triples` above
     /// where the edge UUID must be known in advance).
     repeated EdgeAnnotation edge_annotations = 3;
+    /// IRIs of nodes written in this request, recorded in the IRI dictionary in
+    /// the same commit so export can render them. Each IRI names the node
+    /// `iri_to_node_id(iri)` (urn:uuid:<u> → u, otherwise xxHash3-128); urn:uuid
+    /// IRIs are accepted and ignored. A request may carry only IRIs.
+    repeated string iris = 4;
 }
 
 message InsertResponse {
@@ -959,10 +964,24 @@ message RunMaterializationResponse {
 
 // ── Service ───────────────────────────────────────────────────────────────────
 
+message ResolveIrisRequest {
+    /// Nodes to name. At most 10 000 per request.
+    repeated NodeId nodes = 1;
+}
+
+message ResolveIrisResponse {
+    /// One IRI per requested node, in request order: the stored IRI, or
+    /// `urn:uuid:<id>` when the node has no dictionary entry.
+    repeated string iris = 1;
+}
+
 service PolarGraphService {
     /// Insert one or more triples in a single atomic transaction.
     /// Returns ABORTED if a write-write conflict is detected.
     rpc Insert(InsertRequest) returns (InsertResponse);
+
+    /// Map node IDs back to IRIs via the IRI dictionary.
+    rpc ResolveIris(ResolveIrisRequest) returns (ResolveIrisResponse);
 
     /// Execute a conjunctive query and return all satisfying variable bindings.
     rpc Query(QueryRequest) returns (QueryResponse);

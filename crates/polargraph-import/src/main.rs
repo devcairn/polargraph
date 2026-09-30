@@ -166,13 +166,25 @@ fn main() -> Result<()> {
                 current_batch.push(t);
                 if current_batch.len() >= cli.batch_size {
                     batch_num += 1;
-                    total_imported += flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                    total_imported += flush_batch(
+                        &current_batch,
+                        conv.take_iris(),
+                        &store,
+                        &temp_dir,
+                        batch_num,
+                    )?;
                     current_batch.clear();
                 }
             }
             if !current_batch.is_empty() {
                 batch_num += 1;
-                total_imported += flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                total_imported += flush_batch(
+                    &current_batch,
+                    conv.take_iris(),
+                    &store,
+                    &temp_dir,
+                    batch_num,
+                )?;
             }
         }
         "jsonld" | "json-ld" => {
@@ -184,13 +196,25 @@ fn main() -> Result<()> {
                 current_batch.push(t);
                 if current_batch.len() >= cli.batch_size {
                     batch_num += 1;
-                    total_imported += flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                    total_imported += flush_batch(
+                        &current_batch,
+                        conv.take_iris(),
+                        &store,
+                        &temp_dir,
+                        batch_num,
+                    )?;
                     current_batch.clear();
                 }
             }
             if !current_batch.is_empty() {
                 batch_num += 1;
-                total_imported += flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                total_imported += flush_batch(
+                    &current_batch,
+                    conv.take_iris(),
+                    &store,
+                    &temp_dir,
+                    batch_num,
+                )?;
             }
         }
         _ => {
@@ -216,13 +240,25 @@ fn main() -> Result<()> {
 
                 if current_batch.len() >= cli.batch_size {
                     batch_num += 1;
-                    total_imported += flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                    total_imported += flush_batch(
+                        &current_batch,
+                        conv.take_iris(),
+                        &store,
+                        &temp_dir,
+                        batch_num,
+                    )?;
                     current_batch.clear();
                 }
             }
             if !current_batch.is_empty() {
                 batch_num += 1;
-                total_imported += flush_batch(&current_batch, &store, &temp_dir, batch_num)?;
+                total_imported += flush_batch(
+                    &current_batch,
+                    conv.take_iris(),
+                    &store,
+                    &temp_dir,
+                    batch_num,
+                )?;
             }
             if skipped > 0 {
                 info!(skipped, "lines skipped (unparseable — not blank/comment)");
@@ -247,6 +283,7 @@ fn main() -> Result<()> {
 
 fn flush_batch(
     triples: &[Triple],
+    iris: Vec<String>,
     store: &TripleStore,
     temp_dir: &std::path::Path,
     batch_num: usize,
@@ -257,6 +294,9 @@ fn flush_batch(
 
     for triple in triples {
         importer.add_triple(triple);
+    }
+    for iri in iris {
+        importer.add_iri(iri);
     }
 
     let stats = importer
@@ -277,6 +317,8 @@ fn flush_batch(
 struct Converter {
     scope: ImportScope,
     temporal: BiTemporalRange,
+    /// IRIs named since the last `take_iris`, for the IRI dictionary.
+    iris: std::cell::RefCell<std::collections::BTreeSet<String>>,
 }
 
 impl Converter {
@@ -288,7 +330,21 @@ impl Converter {
                 vt_end: Timestamp::END_OF_TIME,
                 tt: Timestamp(0), // overwritten by SstImporter::finish()
             },
+            iris: Default::default(),
         }
+    }
+
+    fn record_iri(&self, iri: &str) {
+        if term::needs_dictionary(iri) {
+            self.iris.borrow_mut().insert(iri.to_string());
+        }
+    }
+
+    /// Drain the IRIs named since the last call.
+    fn take_iris(&self) -> Vec<String> {
+        std::mem::take(&mut *self.iris.borrow_mut())
+            .into_iter()
+            .collect()
     }
 
     /// The identifying IRI for a node reference: the IRI itself, or the skolem
@@ -301,6 +357,8 @@ impl Converter {
     }
 
     fn relation(&self, subject: &str, predicate: &str, object: &str) -> Triple {
+        self.record_iri(subject);
+        self.record_iri(object);
         Triple::Relation {
             subject: term::iri_to_node_id(subject),
             predicate: Predicate::new(predicate),
@@ -311,6 +369,7 @@ impl Converter {
     }
 
     fn property(&self, subject: &str, predicate: &str, value: Value) -> Triple {
+        self.record_iri(subject);
         Triple::Property {
             subject: term::iri_to_node_id(subject),
             predicate: Predicate::new(predicate),
@@ -556,6 +615,26 @@ mod tests {
         assert!(parse_line("   ", &c).is_none());
         assert!(parse_line("", &c).is_none());
         assert!(parse_line("not n-triples at all", &c).is_none());
+    }
+
+    #[test]
+    fn converter_collects_iris_for_the_dictionary() {
+        let c = conv("t");
+        parse_line(
+            r#"<http://ex/a> <http://ex/p> <urn:uuid:0191c1f6-2b1e-7c3a-9f00-000000000001> ."#,
+            &c,
+        );
+        parse_line(r#"_:b0 <http://ex/name> "x" ."#, &c);
+        let iris = c.take_iris();
+        assert_eq!(
+            iris,
+            vec![
+                "http://ex/a".to_string(),
+                "https://kb.example.com/.well-known/genid/t/b0".to_string(),
+            ],
+            "hashed IRIs (incl. skolem) are collected; urn:uuid is not"
+        );
+        assert!(c.take_iris().is_empty(), "take_iris drains");
     }
 
     #[test]

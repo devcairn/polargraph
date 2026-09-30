@@ -29,16 +29,16 @@ use crate::{
         PurgeOldBackupsRequest, PurgeOldBackupsResponse, QueryRequest, QueryResponse,
         QueryStreamChunk, ReachableRequest, ReachableResponse, RegisterEdgeTypeRequest,
         RegisterEdgeTypeResponse, RegisterNodeTypeRequest, RegisterNodeTypeResponse,
-        ReplicaStatusRequest, ReplicaStatusResponse, RevokeAccessRequest, RevokeAccessResponse,
-        RevokeApiKeyRequest, RevokeApiKeyResponse, RollbackTransactionRequest,
-        RollbackTransactionResponse, RunMaterializationRequest, RunMaterializationResponse,
-        RunRetentionRequest, RunRetentionResponse, ScoredBinding, SearchVectorFilteredRequest,
-        SearchVectorFilteredResponse, SearchVectorInSetRequest, SearchVectorInSetResponse,
-        SearchVectorRequest, SearchVectorResponse, ShowIndexesRequest, ShowIndexesResponse,
-        ShowStatsRequest, ShowStatsResponse, StreamWalRequest, ValidateEdgeRequest,
-        ValidateEdgeResponse, ValidateNodeRequest, ValidateNodeResponse, ValidateOntologyRequest,
-        ValidateOntologyResponse, VectorSearchResult, VectorSeedQueryRequest,
-        VectorSeedQueryResponse, VectorSpaceInfo, WalEntry,
+        ReplicaStatusRequest, ReplicaStatusResponse, ResolveIrisRequest, ResolveIrisResponse,
+        RevokeAccessRequest, RevokeAccessResponse, RevokeApiKeyRequest, RevokeApiKeyResponse,
+        RollbackTransactionRequest, RollbackTransactionResponse, RunMaterializationRequest,
+        RunMaterializationResponse, RunRetentionRequest, RunRetentionResponse, ScoredBinding,
+        SearchVectorFilteredRequest, SearchVectorFilteredResponse, SearchVectorInSetRequest,
+        SearchVectorInSetResponse, SearchVectorRequest, SearchVectorResponse, ShowIndexesRequest,
+        ShowIndexesResponse, ShowStatsRequest, ShowStatsResponse, StreamWalRequest,
+        ValidateEdgeRequest, ValidateEdgeResponse, ValidateNodeRequest, ValidateNodeResponse,
+        ValidateOntologyRequest, ValidateOntologyResponse, VectorSearchResult,
+        VectorSeedQueryRequest, VectorSeedQueryResponse, VectorSpaceInfo, WalEntry,
     },
 };
 use dashmap::DashMap;
@@ -682,6 +682,35 @@ impl PolarGraphService for PolarGraphServer {
     type CypherQueryStreamStream = ReceiverStream<Result<QueryStreamChunk, Status>>;
 
     /// Insert one or more triples atomically.
+    async fn resolve_iris(
+        &self,
+        request: Request<ResolveIrisRequest>,
+    ) -> Result<Response<ResolveIrisResponse>, Status> {
+        const MAX_NODES: usize = 10_000;
+        let req = request.into_inner();
+        if req.nodes.len() > MAX_NODES {
+            return Err(Status::invalid_argument(format!(
+                "at most {MAX_NODES} nodes per ResolveIris request"
+            )));
+        }
+        let nodes = req
+            .nodes
+            .iter()
+            .map(convert::node_id_from_proto)
+            .collect::<Result<Vec<_>, _>>()?;
+        let stored = self.store.iris_of(&nodes).map_err(storage_err_to_status)?;
+        let iris = nodes
+            .iter()
+            .map(|n| {
+                stored
+                    .get(n)
+                    .cloned()
+                    .unwrap_or_else(|| polargraph_core::term::fallback_iri(n))
+            })
+            .collect();
+        Ok(Response::new(ResolveIrisResponse { iris }))
+    }
+
     async fn insert(
         &self,
         request: Request<InsertRequest>,
@@ -689,9 +718,14 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let req = request.into_inner();
 
-        if req.triples.is_empty() && req.edge_annotations.is_empty() {
+        if req.triples.is_empty() && req.edge_annotations.is_empty() && req.iris.is_empty() {
             return Err(Status::invalid_argument(
-                "insert request must contain at least one triple or edge annotation",
+                "insert request must contain at least one triple, edge annotation or IRI",
+            ));
+        }
+        if req.iris.iter().any(|iri| iri.is_empty()) {
+            return Err(Status::invalid_argument(
+                "iris must not contain empty strings",
             ));
         }
 
@@ -728,6 +762,9 @@ impl PolarGraphService for PolarGraphServer {
             for triple in &all_triples {
                 guard.tx.insert(triple.clone());
             }
+            for iri in &req.iris {
+                guard.tx.bind_iri(iri.as_str());
+            }
             guard.last_used = Instant::now();
             debug!(tx_id = %req.tx_id, "buffered {} triple(s) into open transaction", all_triples.len());
             return Ok(Response::new(InsertResponse {
@@ -755,6 +792,9 @@ impl PolarGraphService for PolarGraphServer {
         let mut tx = self.store.begin();
         for triple in &all_triples {
             tx.insert(triple.clone());
+        }
+        for iri in &req.iris {
+            tx.bind_iri(iri.as_str());
         }
         let commit_ts = tx.commit().map_err(storage_err_to_status)?;
 
@@ -3634,5 +3674,9 @@ fn storage_err_to_status(err: StorageError) -> Status {
         StorageError::Io(_) => Status::internal(err.to_string()),
         StorageError::ReadOnly(_) => Status::failed_precondition(err.to_string()),
         StorageError::Validation(_) => Status::failed_precondition(err.to_string()),
+        StorageError::IriCollision { .. } => {
+            warn!("{err}");
+            Status::already_exists(err.to_string())
+        }
     }
 }
