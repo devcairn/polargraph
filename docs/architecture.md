@@ -94,7 +94,9 @@ Every quad belongs to a graph. `GraphId(0)` is the **default graph**: every
 write that doesn't name a graph lands there, so pre-graph clients keep
 working unchanged. Named graphs are identified by IRI and interned to `u32`
 ids exactly like predicates (`TripleStore::intern_graph`). Reads that don't
-name a graph cover every graph and return each `(s, p, o)` once.
+name a graph cover every graph and return each `(s, p, o)` once. Queries,
+graph management and quad import/export are described in
+[Named graphs](#named-graphs).
 
 ### Predicate
 
@@ -784,6 +786,137 @@ message VectorSeedQueryResponse {
 
 ---
 
+## Named graphs
+
+A PolarGraph store is an RDF **dataset**: one default graph (`GraphId(0)`)
+plus any number of named graphs, each identified by an IRI and interned to a
+`GraphId` (see [Graphs](#graphs)). Interning a graph also records its IRI in
+the IRI dictionary, so the graph's IRI node
+(`TripleStore::graph_node(g)` = `iri_to_node_id(iri)`) resolves back to the
+IRI on export. The default graph has no IRI.
+
+### Graph terms in queries
+
+Each `VarPattern` carries a `GraphTerm` saying which graphs it matches
+(`polargraph_query::datalog::GraphTerm`):
+
+| `GraphTerm` | Matches | Proto `VarPattern.graph` | REST pattern suffix |
+|---|---|---|---|
+| `Union` (default) | every graph, each `(s, p, o)` once | unset | none |
+| `Default` | the default graph only | `default_graph: true` | `@default` |
+| `Bound(g)` | one named graph | `iri: "<iri>"` | `@<iri>` |
+| `Var(name)` | each named graph in turn; binds `?name` to the graph's IRI node | `var: "g"` | `@?g` |
+| `Set(gs)` | any of a set of graphs (SPARQL `FROM`-style dataset) | `set { iris }` | — |
+
+`QueryRequest.graphs` (REST `/query` body `"graphs": [...]`) gives the
+dataset for every pattern that has no graph term of its own; it becomes
+`Set`. An unknown graph IRI matches nothing (an empty `Set`) rather than
+failing the query. A graph variable ranges over **named** graphs only; once it
+is bound (by an earlier pattern), later patterns with the same variable are
+restricted to that graph, so two patterns joined on `?g` must match in the
+same graph.
+
+```mermaid
+flowchart LR
+    VP["VarPattern + GraphTerm"] --> GS{"graph_scope()"}
+    GS -->|Union| U["GraphScope::Union"]
+    GS -->|Default / Bound / bound Var| O["GraphScope::One(g)"]
+    GS -->|Set / dataset| SET["GraphScope::Set(gs)"]
+    GS -->|unbound Var| N["GraphScope::Named"]
+    O --> G1["gspo / gpos orders<br/>(graph-first prefix)"]
+    U --> G2["spog / sopg / posg / ospg orders<br/>+ graph post-filter"]
+    SET --> G2
+    N --> G2
+    G1 --> R["Snapshot::scan_scoped → (GraphId, Triple)"]
+    G2 --> R
+    R --> B["bindings (+ ?g = graph IRI node)"]
+```
+
+`Snapshot::scan_scoped(subject, predicate, object, &GraphScope)` returns each
+match with its graph. A single-graph scope uses the graph-first orders
+(`gspo`, `gpos`); other scopes use the subject/predicate/object-first orders
+and filter on the key's graph slot. `ExplainQuery` shows the graph term in
+each pattern's text.
+
+**Known limits.** Uncommitted writes of a wire transaction and facts derived
+by Datalog rules have no graph, so they are only visible to `Union` patterns.
+Bounded variable-length patterns (`max_hops`) ignore graph terms.
+
+### Graph management
+
+Graph metadata (status, kind, owner, …) is stored as properties of the
+graph's IRI node in the **system graph** `urn:pg:graph:meta`
+(`polargraph_storage::SYSTEM_GRAPH_IRI`), so it is ordinary bitemporal data
+and does not appear in the graph itself. Operations live in
+`polargraph-storage::graphs`:
+
+| `TripleStore` method | RPC | REST | Effect |
+|---|---|---|---|
+| `create_graph(iri, metadata)` | `CreateGraph` | `POST /graphs {iri, metadata}` | Intern the IRI; set metadata (`WriteMode::Replace` per predicate). Idempotent |
+| `graph_metadata(g)` / `list_graphs()` | `ListGraphs` (metadata filter, `include_system`) | `GET /graphs?include_system=` | Graphs with their metadata; system graph hidden by default |
+| `graph_stats(g)` | `GraphStats` | `GET /graphs/stats?iri=` | Live quad count, latest write `tt` |
+| `copy_graph(src, dst, clear_target)` | `CopyGraph` | `POST /graphs/copy {source, target, clear_target}` | SPARQL `COPY` (`clear_target`, default in REST) or `ADD` |
+| `move_graph(src, dst)` | `MoveGraph` | `POST /graphs/move {source, target}` | Copy into `dst` (replacing it), then drop `src` |
+| `drop_graph(g)` | `DropGraph` | `DELETE /graphs?iri=` | Close every live quad at now |
+
+**Drop is bitemporal.** `drop_graph` writes a closing version
+(`vt_end = now`) for each live quad instead of deleting keys, so a query with
+`as_of_valid_time` or `as_of_tx_time` before the drop still sees the graph.
+Physical removal is left to [retention](#compaction-and-retention). The graph
+id and its metadata survive a drop.
+
+**Copies are new writes.** Copied quads keep the source's valid-time windows
+and relation edge ids (edge ids are graph-independent) but get a new
+transaction time. Drops and copies commit in chunks of 50 000 quads
+(`GRAPH_OP_CHUNK`); while a chunked copy runs, the target carries the
+metadata flag `urn:pg:copyInProgress = true`, removed when the copy
+completes. A reader can therefore see a partially copied target, flagged.
+
+Write RPCs (`CreateGraph`, `CopyGraph`, `MoveGraph`, `DropGraph`) are refused
+on replicas. RPCs that name an existing graph return `NOT_FOUND` for an
+unknown IRI; an empty IRI means the default graph where that makes sense.
+
+### Quad import and export
+
+```mermaid
+flowchart LR
+    subgraph Import
+        NQ["N-Quads / TriG"] -->|"parse_nquads / parse_trig"| IT["ImportedTriple { graph }"]
+        NT["N-Triples / Turtle / JSON-LD"] -->|"?graph= (REST)"| IT
+        IT -->|"REST: one Insert per graph"| S[(polargraphd)]
+        IT -->|"polargraph-import: SstImporter::add_triple_in"| DB[(RocksDB)]
+    end
+    subgraph Export
+        S -->|"ExportGraph (stream)"| GE["GET /graphs/export"]
+        S -->|"Query with @default and @?g"| SE["GET /export/subgraph"]
+        GE --> OUT["N-Quads · TriG · (one graph) N-Triples / Turtle / JSON-LD"]
+        SE --> OUT
+    end
+```
+
+- **REST import** — `POST /import/rdf` accepts `application/n-quads` and
+  `application/trig`; triples are grouped by graph and inserted with
+  `InsertRequest.graph`. A blank-node graph name is skolemized in the
+  import's scope. For triple formats, `?graph=<iri>` loads the whole document
+  into one named graph.
+- **Bulk import** — `polargraph-import --format nquads|nq|trig` interns each
+  graph IRI and passes it per triple to `SstImporter::add_triple_in`.
+- **`ExportGraph` RPC** — streams the live relation and property quads of one
+  graph (`iri`, empty = default) or of the whole dataset (`all_graphs`, the
+  system graph excluded), each with its graph IRI. Unlike `Query` it returns
+  property values. Edge annotations are not included.
+- **`GET /graphs/export?iri=|all=true`** — N-Quads by default, TriG for
+  `Accept: application/trig`; a single graph can also be fetched as
+  N-Triples, Turtle or JSON-LD (graph label dropped); `all=true` with a
+  triple format returns 406.
+- **`GET /export/subgraph`** — with `Accept: application/n-quads` or
+  `application/trig`, queries the default graph and each named graph
+  separately so every triple keeps its graph label; other formats return the
+  union as before.
+
+Serialization is `polargraph_sparql::serialize_nquads` / `serialize_trig`
+over `RdfQuad { triple, graph }`.
+
 ## Cypher query surface
 
 PolarGraph supports a subset of Cypher as a higher-level query language that
@@ -1190,7 +1323,7 @@ database — use the `Insert` RPC or `POST /import/rdf` for that.
 polargraph-import \
   --data-dir /var/lib/polargraph \
   --input    ./dump.nt \
-  --format   ntriples \            # ntriples (default) | turtle | jsonld
+  --format   ntriples \            # ntriples (default) | turtle | jsonld | nquads | trig
   --import-id crm-2026-09-29 \     # optional; blank-node scope
   --skolem-base https://kb.example.com \
   --batch-size 100000
@@ -2961,6 +3094,8 @@ and the offline bulk importer.
 | N-Triples | `application/n-triples` | ✓ | ✓ |
 | Turtle | `text/turtle` | ✓ | ✓ |
 | JSON-LD | `application/ld+json` | ✓ | ✓ |
+| N-Quads | `application/n-quads` | ✓ | ✓ |
+| TriG | `application/trig` | ✓ | ✓ |
 | RDF/XML | `application/rdf+xml` | — | — |
 | OWL/XML | `application/owl+xml` | — | — |
 
