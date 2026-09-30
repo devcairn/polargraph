@@ -1212,7 +1212,7 @@ impl TripleStore {
             }
         }
         let mut found: Vec<(Timestamp, EdgeId)> = best.into_values().collect();
-        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.sort_by_key(|b| std::cmp::Reverse(b.0));
         let mut seen = HashSet::new();
         Ok(found
             .into_iter()
@@ -2181,7 +2181,7 @@ impl TripleStore {
         // value is a Replace's closing entry, not a write of its own.
         let open_at: HashSet<i64> = versions.iter().filter(|v| v.1).map(|v| v.0).collect();
         versions.retain(|(tt, open, _, _)| *open || !open_at.contains(tt));
-        versions.sort_by(|a, b| b.0.cmp(&a.0));
+        versions.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         let mut out = Vec::new();
         for (tt, _, o, bytes) in versions.into_iter().take(limit) {
