@@ -379,7 +379,28 @@ store.intern_graph(iri: &str) -> Result<GraphId, StorageError>    // assigns on 
 store.graph_id(iri: &str) -> Option<GraphId>
 store.graph_iri(id: GraphId) -> Option<String>                    // None for the default graph
 store.list_graphs() -> Vec<(GraphId, String)>
+store.graph_node(id: GraphId) -> Option<NodeId>                  // the graph IRI's node
+store.graph_for_node(node: &NodeId) -> Option<GraphId>
 ```
+
+#### Named-graph management (`polargraph_storage::graphs`)
+
+```rust
+store.system_graph() -> Result<GraphId, StorageError>             // urn:pg:graph:meta
+store.create_graph(iri: &str, metadata: &[(String, Value)]) -> Result<GraphId, StorageError>
+store.set_graph_metadata(g: GraphId, metadata: &[(String, Value)]) -> Result<(), StorageError>
+store.graph_metadata(g: GraphId) -> Result<Vec<(String, Value)>, StorageError>
+store.graph_stats(g: GraphId) -> Result<GraphStats, StorageError> // { live_quads, last_write_tt }
+store.drop_graph(g: GraphId) -> Result<usize, StorageError>       // bitemporal: closes live quads
+store.copy_graph(src: GraphId, dst: GraphId, clear_target: bool) -> Result<usize, StorageError>
+store.move_graph(src: GraphId, dst: GraphId) -> Result<usize, StorageError>
+```
+
+Metadata lives on the graph's IRI node in the system graph
+(`SYSTEM_GRAPH_IRI`); one value per predicate. The default graph has no
+metadata (`Validation` error). Drop and copy commit in chunks of
+`GRAPH_OP_CHUNK` (50 000); a chunked copy flags the target with
+`COPY_IN_PROGRESS_PRED = true` until it completes.
 
 #### IRI dictionary
 
@@ -487,6 +508,7 @@ pub struct Snapshot {
 | `scan_by_predicate_value(predicate, &Value)` | Property triples with exactly that value — a value-index lookup |
 | `scan_graph(g: GraphId)` | Every triple in graph `g` |
 | `scan_by_subject_in_graph(g, subject)` | Triples of `subject` in `g` |
+| `scan_scoped(subject, predicate, object, &GraphScope)` | Match any bound slots within a graph scope; returns `(GraphId, Triple)` |
 | `text_search(predicate, query)` | Trigram search, confirmed against live values |
 | `scan_edge_annotations(edge)`, `scan_annotations_by_predicate(p)`, `scan_edge_annotations_as_triples(edge)` | RDF-star annotations |
 
@@ -582,12 +604,42 @@ Internal module, but useful to understand when debugging index contents.
 The decoded `temporal.tt` is always `Timestamp(0)` — the caller fills it in
 from the index key. A `PropertyRef`'s value is `blob[key object slot]`.
 
+`GraphScope` (`polargraph_storage::GraphScope`):
+
+```rust
+pub enum GraphScope {
+    Union,             // every graph, each (s, p, o) once
+    One(GraphId),
+    Set(Vec<GraphId>), // GraphScope::set(vec) sorts and dedupes
+    Named,             // every named graph (not the default graph)
+}
+```
+
 ---
 
 ## `polargraph-query`
 
 Pattern-based query evaluation, Cypher frontend, aggregations, and view
 projection.
+
+### `GraphTerm` (`polargraph_query::datalog`)
+
+```rust
+pub enum GraphTerm {
+    Union,              // default
+    Default,            // default graph only
+    Bound(GraphId),
+    Var(String),        // named graphs; binds the graph IRI node
+    Set(Vec<GraphId>),
+}
+
+VarPattern { subject, predicate: Some("pred".into()), object, ..VarPattern::new() }
+    .graph(GraphTerm::Var("g".into()))
+```
+
+Once a graph variable is bound, later patterns using it are restricted to
+that graph. Pending-transaction writes and rule-derived facts only match
+`Union` patterns; `max_hops` patterns ignore the graph term.
 
 ---
 
@@ -697,6 +749,41 @@ rpc ResolveIris(ResolveIrisRequest) returns (ResolveIrisResponse)
 
 `nodes` (≤ 10 000) → `iris`, one per node in request order: the stored IRI,
 or `urn:uuid:<id>` when the node has none.
+
+### `Query` — graph terms and dataset
+
+`VarPattern.graph` (`GraphTerm`, optional) scopes a pattern:
+
+```proto
+message GraphTerm {
+    oneof kind {
+        bool     default_graph = 1;  // the default graph
+        string   iri           = 2;  // one named graph
+        string   var           = 3;  // graph variable (named graphs)
+        GraphSet set           = 4;  // any of these graphs
+    }
+}
+```
+
+Unset = union of all graphs. `QueryRequest.graphs` (`repeated string`) is the
+dataset for patterns without a graph term. Unknown IRIs match nothing. A
+graph variable's binding is the graph IRI's NodeId (resolve it with
+`ResolveIris`). `QueryStream` and `ExplainQuery` accept the same fields.
+
+### Named-graph RPCs
+
+| RPC | Request → Response | Notes |
+|---|---|---|
+| `CreateGraph` | `{iri, metadata: [GraphMetadata{predicate, value}]}` → `{graph: GraphInfo}` | Idempotent; metadata predicates replaced. Primary only |
+| `ListGraphs` | `{filter: [GraphMetadata], include_system}` → `{graphs: [GraphInfo]}` | Filter = all metadata pairs must match |
+| `GraphStats` | `{iri}` → `{iri, live_quads, last_write_tt}` | Empty IRI = default graph |
+| `CopyGraph` | `{source, target, clear_target}` → `{quads}` | `COPY` (`clear_target`) or `ADD`; target interned. Primary only |
+| `MoveGraph` | `{source, target}` → `CopyGraphResponse` | Copy, then drop source. Primary only |
+| `DropGraph` | `{iri}` → `{quads_closed}` | Bitemporal close; history stays queryable. Primary only |
+| `ExportGraph` | `{iri, all_graphs}` → stream `ExportGraphChunk{quads: [ExportedQuad]}` | Live relation/property quads; `ExportedQuad{subject, predicate, node \| value, graph}` |
+
+`GraphInfo` = `{iri, id, metadata}`. A named graph that
+doesn't exist is `NOT_FOUND`.
 
 ---
 
@@ -861,6 +948,32 @@ The following endpoints are available in addition to those documented in
 | `POST` | `/tx/begin` | `BeginTransaction` |
 | `POST` | `/tx/commit` | `CommitTransaction` |
 | `POST` | `/tx/rollback` | `RollbackTransaction` |
+| `POST` | `/graphs` | `CreateGraph` |
+| `GET` | `/graphs?include_system=` | `ListGraphs` |
+| `GET` | `/graphs/stats?iri=` | `GraphStats` |
+| `POST` | `/graphs/copy` | `CopyGraph` |
+| `POST` | `/graphs/move` | `MoveGraph` |
+| `DELETE` | `/graphs?iri=` | `DropGraph` |
+| `GET` | `/graphs/export?iri=\|all=true` | `ExportGraph` |
+
+### Named graphs over REST
+
+Graph IRIs go in the body or the `iri` query parameter, never the path.
+
+- `POST /graphs` — `{"iri": "urn:g:p1", "metadata": {"cb:status": "Proposed"}}`
+  (values use the usual property JSON encoding).
+- `POST /graphs/copy` — `{"source": "...", "target": "...", "clear_target": true}`
+  (`clear_target` defaults to `true` = SPARQL `COPY`; `false` = `ADD`).
+- `POST /graphs/move` — `{"source": "...", "target": "..."}`.
+- `GET /graphs/export` — `iri` (empty = default graph) or `all=true`,
+  `deskolemize`. N-Quads by default, TriG for `Accept: application/trig`;
+  a single graph also as N-Triples / Turtle / JSON-LD. `all=true` with a
+  triple format is 406.
+
+`POST /query` patterns take an optional fourth token for the graph:
+`?s :knows ?o @default`, `?s :knows ?o @<urn:g:p1>`, `?s :knows ?o @?g`.
+The body's `"graphs": ["urn:g:p1", ...]` sets the dataset for patterns
+without a suffix.
 
 ### `POST /cypher`
 
@@ -1061,6 +1174,8 @@ determined by the `Content-Type` header.
 | `application/n-triples` | N-Triples |
 | `text/turtle` | Turtle |
 | `application/ld+json` | JSON-LD (`@graph` array) |
+| `application/n-quads` | N-Quads — each quad into its graph |
+| `application/trig` | TriG — each quad into its graph |
 | `application/rdf+xml` | Not supported — returns 415 |
 | `application/owl+xml` | Not supported — returns 415 |
 
@@ -1075,6 +1190,7 @@ two imports is two different nodes.
 | Query parameter | Description |
 |---|---|
 | `import_id` | Optional. 1–128 chars of `[A-Za-z0-9._~-]`. Re-importing with the same id maps blank nodes to the same NodeIds. Defaults to a fresh UUIDv7. |
+| `graph` | Optional. Graph IRI for triple formats (N-Triples, Turtle, JSON-LD); default graph otherwise. Quad formats carry their own graphs; blank-node graph names are skolemized. |
 
 **Response:**
 ```json
@@ -1146,8 +1262,12 @@ Response format negotiated via `Accept` header:
 |---|---|
 | `application/ld+json` | JSON-LD |
 | `text/turtle` | Turtle |
+| `application/n-quads` | N-Quads — each triple with its graph |
+| `application/trig` | TriG — one block per named graph |
 | `application/n-triples` (default) | N-Triples |
 
+Quad formats query the default graph and each named graph separately, so a
+triple in two graphs appears twice; triple formats return the union.
 Includes edge annotations as property triples on the edge NodeId.
 
 ### `GET /schema/rdf`
