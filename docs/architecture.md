@@ -2765,10 +2765,32 @@ RDF bytes
 IRIs are mapped to deterministic `NodeId`s via xxHash3-128:
 
 ```
-uri_to_node_id("http://example.org/Alice")  →  stable NodeId
-bnode_to_node_id("b0")  →  NodeId from "_:bnode_b0"
-edge_id_for(s, p, o)    →  stable EdgeId for a Relation triple
+uri_to_node_id("http://example.org/Alice")  →  NodeId::from_iri(...), stable
+scope.bnode_node_id("b0")                    →  NodeId of the skolem IRI (below)
+edge_id_for(s, p, o)                         →  stable EdgeId for a Relation triple
 ```
+
+#### Blank nodes (skolemization)
+
+A blank-node label is only meaningful inside the document that contains it,
+so every import runs in an `ImportScope` (`polargraph-core::skolem`) that maps
+each label to an RDF 1.1 skolem IRI:
+
+```
+{skolem-base}/.well-known/genid/{import_id}/{label}
+```
+
+`_:b0` in two different imports therefore names two different nodes, while
+re-importing with the same `import_id` reproduces the same NodeIds
+(idempotent). `import_id` defaults to a fresh UUIDv7. `skolem-base` should be
+the instance's public origin (default `https://polargraph.invalid`); set it
+with `--skolem-base` on `polargraph-rest` (`POLARGRAPH_REST_SKOLEM_BASE`) and
+`polargraph-import` (`POLARGRAPH_SKOLEM_BASE`). In JSON-LD, an `@id` of the
+form `_:label` is a blank node.
+
+Skolem IRIs are not yet stored (NodeIds are one-way hashes), so export still
+renders blank nodes as `urn:uuid:` IRIs; de-skolemizing export needs the
+IRI dictionary.
 
 RDF-star quoted triples (as subject or object) are stored as the N-Triples-star
 string representation.
@@ -2779,6 +2801,8 @@ string representation.
 
 Accepts N-Triples, Turtle, or JSON-LD based on `Content-Type`.
 Triples are bulk-inserted via the gRPC `Insert` RPC in batches of 1 000.
+Optional `?import_id=<id>` (1–128 chars of `[A-Za-z0-9._~-]`) fixes the
+blank-node scope for idempotent re-imports.
 
 ```
 POST /import/rdf
@@ -2790,7 +2814,8 @@ ex:Alice ex:knows ex:Bob .
 
 Response:
 ```json
-{ "imported": 1, "total_parsed": 1, "duration_ms": 12 }
+{ "imported": 1, "total_parsed": 1, "duration_ms": 12,
+  "import_id": "01928c7e-5b1a-7f3e-9d0c-2a4b6c8d0e1f" }
 ```
 
 #### `POST /import/subgraph`
@@ -2878,7 +2903,13 @@ polargraph-import \
   --data-dir /data \
   --input data.ttl \
   --format turtle   # ntriples (default) | turtle | jsonld
+  --import-id crm-2026-09-29   # optional; blank-node scope (default: fresh UUIDv7)
+  --skolem-base https://kb.example.com
 ```
+
+All three formats keep blank nodes (skolemized per import) and convert typed
+literals (`xsd:integer`, `double`, `boolean`, …) to typed values. N-Triples
+lines that fail to parse are counted and skipped.
 
 The binary must run while `polargraphd` is stopped (SST ingestion requires
 exclusive DB access).

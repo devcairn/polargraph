@@ -53,6 +53,16 @@ struct Args {
     /// Path to a PEM CA certificate for verifying the upstream TLS connection.
     #[arg(long, env = "POLARGRAPH_REST_TLS_CA")]
     tls_ca: Option<std::path::PathBuf>,
+
+    /// Base IRI for skolemized blank nodes on RDF import
+    /// (`{base}/.well-known/genid/{import_id}/{label}`). Set this to the
+    /// instance's public origin, e.g. `https://kb.example.com`.
+    #[arg(
+        long,
+        env = "POLARGRAPH_REST_SKOLEM_BASE",
+        default_value = polargraph_sparql::DEFAULT_SKOLEM_BASE
+    )]
+    skolem_base: String,
 }
 
 // ── Auth interceptor ──────────────────────────────────────────────────────────
@@ -95,6 +105,8 @@ type GrpcClient = PolarGraphServiceClient<
 struct AppState {
     /// gRPC client; cheap to clone (backed by a pooled Channel).
     client: GrpcClient,
+    /// Base IRI for blank-node skolem IRIs on RDF import.
+    skolem_base: String,
 }
 
 // ── JSON request/response types ───────────────────────────────────────────────
@@ -2925,35 +2937,25 @@ fn pg_value_to_proto(v: &polargraph_core::value::Value) -> proto::Value {
 /// Convert a batch of [`polargraph_sparql::ImportedTriple`] objects to `proto::Triple` objects.
 ///
 /// Each Relation becomes one `proto::Triple::Relation`; each Literal becomes a Property.
-fn imported_triples_to_proto(triples: &[polargraph_sparql::ImportedTriple]) -> Vec<proto::Triple> {
-    use polargraph_sparql::{bnode_to_node_id, uri_to_node_id, ImportedObject};
+/// Blank nodes are skolemized within `scope`, so the same label in two
+/// imports names two different nodes.
+fn imported_triples_to_proto(
+    triples: &[polargraph_sparql::ImportedTriple],
+    scope: &polargraph_sparql::ImportScope,
+) -> Vec<proto::Triple> {
+    use polargraph_sparql::ImportedObject;
 
     triples
         .iter()
         .map(|t| {
-            let subj_node_id = if t.subject_is_bnode {
-                bnode_to_node_id(&t.subject)
-            } else {
-                uri_to_node_id(&t.subject)
-            };
-            let subject_proto = pg_node_id_to_proto(subj_node_id);
+            let subject_proto = pg_node_id_to_proto(t.subject_node_id(scope));
 
             match &t.object {
-                ImportedObject::Iri(obj_iri) => {
-                    let obj_node_id = uri_to_node_id(obj_iri);
-                    proto::Triple {
-                        kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
-                            subject: Some(subject_proto),
-                            predicate: t.predicate.clone(),
-                            object: Some(pg_node_id_to_proto(obj_node_id)),
-                            vt_start: 0,
-                            vt_end: i64::MAX,
-                            properties: vec![],
-                        })),
-                    }
-                }
-                ImportedObject::BlankNode(bnode) => {
-                    let obj_node_id = bnode_to_node_id(bnode);
+                ImportedObject::Iri(_) | ImportedObject::BlankNode(_) => {
+                    let obj_node_id = t
+                        .object
+                        .node_id(scope)
+                        .expect("IRI and blank-node objects always have a NodeId");
                     proto::Triple {
                         kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
                             subject: Some(subject_proto),
@@ -3004,14 +3006,48 @@ async fn insert_proto_triples(
 //   application/n-triples  → N-Triples
 //   text/turtle             → Turtle
 //   application/ld+json    → JSON-LD
+//
+// Blank nodes are skolemized per import. Pass `?import_id=<id>` to make a
+// re-import idempotent (same id → same blank-node NodeIds); otherwise a fresh
+// UUIDv7 is generated. The id used is returned as `import_id`.
+
+#[derive(Deserialize, Default)]
+struct ImportRdfParams {
+    import_id: Option<String>,
+}
+
+/// An `import_id` becomes a path segment of every skolem IRI, so keep it to
+/// unreserved IRI characters.
+fn valid_import_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+}
 
 async fn handle_import_rdf(
     State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<ImportRdfParams>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    use polargraph_sparql::{parse_jsonld, parse_ntriples, parse_turtle};
+    use polargraph_sparql::{parse_jsonld, parse_ntriples, parse_turtle, ImportScope};
     use std::time::Instant;
+
+    let scope = match params.import_id {
+        Some(id) if !valid_import_id(&id) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "import_id must be 1-128 characters of [A-Za-z0-9._~-]"
+                })),
+            )
+                .into_response()
+        }
+        Some(id) => ImportScope::new(&state.skolem_base, id),
+        None => ImportScope::fresh(&state.skolem_base),
+    };
 
     let content_type = headers
         .get("content-type")
@@ -3081,7 +3117,7 @@ async fn handle_import_rdf(
     };
 
     let total = imported_triples.len();
-    let proto_triples = imported_triples_to_proto(&imported_triples);
+    let proto_triples = imported_triples_to_proto(&imported_triples, &scope);
 
     // Insert in batches of 1 000.
     const BATCH: usize = 1_000;
@@ -3099,6 +3135,7 @@ async fn handle_import_rdf(
         "imported": imported,
         "total_parsed": total,
         "duration_ms": duration_ms,
+        "import_id": scope.import_id(),
     }))
     .into_response()
 }
@@ -3520,10 +3557,11 @@ async fn handle_export_subgraph(
 
 async fn handle_import_subgraph(
     state: State<Arc<AppState>>,
+    params: QueryParams<ImportRdfParams>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    handle_import_rdf(state, headers, body).await
+    handle_import_rdf(state, params, headers, body).await
 }
 
 // ── GET /schema/rdf ───────────────────────────────────────────────────────────
@@ -3733,7 +3771,10 @@ async fn main() -> anyhow::Result<()> {
         },
     );
 
-    let state = Arc::new(AppState { client });
+    let state = Arc::new(AppState {
+        client,
+        skolem_base: args.skolem_base.clone(),
+    });
 
     let app = Router::new()
         .route("/query", post(handle_query))
@@ -3898,5 +3939,35 @@ mod tests {
             req.metadata().get("x-polargraph-user-id").is_none(),
             "no metadata header should be set for empty user_id"
         );
+    }
+
+    #[test]
+    fn import_id_validation() {
+        assert!(valid_import_id("crm-2026-09-29.v1"));
+        assert!(valid_import_id(&Uuid::now_v7().to_string()));
+        assert!(!valid_import_id(""));
+        assert!(!valid_import_id("a/b"));
+        assert!(!valid_import_id("has space"));
+        assert!(!valid_import_id(&"x".repeat(129)));
+    }
+
+    #[test]
+    fn rdf_import_skolemizes_bnodes_per_scope() {
+        use polargraph_sparql::{parse_ntriples, ImportScope};
+
+        let doc = b"_:b0 <http://schema.org/knows> _:b1 .\n";
+        let parsed = parse_ntriples(doc).unwrap();
+        let rel = |scope: &ImportScope| match &imported_triples_to_proto(&parsed, scope)[0].kind {
+            Some(proto::triple::Kind::Relation(r)) => (r.subject.clone(), r.object.clone()),
+            other => panic!("expected relation, got {other:?}"),
+        };
+
+        let a = rel(&ImportScope::new("https://kb.example.com", "one"));
+        let b = rel(&ImportScope::new("https://kb.example.com", "two"));
+        let a_again = rel(&ImportScope::new("https://kb.example.com", "one"));
+
+        assert_ne!(a.0, b.0, "_:b0 must differ across imports");
+        assert_ne!(a.1, b.1, "_:b1 must differ across imports");
+        assert_eq!(a, a_again, "same import_id is idempotent");
     }
 }

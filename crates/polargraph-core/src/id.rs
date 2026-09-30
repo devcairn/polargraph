@@ -16,6 +16,15 @@ impl NodeId {
         Self(Uuid::now_v7())
     }
 
+    /// Deterministic `NodeId` for an IRI: xxHash3-128 of the IRI bytes.
+    ///
+    /// Every importer and query translator must map IRIs through this function
+    /// so that the same IRI always names the same node.
+    pub fn from_iri(iri: &str) -> Self {
+        let hash: u128 = xxhash_rust::xxh3::xxh3_128(iri.as_bytes());
+        Self(Uuid::from_bytes(hash.to_le_bytes()))
+    }
+
     /// Fixed-width 16-byte representation for index keys.
     #[inline]
     pub fn as_bytes(&self) -> &[u8; 16] {

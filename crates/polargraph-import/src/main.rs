@@ -11,15 +11,18 @@
 //!
 //! # N-Triples support
 //!
-//! Handles the common subset:
-//!   - `<uri> <uri> <uri> .`   → `Triple::Relation`
-//!   - `<uri> <uri> "literal" .` → `Triple::Property` (Value::Text)
-//!   - Lines starting with `#` and blank lines are skipped.
-//!   - Typed (`"val"^^<type>`) and language-tagged (`"val"@lang`) literals are
-//!     accepted; the tag/type is stripped and the string value is stored.
+//! Each line is parsed with `rio_turtle`'s N-Triples parser:
+//!   - `<iri> <iri> <iri> .` and blank-node subjects/objects → `Triple::Relation`
+//!   - `<iri> <iri> "literal" .` → `Triple::Property`; `xsd:integer`/`long`/`int`,
+//!     `double`/`float`/`decimal` and `boolean` literals become typed values,
+//!     everything else (including language-tagged strings) is stored as text.
+//!   - Comment and blank lines are skipped; unparseable lines are counted and
+//!     skipped rather than aborting the import.
 //!
-//! URIs are hashed to stable NodeIds using xxHash3-128. The same URI always
-//! produces the same NodeId across runs.
+//! IRIs are hashed to stable NodeIds with [`NodeId::from_iri`]. Blank nodes are
+//! skolemized per import (`{skolem-base}/.well-known/genid/{import-id}/{label}`),
+//! so `_:b0` in two different files is two different nodes. Re-running with the
+//! same `--import-id` reproduces the same blank-node NodeIds.
 //!
 //! # Example
 //!
@@ -40,6 +43,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use polargraph_core::{
     id::{EdgeId, NodeId},
+    skolem::{ImportScope, DEFAULT_SKOLEM_BASE},
     temporal::{BiTemporalRange, Timestamp},
     triple::{Predicate, Triple},
     value::Value,
@@ -86,6 +90,24 @@ struct Cli {
     #[arg(long = "format", default_value = "ntriples", value_name = "FORMAT")]
     format: String,
 
+    /// Identifier for this import, used to skolemize blank nodes.
+    ///
+    /// Re-running with the same id maps the same blank-node labels to the same
+    /// NodeIds (idempotent re-import). Defaults to a fresh UUIDv7, which is
+    /// printed at startup.
+    #[arg(long = "import-id", value_name = "ID")]
+    import_id: Option<String>,
+
+    /// Base IRI for skolemized blank nodes — normally the instance's public
+    /// origin, e.g. `https://kb.example.com`.
+    #[arg(
+        long = "skolem-base",
+        env = "POLARGRAPH_SKOLEM_BASE",
+        default_value = DEFAULT_SKOLEM_BASE,
+        value_name = "IRI"
+    )]
+    skolem_base: String,
+
     /// Log filter directive (same syntax as `RUST_LOG`).
     #[arg(
         long = "log",
@@ -110,6 +132,13 @@ fn main() -> Result<()> {
 
     let temp_dir = cli.temp_dir.unwrap_or_else(|| cli.data_dir.join("sst_tmp"));
 
+    let scope = match cli.import_id {
+        Some(id) => ImportScope::new(&cli.skolem_base, id),
+        None => ImportScope::fresh(&cli.skolem_base),
+    };
+    let conv = Converter::new(scope);
+    println!("Import id: {}", conv.scope.import_id());
+
     info!(data_dir = %cli.data_dir.display(), input = %cli.input.display(), batch_size = cli.batch_size, "polargraph-import starting");
 
     std::fs::create_dir_all(&cli.data_dir)
@@ -130,7 +159,7 @@ fn main() -> Result<()> {
             // Read entire file into memory (rio_turtle needs BufRead internally).
             let mut buf = Vec::new();
             BufReader::new(file).read_to_end(&mut buf)?;
-            let triples = parse_input_turtle(&buf)?;
+            let triples = parse_input_turtle(&buf, &conv)?;
             let mut current_batch: Vec<Triple> = Vec::with_capacity(cli.batch_size);
             for t in triples {
                 current_batch.push(t);
@@ -148,7 +177,7 @@ fn main() -> Result<()> {
         "jsonld" | "json-ld" => {
             let mut text = String::new();
             BufReader::new(file).read_to_string(&mut text)?;
-            let triples = parse_input_jsonld(&text)?;
+            let triples = parse_input_jsonld(&text, &conv)?;
             let mut current_batch: Vec<Triple> = Vec::with_capacity(cli.batch_size);
             for t in triples {
                 current_batch.push(t);
@@ -173,7 +202,7 @@ fn main() -> Result<()> {
                 line_num = line_num.wrapping_add(1);
                 let line = line.with_context(|| format!("I/O error reading line {line_num}"))?;
 
-                match parse_line(&line) {
+                match parse_line(&line, &conv) {
                     Some(triple) => current_batch.push(triple),
                     None => {
                         let trimmed = line.trim();
@@ -241,86 +270,123 @@ fn flush_batch(
     Ok(stats.triples_imported)
 }
 
+// ── Triple conversion ─────────────────────────────────────────────────────────
+
+/// Converts parsed RDF terms into PolarGraph triples within one import scope.
+struct Converter {
+    scope: ImportScope,
+    temporal: BiTemporalRange,
+}
+
+impl Converter {
+    fn new(scope: ImportScope) -> Self {
+        Self {
+            scope,
+            temporal: BiTemporalRange {
+                vt_start: Timestamp::now(),
+                vt_end: Timestamp::END_OF_TIME,
+                tt: Timestamp(0), // overwritten by SstImporter::finish()
+            },
+        }
+    }
+
+    /// The identifying IRI for a node reference: the IRI itself, or the skolem
+    /// IRI for a blank-node label.
+    fn node_iri(&self, iri_or_bnode: NodeRef<'_>) -> String {
+        match iri_or_bnode {
+            NodeRef::Iri(iri) => iri.to_string(),
+            NodeRef::Blank(label) => self.scope.skolem_iri(label),
+        }
+    }
+
+    fn relation(&self, subject: &str, predicate: &str, object: &str) -> Triple {
+        Triple::Relation {
+            subject: NodeId::from_iri(subject),
+            predicate: Predicate::new(predicate),
+            object: NodeId::from_iri(object),
+            edge_id: edge_id_for(subject, predicate, object),
+            temporal: self.temporal,
+        }
+    }
+
+    fn property(&self, subject: &str, predicate: &str, value: Value) -> Triple {
+        Triple::Property {
+            subject: NodeId::from_iri(subject),
+            predicate: Predicate::new(predicate),
+            value,
+            temporal: self.temporal,
+        }
+    }
+
+    /// Convert one rio triple. Quoted-triple (RDF-star) terms are skipped.
+    fn convert(&self, t: &rio_api::model::Triple<'_>) -> Option<Triple> {
+        use rio_api::model::{Literal, Subject, Term};
+
+        let subject = self.node_iri(match &t.subject {
+            Subject::NamedNode(n) => NodeRef::Iri(n.iri),
+            Subject::BlankNode(b) => NodeRef::Blank(b.id),
+            Subject::Triple(_) => return None,
+        });
+        let predicate = t.predicate.iri;
+        Some(match &t.object {
+            Term::NamedNode(n) => self.relation(&subject, predicate, n.iri),
+            Term::BlankNode(b) => self.relation(&subject, predicate, &self.scope.skolem_iri(b.id)),
+            Term::Literal(lit) => {
+                let value = match lit {
+                    Literal::Simple { value } | Literal::LanguageTaggedString { value, .. } => {
+                        Value::Text(value.to_string())
+                    }
+                    Literal::Typed { value, datatype } => xsd_to_value(value, datatype.iri),
+                };
+                self.property(&subject, predicate, value)
+            }
+            Term::Triple(_) => return None,
+        })
+    }
+}
+
+/// An IRI or a blank-node label, before skolemization.
+#[derive(Clone, Copy)]
+enum NodeRef<'a> {
+    Iri(&'a str),
+    Blank(&'a str),
+}
+
+impl<'a> NodeRef<'a> {
+    /// Interpret a JSON-LD `@id`: `_:label` is a blank node, anything else an IRI.
+    fn from_jsonld_id(id: &'a str) -> Self {
+        match id.strip_prefix("_:") {
+            Some(label) => NodeRef::Blank(label),
+            None => NodeRef::Iri(id),
+        }
+    }
+}
+
 // ── N-Triples parser ──────────────────────────────────────────────────────────
 
 /// Parse one N-Triples line. Returns `None` for blank lines, comments, and
-/// lines that don't match the expected format.
-fn parse_line(line: &str) -> Option<Triple> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
+/// lines that fail to parse (the caller counts those as skipped).
+fn parse_line(line: &str, conv: &Converter) -> Option<Triple> {
+    use rio_api::parser::TriplesParser;
+
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
         return None;
     }
-
-    // Strip trailing ` .` (with optional whitespace before the dot).
-    let line = line.strip_suffix('.')?.trim_end();
-
-    // Subject (must be a URI)
-    let (subject_uri, rest) = parse_uri(line)?;
-    let rest = rest.trim_start();
-
-    // Predicate (must be a URI)
-    let (pred_uri, rest) = parse_uri(rest)?;
-    let rest = rest.trim_start();
-
-    let now = Timestamp::now();
-    let temporal = BiTemporalRange {
-        vt_start: now,
-        vt_end: Timestamp::END_OF_TIME,
-        tt: Timestamp(0), // overwritten by SstImporter::finish()
-    };
-
-    let subject = uri_to_node_id(subject_uri);
-    let predicate = Predicate::new(pred_uri);
-
-    if rest.starts_with('<') {
-        // Object is a URI → Relation triple
-        let (obj_uri, _) = parse_uri(rest)?;
-        let object = uri_to_node_id(obj_uri);
-        Some(Triple::Relation {
-            subject,
-            predicate,
-            object,
-            edge_id: edge_id_for(subject_uri, pred_uri, obj_uri),
-            temporal,
+    let mut parsed = None;
+    rio_turtle::NTriplesParser::new(trimmed.as_bytes())
+        .parse_all(&mut |t| -> Result<(), rio_turtle::TurtleError> {
+            if parsed.is_none() {
+                parsed = conv.convert(&t);
+            }
+            Ok(())
         })
-    } else if rest.starts_with('"') {
-        // Object is a literal → Property triple (Value::Text)
-        let literal = parse_literal(rest)?;
-        Some(Triple::Property {
-            subject,
-            predicate,
-            value: Value::Text(literal.to_string()),
-            temporal,
-        })
-    } else {
-        // Blank nodes (`_:…`) and other forms are not supported.
-        None
-    }
+        .ok()?;
+    parsed
 }
 
-/// Extract the URI content from `<...>` and return `(uri_str, remainder)`.
-fn parse_uri(s: &str) -> Option<(&str, &str)> {
-    let s = s.strip_prefix('<')?;
-    let end = s.find('>')?;
-    Some((&s[..end], &s[end + 1..]))
-}
-
-/// Extract the literal string from `"..."` (ignoring trailing `@lang` /
-/// `^^<type>`). Returns the raw string content without escape processing.
-fn parse_literal(s: &str) -> Option<&str> {
-    let s = s.strip_prefix('"')?;
-    // Find the closing quote (not handling escaped quotes for simplicity).
-    let end = s.find('"')?;
-    Some(&s[..end])
-}
-
-/// Hash a URI string to a stable, deterministic `NodeId` using xxHash3-128.
-fn uri_to_node_id(uri: &str) -> NodeId {
-    let hash: u128 = xxhash_rust::xxh3::xxh3_128(uri.as_bytes());
-    NodeId(uuid::Uuid::from_bytes(hash.to_le_bytes()))
-}
-
-/// Generate a deterministic `EdgeId` from the three URI strings of a relation.
+/// Generate a deterministic `EdgeId` from the three IRI strings of a relation
+/// (skolem IRIs for blank nodes).
 fn edge_id_for(subject: &str, predicate: &str, object: &str) -> EdgeId {
     let mut buf = Vec::with_capacity(subject.len() + predicate.len() + object.len() + 2);
     buf.extend_from_slice(subject.as_bytes());
@@ -335,94 +401,28 @@ fn edge_id_for(subject: &str, predicate: &str, object: &str) -> EdgeId {
 // ── Turtle / JSON-LD parsers ──────────────────────────────────────────────────
 
 /// Parse a Turtle document into PolarGraph triples using rio_turtle.
-fn parse_input_turtle(input: &[u8]) -> Result<Vec<Triple>> {
-    use rio_api::{
-        model::{Literal, Subject, Term, Triple as RioTriple},
-        parser::TriplesParser,
-    };
-    use rio_turtle::TurtleParser;
+fn parse_input_turtle(input: &[u8], conv: &Converter) -> Result<Vec<Triple>> {
+    use rio_api::parser::TriplesParser;
 
-    let cursor = std::io::Cursor::new(input);
-    let mut parser = TurtleParser::new(cursor, None);
+    let mut parser = rio_turtle::TurtleParser::new(std::io::Cursor::new(input), None);
     let mut triples = Vec::new();
-
-    let now = Timestamp::now();
-    let temporal_template = BiTemporalRange {
-        vt_start: now,
-        vt_end: Timestamp::END_OF_TIME,
-        tt: Timestamp(0),
-    };
-
     parser
-        .parse_all(
-            &mut |t: RioTriple<'_>| -> Result<(), rio_turtle::TurtleError> {
-                let subject_str = match &t.subject {
-                    Subject::NamedNode(n) => n.iri.to_string(),
-                    Subject::BlankNode(b) => format!("_:bnode_{}", b.id),
-                    Subject::Triple(_) => return Ok(()), // skip quoted triple subjects
-                };
-                let subject = uri_to_node_id(&subject_str);
-                let predicate = Predicate::new(t.predicate.iri);
-
-                let triple = match &t.object {
-                    Term::NamedNode(n) => Triple::Relation {
-                        subject,
-                        predicate,
-                        object: uri_to_node_id(n.iri),
-                        edge_id: edge_id_for(&subject_str, t.predicate.iri, n.iri),
-                        temporal: temporal_template,
-                    },
-                    Term::BlankNode(b) => {
-                        let bnode_uri = format!("_:bnode_{}", b.id);
-                        Triple::Relation {
-                            subject,
-                            predicate,
-                            object: uri_to_node_id(&bnode_uri),
-                            edge_id: edge_id_for(&subject_str, t.predicate.iri, &bnode_uri),
-                            temporal: temporal_template,
-                        }
-                    }
-                    Term::Literal(lit) => {
-                        let value = match lit {
-                            Literal::Simple { value }
-                            | Literal::LanguageTaggedString { value, .. } => {
-                                Value::Text(value.to_string())
-                            }
-                            Literal::Typed { value, datatype } => xsd_to_value(value, datatype.iri),
-                        };
-                        Triple::Property {
-                            subject,
-                            predicate,
-                            value,
-                            temporal: temporal_template,
-                        }
-                    }
-                    Term::Triple(_) => return Ok(()), // skip quoted triple objects
-                };
-                triples.push(triple);
-                Ok(())
-            },
-        )
+        .parse_all(&mut |t| -> Result<(), rio_turtle::TurtleError> {
+            triples.extend(conv.convert(&t));
+            Ok(())
+        })
         .map_err(|e| anyhow::anyhow!("Turtle parse error: {}", e))?;
-
     Ok(triples)
 }
 
 /// Parse a JSON-LD document into PolarGraph triples.
-fn parse_input_jsonld(input: &str) -> Result<Vec<Triple>> {
+fn parse_input_jsonld(input: &str, conv: &Converter) -> Result<Vec<Triple>> {
     let doc: serde_json::Value = serde_json::from_str(input).context("JSON parse error")?;
 
     let graph = doc
         .get("@graph")
         .and_then(|v: &serde_json::Value| v.as_array())
         .ok_or_else(|| anyhow::anyhow!("JSON-LD document missing @graph array"))?;
-
-    let now = Timestamp::now();
-    let temporal_template = BiTemporalRange {
-        vt_start: now,
-        vt_end: Timestamp::END_OF_TIME,
-        tt: Timestamp(0),
-    };
 
     let mut triples = Vec::new();
 
@@ -432,17 +432,14 @@ fn parse_input_jsonld(input: &str) -> Result<Vec<Triple>> {
             None => continue,
         };
         let subject_iri = match obj.get("@id").and_then(|v| v.as_str()) {
-            Some(s) => s.to_string(),
+            Some(s) => conv.node_iri(NodeRef::from_jsonld_id(s)),
             None => continue,
         };
-        let subject = uri_to_node_id(&subject_iri);
 
         for (key, val) in obj {
             if key.starts_with('@') {
                 continue;
             }
-            let predicate = Predicate::new(key.as_str());
-
             let items: Vec<&serde_json::Value> = if val.is_array() {
                 val.as_array().unwrap().iter().collect()
             } else {
@@ -451,13 +448,8 @@ fn parse_input_jsonld(input: &str) -> Result<Vec<Triple>> {
 
             for item in items {
                 if let Some(id) = item.get("@id").and_then(|v| v.as_str()) {
-                    triples.push(Triple::Relation {
-                        subject,
-                        predicate: predicate.clone(),
-                        object: uri_to_node_id(id),
-                        edge_id: edge_id_for(&subject_iri, key, id),
-                        temporal: temporal_template,
-                    });
+                    let object_iri = conv.node_iri(NodeRef::from_jsonld_id(id));
+                    triples.push(conv.relation(&subject_iri, key, &object_iri));
                 } else if let Some(raw) = item.get("@value") {
                     let type_str = item
                         .get("@type")
@@ -465,12 +457,7 @@ fn parse_input_jsonld(input: &str) -> Result<Vec<Triple>> {
                         .unwrap_or("xsd:string");
                     let full_dt = expand_xsd_prefix(type_str);
                     let value = xsd_to_value(raw.as_str().unwrap_or(&raw.to_string()), &full_dt);
-                    triples.push(Triple::Property {
-                        subject,
-                        predicate: predicate.clone(),
-                        value,
-                        temporal: temporal_template,
-                    });
+                    triples.push(conv.property(&subject_iri, key, value));
                 }
             }
         }
@@ -513,19 +500,30 @@ fn expand_xsd_prefix(dt: &str) -> String {
 mod tests {
     use super::*;
 
+    fn conv(import_id: &str) -> Converter {
+        Converter::new(ImportScope::new("https://kb.example.com", import_id))
+    }
+
     #[test]
     fn parse_relation_line() {
         let line =
             "<http://example.org/Alice> <http://schema.org/knows> <http://example.org/Bob> .";
-        let triple = parse_line(line).unwrap();
-        assert!(matches!(triple, Triple::Relation { .. }));
+        let triple = parse_line(line, &conv("t")).unwrap();
+        match triple {
+            Triple::Relation {
+                subject, object, ..
+            } => {
+                assert_eq!(subject, NodeId::from_iri("http://example.org/Alice"));
+                assert_eq!(object, NodeId::from_iri("http://example.org/Bob"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]
     fn parse_property_line() {
         let line = r#"<http://example.org/Alice> <http://schema.org/name> "Alice" ."#;
-        let triple = parse_line(line).unwrap();
-        match triple {
+        match parse_line(line, &conv("t")).unwrap() {
             Triple::Property {
                 value: Value::Text(s),
                 ..
@@ -537,33 +535,89 @@ mod tests {
     #[test]
     fn parse_property_with_lang_tag() {
         let line = r#"<http://example.org/Alice> <http://schema.org/name> "Alice"@en ."#;
-        let triple = parse_line(line).unwrap();
+        let triple = parse_line(line, &conv("t")).unwrap();
         assert!(matches!(triple, Triple::Property { .. }));
     }
 
     #[test]
-    fn parse_comment_returns_none() {
-        assert!(parse_line("# this is a comment").is_none());
+    fn parse_typed_literal_and_escapes() {
+        let c = conv("t");
+        let int =
+            r#"<http://ex/x> <http://ex/age> "30"^^<http://www.w3.org/2001/XMLSchema#integer> ."#;
+        assert!(matches!(
+            parse_line(int, &c),
+            Some(Triple::Property {
+                value: Value::Int(30),
+                ..
+            })
+        ));
+        let esc = r#"<http://ex/x> <http://ex/says> "a \"quoted\" word" ."#;
+        match parse_line(esc, &c) {
+            Some(Triple::Property {
+                value: Value::Text(s),
+                ..
+            }) => assert_eq!(s, r#"a "quoted" word"#),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_blank_returns_none() {
-        assert!(parse_line("   ").is_none());
-        assert!(parse_line("").is_none());
+    fn parse_comment_blank_and_garbage_return_none() {
+        let c = conv("t");
+        assert!(parse_line("# this is a comment", &c).is_none());
+        assert!(parse_line("   ", &c).is_none());
+        assert!(parse_line("", &c).is_none());
+        assert!(parse_line("not n-triples at all", &c).is_none());
     }
 
     #[test]
-    fn uri_to_node_id_is_deterministic() {
-        let id1 = uri_to_node_id("http://example.org/Alice");
-        let id2 = uri_to_node_id("http://example.org/Alice");
-        let id3 = uri_to_node_id("http://example.org/Bob");
-        assert_eq!(id1, id2);
-        assert_ne!(id1, id3);
+    fn blank_nodes_are_imported_and_scoped() {
+        let line = "_:b0 <http://schema.org/knows> _:b1 .";
+        let ends = |c: &Converter| match parse_line(line, c) {
+            Some(Triple::Relation {
+                subject,
+                object,
+                edge_id,
+                ..
+            }) => (subject, object, edge_id),
+            other => panic!("bnode relation should import, got {other:?}"),
+        };
+        let a = ends(&conv("one"));
+        let b = ends(&conv("two"));
+        assert_ne!(a.0, b.0, "_:b0 differs across imports");
+        assert_ne!(a.1, b.1, "_:b1 differs across imports");
+        assert_ne!(a.2, b.2, "edge ids differ across imports");
+        assert_eq!(a, ends(&conv("one")), "same import id is idempotent");
     }
 
     #[test]
-    fn blank_node_returns_none() {
-        let line = "<http://example.org/Alice> <http://schema.org/knows> _:b0 .";
-        assert!(parse_line(line).is_none());
+    fn jsonld_blank_node_ids_are_scoped() {
+        let doc = r#"{"@graph": [
+            {"@id": "_:b0", "http://schema.org/knows": {"@id": "_:b1"}},
+            {"@id": "_:b1", "http://schema.org/name": {"@value": "Bob"}}
+        ]}"#;
+        let a = parse_input_jsonld(doc, &conv("one")).unwrap();
+        let b = parse_input_jsonld(doc, &conv("two")).unwrap();
+        let (a_obj, a_named) = match (&a[0], &a[1]) {
+            (Triple::Relation { object, .. }, Triple::Property { subject, .. }) => {
+                (*object, *subject)
+            }
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(a_obj, a_named, "_:b1 is one node within an import");
+        assert_ne!(
+            a[0].subject(),
+            b[0].subject(),
+            "_:b0 differs across imports"
+        );
+    }
+
+    #[test]
+    fn turtle_blank_nodes_are_scoped() {
+        let ttl = b"@prefix ex: <http://ex/> .\n[] ex:knows ex:Bob .\n";
+        let a = parse_input_turtle(ttl, &conv("one")).unwrap();
+        let b = parse_input_turtle(ttl, &conv("two")).unwrap();
+        assert_eq!(a.len(), 1);
+        assert_ne!(a[0].subject(), b[0].subject());
     }
 }

@@ -6,6 +6,7 @@
 
 use polargraph_core::{
     id::{EdgeId, NodeId},
+    skolem::ImportScope,
     value::Value,
 };
 use rio_api::{
@@ -20,17 +21,7 @@ use rio_turtle::{NTriplesParser, TurtleParser};
 ///
 /// The same URI always produces the same NodeId across processes and restarts.
 pub fn uri_to_node_id(uri: &str) -> NodeId {
-    let hash: u128 = xxhash_rust::xxh3::xxh3_128(uri.as_bytes());
-    NodeId(uuid::Uuid::from_bytes(hash.to_le_bytes()))
-}
-
-/// Map a blank node identifier to a deterministic [`NodeId`].
-///
-/// The identifier is scoped with a `_:bnode_` prefix so it cannot collide with
-/// real URIs.
-pub fn bnode_to_node_id(bnode_id: &str) -> NodeId {
-    let scoped = format!("_:bnode_{}", bnode_id);
-    uri_to_node_id(&scoped)
+    NodeId::from_iri(uri)
 }
 
 /// Derive a deterministic [`EdgeId`] from the three IRI/blank-node strings of
@@ -71,6 +62,29 @@ pub struct ImportedTriple {
     pub predicate: String,
     /// Object value.
     pub object: ImportedObject,
+}
+
+impl ImportedTriple {
+    /// The subject's `NodeId`; blank nodes are skolemized within `scope`.
+    pub fn subject_node_id(&self, scope: &ImportScope) -> NodeId {
+        if self.subject_is_bnode {
+            scope.bnode_node_id(&self.subject)
+        } else {
+            uri_to_node_id(&self.subject)
+        }
+    }
+}
+
+impl ImportedObject {
+    /// The object's `NodeId` for IRIs and blank nodes (skolemized within
+    /// `scope`); `None` for literals.
+    pub fn node_id(&self, scope: &ImportScope) -> Option<NodeId> {
+        match self {
+            ImportedObject::Iri(iri) => Some(uri_to_node_id(iri)),
+            ImportedObject::BlankNode(label) => Some(scope.bnode_node_id(label)),
+            ImportedObject::Literal { .. } => None,
+        }
+    }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -196,6 +210,7 @@ pub fn parse_turtle(input: &[u8]) -> Result<Vec<ImportedTriple>, String> {
 /// - `{ "@id": "<iri>", "<pred>": { "@id": "<iri>" } }` → Relation triple
 /// - `{ "@id": "<iri>", "<pred>": { "@value": ..., "@type": "xsd:..." } }` → Property triple
 /// - Array-valued predicates expand into multiple triples.
+/// - `"@id": "_:label"` (subject or object) is a blank node.
 pub fn parse_jsonld(input: &str) -> Result<Vec<ImportedTriple>, String> {
     let doc: serde_json::Value =
         serde_json::from_str(input).map_err(|e| format!("JSON parse error: {}", e))?;
@@ -213,8 +228,11 @@ pub fn parse_jsonld(input: &str) -> Result<Vec<ImportedTriple>, String> {
             Some(o) => o,
             None => continue,
         };
-        let subject = match obj.get("@id").and_then(|v| v.as_str()) {
-            Some(s) => s.to_string(),
+        let (subject, subject_is_bnode) = match obj.get("@id").and_then(|v| v.as_str()) {
+            Some(id) => match id.strip_prefix("_:") {
+                Some(label) => (label.to_string(), true),
+                None => (id.to_string(), false),
+            },
             None => continue,
         };
 
@@ -233,7 +251,10 @@ pub fn parse_jsonld(input: &str) -> Result<Vec<ImportedTriple>, String> {
 
             for item in items {
                 let imported_object = if let Some(id) = item.get("@id").and_then(|v| v.as_str()) {
-                    ImportedObject::Iri(id.to_string())
+                    match id.strip_prefix("_:") {
+                        Some(label) => ImportedObject::BlankNode(label.to_string()),
+                        None => ImportedObject::Iri(id.to_string()),
+                    }
                 } else if let Some(raw_val) = item.get("@value") {
                     let type_str = item
                         .get("@type")
@@ -278,7 +299,7 @@ pub fn parse_jsonld(input: &str) -> Result<Vec<ImportedTriple>, String> {
 
                 triples.push(ImportedTriple {
                     subject: subject.clone(),
-                    subject_is_bnode: false,
+                    subject_is_bnode,
                     predicate: predicate.clone(),
                     object: imported_object,
                 });
@@ -313,6 +334,34 @@ mod tests {
         let c = uri_to_node_id("http://example.org/Bob");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn bnodes_are_scoped_per_import() {
+        let nt = b"_:b0 <http://schema.org/knows> _:b1 .\n";
+        let t = &parse_ntriples(nt).unwrap()[0];
+        let first = ImportScope::new(crate::DEFAULT_SKOLEM_BASE, "import-1");
+        let second = ImportScope::new(crate::DEFAULT_SKOLEM_BASE, "import-2");
+
+        assert_ne!(t.subject_node_id(&first), t.subject_node_id(&second));
+        assert_ne!(t.object.node_id(&first), t.object.node_id(&second));
+        // Same import_id → same nodes (idempotent re-import).
+        let again = ImportScope::new(crate::DEFAULT_SKOLEM_BASE, "import-1");
+        assert_eq!(t.subject_node_id(&first), t.subject_node_id(&again));
+        // IRIs are unaffected by scope.
+        let iri = ImportedObject::Iri("http://example.org/Bob".into());
+        assert_eq!(iri.node_id(&first), iri.node_id(&second));
+    }
+
+    #[test]
+    fn parse_jsonld_blank_node_ids() {
+        let doc = r#"{"@graph": [
+            {"@id": "_:b0", "http://schema.org/knows": {"@id": "_:b1"}}
+        ]}"#;
+        let t = &parse_jsonld(doc).unwrap()[0];
+        assert!(t.subject_is_bnode);
+        assert_eq!(t.subject, "b0");
+        assert!(matches!(&t.object, ImportedObject::BlankNode(l) if l == "b1"));
     }
 
     #[test]

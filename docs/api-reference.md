@@ -917,9 +917,18 @@ Triples are inserted in batches of 1 000. Relations become `RelationTriple`s;
 literals become `PropertyTriple`s. IRIs map to `NodeId`s via deterministic
 xxHash3-128 (`uri_to_node_id`).
 
+Blank nodes are skolemized per import
+(`{skolem-base}/.well-known/genid/{import_id}/{label}`), so the same label in
+two imports is two different nodes.
+
+| Query parameter | Description |
+|---|---|
+| `import_id` | Optional. 1–128 chars of `[A-Za-z0-9._~-]`. Re-importing with the same id maps blank nodes to the same NodeIds. Defaults to a fresh UUIDv7. |
+
 **Response:**
 ```json
-{ "imported": 42, "total_parsed": 42, "duration_ms": 18 }
+{ "imported": 42, "total_parsed": 42, "duration_ms": 18,
+  "import_id": "01928c7e-5b1a-7f3e-9d0c-2a4b6c8d0e1f" }
 ```
 
 ### `POST /import/subgraph`

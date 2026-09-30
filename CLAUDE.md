@@ -108,6 +108,7 @@ Dependency-free. No I/O, no async. Contains every shared type.
 | `value` | `Value` enum: Null, Bool, Int, Float, Text, Blob, Vector |
 | `view` | `View`, `ViewId`, `NodeFilter`, `EdgePresentation` |
 | `schema` | `FieldKind`, `FieldDef`, `NodeTypeDef`, `EdgeTypeDef`, `VectorSpaceDef` |
+| `skolem` | `ImportScope` — per-import blank-node skolemization (`{base}/.well-known/genid/{import_id}/{label}`) |
 
 **Do not add I/O or async imports here.**
 
@@ -215,6 +216,9 @@ into RocksDB via SST file ingestion — no server required.
 | `--input FILE` | *(required)* | N-Triples input file |
 | `--batch-size N` | `100000` | Triples per SST import batch |
 | `--temp-dir PATH` | `<data-dir>/sst_tmp` | Temporary SST file directory |
+| `--format FORMAT` | `ntriples` | `ntriples`, `turtle`, or `jsonld` |
+| `--import-id ID` | *(fresh UUIDv7)* | Blank-node skolemization scope; reuse for idempotent re-import |
+| `--skolem-base IRI` | `https://polargraph.invalid` | Base of skolem IRIs (`POLARGRAPH_SKOLEM_BASE`) |
 
 **Must be run while `polargraphd` is stopped** — SST ingestion requires
 exclusive DB access.
@@ -231,6 +235,7 @@ the generated proto client code via `tonic`.
 | `--listen ADDR` | `POLARGRAPH_REST_LISTEN` | `0.0.0.0:8000` | HTTP listen address |
 | `--api-key KEY` | `POLARGRAPH_REST_API_KEY` | *(none)* | Forwarded as `Authorization: Bearer` to upstream |
 | `--tls-ca PATH` | `POLARGRAPH_REST_TLS_CA` | *(none)* | PEM CA cert for upstream TLS verification |
+| `--skolem-base IRI` | `POLARGRAPH_REST_SKOLEM_BASE` | `https://polargraph.invalid` | Base of blank-node skolem IRIs on `/import/rdf` |
 
 Endpoints include: `POST /query`, `POST /query/stream`, `POST /insert`, `GET /triples`,
 `POST /vector/search`, `GET /health`, `POST /explain`, `POST /cypher`, `POST /cypher/write`,
@@ -253,7 +258,7 @@ used exclusively by `polargraph-rest`.
 | `response` | `serialize_json()`, `serialize_csv()`, `node_bindings_to_sparql()` — SPARQL results serializers |
 | `serialize` | `serialize_ntriples()`, `serialize_turtle()`, `node_id_to_iri()` — RDF output for CONSTRUCT/DESCRIBE; Turtle-star / N-Triples-star serialization for SPARQL-star results |
 | `protocol` | `negotiate_format()`, `extract_query_from_form()` — HTTP content negotiation and form-encoded body parsing |
-| `rdf_import` | `parse_ntriples()`, `parse_turtle()`, `parse_jsonld()` — multi-format RDF parsing (rio_api 0.8); `uri_to_node_id`, `bnode_to_node_id`, `edge_id_for` — deterministic IRI → NodeId/EdgeId mapping; `serialize_jsonld`, `serialize_schema_rdf`, `parse_schema_rdf` |
+| `rdf_import` | `parse_ntriples()`, `parse_turtle()`, `parse_jsonld()` — multi-format RDF parsing (rio_api 0.8); `uri_to_node_id`, `edge_id_for` — deterministic IRI → NodeId/EdgeId mapping; blank nodes via `ImportedTriple::subject_node_id(&ImportScope)` / `ImportedObject::node_id`; `serialize_jsonld`, `serialize_schema_rdf`, `parse_schema_rdf` |
 
 ---
 

@@ -5,6 +5,7 @@
 
 pub mod id;
 pub mod schema;
+pub mod skolem;
 pub mod temporal;
 pub mod triple;
 pub mod value;
