@@ -81,7 +81,7 @@ Recorded after auditing this plan against the code at `849839a`.
 | 2b | IRI dictionary CF; IRI bindings on insert/import; `ResolveIris` RPC | additive CF | ✅ |
 | 2c | Export paths render stored IRIs; optional de-skolemization | none | ✅ |
 | 2d | Literal datatypes + language tags preserved (`Value::LangText`, `Value::Typed`, `term::literal_to_value`) | none | ✅ |
-| 3 | New key layout: value-hashed property keys (1.2), 48-byte keys with `g` (2.3), `GSPO`/`GPOS`, `BLOB` CF + value refs (1.3), conflict detection on `(s,p,o,g)`, graph interning — exact formats in `docs/design/v3-key-layout.md` | **v3** offline rewrite | in progress — storage layer, value hashes, graph slot + interning, blobs, write modes, `polargraphd migrate` done; Insert RPC graph/mode fields and planner value lookup done; remaining: benchmarks vs v2 (see design note §10) |
+| 3 | New key layout: value-hashed property keys (1.2), 48-byte keys with `g` (2.3), `GSPO`/`GPOS`, `BLOB` CF + value refs (1.3), conflict detection on `(s,p,o,g)`, graph interning — exact formats in `docs/design/v3-key-layout.md` | **v3** offline rewrite (`polargraphd migrate`) | ✅ — end-to-end inserts −9% vs v2 (budget −30%), union reads 3–17% faster, 1K-quad graph load 0.37 ms (design note §10) |
 | 4 | `GraphTerm` in Datalog/planner; graph RPCs; N-Quads/TriG | — | |
 | 5 | SPARQL dataset semantics + graph Update ops; Cypher `USE GRAPH` | — | |
 | 6 | Graph-bitmap ACL inside scans (2.8) | — | |

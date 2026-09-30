@@ -35,7 +35,7 @@ use polargraph_core::{
     triple::Triple,
     value::Value,
 };
-use rocksdb::{Direction, IteratorMode, WriteBatch};
+use rocksdb::WriteBatch;
 use std::{
     collections::HashMap,
     sync::{
@@ -289,104 +289,110 @@ impl Transaction {
     ///   4. Persist updated oracle counter to META CF.
     ///   5. Release commit lock.
     pub fn commit(self) -> Result<Timestamp, StorageError> {
-        if self.write_buffer.is_empty() && self.iris.is_empty() {
-            return Ok(self.read_ts);
+        let Transaction {
+            store,
+            read_ts,
+            write_buffer,
+            write_meta,
+            iris,
+        } = self;
+        if write_buffer.is_empty() && iris.is_empty() {
+            return Ok(read_ts);
         }
 
-        let (commit_ts, _guard) = self.store.oracle().begin_commit();
-        debug!(
-            "tx commit: read_ts={} commit_ts={}",
-            self.read_ts.0, commit_ts.0
-        );
+        let (commit_ts, _guard) = store.oracle().begin_commit();
+        debug!("tx commit: read_ts={} commit_ts={}", read_ts.0, commit_ts.0);
 
-        let writes: Vec<PendingWrite> = self
-            .write_buffer
-            .iter()
-            .zip(&self.write_meta)
+        let writes: Vec<PendingWrite> = write_buffer
+            .into_iter()
+            .zip(write_meta)
             .map(|(triple, (graph, mode))| PendingWrite {
-                triple: triple.clone(),
-                graph: *graph,
-                mode: *mode,
+                triple,
+                graph,
+                mode,
             })
             .collect();
 
         // ── conflict check (quads only) ───────────────────────────────────────
         // Edge annotations don't participate; they use additive append-only
-        // semantics.
-        for w in &writes {
-            if let Some(conflict) = self.check_conflict(w, commit_ts)? {
-                return Err(StorageError::WriteConflict(conflict));
+        // semantics. One raw iterator is reused for every check.
+        {
+            let gspo_cf = store.cf_handle(Order::Gspo.cf())?;
+            let mut gspo = store.db_ref().raw_iterator_cf(&gspo_cf);
+            for w in &writes {
+                if let Some(conflict) = check_conflict(&store, &mut gspo, w, read_ts, commit_ts)? {
+                    return Err(StorageError::WriteConflict(conflict));
+                }
             }
         }
 
         // ── build WriteBatch ──────────────────────────────────────────────────
         let mut batch = WriteBatch::default();
-        self.store.stage_writes(&mut batch, &writes, commit_ts)?;
+        store.stage_writes(&mut batch, &writes, commit_ts)?;
 
         // IRI dictionary entries — checked and written under the commit lock,
         // so concurrent bindings of one node are serialized.
         let mut pending_iris = HashMap::new();
-        for iri in &self.iris {
-            self.store.batch_iri(&mut batch, iri, &mut pending_iris)?;
+        for iri in &iris {
+            store.batch_iri(&mut batch, iri, &mut pending_iris)?;
         }
 
         // Persist oracle counter so restarts don't reuse timestamps.
-        let meta_cf = self.store.cf_handle(cf::META)?;
+        let meta_cf = store.cf_handle(cf::META)?;
         batch.put_cf(&meta_cf, META_ORACLE_CTR, commit_ts.0.to_be_bytes());
 
-        self.store.db_write(batch)?;
+        store.db_write(batch)?;
         Ok(commit_ts)
     }
+}
 
-    // ── private ───────────────────────────────────────────────────────────────
-
-    /// Returns `Some(ConflictError)` if a version committed after `read_ts`
-    /// exists for what `w` writes: the exact quad, or — for a `Replace`
-    /// property write — any value of its `(subject, predicate, graph)`.
-    fn check_conflict(
-        &self,
-        w: &PendingWrite,
-        commit_ts: Timestamp,
-    ) -> Result<Option<ConflictError>, StorageError> {
-        let s = w.triple.subject();
-        let pred_str = w.triple.predicate().0.as_str();
-        let Some(p) = self.store.predicate_id(pred_str) else {
-            return Ok(None); // predicate not yet in store → no conflict
-        };
-        let prefix = match &w.triple {
-            Triple::Relation { object, .. } => {
-                Order::Gspo.prefix(Some(&s), Some(p), Some(object), Some(w.graph))
-            }
-            Triple::Property { value, .. } => match w.mode.resolve(&w.triple) {
-                WriteMode::Replace => Order::Gspo.prefix(Some(&s), Some(p), None, Some(w.graph)),
-                _ => Order::Gspo.prefix(
-                    Some(&s),
-                    Some(p),
-                    Some(&keys::value_object(value)),
-                    Some(w.graph),
-                ),
-            },
-            Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => return Ok(None),
-        };
-
-        let cf = self.store.cf_handle(Order::Gspo.cf())?;
-        let db = self.store.db_ref();
-        let iter = db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
-        for item in iter {
-            let (key, _) = item?;
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            let tt = keys::key_tt(&key);
-            if tt > self.read_ts && tt <= commit_ts {
-                return Ok(Some(ConflictError {
-                    subject: s,
-                    predicate: pred_str.to_owned(),
-                }));
-            }
+/// Returns `Some(ConflictError)` if a version committed in
+/// `(read_ts, commit_ts]` exists for what `w` writes: the exact quad, or — for
+/// a `Replace` property write — any value of its `(subject, predicate, graph)`.
+fn check_conflict(
+    store: &TripleStore,
+    gspo: &mut rocksdb::DBRawIteratorWithThreadMode<'_, crate::store::DB>,
+    w: &PendingWrite,
+    read_ts: Timestamp,
+    commit_ts: Timestamp,
+) -> Result<Option<ConflictError>, StorageError> {
+    let s = w.triple.subject();
+    let pred_str = w.triple.predicate().0.as_str();
+    let Some(p) = store.predicate_id(pred_str) else {
+        return Ok(None); // predicate not yet in store → no conflict
+    };
+    let prefix = match &w.triple {
+        Triple::Relation { object, .. } => {
+            Order::Gspo.prefix(Some(&s), Some(p), Some(object), Some(w.graph))
         }
-        Ok(None)
+        Triple::Property { value, .. } => match w.mode.resolve(&w.triple) {
+            WriteMode::Replace => Order::Gspo.prefix(Some(&s), Some(p), None, Some(w.graph)),
+            _ => Order::Gspo.prefix(
+                Some(&s),
+                Some(p),
+                Some(&keys::value_object(value)),
+                Some(w.graph),
+            ),
+        },
+        Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => return Ok(None),
+    };
+
+    gspo.seek(prefix);
+    while let Some(key) = gspo.key() {
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        let tt = keys::key_tt(key);
+        if tt > read_ts && tt <= commit_ts {
+            return Ok(Some(ConflictError {
+                subject: s,
+                predicate: pred_str.to_owned(),
+            }));
+        }
+        gspo.next();
     }
+    gspo.status()?;
+    Ok(None)
 }
 
 // ── Snapshot ──────────────────────────────────────────────────────────────────

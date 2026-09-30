@@ -243,6 +243,34 @@ Deviations from and details beyond §1–§8, recorded as the code landed on
 - **Retention** counts index entries across the eight orders (one quad
   version = 8) and reports `blobs_deleted` from the sweep.
 
+### Benchmarks vs v2 (2026-09-30, Apple M-series, release/bench profile)
+
+End-to-end (§8 budget: ≤ 30% insert regression) — `polargraph-bench write
+--nodes 5000 --edges-per-node 4` (30 000 triples over gRPC), 3 runs each:
+v2 ≈ 203k triples/s, v3 ≈ 185k triples/s → **−9%**.
+
+Storage micro-benchmarks (`cargo bench -p polargraph-storage`), v2 and v3 run
+back to back:
+
+| Benchmark | v2 | v3 | Δ |
+|---|---|---|---|
+| `pattern_query/scan_by_subject` | 2.03 µs | 1.81 µs | −11% |
+| `pattern_query/scan_by_predicate_name` (500) | 251 µs | 208 µs | −17% |
+| `pattern_query/scan_by_predicate_object` | 1.19 µs | 1.09 µs | −8% |
+| `pattern_query/scan_by_object` | 1.01 µs | 1.04 µs | +3% |
+| `bsbm/q1_product_search` | 43.2 µs | 42.9 µs | −1% |
+| `bsbm/q7_five_way_join` | 3.13 µs | 3.31 µs | +6% |
+| `triple_writes/1000` (one commit) | 3.71 ms | 4.84 ms | +31% |
+| `graph_scan/gspo_1k_quads` (new; target p50 ≤ 2 ms) | — | 0.37 ms | ✓ |
+
+The storage-level write cost is the accepted write amplification (8 index
+inserts instead of 6, ~40% more WAL bytes per quad); an experiment with
+`WriteMode::Add` showed the `Replace` lookup itself is not a measurable
+cost. `triple_writes/1` and `/10` are dominated by store close and temp-dir
+removal inside the timed closure, which grows with the CF count. Union reads
+got faster: de-duplication is skipped entirely when no named graphs exist and
+otherwise keyed on ids, and scan prefixes are built on the stack.
+
 Docs still describing the v2 layout (for the docs pass): the key-layout,
 column-family, retention and bulk-import sections of `docs/architecture.md`,
 the storage tables in `CLAUDE.md`, and `docs/api-reference.md`'s key-encoding

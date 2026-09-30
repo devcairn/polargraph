@@ -174,31 +174,34 @@ impl Order {
     }
 
     /// Key prefix for a scan: the leading slots of this order that are bound,
-    /// stopping at the first unbound one.
+    /// stopping at the first unbound one. Built on the stack (no allocation).
     pub fn prefix(
         self,
         s: Option<&NodeId>,
         p: Option<PredId>,
         o: Option<&NodeId>,
         g: Option<GraphId>,
-    ) -> Vec<u8> {
-        let mut out = Vec::with_capacity(QUAD_TUPLE_LEN);
+    ) -> KeyPrefix {
+        let mut out = KeyPrefix {
+            bytes: [0; QUAD_TUPLE_LEN],
+            len: 0,
+        };
         for slot in self.slots() {
             match slot {
                 Slot::S => match s {
-                    Some(s) => out.extend_from_slice(s.as_bytes()),
+                    Some(s) => out.push(s.as_bytes()),
                     None => break,
                 },
                 Slot::P => match p {
-                    Some(p) => out.extend_from_slice(&p.to_be_bytes()),
+                    Some(p) => out.push(&p.to_be_bytes()),
                     None => break,
                 },
                 Slot::O => match o {
-                    Some(o) => out.extend_from_slice(o.as_bytes()),
+                    Some(o) => out.push(o.as_bytes()),
                     None => break,
                 },
                 Slot::G => match g {
-                    Some(g) => out.extend_from_slice(&g.to_be_bytes()),
+                    Some(g) => out.push(&g.to_be_bytes()),
                     None => break,
                 },
             }
@@ -214,6 +217,36 @@ impl Order {
             _ => GRAPH_OFFSET_NON_LEADING,
         };
         GraphId(u32_from(&key[at..at + 4]))
+    }
+}
+
+/// A scan prefix of up to [`QUAD_TUPLE_LEN`] bytes, held inline.
+#[derive(Clone, Copy)]
+pub struct KeyPrefix {
+    bytes: [u8; QUAD_TUPLE_LEN],
+    len: usize,
+}
+
+impl KeyPrefix {
+    #[inline]
+    fn push(&mut self, part: &[u8]) {
+        self.bytes[self.len..self.len + part.len()].copy_from_slice(part);
+        self.len += part.len();
+    }
+}
+
+impl std::ops::Deref for KeyPrefix {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl AsRef<[u8]> for KeyPrefix {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self
     }
 }
 

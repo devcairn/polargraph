@@ -104,7 +104,7 @@ pub enum StoreMode {
     },
 }
 
-type DB = DBWithThreadMode<MultiThreaded>;
+pub(crate) type DB = DBWithThreadMode<MultiThreaded>;
 
 // META key namespace for predicate table.
 const META_PRED_PREFIX: &[u8] = b"p/";
@@ -198,6 +198,9 @@ pub type RawEntry = (Box<[u8]>, Box<[u8]>);
 /// Per-quad winner while deduplicating versions in `snapshot_scan`:
 /// `(vt_start, tt, vt_end, value_bytes)`.
 type VersionSlot = (i64, Timestamp, i64, Vec<u8>);
+
+/// `(subject, predicate, object slot, graph)` of a quad.
+type QuadIds = (NodeId, PredId, NodeId, GraphId);
 
 /// Property values staged in one write batch, per `(s, p, g)`.
 type StagedValues = HashMap<(NodeId, PredId, GraphId), Vec<(NodeId, Vec<u8>)>>;
@@ -1333,7 +1336,7 @@ impl TripleStore {
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
     ) -> Result<Vec<Triple>, StorageError> {
-        let quads = self.snapshot_scan(
+        let quads = self.snapshot_scan_keyed(
             order.cf(),
             order,
             prefix,
@@ -1341,19 +1344,19 @@ impl TripleStore {
             vt_as_of,
             GraphFilter::Union,
         )?;
+        // With no named graphs every quad is in the default graph, so there
+        // is nothing to de-duplicate.
+        if self.inner.graph_fwd.read().unwrap().is_empty() {
+            return Ok(quads.into_iter().map(|(_, t)| t).collect());
+        }
         // Keep one triple per (s, p, o): the one from the lowest graph id.
-        let mut by_spo: HashMap<(NodeId, String, NodeId), (GraphId, Triple)> = HashMap::new();
-        for (g, t) in quads {
-            let o = match &t {
-                Triple::Relation { object, .. } => *object,
-                Triple::Property { value, .. } => keys::value_object(value),
-                _ => continue,
-            };
-            let key = (t.subject(), t.predicate().0.clone(), o);
-            match by_spo.get(&key) {
+        let mut by_spo: HashMap<(NodeId, PredId, NodeId), (GraphId, Triple)> =
+            HashMap::with_capacity(quads.len());
+        for ((s, p, o, g), t) in quads {
+            match by_spo.get(&(s, p, o)) {
                 Some((prev, _)) if *prev <= g => {}
                 _ => {
-                    by_spo.insert(key, (g, t));
+                    by_spo.insert((s, p, o), (g, t));
                 }
             }
         }
@@ -1386,6 +1389,23 @@ impl TripleStore {
         vt_as_of: Option<i64>,
         graphs: GraphFilter,
     ) -> Result<Vec<(GraphId, Triple)>, StorageError> {
+        Ok(self
+            .snapshot_scan_keyed(cf_name, order, prefix, snapshot_ts, vt_as_of, graphs)?
+            .into_iter()
+            .map(|((_, _, _, g), t)| (g, t))
+            .collect())
+    }
+
+    /// [`Self::snapshot_scan`], keeping each result's `(s, p, o, g)` ids.
+    fn snapshot_scan_keyed(
+        &self,
+        cf_name: &str,
+        order: Order,
+        prefix: &[u8],
+        snapshot_ts: Timestamp,
+        vt_as_of: Option<i64>,
+        graphs: GraphFilter,
+    ) -> Result<Vec<(QuadIds, Triple)>, StorageError> {
         let vt = vt_as_of.unwrap_or_else(|| Timestamp::now().0);
         let cf = self.cf_handle(cf_name)?;
         let iter = self
@@ -1393,7 +1413,7 @@ impl TripleStore {
             .db
             .iterator_cf(&cf, IteratorMode::From(prefix, Direction::Forward));
 
-        let mut latest: HashMap<(NodeId, PredId, NodeId, GraphId), VersionSlot> = HashMap::new();
+        let mut latest: HashMap<QuadIds, VersionSlot> = HashMap::new();
 
         for item in iter {
             let (key, value) = item?;
@@ -1428,7 +1448,7 @@ impl TripleStore {
             if vt >= vt_end {
                 continue;
             }
-            out.push((g, self.reconstruct(s, p, o, tt, &value_bytes)?));
+            out.push(((s, p, o, g), self.reconstruct(s, p, o, tt, &value_bytes)?));
         }
         Ok(out)
     }
@@ -1436,46 +1456,52 @@ impl TripleStore {
     // ── internal write helpers ────────────────────────────────────────────────
 
     /// Write one quad version into all eight orders.
+    ///
+    /// `handles` are the eight order CFs in [`Order::ALL`] order (see
+    /// [`Self::order_handles`]), fetched once per batch.
     pub(crate) fn batch_quad(
-        &self,
         batch: &mut WriteBatch,
+        handles: &[Arc<BoundColumnFamily<'_>>],
         q: &QuadKey,
         value: &[u8],
-    ) -> Result<(), StorageError> {
-        for order in Order::ALL {
-            batch.put_cf(&self.cf_handle(order.cf())?, order.encode(q), value);
+    ) {
+        for (order, cf) in Order::ALL.iter().zip(handles) {
+            batch.put_cf(cf, order.encode(q), value);
         }
-        Ok(())
+    }
+
+    /// Handles of the eight quad-order CFs, in [`Order::ALL`] order.
+    pub(crate) fn order_handles(&self) -> Result<Vec<Arc<BoundColumnFamily<'_>>>, StorageError> {
+        Order::ALL.iter().map(|o| self.cf_handle(o.cf())).collect()
     }
 
     /// The latest committed version of every property value of `(s, p, g)`
     /// that is still open at `at` — the values a `Replace` write closes.
+    ///
+    /// `gspo` is a raw iterator over the `gspo` CF, reused across calls.
     fn open_values(
-        &self,
+        gspo: &mut rocksdb::DBRawIteratorWithThreadMode<'_, DB>,
         s: &NodeId,
         p: PredId,
         g: GraphId,
         at: Timestamp,
     ) -> Result<Vec<(NodeId, Vec<u8>)>, StorageError> {
         let prefix = Order::Gspo.prefix(Some(s), Some(p), None, Some(g));
-        let cf = self.cf_handle(Order::Gspo.cf())?;
-        let iter = self
-            .inner
-            .db
-            .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+        gspo.seek(prefix);
         // Keys sort oldest-first within a value, so the last one seen wins.
         let mut latest: Vec<(NodeId, Vec<u8>)> = Vec::new();
-        for item in iter {
-            let (key, value) = item?;
+        while let (Some(key), Some(value)) = (gspo.key(), gspo.value()) {
             if !key.starts_with(&prefix) {
                 break;
             }
-            let o = Order::Gspo.decode(&key)?.o;
+            let o = Order::Gspo.decode(key)?.o;
             match latest.last_mut() {
                 Some((prev, bytes)) if *prev == o => *bytes = value.to_vec(),
                 _ => latest.push((o, value.to_vec())),
             }
+            gspo.next();
         }
+        gspo.status()?;
         Ok(latest
             .into_iter()
             .filter(|(_, bytes)| {
@@ -1498,6 +1524,9 @@ impl TripleStore {
         // Property values staged in this batch, per (s, p, g): a later Replace
         // in the same batch must close them too.
         let mut staged: StagedValues = HashMap::new();
+        let handles = self.order_handles()?;
+        let gspo_cf = self.cf_handle(Order::Gspo.cf())?;
+        let mut gspo = self.inner.db.raw_iterator_cf(&gspo_cf);
 
         for w in writes {
             let temporal = BiTemporalRange {
@@ -1520,7 +1549,12 @@ impl TripleStore {
                         g,
                         tt,
                     };
-                    self.batch_quad(batch, &q, &codec::encode_relation(edge_id, &temporal))?;
+                    Self::batch_quad(
+                        batch,
+                        &handles,
+                        &q,
+                        &codec::encode_relation(edge_id, &temporal),
+                    );
                 }
                 Triple::Property { subject, value, .. } => {
                     let o = keys::value_object(value);
@@ -1528,7 +1562,7 @@ impl TripleStore {
                     let slot = staged.entry((*subject, p, g)).or_default();
                     if w.mode.resolve(&w.triple) == WriteMode::Replace {
                         let closing_at = temporal.vt_start;
-                        let mut to_close = self.open_values(subject, p, g, closing_at)?;
+                        let mut to_close = Self::open_values(&mut gspo, subject, p, g, closing_at)?;
                         to_close.append(slot);
                         for (other, other_bytes) in to_close {
                             if other == o {
@@ -1541,11 +1575,8 @@ impl TripleStore {
                                 g,
                                 tt,
                             };
-                            self.batch_quad(
-                                batch,
-                                &q,
-                                &codec::with_vt_end(&other_bytes, closing_at)?,
-                            )?;
+                            let closed = codec::with_vt_end(&other_bytes, closing_at)?;
+                            Self::batch_quad(batch, &handles, &q, &closed);
                         }
                     }
                     slot.push((o, bytes.clone()));
@@ -1556,7 +1587,7 @@ impl TripleStore {
                         g,
                         tt,
                     };
-                    self.batch_quad(batch, &q, &bytes)?;
+                    Self::batch_quad(batch, &handles, &q, &bytes);
                     if let Some(text) = value.as_text() {
                         self.batch_text_trigrams(batch, subject, p, g, text)?;
                     }
