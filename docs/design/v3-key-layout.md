@@ -271,7 +271,7 @@ removal inside the timed closure, which grows with the CF count. Union reads
 got faster: de-duplication is skipped entirely when no named graphs exist and
 otherwise keyed on ids, and scan prefixes are built on the stack.
 
-Docs still describing the v2 layout (for the docs pass): the key-layout,
-column-family, retention and bulk-import sections of `docs/architecture.md`,
-the storage tables in `CLAUDE.md`, and `docs/api-reference.md`'s key-encoding
-section and `Insert` fields (`graph`, `mode`).
+Docs updated for v3 on 2026-09-30: `docs/architecture.md` (storage layer,
+write path, read path, migration, retention, replication — with Mermaid
+diagrams), `docs/api-reference.md`, `CLAUDE.md`, `README.md`,
+`docs/scaling.md` and `docs/benchmarks.md`.

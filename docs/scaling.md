@@ -21,13 +21,13 @@ Size the cache to the working set of hot triples. Rule of thumb: 20–50 % of th
 
 ### Bloom filters
 
-A 10-bit bloom filter per SST file reduces point-lookup disk reads to near zero when the key is absent. Enable on the hexastore column families:
+A 10-bit bloom filter per SST file reduces point-lookup disk reads to near zero when the key is absent. Enable on the quad-index column families:
 
 ```rust
 table_opts.set_bloom_filter(10.0, false);
 ```
 
-The impact is highest on the SPO, PSO, and POS CFs that are hit by most subject/predicate/object-bound pattern queries.
+The impact is highest on `spog`, `psog`, `posg` and `gspo`, which serve most subject-, predicate-, value- and graph-bound pattern queries.
 
 ### Compaction threads
 
@@ -246,9 +246,9 @@ If the primary goes down, replicas continue serving reads from the last applied 
 
 Any writes committed to the original primary after the last applied WAL batch will be lost.
 
-### Write amplification with 6 CFs
+### Write amplification with 8 quad orders
 
-Every triple write goes to 6 column families (hexastore). This is by design but means write throughput is roughly 1/6 of a single-CF store at the same hardware. Replicas inherit this — each WAL batch applied on the replica performs the same 6-CF fan-out that was done on the primary.
+Every quad version is written to 8 column families (the quad index, storage format v3), plus `trig`, `blob` and `iri` entries where applicable. This is by design: every bind pattern — including per-graph scans and value lookups — is a single prefix scan. Measured end to end, v3 inserts run about 9% slower than the 6-CF v2 layout (`docs/design/v3-key-layout.md` §10). Large values are stored once in `blob` rather than 8×. Replicas inherit the fan-out — each WAL batch applied on the replica performs the same writes as on the primary.
 
 ---
 
