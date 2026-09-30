@@ -19,6 +19,10 @@
 //!   - Comment and blank lines are skipped; unparseable lines are counted and
 //!     skipped rather than aborting the import.
 //!
+//! `--format nquads` / `trig` load each quad into its named graph (interned
+//! on first use; a blank-node graph name is skolemized like any blank node);
+//! quads without a graph name go to the default graph.
+//!
 //! IRIs map to NodeIds via [`term::iri_to_node_id`] (`urn:uuid:` IRIs keep
 //! their UUID; others are hashed). Blank nodes are
 //! skolemized per import (`{skolem-base}/.well-known/genid/{import-id}/{label}`),
@@ -43,6 +47,7 @@ use std::{
 use anyhow::{Context, Result};
 use clap::Parser;
 use polargraph_core::{
+    id::GraphId,
     skolem::{ImportScope, DEFAULT_SKOLEM_BASE},
     temporal::{BiTemporalRange, Timestamp},
     term,
@@ -88,6 +93,8 @@ struct Cli {
     /// `ntriples` (default) — one triple per line, no prefixes.
     /// `turtle`             — Turtle / Turtle-star with prefix declarations.
     /// `jsonld`             — JSON-LD @graph format.
+    /// `nquads` / `nq`      — N-Quads; the fourth term names the graph.
+    /// `trig`               — TriG (Turtle with `GRAPH { … }` blocks).
     #[arg(long = "format", default_value = "ntriples", value_name = "FORMAT")]
     format: String,
 
@@ -161,9 +168,39 @@ fn main() -> Result<()> {
             let mut buf = Vec::new();
             BufReader::new(file).read_to_end(&mut buf)?;
             let triples = parse_input_turtle(&buf, &conv)?;
-            let mut current_batch: Vec<Triple> = Vec::with_capacity(cli.batch_size);
+            let mut current_batch: Vec<(Triple, GraphId)> = Vec::with_capacity(cli.batch_size);
             for t in triples {
-                current_batch.push(t);
+                current_batch.push((t, GraphId::DEFAULT));
+                if current_batch.len() >= cli.batch_size {
+                    batch_num += 1;
+                    total_imported += flush_batch(
+                        &current_batch,
+                        conv.take_iris(),
+                        &store,
+                        &temp_dir,
+                        batch_num,
+                    )?;
+                    current_batch.clear();
+                }
+            }
+            if !current_batch.is_empty() {
+                batch_num += 1;
+                total_imported += flush_batch(
+                    &current_batch,
+                    conv.take_iris(),
+                    &store,
+                    &temp_dir,
+                    batch_num,
+                )?;
+            }
+        }
+        "nquads" | "nq" | "trig" => {
+            let mut buf = Vec::new();
+            BufReader::new(file).read_to_end(&mut buf)?;
+            let quads = parse_input_quads(&buf, cli.format == "trig", &conv, &store)?;
+            let mut current_batch: Vec<(Triple, GraphId)> = Vec::with_capacity(cli.batch_size);
+            for q in quads {
+                current_batch.push(q);
                 if current_batch.len() >= cli.batch_size {
                     batch_num += 1;
                     total_imported += flush_batch(
@@ -191,9 +228,9 @@ fn main() -> Result<()> {
             let mut text = String::new();
             BufReader::new(file).read_to_string(&mut text)?;
             let triples = parse_input_jsonld(&text, &conv)?;
-            let mut current_batch: Vec<Triple> = Vec::with_capacity(cli.batch_size);
+            let mut current_batch: Vec<(Triple, GraphId)> = Vec::with_capacity(cli.batch_size);
             for t in triples {
-                current_batch.push(t);
+                current_batch.push((t, GraphId::DEFAULT));
                 if current_batch.len() >= cli.batch_size {
                     batch_num += 1;
                     total_imported += flush_batch(
@@ -219,7 +256,7 @@ fn main() -> Result<()> {
         }
         _ => {
             let reader = BufReader::new(file);
-            let mut current_batch: Vec<Triple> = Vec::with_capacity(cli.batch_size);
+            let mut current_batch: Vec<(Triple, GraphId)> = Vec::with_capacity(cli.batch_size);
             let mut line_num = 0usize;
             let mut skipped = 0usize;
 
@@ -228,7 +265,7 @@ fn main() -> Result<()> {
                 let line = line.with_context(|| format!("I/O error reading line {line_num}"))?;
 
                 match parse_line(&line, &conv) {
-                    Some(triple) => current_batch.push(triple),
+                    Some(triple) => current_batch.push((triple, GraphId::DEFAULT)),
                     None => {
                         let trimmed = line.trim();
                         if !trimmed.is_empty() && !trimmed.starts_with('#') {
@@ -282,7 +319,7 @@ fn main() -> Result<()> {
 // ── Batch flush ───────────────────────────────────────────────────────────────
 
 fn flush_batch(
-    triples: &[Triple],
+    triples: &[(Triple, GraphId)],
     iris: Vec<String>,
     store: &TripleStore,
     temp_dir: &std::path::Path,
@@ -292,8 +329,8 @@ fn flush_batch(
     let mut importer = SstImporter::new(&batch_dir)
         .with_context(|| format!("failed to create SstImporter for batch {batch_num}"))?;
 
-    for triple in triples {
-        importer.add_triple(triple);
+    for (triple, g) in triples {
+        importer.add_triple_in(triple, *g);
     }
     for iri in iris {
         importer.add_iri(iri);
@@ -463,6 +500,62 @@ fn parse_input_turtle(input: &[u8], conv: &Converter) -> Result<Vec<Triple>> {
         })
         .map_err(|e| anyhow::anyhow!("Turtle parse error: {}", e))?;
     Ok(triples)
+}
+
+/// Parse an N-Quads or TriG document into (triple, graph) pairs; graph IRIs
+/// (skolemized for blank-node graph names) are interned in `store`.
+fn parse_input_quads(
+    input: &[u8],
+    trig: bool,
+    conv: &Converter,
+    store: &TripleStore,
+) -> Result<Vec<(Triple, GraphId)>> {
+    use rio_api::{
+        model::{GraphName, Quad, Triple as RioTriple},
+        parser::QuadsParser,
+    };
+
+    let mut graphs: std::collections::HashMap<String, GraphId> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    let mut on_quad = |q: Quad<'_>| -> Result<(), anyhow::Error> {
+        let t = RioTriple {
+            subject: q.subject,
+            predicate: q.predicate,
+            object: q.object,
+        };
+        let Some(triple) = conv.convert(&t) else {
+            return Ok(());
+        };
+        let g = match q.graph_name {
+            None => GraphId::DEFAULT,
+            Some(name) => {
+                let iri = match name {
+                    GraphName::NamedNode(n) => n.iri.to_string(),
+                    GraphName::BlankNode(b) => conv.scope.skolem_iri(b.id),
+                };
+                match graphs.get(&iri) {
+                    Some(g) => *g,
+                    None => {
+                        let g = store.intern_graph(&iri)?;
+                        graphs.insert(iri, g);
+                        g
+                    }
+                }
+            }
+        };
+        out.push((triple, g));
+        Ok(())
+    };
+    let cursor = std::io::Cursor::new(input);
+    if trig {
+        rio_turtle::TriGParser::new(cursor, None)
+            .parse_all(&mut |q| on_quad(q).map_err(|e| std::io::Error::other(e.to_string())))
+    } else {
+        rio_turtle::NQuadsParser::new(cursor)
+            .parse_all(&mut |q| on_quad(q).map_err(|e| std::io::Error::other(e.to_string())))
+    }
+    .map_err(|e| anyhow::anyhow!("quad parse error: {e}"))?;
+    Ok(out)
 }
 
 /// Parse a JSON-LD document into PolarGraph triples.
@@ -674,5 +767,31 @@ mod tests {
         let b = parse_input_turtle(ttl, &conv("two")).unwrap();
         assert_eq!(a.len(), 1);
         assert_ne!(a[0].subject(), b[0].subject());
+    }
+
+    #[test]
+    fn quads_import_into_their_graphs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = TripleStore::open(&dir.path().join("db")).unwrap();
+        let c = conv("q");
+        let trig = b"@prefix ex: <http://ex/> .\n\
+            ex:a ex:knows ex:b .\n\
+            ex:g1 { ex:a ex:name \"A\" . ex:a ex:knows ex:c . }\n\
+            _:g2 { ex:b ex:knows ex:c . }\n";
+        let quads = parse_input_quads(trig, true, &c, &store).unwrap();
+        assert_eq!(quads.len(), 4);
+        let nq = b"<http://ex/a> <http://ex/knows> <http://ex/d> <http://ex/g1> .\n";
+        let more = parse_input_quads(nq, false, &c, &store).unwrap();
+
+        let all: Vec<_> = quads.into_iter().chain(more).collect();
+        let n = flush_batch(&all, c.take_iris(), &store, &dir.path().join("sst"), 1).unwrap();
+        assert_eq!(n, 5);
+
+        let g1 = store.graph_id("http://ex/g1").unwrap();
+        let g2 = store.graph_id(&c.scope.skolem_iri("g2")).unwrap();
+        let snap = store.snapshot(Timestamp(store.oracle_ts()));
+        assert_eq!(snap.scan_graph(GraphId::DEFAULT).unwrap().len(), 1);
+        assert_eq!(snap.scan_graph(g1).unwrap().len(), 3);
+        assert_eq!(snap.scan_graph(g2).unwrap().len(), 1);
     }
 }
