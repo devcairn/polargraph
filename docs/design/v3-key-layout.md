@@ -1,6 +1,6 @@
 # Design: v3 storage layout (engine step 3)
 
-**Status:** Proposed — needs sign-off before implementation
+**Status:** Approved 2026-09-30 (decisions A–E as recommended in §9) — in implementation
 **Date:** 2026-09-29
 **Plan refs:** `docs/contxtbroker-platform-plan.md` §1.2 (D1), §1.3, §2.2–2.4, §2.9 (D3)
 
@@ -179,9 +179,9 @@ Order of PRs on the branch (each green on its own):
 Graph-aware query surfaces (`GraphTerm`, graph RPCs, SPARQL datasets, ACL
 bitmaps) follow in steps 4–6 and don't change the on-disk format again.
 
-## 9. Decisions needed
+## 9. Decisions (approved 2026-09-30 as recommended)
 
-| # | Question | Recommendation |
+| # | Question | Decision |
 |---|---|---|
 | A | Default property write mode for the existing `Insert` RPC | `Replace` — keeps current client behaviour; RDF paths use `Add` |
 | B | Migration trigger | Explicit offline `polargraphd migrate`, never automatic |
