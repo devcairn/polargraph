@@ -2045,7 +2045,7 @@ Cypher string
 
 Node patterns `(a:Person)` become two `VarPattern`s: one binding `a` to any subject and one constraining `a :__type "Person"`. Relationship patterns `(a)-[:knows]->(b)` add a third pattern for the relation triple.
 
-`WHERE` equality predicates (`a.name = "Alice"`) compile to bound patterns `(a, "name", "Alice")`. Comparison predicates use post-filter evaluation. Text predicates (`CONTAINS`, `STARTS WITH`, `=~`) are routed to the trigram index (see Full-text trigram search below) and therefore do not generate Datalog patterns at all — the trigram scan returns a candidate node set that is then intersected with the rest of the join.
+`WHERE` equality predicates (`a.name = "Alice"`) compile to bound patterns `(a, "name", "Alice")`. Comparison predicates use post-filter evaluation. Text predicates (`CONTAINS`, `STARTS WITH`, `=~`) do not generate Datalog patterns; `apply_text_filters` post-filters the join's bindings by reading each candidate's text values. (They do not currently use the trigram index — see Full-text trigram search below.)
 
 ### Aggregations
 
@@ -2082,7 +2082,7 @@ The `WITH` clause compiles to a sub-plan: run the left-hand query, apply any agg
 
 ### TRI column family
 
-Text properties that are candidates for `CONTAINS` / `STARTS WITH` / `=~` filtering are indexed in a seventh column family (`TRI`). On every property triple write where `value` is `Value::Text`, the storage layer calls `extract_trigrams()` and writes one entry per trigram:
+Short text properties are indexed in the `TRI` column family. On every property triple write where `value` is `Value::Text` of at most `TRIGRAM_MAX_TEXT_BYTES` (512) UTF-8 bytes, the storage layer calls `extract_trigrams()` and writes one entry per trigram. Longer values (descriptions, document chunks) are not indexed — they would multiply the CF by their length and are better served by vector search:
 
 ```
 Key:   [trigram: 3 bytes][pred_id: 4 bytes][subject_id: 16 bytes]
@@ -2097,13 +2097,21 @@ The key layout sorts first by trigram, then by predicate, then by subject. A pre
 
 ### Query path
 
-1. `compile_cypher()` identifies text predicates in the WHERE clause.
-2. It calls `text_search(store, predicate, pattern, mode)` → `HashSet<NodeId>`.
-3. The resulting node set becomes an allowed-set filter applied to the join variables before the Datalog patterns execute, equivalent to the `SearchVectorInSet` approach used for vector post-filtering.
+`TripleStore::text_search(predicate, query, snapshot_ts, vt_as_of)` (and
+`Snapshot::text_search`) intersects the candidate sets of every trigram in
+`query`, then confirms each candidate against its live value in the snapshot,
+which also discards stale entries from superseded values.
+
+Cypher `CONTAINS` / `STARTS WITH` / `=~` do **not** call `text_search` today;
+they post-filter bindings in `apply_text_filters`. Wiring them to the index is
+future work, and must fall back to a scan for values over the size cap.
 
 ### Insert path
 
-`TripleStore::insert()` detects `Value::Text` payloads and calls `insert_trigrams()` inside the same `WriteBatch` as the hexastore keys. There is no separate indexing step — trigrams are always consistent with the triple data.
+Every write path — `Transaction::commit()`, `insert_at_ts`, and SST import —
+calls `batch_text_trigrams()` inside the same `WriteBatch` as the hexastore
+keys. TRI keys carry no `tt` and are never deleted when a value changes; the
+confirmation step above keeps results correct.
 
 ---
 

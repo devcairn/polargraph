@@ -137,6 +137,12 @@ struct Inner {
 // META key for persisting the last replicated WAL sequence number.
 const META_LAST_REPL_SEQ: &[u8] = b"__replication__/last_seq";
 
+/// Text property values longer than this (in UTF-8 bytes) are not written to
+/// the trigram index. Labels, names and titles stay searchable; long bodies
+/// (descriptions, document chunks) would multiply the `tri` CF by their length
+/// and are better served by vector search.
+pub const TRIGRAM_MAX_TEXT_BYTES: usize = 512;
+
 /// A raw (key, value) entry read straight from a column family.
 pub type RawEntry = (Box<[u8]>, Box<[u8]>);
 
@@ -1192,7 +1198,9 @@ impl TripleStore {
     /// Write trigram index entries for a text property into a caller-supplied batch.
     ///
     /// Appends one key per trigram extracted from `text` to the `tri` CF.
-    /// Called from `Transaction::commit()` for every `Triple::Property { value: Text(..) }`.
+    /// Called from every write path (`Transaction::commit()`, `insert_at_ts`,
+    /// SST import) for each `Triple::Property { value: Text(..) }`. Values
+    /// longer than [`TRIGRAM_MAX_TEXT_BYTES`] are not indexed.
     pub(crate) fn batch_text_trigrams(
         &self,
         batch: &mut WriteBatch,
@@ -1200,6 +1208,9 @@ impl TripleStore {
         pred_id: PredId,
         text: &str,
     ) -> Result<(), StorageError> {
+        if text.len() > TRIGRAM_MAX_TEXT_BYTES {
+            return Ok(());
+        }
         let tri_cf = self.cf_handle(cf::TRI)?;
         for trigram in keys::extract_trigrams(text) {
             batch.put_cf(&tri_cf, keys::encode_tri(trigram, pred_id, subject), b"");
@@ -1631,6 +1642,9 @@ impl TripleStore {
     }
 
     /// Search for nodes whose `predicate` text value contains all trigrams of `query`.
+    ///
+    /// Only values of at most [`TRIGRAM_MAX_TEXT_BYTES`] are indexed, so longer
+    /// values are never returned.
     ///
     /// Returns `NodeId`s confirmed alive via MVCC snapshot scan. Stale trigram entries
     /// (from updated/deleted values) are eliminated by the confirmation step.

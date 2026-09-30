@@ -442,6 +442,7 @@ impl Snapshot {
     }
 
     /// Return `NodeId`s confirmed to have a live text value for `predicate` containing `query`.
+    /// Values longer than [`crate::store::TRIGRAM_MAX_TEXT_BYTES`] are not indexed and never match.
     pub fn text_search(
         &self,
         predicate: &str,

@@ -566,6 +566,30 @@ fn trigram_insert_and_search() {
 }
 
 #[test]
+fn trigram_skips_long_text_values() {
+    let (store, _dir) = open_store();
+    let short = NodeId::new();
+    let long = NodeId::new();
+    let body = |pad: usize| format!("needle {}", "x".repeat(pad));
+    store
+        .insert(&property(short, "bio", Value::Text(body(10))))
+        .unwrap();
+    store
+        .insert(&property(
+            long,
+            "bio",
+            Value::Text(body(polargraph_storage::TRIGRAM_MAX_TEXT_BYTES)),
+        ))
+        .unwrap();
+
+    let ts = Timestamp(store.oracle_ts());
+    let hits = store.text_search("bio", "needle", ts, None).unwrap();
+    assert_eq!(hits, vec![short], "values over the cap are not indexed");
+    // The long value is still stored and readable.
+    assert_eq!(store.scan_by_subject(&long).unwrap().len(), 1);
+}
+
+#[test]
 fn trigram_no_match_returns_empty() {
     let (store, _dir) = open_store();
     let node = NodeId::new();

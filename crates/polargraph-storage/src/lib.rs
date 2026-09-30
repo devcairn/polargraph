@@ -37,5 +37,7 @@ pub use owl_rl::MaterializationStats;
 pub use polargraph_core::schema::{RetentionPolicy, VectorSpaceDef};
 pub use registry::{EdgeTypeRegistry, NodeTypeRegistry, ValidationError, SCHEMA_REGISTRY_NODE};
 pub use sst_import::{ImportStats, SstImporter};
-pub use store::{EdgeAnnotation, EdgeAnnotationValue, StoreMode, TripleStore};
+pub use store::{
+    EdgeAnnotation, EdgeAnnotationValue, StoreMode, TripleStore, TRIGRAM_MAX_TEXT_BYTES,
+};
 pub use wal_stream::{WalEntry, WalStreamer};
