@@ -4128,6 +4128,170 @@ async fn handle_graph_stats(
     }
 }
 
+#[derive(Deserialize)]
+struct ExportGraphParams {
+    /// Graph IRI; empty = the default graph.
+    #[serde(default)]
+    iri: String,
+    /// Export every graph (default + named) instead of `iri`.
+    #[serde(default)]
+    all: bool,
+    /// Render skolem IRIs as blank nodes (`_:label`).
+    #[serde(default)]
+    deskolemize: bool,
+}
+
+/// `GET /graphs/export?iri=<graph>|all=true` — live quads of one graph or of
+/// the whole dataset. N-Quads by default; `Accept: application/trig` for
+/// TriG. A single graph can also be fetched as N-Triples, Turtle or JSON-LD
+/// (graph label dropped); `all=true` requires a quad format (406 otherwise).
+async fn handle_export_graph(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    QueryParams(params): QueryParams<ExportGraphParams>,
+) -> Response {
+    use polargraph_sparql::{node_id_to_iri, value_to_nt_literal, RdfQuad, RdfTriple};
+
+    let accept = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let triple_format = [
+        "application/n-triples",
+        "text/turtle",
+        "application/ld+json",
+    ]
+    .into_iter()
+    .find(|f| accept.contains(f));
+    if params.all && triple_format.is_some() && !accept.contains("application/trig") {
+        return (
+            StatusCode::NOT_ACCEPTABLE,
+            Json(serde_json::json!({
+                "error": "all=true needs a quad format: application/n-quads or application/trig"
+            })),
+        )
+            .into_response();
+    }
+
+    let mut client = state.client.clone();
+    let req = proto::ExportGraphRequest {
+        iri: params.iri,
+        all_graphs: params.all,
+    };
+    let mut stream = match client.export_graph(tonic::Request::new(req)).await {
+        Ok(r) => r.into_inner(),
+        Err(e) => return grpc_error(e),
+    };
+    let mut triples: Vec<RdfTriple> = Vec::new();
+    let mut graphs: Vec<Option<String>> = Vec::new();
+    loop {
+        let chunk = match stream.message().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(e) => return grpc_error(e),
+        };
+        for q in chunk.quads {
+            let Some(subject) = q.subject.as_ref().and_then(proto_node_id) else {
+                continue;
+            };
+            let object = match q.object {
+                Some(proto::exported_quad::Object::Node(n)) => match proto_node_id(&n) {
+                    Some(id) => node_id_to_iri(&id),
+                    None => continue,
+                },
+                Some(proto::exported_quad::Object::Value(v)) => match proto_value_to_pg(&v) {
+                    Some(v) => value_to_nt_literal(&v),
+                    None => continue,
+                },
+                None => continue,
+            };
+            triples.push(RdfTriple {
+                subject: node_id_to_iri(&subject),
+                predicate: format!("<{}>", q.predicate),
+                object,
+            });
+            graphs.push((!q.graph.is_empty()).then(|| format!("<{}>", q.graph)));
+        }
+    }
+
+    let names = resolve_names(
+        &mut client,
+        polargraph_sparql::node_ids_in_triples(&triples),
+        params.deskolemize,
+    )
+    .await;
+    names.rewrite_triples(&mut triples);
+
+    let (content_type, body) = if accept.contains("application/trig") {
+        let quads: Vec<RdfQuad> = triples
+            .into_iter()
+            .zip(graphs)
+            .map(|(triple, graph)| RdfQuad { triple, graph })
+            .collect();
+        (
+            "application/trig",
+            polargraph_sparql::serialize_trig(&quads),
+        )
+    } else {
+        match triple_format {
+            Some("text/turtle") => ("text/turtle", polargraph_sparql::serialize_turtle(&triples)),
+            Some("application/ld+json") => (
+                "application/ld+json",
+                polargraph_sparql::serialize_jsonld(&triples),
+            ),
+            Some(_) => (
+                "application/n-triples",
+                polargraph_sparql::serialize_ntriples(&triples),
+            ),
+            None => {
+                let quads: Vec<RdfQuad> = triples
+                    .into_iter()
+                    .zip(graphs)
+                    .map(|(triple, graph)| RdfQuad { triple, graph })
+                    .collect();
+                (
+                    "application/n-quads",
+                    polargraph_sparql::serialize_nquads(&quads),
+                )
+            }
+        }
+    };
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", content_type)
+        .body(axum::body::boxed(axum::body::Full::from(body)))
+        .unwrap()
+}
+
+/// A 16-byte proto NodeId as a [`NodeId`].
+fn proto_node_id(n: &proto::NodeId) -> Option<NodeId> {
+    let arr: [u8; 16] = n.bytes.as_slice().try_into().ok()?;
+    Some(NodeId(uuid::Uuid::from_bytes(arr)))
+}
+
+/// Inverse of [`pg_value_to_proto`]; `None` for an empty value.
+fn proto_value_to_pg(v: &proto::Value) -> Option<polargraph_core::value::Value> {
+    use polargraph_core::value::Value as V;
+    use proto::value::Kind;
+    Some(match v.kind.as_ref()? {
+        Kind::NullVal(_) => V::Null,
+        Kind::BoolVal(b) => V::Bool(*b),
+        Kind::IntVal(n) => V::Int(*n),
+        Kind::FloatVal(f) => V::Float(*f),
+        Kind::TextVal(s) => V::Text(s.clone()),
+        Kind::BlobVal(b) => V::Blob(b.clone()),
+        Kind::VecVal(a) => V::Vector(a.values.clone()),
+        Kind::LangText(l) => V::LangText {
+            text: l.text.clone(),
+            lang: l.lang.clone(),
+        },
+        Kind::Typed(t) => V::Typed {
+            lexical: t.lexical.clone(),
+            datatype: t.datatype.clone(),
+        },
+    })
+}
+
 async fn handle_copy_graph(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CopyGraphBody>,
@@ -4293,6 +4457,7 @@ async fn main() -> anyhow::Result<()> {
                 .delete(handle_drop_graph),
         )
         .route("/graphs/stats", get(handle_graph_stats))
+        .route("/graphs/export", get(handle_export_graph))
         .route("/graphs/copy", post(handle_copy_graph))
         .route("/graphs/move", post(handle_move_graph))
         .with_state(state);
