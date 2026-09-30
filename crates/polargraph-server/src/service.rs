@@ -17,12 +17,13 @@ use crate::{
         CopyGraphResponse, CreateBackupRequest, CreateBackupResponse, CreateGraphRequest,
         CreateGraphResponse, CypherBinding, CypherQueryRequest, CypherQueryResponse,
         CypherWriteRequest, CypherWriteResponse, DeleteTriplesRequest, DeleteTriplesResponse,
-        DropGraphRequest, DropGraphResponse, ExplainResponse, GetEdgeAnnotationsRequest,
-        GetEdgeAnnotationsResponse, GetEdgeIdsByTripleRequest, GetEdgeIdsByTripleResponse,
-        GetEdgeTypeRequest, GetEdgeTypeResponse, GetNodeTypeRequest, GetNodeTypeResponse,
-        GetPropertyHistoryRequest, GetPropertyHistoryResponse, GetUserAccessRequest,
-        GetUserAccessResponse, GrantAccessRequest, GrantAccessResponse, GraphInfo, GraphMetadata,
-        GraphStatsRequest, GraphStatsResponse, InsertRequest, InsertResponse, InsertVectorRequest,
+        DropGraphRequest, DropGraphResponse, ExplainResponse, ExportGraphChunk, ExportGraphRequest,
+        ExportedQuad, GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse,
+        GetEdgeIdsByTripleRequest, GetEdgeIdsByTripleResponse, GetEdgeTypeRequest,
+        GetEdgeTypeResponse, GetNodeTypeRequest, GetNodeTypeResponse, GetPropertyHistoryRequest,
+        GetPropertyHistoryResponse, GetUserAccessRequest, GetUserAccessResponse,
+        GrantAccessRequest, GrantAccessResponse, GraphInfo, GraphMetadata, GraphStatsRequest,
+        GraphStatsResponse, InsertRequest, InsertResponse, InsertVectorRequest,
         InsertVectorResponse, ListApiKeysRequest, ListApiKeysResponse, ListBackupsRequest,
         ListBackupsResponse, ListEdgeTypesRequest, ListEdgeTypesResponse, ListGraphsRequest,
         ListGraphsResponse, ListNodeTypesRequest, ListNodeTypesResponse,
@@ -703,6 +704,7 @@ impl PolarGraphService for PolarGraphServer {
     type StreamWalStream = ReceiverStream<Result<WalEntry, Status>>;
     type QueryStreamStream = ReceiverStream<Result<QueryStreamChunk, Status>>;
     type CypherQueryStreamStream = ReceiverStream<Result<QueryStreamChunk, Status>>;
+    type ExportGraphStream = ReceiverStream<Result<ExportGraphChunk, Status>>;
 
     /// Insert one or more triples atomically.
     async fn create_graph(
@@ -824,6 +826,49 @@ impl PolarGraphService for PolarGraphServer {
         Ok(Response::new(DropGraphResponse {
             quads_closed: closed as u64,
         }))
+    }
+
+    async fn export_graph(
+        &self,
+        request: Request<ExportGraphRequest>,
+    ) -> Result<Response<Self::ExportGraphStream>, Status> {
+        let req = request.into_inner();
+        let graphs: Vec<(polargraph_core::id::GraphId, String)> = if req.all_graphs {
+            std::iter::once((polargraph_core::id::GraphId::DEFAULT, String::new()))
+                .chain(
+                    self.store
+                        .list_graphs()
+                        .into_iter()
+                        .filter(|(_, iri)| iri != polargraph_storage::SYSTEM_GRAPH_IRI),
+                )
+                .collect()
+        } else {
+            vec![(self.existing_graph(&req.iri)?, req.iri)]
+        };
+        let store = self.store.clone();
+        let (tx, rx) = mpsc::channel::<Result<ExportGraphChunk, Status>>(4);
+        tokio::task::spawn_blocking(move || {
+            let snapshot = store.snapshot(store.begin().read_ts);
+            for (g, iri) in graphs {
+                let triples = match snapshot.scan_graph(g) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = tx.blocking_send(Err(storage_err_to_status(e)));
+                        return;
+                    }
+                };
+                for chunk in triples.chunks(STREAM_CHUNK_SIZE) {
+                    let quads = chunk
+                        .iter()
+                        .filter_map(|t| exported_quad(t, &iri))
+                        .collect();
+                    if tx.blocking_send(Ok(ExportGraphChunk { quads })).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn resolve_iris(
@@ -3823,6 +3868,41 @@ fn metadata_from_proto(meta: &[GraphMetadata]) -> Result<Vec<(String, Value)>, S
             Ok((m.predicate.clone(), convert::value_from_proto(value)?))
         })
         .collect()
+}
+
+/// Proto form of a relation or property quad in graph `graph` (other triple
+/// kinds are not exported).
+fn exported_quad(t: &Triple, graph: &str) -> Option<ExportedQuad> {
+    use crate::proto::exported_quad::Object;
+    let (subject, predicate, object) = match t {
+        Triple::Relation {
+            subject,
+            predicate,
+            object,
+            ..
+        } => (
+            subject,
+            predicate,
+            Object::Node(convert::node_id_to_proto(*object)),
+        ),
+        Triple::Property {
+            subject,
+            predicate,
+            value,
+            ..
+        } => (
+            subject,
+            predicate,
+            Object::Value(convert::value_to_proto(value)),
+        ),
+        _ => return None,
+    };
+    Some(ExportedQuad {
+        subject: Some(convert::node_id_to_proto(*subject)),
+        predicate: predicate.0.clone(),
+        object: Some(object),
+        graph: graph.to_string(),
+    })
 }
 
 fn graph_info(

@@ -7111,3 +7111,66 @@ async fn graph_management_rpcs() {
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::NotFound);
 }
+
+#[tokio::test]
+async fn export_graph_streams_live_quads() {
+    use polargraph_server::proto::{exported_quad::Object, ExportGraphRequest};
+
+    let (svc, _dir) = open();
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel(a.clone(), "dependsOn", b.clone())],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            rel(a.clone(), "dependsOn", b.clone()),
+            text_prop(a, "owner", "t"),
+        ],
+        graph: "urn:g:p1".into(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let export = |iri: &'static str, all_graphs: bool| {
+        let svc = &svc;
+        async move {
+            let mut stream = svc
+                .export_graph(Request::new(ExportGraphRequest {
+                    iri: iri.into(),
+                    all_graphs,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            let mut quads = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                quads.extend(chunk.unwrap().quads);
+            }
+            quads
+        }
+    };
+
+    let named = export("urn:g:p1", false).await;
+    assert_eq!(named.len(), 2);
+    assert!(named.iter().all(|q| q.graph == "urn:g:p1"));
+    assert!(named
+        .iter()
+        .any(|q| q.predicate == "owner" && matches!(q.object, Some(Object::Value(_)))));
+    assert_eq!(export("", false).await.len(), 1);
+    let all = export("", true).await;
+    assert_eq!(all.len(), 3);
+    assert_eq!(all.iter().filter(|q| q.graph.is_empty()).count(), 1);
+
+    let missing = svc
+        .export_graph(Request::new(ExportGraphRequest {
+            iri: "urn:g:nope".into(),
+            all_graphs: false,
+        }))
+        .await;
+    assert_eq!(missing.err().unwrap().code(), tonic::Code::NotFound);
+}

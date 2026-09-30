@@ -1099,6 +1099,30 @@ message DropGraphResponse {
     uint64 quads_closed = 1;
 }
 
+message ExportGraphRequest {
+    /// Graph IRI; empty = the default graph.
+    string iri = 1;
+    /// Export the default graph and every named graph (not the system
+    /// graph); `iri` is ignored.
+    bool all_graphs = 2;
+}
+
+/// One live quad. Relation quads set `node`, property quads set `value`.
+message ExportedQuad {
+    NodeId subject = 1;
+    string predicate = 2;
+    oneof object {
+        NodeId node = 3;
+        Value value = 4;
+    }
+    /// Graph IRI; empty = the default graph.
+    string graph = 5;
+}
+
+message ExportGraphChunk {
+    repeated ExportedQuad quads = 1;
+}
+
 message ResolveIrisRequest {
     /// Nodes to name. At most 10 000 per request.
     repeated NodeId nodes = 1;
@@ -1130,6 +1154,8 @@ service PolarGraphService {
     rpc MoveGraph(MoveGraphRequest) returns (CopyGraphResponse);
     /// Close every live quad of a graph (bitemporal tombstones).
     rpc DropGraph(DropGraphRequest) returns (DropGraphResponse);
+    /// Stream the live quads of one graph, or of the whole dataset.
+    rpc ExportGraph(ExportGraphRequest) returns (stream ExportGraphChunk);
 
     /// Execute a conjunctive query and return all satisfying variable bindings.
     rpc Query(QueryRequest) returns (QueryResponse);
