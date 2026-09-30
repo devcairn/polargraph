@@ -554,6 +554,7 @@ async fn api_insert(
                 }),
                 vt_start: 0,
                 vt_end: 0,
+                mode: crate::proto::PropertyWriteMode::Auto as i32,
             })),
         }
     };

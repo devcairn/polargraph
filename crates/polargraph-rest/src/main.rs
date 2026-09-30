@@ -171,6 +171,9 @@ struct InsertBody {
     /// Open transaction ID to buffer this insert into instead of auto-committing.
     #[serde(default)]
     tx_id: Option<String>,
+    /// Named graph (IRI) to write into; omitted = the default graph.
+    #[serde(default)]
+    graph: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -565,6 +568,7 @@ async fn handle_insert(
         .insert(tonic::Request::new(proto::InsertRequest {
             triples: vec![triple],
             tx_id: body.tx_id.unwrap_or_default(),
+            graph: body.graph.unwrap_or_default(),
             ..Default::default()
         }))
         .await
@@ -2832,6 +2836,7 @@ fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Tr
                     value: Some(val),
                     vt_start: 0,
                     vt_end: i64::MAX,
+                    mode: proto::PropertyWriteMode::Add as i32,
                 })),
             })
         }
@@ -3011,6 +3016,7 @@ fn resolve_quad_pattern_to_proto(
                     value: Some(val),
                     vt_start: 0,
                     vt_end: i64::MAX,
+                    mode: proto::PropertyWriteMode::Add as i32,
                 })),
             })
         }
@@ -3095,6 +3101,7 @@ fn imported_triples_to_proto(
                             value: Some(proto_val),
                             vt_start: 0,
                             vt_end: i64::MAX,
+                            mode: proto::PropertyWriteMode::Add as i32,
                         })),
                     }
                 }

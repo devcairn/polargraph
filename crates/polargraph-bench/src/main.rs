@@ -173,6 +173,7 @@ fn text_prop(subject: Vec<u8>, predicate: &str, text: &str) -> ProtoTriple {
             }),
             vt_start: 0,
             vt_end: 0,
+            mode: 0,
         })),
     }
 }

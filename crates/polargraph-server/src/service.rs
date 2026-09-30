@@ -729,11 +729,24 @@ impl PolarGraphService for PolarGraphServer {
             ));
         }
 
-        // Convert proto triples → core triples, collecting EdgeIds for relations.
+        // Target graph (interned on first use; empty = default graph).
+        let graph = if req.graph.is_empty() {
+            polargraph_core::id::GraphId::DEFAULT
+        } else {
+            self.store
+                .intern_graph(&req.graph)
+                .map_err(storage_err_to_status)?
+        };
+
+        // Convert proto triples → core triples (with each one's write mode),
+        // collecting EdgeIds for relations.
         let mut all_triples: Vec<Triple> = Vec::new();
+        let mut modes: Vec<polargraph_storage::WriteMode> = Vec::new();
         let mut edge_ids: Vec<Vec<u8>> = Vec::new();
         for proto_triple in &req.triples {
             let (triples, edge_id) = convert::triples_from_proto(proto_triple)?;
+            let mode = convert::write_mode_from_proto(proto_triple)?;
+            modes.extend(std::iter::repeat(mode).take(triples.len()));
             all_triples.extend(triples);
             if let Some(eid) = edge_id {
                 edge_ids.push(eid.0.as_bytes().to_vec());
@@ -744,6 +757,7 @@ impl PolarGraphService for PolarGraphServer {
         for ann in &req.edge_annotations {
             let triple = convert::edge_annotation_from_proto(ann)?;
             all_triples.push(triple);
+            modes.push(polargraph_storage::WriteMode::Auto);
         }
 
         debug!(
@@ -759,8 +773,8 @@ impl PolarGraphService for PolarGraphServer {
                 Status::not_found(format!("unknown or expired transaction: {}", req.tx_id))
             })?;
             let mut guard = entry.lock().await;
-            for triple in &all_triples {
-                guard.tx.insert(triple.clone());
+            for (triple, mode) in all_triples.iter().zip(&modes) {
+                guard.tx.insert_in(triple.clone(), graph, *mode);
             }
             for iri in &req.iris {
                 guard.tx.bind_iri(iri.as_str());
@@ -790,8 +804,8 @@ impl PolarGraphService for PolarGraphServer {
 
         // Auto-commit path: begin a new transaction, insert all, commit.
         let mut tx = self.store.begin();
-        for triple in &all_triples {
-            tx.insert(triple.clone());
+        for (triple, mode) in all_triples.iter().zip(&modes) {
+            tx.insert_in(triple.clone(), graph, *mode);
         }
         for iri in &req.iris {
             tx.bind_iri(iri.as_str());

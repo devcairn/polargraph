@@ -13,7 +13,7 @@ use crate::planner::{
     Pattern,
 };
 use polargraph_core::{id::NodeId, triple::Triple, value::Value};
-use polargraph_storage::{EdgeTypeRegistry, Snapshot, StorageError};
+use polargraph_storage::{keys, EdgeTypeRegistry, Snapshot, StorageError};
 use tracing::warn;
 
 /// Evaluate a triple pattern against a snapshot.
@@ -109,15 +109,13 @@ fn triple_matches_pattern(triple: &Triple, pattern: &Pattern) -> bool {
     }
     if let Some(obj) = pattern.object {
         match triple {
-            Triple::Relation { object, .. } => {
-                if *object != obj {
+            Triple::Relation { .. } | Triple::Property { .. } => {
+                if !object_matches(triple, &obj) {
                     return false;
                 }
             }
-            // Property/annotation triples carry a scalar value, not a NodeId object.
-            Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => {
-                return false
-            }
+            // Annotation triples have no object slot in the quad index.
+            Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => return false,
         }
     }
     true
@@ -240,14 +238,13 @@ fn execute(choice: IndexChoice, snap: &Snapshot) -> Result<Vec<Triple>, StorageE
 
 /// Returns true if a triple's object slot matches `expected`.
 ///
-/// Property triples never match a NodeId object — they carry a scalar value,
-/// not a node reference.
+/// A property's object slot is its value's content hash (storage format v3),
+/// so a pattern object built with `keys::value_object` matches it.
 fn object_matches(triple: &Triple, expected: &NodeId) -> bool {
     match triple {
         Triple::Relation { object, .. } => object == expected,
-        Triple::Property { .. } | Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => {
-            false
-        }
+        Triple::Property { value, .. } => keys::value_object(value) == *expected,
+        Triple::EdgeProperty { .. } | Triple::EdgeRelation { .. } => false,
     }
 }
 

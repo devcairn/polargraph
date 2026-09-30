@@ -229,6 +229,14 @@ Deviations from and details beyond §1–§8, recorded as the code landed on
   `vt_start` onward; v3 treats the correction as authoritative from its
   `vt_start`. Verification checksums what was written (including
   synthesized versions) against what was read, and counts all eight orders.
+- **Wire API.** `InsertRequest.graph` (graph IRI, interned on first use;
+  empty = default graph, also on REST `/insert` as `"graph"`) and
+  `PropertyTriple.mode` (`PropertyWriteMode`: `AUTO` = 0 default, `REPLACE`,
+  `ADD`). REST `/import/rdf`, SPARQL `INSERT DATA` and `INSERT` templates
+  write with `ADD`; everything else keeps `AUTO`.
+- **Value index in queries.** A Datalog `Term::Literal` resolves to the
+  value hash, so `(?s, :p, "literal")` plans as a `posg` prefix lookup
+  (visible in `EXPLAIN`); the decoded value is still compared.
 - **CLI.** `polargraphd migrate --data-dir D --backup-dir B` (or
   `--no-backup`); `--inline-value-max-bytes` / `POLARGRAPH_INLINE_VALUE_MAX_BYTES`
   / `[storage] inline_value_max_bytes` (default 256).
@@ -238,4 +246,4 @@ Deviations from and details beyond §1–§8, recorded as the code landed on
 Docs still describing the v2 layout (for the docs pass): the key-layout,
 column-family, retention and bulk-import sections of `docs/architecture.md`,
 the storage tables in `CLAUDE.md`, and `docs/api-reference.md`'s key-encoding
-section.
+section and `Insert` fields (`graph`, `mode`).

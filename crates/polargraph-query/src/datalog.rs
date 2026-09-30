@@ -223,8 +223,10 @@ fn resolve_term(term: &Term, bindings: &Bindings) -> Option<NodeId> {
         Term::Any => None,
         // Params should be substituted before evaluation; treat as wildcard.
         Term::Param(_) => None,
-        // Scanned as a wildcard object; `extend_full` checks the value.
-        Term::Literal(_) => None,
+        // The value hash is a property's object slot, so a literal is an
+        // index lookup (`posg` when the predicate is bound); `extend_full`
+        // still verifies the decoded value.
+        Term::Literal(v) => Some(polargraph_storage::keys::value_object(v)),
     }
 }
 

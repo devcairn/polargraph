@@ -72,6 +72,7 @@ fn name_property(subject: PNodeId, text: &str) -> Triple {
             }),
             vt_start: 0,
             vt_end: 0,
+            mode: 0,
         })),
     }
 }
@@ -86,6 +87,7 @@ fn versioned_property(subject: PNodeId, text: &str, vt_start: i64, vt_end: i64) 
             }),
             vt_start,
             vt_end,
+            mode: 0,
         })),
     }
 }

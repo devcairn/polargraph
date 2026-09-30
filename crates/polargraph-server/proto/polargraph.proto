@@ -65,12 +65,25 @@ message RelationTriple {
 }
 
 /// A scalar property on a node.
+/// How a property write treats existing values of the same
+/// (subject, predicate, graph). See docs/design/v3-key-layout.md §6.
+enum PropertyWriteMode {
+    /// REPLACE for an open-ended value (vt_end unset / end of time), ADD for
+    /// a closing write. The default — matches pre-v3 behaviour.
+    PROPERTY_WRITE_MODE_AUTO = 0;
+    /// Close every other open value of (s, p, g), then write this one.
+    PROPERTY_WRITE_MODE_REPLACE = 1;
+    /// Write alongside existing values (multi-valued properties, RDF).
+    PROPERTY_WRITE_MODE_ADD = 2;
+}
+
 message PropertyTriple {
     NodeId subject   = 1;
     string predicate = 2;
     Value  value     = 3;
     int64  vt_start  = 4;
     int64  vt_end    = 5;
+    PropertyWriteMode mode = 6;
 }
 
 message Triple {
@@ -181,6 +194,9 @@ message InsertRequest {
     /// `iri_to_node_id(iri)` (urn:uuid:<u> → u, otherwise xxHash3-128); urn:uuid
     /// IRIs are accepted and ignored. A request may carry only IRIs.
     repeated string iris = 4;
+    /// Named graph (IRI) every triple and annotation in this request goes to;
+    /// interned on first use. Empty = the default graph.
+    string graph = 5;
 }
 
 message InsertResponse {

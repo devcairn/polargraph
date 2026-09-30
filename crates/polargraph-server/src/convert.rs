@@ -19,6 +19,7 @@ use polargraph_core::{
     value::Value,
 };
 use polargraph_query::datalog::{Bindings, Rule, Term, VarPattern};
+use polargraph_storage::WriteMode;
 use polargraph_storage::{EdgeAnnotation, EdgeAnnotationValue};
 use tonic::Status;
 use uuid::Uuid;
@@ -126,6 +127,23 @@ pub fn triple_from_proto(proto: &proto::Triple) -> Result<Triple, Status> {
 ///   - one `Triple::Property` per edge property, with `subject = NodeId(edge_id)`
 ///
 /// Returns `(triples, edge_id)` where `edge_id` is `Some` only for relation triples.
+/// The write mode for the triples [`triples_from_proto`] produces from `proto`:
+/// a property's `mode` field; relations (and their edge properties) use `Auto`.
+pub fn write_mode_from_proto(proto: &proto::Triple) -> Result<WriteMode, Status> {
+    Ok(match &proto.kind {
+        Some(TripleKind::Property(p)) => {
+            match proto::PropertyWriteMode::try_from(p.mode).map_err(|_| {
+                Status::invalid_argument(format!("unknown property write mode {}", p.mode))
+            })? {
+                proto::PropertyWriteMode::Auto => WriteMode::Auto,
+                proto::PropertyWriteMode::Replace => WriteMode::Replace,
+                proto::PropertyWriteMode::Add => WriteMode::Add,
+            }
+        }
+        _ => WriteMode::Auto,
+    })
+}
+
 pub fn triples_from_proto(proto: &proto::Triple) -> Result<(Vec<Triple>, Option<EdgeId>), Status> {
     match &proto.kind {
         Some(TripleKind::Relation(r)) => {

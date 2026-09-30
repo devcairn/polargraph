@@ -95,6 +95,7 @@ fn text_prop(subject: NodeId, predicate: &str, text: &str) -> Triple {
             }),
             vt_start: 0,
             vt_end: 0,
+            mode: 0,
         })),
     }
 }
@@ -2232,6 +2233,7 @@ fn text_prop_with_vt(
             }),
             vt_start,
             vt_end,
+            mode: 0,
         })),
     }
 }
@@ -6117,6 +6119,7 @@ fn int_prop(subject: NodeId, predicate: &str, n: i64) -> Triple {
             }),
             vt_start: 0,
             vt_end: 0,
+            mode: 0,
         })),
     }
 }
@@ -6805,6 +6808,7 @@ async fn language_tag_is_part_of_a_literal_match() {
                 value: Some(lang_val("Acme", "en")),
                 vt_start: 0,
                 vt_end: 0,
+                mode: 0,
             })),
         }],
         ..Default::default()
@@ -6842,4 +6846,81 @@ async fn language_tag_is_part_of_a_literal_match() {
         0,
         "plain string is a different literal"
     );
+}
+
+// ── v3: write modes and named graphs on Insert ───────────────────────────────
+
+fn text_prop_mode(subject: NodeId, predicate: &str, text: &str, mode: i32) -> Triple {
+    Triple {
+        kind: Some(TripleKind::Property(PropertyTriple {
+            subject: Some(subject),
+            predicate: predicate.into(),
+            value: Some(Value {
+                kind: Some(ValueKind::TextVal(text.into())),
+            }),
+            vt_start: 0,
+            vt_end: 0,
+            mode,
+        })),
+    }
+}
+
+#[tokio::test]
+async fn insert_mode_add_keeps_values_and_default_replaces() {
+    use polargraph_server::proto::PropertyWriteMode;
+
+    let (svc, _dir) = open();
+    let (core_s, s) = new_node();
+    let add = PropertyWriteMode::Add as i32;
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            text_prop_mode(s.clone(), "alias", "Acme", add),
+            text_prop_mode(s.clone(), "alias", "ACME Inc.", add),
+        ],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    let aliases = svc
+        .store()
+        .scan_by_subject_predicate(&core_s, "alias")
+        .unwrap();
+    assert_eq!(aliases.len(), 2, "ADD keeps both values");
+
+    // A plain insert (AUTO) replaces all of them.
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(s.clone(), "alias", "Acme Corp")],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    let aliases = svc
+        .store()
+        .scan_by_subject_predicate(&core_s, "alias")
+        .unwrap();
+    assert_eq!(aliases.len(), 1);
+}
+
+#[tokio::test]
+async fn insert_into_named_graph_interns_and_scopes_it() {
+    let (svc, _dir) = open();
+    let (core_s, s) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(s.clone(), "status", "proposed")],
+        graph: "https://kb.example/g/proposal-1".into(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let store = svc.store();
+    let g = store.graph_id("https://kb.example/g/proposal-1").unwrap();
+    let snap = store.snapshot(Timestamp(store.oracle_ts()));
+    assert_eq!(snap.scan_graph(g).unwrap().len(), 1);
+    assert!(snap
+        .scan_graph(polargraph_core::id::GraphId::DEFAULT)
+        .unwrap()
+        .is_empty());
+    // Union reads (the existing query paths) still see it.
+    assert_eq!(store.scan_by_subject(&core_s).unwrap().len(), 1);
 }
