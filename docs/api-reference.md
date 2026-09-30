@@ -22,8 +22,35 @@ pub struct NodeId(pub Uuid);
 | Method | Description |
 |--------|-------------|
 | `NodeId::new() -> NodeId` | Allocate a new unique ID (UUID v7) |
+| `NodeId::from_iri(iri) -> NodeId` | xxHash3-128 of the IRI (prefer `term::iri_to_node_id`) |
 | `NodeId::as_bytes() -> &[u8; 16]` | 16-byte big-endian representation for index keys |
 | `impl Display` | Renders as a UUID string |
+
+---
+
+### `GraphId` and `Quad`
+
+```rust
+pub struct GraphId(pub u32);        // GraphId::DEFAULT = GraphId(0)
+pub struct Quad { pub triple: Triple, pub graph: GraphId }
+```
+
+Graph IRIs are interned to `GraphId`s by the store (`intern_graph`). Graph 0
+is the default graph and has no IRI.
+
+---
+
+### Term identity (`polargraph_core::term`, `polargraph_core::skolem`)
+
+| Function | Description |
+|----------|-------------|
+| `term::iri_to_node_id(iri)` | `urn:uuid:<u>` → `NodeId(u)`; any other IRI → xxHash3-128 |
+| `term::fallback_iri(&NodeId)` | `urn:uuid:<id>` — the IRI of a node with no dictionary entry |
+| `term::needs_dictionary(iri)` | True for hashed (non-`urn:uuid:`) IRIs |
+| `term::edge_id_for(s, p, o)` | Deterministic `EdgeId` for RDF relations |
+| `term::literal_to_value(lexical, datatype, lang)` | The one RDF literal → `Value` mapping |
+| `skolem::ImportScope::new(base, import_id)` / `::fresh(base)` | Blank-node scope; `skolem_iri(label)`, `bnode_node_id(label)` |
+| `skolem::parse_skolem_iri(iri)`, `skolem::deskolemized_label(iri)` | For de-skolemizing export |
 
 ---
 
@@ -95,7 +122,9 @@ pub struct Predicate(pub String);
 
 ### `Triple`
 
-The atomic storage unit. Two variants share the same index structure.
+The atomic storage unit. `Relation` and `Property` share the quad index (a
+property's object slot is its value's content hash); the two RDF-star
+variants live in the annotation CFs.
 
 ```rust
 pub enum Triple {
@@ -112,14 +141,14 @@ pub enum Triple {
         value:     Value,
         temporal:  BiTemporalRange,
     },
-    // RDF-star edge annotations (stored in EPA CF)
+    // RDF-star edge annotations (stored in epag / peag)
     EdgeProperty {
         edge:      EdgeId,
         predicate: Predicate,
         value:     Value,
         temporal:  BiTemporalRange,
     },
-    // RDF-star edge relations (stored in EPO CF)
+    // RDF-star edge relations (stored in epog)
     EdgeRelation {
         edge:      EdgeId,
         predicate: Predicate,
@@ -283,7 +312,8 @@ RocksDB-backed triple store with predicate interning and MVCC.
 
 ### `TripleStore`
 
-The main storage handle. Cheap to clone (`Arc`-backed).
+The main storage handle. Cheap to clone (`Arc`-backed). Storage format v3 —
+see `docs/architecture.md` (Storage layer) and `docs/design/v3-key-layout.md`.
 
 ```rust
 pub struct TripleStore { /* private */ }
@@ -293,56 +323,91 @@ pub struct TripleStore { /* private */ }
 
 ```rust
 TripleStore::open(path: &Path) -> Result<TripleStore, StorageError>
+TripleStore::open_as_replica(path: &Path, primary_address: String) -> Result<TripleStore, StorageError>
+polargraph_storage::migrate_v3::open_for_migration(path) -> Result<TripleStore, StorageError>
 ```
 
-Opens (or creates) a RocksDB database at `path` with all 7 column families
-(6 triple indexes + META). Loads the predicate intern table from META on
-startup.
+`open` opens (or creates) the database with all 17 column families and loads
+the predicate and graph intern tables. A new store is stamped storage format
+3. A store that still holds v2 data returns `StorageError::NeedsMigration`
+(run `polargraphd migrate`); one written by a newer build returns
+`StorageError::UnsupportedFormat`. `open_as_replica` opens the same way but
+every public write API returns `StorageError::ReadOnly`.
 
-#### Predicate interning
+#### Writes
+
+```rust
+store.insert(triple: &Triple) -> Result<(), StorageError>          // one-triple transaction
+store.insert_at_ts(triple: &Triple, tt: Timestamp) -> Result<(), StorageError>
+store.begin() -> Transaction
+```
+
+`insert` and `insert_at_ts` write to the default graph with `WriteMode::Auto`.
+`insert_at_ts` stamps an explicit transaction time, skips conflict checks
+and advances the oracle — for tests and offline tools.
+
+#### Reads (current state)
+
+```rust
+store.snapshot(ts: Timestamp) -> Snapshot
+store.oracle_ts() -> i64                                            // latest commit ts
+store.scan_by_subject(subject: &NodeId)
+store.scan_by_subject_predicate(subject: &NodeId, predicate: &str)
+store.scan_by_predicate(predicate: &str)
+store.scan_by_predicate_object(predicate: &str, object: &NodeId)
+store.scan_by_object(object: &NodeId)
+store.scan_by_subject_object(subject: &NodeId, object: &NodeId)
+store.scan_all()
+    // all -> Result<Vec<Triple>, StorageError>
+store.scan_property_history(subject: NodeId, predicate: &str, limit: u32)
+    -> Result<Vec<(Value, i64)>, StorageError>                     // newest first
+store.text_search(predicate: &str, query: &str, snapshot_ts: Timestamp, vt_as_of: Option<i64>)
+    -> Result<Vec<NodeId>, StorageError>
+```
+
+The `scan_*` convenience methods read at the latest commit and **valid now**
+(closed / replaced facts are hidden), across all graphs, returning each
+`(s, p, o)` once. Each uses the optimal quad order for its bound slots.
+
+#### Predicates and graphs
 
 ```rust
 store.intern_predicate(pred: &str) -> Result<PredId, StorageError>
 store.predicate_string(id: PredId) -> Option<String>
+store.lookup_predicate(pred: &str) -> Option<PredId>
+store.intern_graph(iri: &str) -> Result<GraphId, StorageError>    // assigns on first use
+store.graph_id(iri: &str) -> Option<GraphId>
+store.graph_iri(id: GraphId) -> Option<String>                    // None for the default graph
+store.list_graphs() -> Vec<(GraphId, String)>
 ```
 
-`intern_predicate` assigns and persists a new `u32` ID on first call for a
-given string. Subsequent calls are a read-locked hash-map lookup (fast path).
-
-#### Insert
+#### IRI dictionary
 
 ```rust
-store.insert(triple: &Triple) -> Result<(), StorageError>
+store.iri_of(node: &NodeId) -> Result<Option<String>, StorageError>
+store.iris_of(nodes: &[NodeId]) -> Result<HashMap<NodeId, String>, StorageError>
+store.bind_iris(iris: impl IntoIterator<Item = &str>) -> Result<(), StorageError>
 ```
 
-Writes the triple to all 6 index CFs atomically. For property triples, the
-property sentinel (`0xFF × 16`) is used in the object slot.
+Only hashed IRIs are stored (`urn:uuid:` IRIs carry their id). A different
+IRI for an already-named node is `StorageError::IriCollision`.
 
-> **Note**: `insert` writes directly with the triple's existing `tt`. For
-> MVCC-stamped writes, use `Transaction::insert` instead.
-
-#### Snapshot scans (unfiltered)
-
-These scan all versions; use the MVCC snapshot variants for point-in-time reads.
+#### Out-of-line values and maintenance
 
 ```rust
-store.scan_by_subject(subject: &NodeId) -> Result<Vec<Triple>, StorageError>
-store.scan_by_subject_predicate(subject: &NodeId, predicate: &str) -> Result<Vec<Triple>, StorageError>
-store.scan_by_predicate(predicate: &str) -> Result<Vec<Triple>, StorageError>
-store.scan_by_predicate_object(predicate: &str, object: &NodeId) -> Result<Vec<Triple>, StorageError>
-store.scan_by_object(object: &NodeId) -> Result<Vec<Triple>, StorageError>
+store.set_inline_value_max_bytes(n: usize)   // default DEFAULT_INLINE_VALUE_MAX_BYTES = 256
+store.inline_value_max_bytes() -> usize
+store.sweep_unreferenced_blobs() -> Result<usize, StorageError>
+store.compact_cf(cf_name: &str) -> Result<(), StorageError>
+store.estimate_triple_count() -> u64
 ```
 
-Each method uses the optimal CF for the given bind pattern (see architecture
-doc for the full mapping).
-
-#### MVCC entry points
-
-```rust
-store.begin() -> Transaction
-store.snapshot() -> Snapshot
-store.snapshot_at(ts: Timestamp) -> Snapshot
-```
+Vector (`insert_vector`, `search_vector*`, `batch_insert_vectors`), RDF-star
+annotation (`scan_edge_annotations`, `get_edge_annotation`,
+`scan_annotations_by_predicate`), derived-fact (`insert_derived_batch`,
+`scan_derived*`, `clear_derived`) and replication (`apply_replicated_batch`,
+`last_applied_seq`) methods are documented in the architecture doc sections
+for those features.
 
 ---
 
@@ -360,32 +425,36 @@ pub struct Transaction {
 #### Writes
 
 ```rust
-txn.insert(triple: Triple)
-```
-
-Buffers the triple. The `tt` field is ignored at this point; the actual
-commit timestamp is assigned at `commit()`.
-
-```rust
+txn.insert(triple: Triple)                                    // default graph, WriteMode::Auto
+txn.insert_in(triple: Triple, graph: GraphId, mode: WriteMode)
 txn.bind_iri(iri: impl Into<String>)
+txn.pending_triples() -> &[Triple]
 ```
 
-Records `iri` in the IRI dictionary on commit, naming the node
-`term::iri_to_node_id(iri)`. `urn:uuid:` IRIs are ignored. See
-`TripleStore::iri_of` / `iris_of` for lookups and `bind_iris` for a
-triple-less write.
-
-#### Snapshot reads (via `read_ts`)
+Writes are buffered; `tt` is assigned at `commit()`. `bind_iri` records
+`iri` in the IRI dictionary on commit, naming `term::iri_to_node_id(iri)`.
 
 ```rust
-txn.scan_by_subject(subject: &NodeId) -> Result<Vec<Triple>, StorageError>
-txn.scan_by_subject_predicate(subject, predicate) -> Result<Vec<Triple>, StorageError>
-txn.scan_by_predicate(predicate: &str) -> Result<Vec<Triple>, StorageError>
-txn.scan_by_predicate_object(predicate, object) -> Result<Vec<Triple>, StorageError>
-txn.scan_by_object(object: &NodeId) -> Result<Vec<Triple>, StorageError>
+pub enum WriteMode {
+    Auto,     // default: Replace for an open-ended property, Add otherwise
+    Replace,  // close every other open value of (s, p, graph), then write
+    Add,      // write alongside existing values
+}
 ```
 
-All return only triples with `tt <= read_ts`.
+`WriteMode` only affects property triples.
+
+#### Reads (as of `read_ts`, valid now)
+
+```rust
+txn.scan_by_subject(subject: &NodeId)
+txn.scan_by_subject_predicate(subject: &NodeId, predicate: &str)
+txn.scan_by_predicate(predicate: &str)
+txn.scan_by_predicate_object(predicate: &str, object: &NodeId)
+txn.scan_by_object(object: &NodeId)
+txn.scan_by_subject_object(subject: &NodeId, object: &NodeId)
+txn.scan_all()
+```
 
 #### Commit / rollback
 
@@ -393,26 +462,33 @@ All return only triples with `tt <= read_ts`.
 txn.commit() -> Result<Timestamp, StorageError>
 ```
 
-Returns the commit timestamp on success. Returns
-`StorageError::WriteConflict(ConflictError)` if a write-write conflict was
-detected. Dropping a `Transaction` without calling `commit()` is a silent
-rollback (nothing is written).
+Returns the commit timestamp. Returns `StorageError::WriteConflict` if a
+version committed after `read_ts` exists for the same quad — or, for a
+`Replace` write, for any value of the same `(subject, predicate, graph)`.
+Dropping a `Transaction` without calling `commit()` is a silent rollback.
 
 ---
 
 ### `Snapshot`
 
-A read-only point-in-time view. Obtained via `TripleStore::snapshot()` or
-`TripleStore::snapshot_at(ts)`.
+A read-only point-in-time view: `store.snapshot(ts)`.
 
 ```rust
 pub struct Snapshot {
     pub ts: Timestamp,
+    pub vt_as_of: Option<i64>,   // valid-time point; defaults to now
 }
 ```
 
-Exposes the same five scan methods as `Transaction`, all filtered to
-`tt <= ts`.
+| Method | Description |
+|--------|-------------|
+| `with_vt_as_of(vt)` | Pin the valid-time point (time travel) |
+| `scan_by_subject`, `scan_by_subject_predicate`, `scan_by_predicate`, `scan_by_predicate_object`, `scan_by_object`, `scan_by_subject_object`, `scan_all` | As on `TripleStore`, at `ts` / `vt_as_of`, all graphs |
+| `scan_by_predicate_value(predicate, &Value)` | Property triples with exactly that value — a value-index lookup |
+| `scan_graph(g: GraphId)` | Every triple in graph `g` |
+| `scan_by_subject_in_graph(g, subject)` | Triples of `subject` in `g` |
+| `text_search(predicate, query)` | Trigram search, confirmed against live values |
+| `scan_edge_annotations(edge)`, `scan_annotations_by_predicate(p)`, `scan_edge_annotations_as_triples(edge)` | RDF-star annotations |
 
 ---
 
@@ -451,19 +527,24 @@ pub struct ConflictError {
 
 ```rust
 pub enum StorageError {
-    RocksDb(rocksdb::Error),
-    Json(serde_json::Error),
-    KeyDecode(String),
+    Rocks(rocksdb::Error),
+    Serde(serde_json::Error),
+    Io(std::io::Error),
     MissingCf(String),
+    KeyDecode(String),
     WriteConflict(ConflictError),
     ReadOnly(String),
     Validation(String),
+    NeedsMigration,              // store is still storage format v2
+    UnsupportedFormat(u32),      // written by a newer build
     IriCollision { node: NodeId, existing: String, new: String },
 }
 ```
 
-`IriCollision` means two different IRIs hash to one `NodeId`; the gRPC layer
-maps it to `ALREADY_EXISTS`.
+gRPC mapping: `WriteConflict` → `ABORTED`; `ReadOnly`, `Validation`,
+`NeedsMigration`, `UnsupportedFormat` → `FAILED_PRECONDITION`;
+`IriCollision` (two different IRIs hashing to one `NodeId`) →
+`ALREADY_EXISTS`; the rest → `INTERNAL`.
 
 ---
 
@@ -471,26 +552,18 @@ maps it to `ALREADY_EXISTS`.
 
 Internal module, but useful to understand when debugging index contents.
 
-| Function | Output size | Description |
-|----------|-------------|-------------|
-| `encode_spo(s, p, o, tt)` | 44 bytes | SPO key |
-| `encode_sop(s, o, p, tt)` | 44 bytes | SOP key |
-| `encode_pso(p, s, o, tt)` | 44 bytes | PSO key |
-| `encode_pos(p, o, s, tt)` | 44 bytes | POS key |
-| `encode_osp(o, s, p, tt)` | 44 bytes | OSP key |
-| `encode_ops(o, p, s, tt)` | 44 bytes | OPS key |
-| `decode_spo(key)` | `DecodedSpo` | Decode SPO key |
-| `decode_pso(key)` | `DecodedPso` | Decode PSO key |
-| `decode_pos(key)` | `DecodedPos` | Decode POS key |
-| `decode_osp(key)` | `DecodedOsp` | Decode OSP key |
-| `spo_prefix_s(s)` | 16 bytes | Prefix for all triples with subject `s` |
-| `spo_prefix_sp(s, p)` | 20 bytes | Prefix for `(s, p, ?)` scan |
-| `pso_prefix_p(p)` | 4 bytes | Prefix for all triples with predicate `p` |
-| `pos_prefix_po(p, o)` | 20 bytes | Prefix for `(?, p, o)` scan |
-| `osp_prefix_o(o)` | 16 bytes | Prefix for all triples with object `o` |
-
-`PROPERTY_SENTINEL: [u8; 16]` — `[0xFF; 16]`, the sentinel placed in the
-object slot for property triples.
+| Item | Description |
+|------|-------------|
+| `QUAD_KEY_LEN` = 48, `QUAD_TUPLE_LEN` = 40 | Key width; the quad prefix shared by every version |
+| `Order` | `Spog`, `Sopg`, `Psog`, `Posg`, `Ospg`, `Opsg`, `Gspo`, `Gpos`; `Order::ALL` |
+| `order.cf()` | The column family of that order |
+| `order.encode(&QuadKey) -> [u8; 48]` / `order.decode(&[u8]) -> QuadKey` | `QuadKey { s, p, o, g, tt }` |
+| `order.prefix(s, p, o, g) -> KeyPrefix` | Bound leading slots, stopping at the first unbound one (stack-allocated) |
+| `order.graph_of(key) -> GraphId` | Read the graph slot without decoding |
+| `key_tt(key)` | Transaction time from the last 8 bytes |
+| `value_object(&Value) -> NodeId` | A property's object slot (its content hash) |
+| `encode_tri` / `decode_tri`, `encode_epa_key`, `encode_epo_key`, `encode_pea_key` | Ancillary CF keys (all carry the graph) |
+| `keys::v2` | Read-only v2 layouts, used by the migration |
 
 ---
 
@@ -499,12 +572,15 @@ object slot for property triples.
 | Function | Description |
 |----------|-------------|
 | `encode_relation(edge_id, temporal) -> Vec<u8>` | 33-byte relation value |
-| `encode_property(value, temporal) -> Result<Vec<u8>, StorageError>` | 17+N property value |
-| `decode_value(bytes) -> Result<DecodedValue, StorageError>` | Decode either variant |
+| `encode_property(value, temporal) -> Result<Vec<u8>, StorageError>` | 17+N property value (vectors binary) |
+| `encode_property_ref(temporal) -> Vec<u8>` | 17-byte reference to an out-of-line value |
+| `encode_blob(value)` / `decode_blob(bytes)` | `blob` CF payload |
+| `decode_value(bytes) -> Result<DecodedValue, StorageError>` | `Relation`, `Property` or `PropertyRef` |
+| `valid_time(bytes) -> Option<(Timestamp, Timestamp)>` | `(vt_start, vt_end)` without a full decode |
+| `with_vt_end(bytes, vt_end)` | Copy with `vt_end` replaced (closing versions) |
 
-`DecodedValue` is an enum with `Relation { edge_id, temporal }` and
-`Property { value, temporal }` arms. The decoded `temporal.tt` is always
-`Timestamp(0)` — the caller fills it in from the index key.
+The decoded `temporal.tt` is always `Timestamp(0)` — the caller fills it in
+from the index key. A `PropertyRef`'s value is `blob[key object slot]`.
 
 ---
 
@@ -575,7 +651,7 @@ pub fn evaluate_with_registry(
 
 Schema-aware variant of `evaluate`. Consults `registry` for the pattern
 predicate's domain/range types and applies a type pre-filter before the
-hexastore scan.
+quad-index scan.
 
 ---
 
@@ -587,7 +663,23 @@ Proto source: `crates/polargraph-server/proto/polargraph.proto`
 
 ---
 
-### `Insert` — IRI bindings
+### `Insert` — graph, write mode and IRI bindings
+
+`InsertRequest.graph` (`string`) names the graph (IRI) every triple and
+annotation in the request goes to; it is interned on first use. Empty means
+the default graph. REST `POST /insert` accepts the same as `"graph"`.
+
+`PropertyTriple.mode` (`PropertyWriteMode`) says how a property treats other
+values of the same `(subject, predicate, graph)`:
+
+| Value | Behaviour |
+|---|---|
+| `PROPERTY_WRITE_MODE_AUTO` (0, default) | `REPLACE` for an open-ended value, `ADD` for a closing write — pre-v3 behaviour |
+| `PROPERTY_WRITE_MODE_REPLACE` | Close every other open value, then write this one |
+| `PROPERTY_WRITE_MODE_ADD` | Write alongside existing values |
+
+REST `/import/rdf`, SPARQL `INSERT DATA` and `INSERT` templates write with
+`ADD`, so multi-valued RDF properties survive.
 
 `InsertRequest.iris` (`repeated string`) lists IRIs of nodes written in the
 request. They are recorded in the IRI dictionary in the same commit (or
