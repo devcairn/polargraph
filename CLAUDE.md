@@ -12,7 +12,7 @@ PolarGraph is a purpose-built, Rust-based graph database engine. The core
 data model is a **triple store** (subject → predicate → object) with:
 
 - **Bitemporal versioning** on every fact (valid time + transaction time)
-- A **hexastore index** (6 RocksDB column families + ancillary CFs) for O(log n) lookups on
+- A **hexastore index** (6 RocksDB column families + 7 ancillary CFs) for O(log n) lookups on
   any (S, P, O) bind pattern
 - **Optimistic MVCC** for snapshot-isolated reads and conflict-detected writes
 - A **View** system for projecting subsets of the graph with label overrides
@@ -122,7 +122,7 @@ RocksDB-backed persistence. Owns the hexastore layout and MVCC layer.
 | `mvcc` | `TimestampOracle`, `Transaction`, `Snapshot`, `ConflictError` |
 | `keys` | Fixed-width key encoding/decoding for all hexastore CFs |
 | `codec` | Value serialization (discriminant + temporal + payload) |
-| `cf` | Column family name constants (SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, DRV, EPA, EPO) |
+| `cf` | Column family name constants (SPO, SOP, PSO, POS, OSP, OPS, META, HNSW, TRI, DRV, EPA, EPO, PEA) |
 | `error` | `StorageError` |
 | `hnsw` | `HnswIndex` — pure-Rust HNSW, named-space key helpers, serialize/deserialize, mmap storage |
 | `registry` | `NodeTypeRegistry`, `EdgeTypeRegistry`, `ValidationError` |
@@ -276,7 +276,7 @@ every index key, so both variants share the same index structure.
 
 ### Column families
 
-PolarGraph uses 12 RocksDB column families. Every triple is written atomically
+PolarGraph uses 13 RocksDB column families. Every triple is written atomically
 to all 6 hexastore CFs via a single `WriteBatch`; the others are written in the
 same batch or separately as appropriate:
 
@@ -289,6 +289,7 @@ same batch or separately as appropriate:
 | DRV | OWL 2 RL derived facts (same SPO key layout as hexastore, separate CF) |
 | EPA | Edge property annotations (key: `[edge_id:16][pred_id:4][tt:8]`) |
 | EPO | Edge relation annotations (key: `[edge_id:16][pred_id:4][obj_id:16][tt:8]`) |
+| PEA | Predicate-first secondary index over EPA (key: `[pred_id:4][edge_id:16][tt:8]`) |
 
 ### Hexastore (6-CF sub-index)
 
