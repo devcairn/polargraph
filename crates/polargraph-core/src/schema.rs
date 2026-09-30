@@ -31,7 +31,7 @@ impl FieldKind {
             (FieldKind::Bool, Value::Bool(_))
                 | (FieldKind::Int, Value::Int(_))
                 | (FieldKind::Float, Value::Float(_))
-                | (FieldKind::Text, Value::Text(_))
+                | (FieldKind::Text, Value::Text(_) | Value::LangText { .. })
                 | (FieldKind::Blob, Value::Blob(_))
                 | (FieldKind::Vector, Value::Vector(_))
         )

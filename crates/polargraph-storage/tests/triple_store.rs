@@ -566,6 +566,27 @@ fn trigram_insert_and_search() {
 }
 
 #[test]
+fn trigram_indexes_language_tagged_text() {
+    let (store, _dir) = open_store();
+    let n = NodeId::new();
+    store
+        .insert(&property(
+            n,
+            "label",
+            Value::LangText {
+                text: "Société Générale".into(),
+                lang: "fr".into(),
+            },
+        ))
+        .unwrap();
+    let ts = Timestamp(store.oracle_ts());
+    assert_eq!(
+        store.text_search("label", "Soci", ts, None).unwrap(),
+        vec![n]
+    );
+}
+
+#[test]
 fn trigram_skips_long_text_values() {
     let (store, _dir) = open_store();
     let short = NodeId::new();

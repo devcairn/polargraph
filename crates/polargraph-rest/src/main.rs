@@ -369,6 +369,9 @@ fn proto_value_to_json(v: &proto::Value) -> serde_json::Value {
             serde_json::Value::String(hex)
         }
         Some(Kind::VecVal(fa)) => serde_json::json!(fa.values),
+        // JSON-LD value objects, so the tag / datatype survives a round trip.
+        Some(Kind::LangText(l)) => serde_json::json!({ "@value": l.text, "@language": l.lang }),
+        Some(Kind::Typed(t)) => serde_json::json!({ "@value": t.lexical, "@type": t.datatype }),
     }
 }
 
@@ -385,6 +388,24 @@ fn json_to_proto_value(v: &serde_json::Value) -> proto::Value {
             }
         }
         serde_json::Value::String(s) => Kind::TextVal(s.clone()),
+        // JSON-LD value objects: {"@value", "@language"} / {"@value", "@type"}.
+        serde_json::Value::Object(o) => match (
+            o.get("@value").and_then(|v| v.as_str()),
+            o.get("@language").and_then(|v| v.as_str()),
+            o.get("@type").and_then(|v| v.as_str()),
+        ) {
+            (Some(text), Some(lang), _) if !lang.is_empty() => Kind::LangText(proto::LangText {
+                text: text.to_string(),
+                lang: lang.to_string(),
+            }),
+            (Some(lexical), None, Some(datatype)) if !datatype.is_empty() => {
+                Kind::Typed(proto::TypedLiteral {
+                    lexical: lexical.to_string(),
+                    datatype: datatype.to_string(),
+                })
+            }
+            _ => Kind::TextVal(v.to_string()),
+        },
         other => Kind::TextVal(other.to_string()),
     };
     proto::Value { kind: Some(kind) }
@@ -2818,20 +2839,13 @@ fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Tr
     }
 }
 
+/// A SPARQL literal as a proto value (see `polargraph_core::term::literal_to_value`).
 fn sparql_literal_to_proto_value(lit: &spargebra::term::Literal) -> Option<proto::Value> {
-    use proto::value::Kind;
-    let dt = lit.datatype().as_str();
-    let val = lit.value();
-    let kind = if dt.ends_with("#integer") || dt.ends_with("#int") || dt.ends_with("#long") {
-        Kind::IntVal(val.parse::<i64>().ok()?)
-    } else if dt.ends_with("#double") || dt.ends_with("#float") || dt.ends_with("#decimal") {
-        Kind::FloatVal(val.parse::<f64>().ok()?)
-    } else if dt.ends_with("#boolean") {
-        Kind::BoolVal(val == "true")
-    } else {
-        Kind::TextVal(val.to_string())
-    };
-    Some(proto::Value { kind: Some(kind) })
+    Some(pg_value_to_proto(&polargraph_core::term::literal_to_value(
+        lit.value(),
+        Some(lit.datatype().as_str()),
+        lit.language(),
+    )))
 }
 
 /// What a SPARQL DELETE quad's object pins down: a node or a literal value.
@@ -3026,6 +3040,14 @@ fn pg_value_to_proto(v: &polargraph_core::value::Value) -> proto::Value {
             V::Bool(b) => proto::value::Kind::BoolVal(*b),
             V::Blob(b) => proto::value::Kind::BlobVal(b.clone()),
             V::Vector(vs) => proto::value::Kind::VecVal(proto::FloatArray { values: vs.clone() }),
+            V::LangText { text, lang } => proto::value::Kind::LangText(proto::LangText {
+                text: text.clone(),
+                lang: lang.clone(),
+            }),
+            V::Typed { lexical, datatype } => proto::value::Kind::Typed(proto::TypedLiteral {
+                lexical: lexical.clone(),
+                datatype: datatype.clone(),
+            }),
             V::Null => return proto::Value { kind: None },
         }),
     }
@@ -4111,6 +4133,18 @@ mod tests {
             req.metadata().get("x-polargraph-user-id").is_none(),
             "no metadata header should be set for empty user_id"
         );
+    }
+
+    #[test]
+    fn json_ld_value_objects_round_trip_through_proto() {
+        let lang = serde_json::json!({ "@value": "Acme", "@language": "en" });
+        let typed = serde_json::json!({
+            "@value": "2026-09-29",
+            "@type": "http://www.w3.org/2001/XMLSchema#date"
+        });
+        for v in [lang, typed] {
+            assert_eq!(proto_value_to_json(&json_to_proto_value(&v)), v);
+        }
     }
 
     #[test]

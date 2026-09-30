@@ -223,6 +223,20 @@ mod tests {
     }
 
     #[test]
+    fn property_lang_text_and_typed_round_trip() {
+        let lang = Value::LangText {
+            text: "Acmé".into(),
+            lang: "fr".into(),
+        };
+        assert_eq!(property_round_trip(lang.clone()), lang);
+        let typed = Value::Typed {
+            lexical: "2026-09-29".into(),
+            datatype: "http://www.w3.org/2001/XMLSchema#date".into(),
+        };
+        assert_eq!(property_round_trip(typed.clone()), typed);
+    }
+
+    #[test]
     fn property_null_round_trip() {
         assert_eq!(property_round_trip(Value::Null), Value::Null);
     }

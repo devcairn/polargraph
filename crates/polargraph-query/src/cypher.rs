@@ -2694,16 +2694,16 @@ pub fn apply_text_filters(
 
             let triples = snapshot.scan_by_subject_predicate(&node_id, &filter.predicate)?;
             let matched = triples.iter().any(|t| match t {
-                Triple::Property {
-                    value: Value::Text(text),
-                    ..
-                } => match &filter.kind {
-                    TextFilterKind::Contains(needle) => text.contains(needle.as_str()),
-                    TextFilterKind::StartsWith(prefix) => text.starts_with(prefix.as_str()),
-                    TextFilterKind::Regex(pattern) => regex::Regex::new(pattern)
-                        .map(|re| re.is_match(text))
-                        .unwrap_or(false),
-                },
+                Triple::Property { value, .. } if value.as_text().is_some() => {
+                    let text = value.as_text().unwrap_or_default();
+                    match &filter.kind {
+                        TextFilterKind::Contains(needle) => text.contains(needle.as_str()),
+                        TextFilterKind::StartsWith(prefix) => text.starts_with(prefix.as_str()),
+                        TextFilterKind::Regex(pattern) => regex::Regex::new(pattern)
+                            .map(|re| re.is_match(text))
+                            .unwrap_or(false),
+                    }
+                }
                 _ => false,
             });
 
@@ -2773,6 +2773,11 @@ fn compare_values(actual: &Value, op: &ComparisonOp, expected: &Value) -> bool {
         (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
         (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.partial_cmp(b),
+        // Cypher has no language tags: compare a tagged string by its text.
+        (Value::LangText { .. }, Value::Text(_) | Value::LangText { .. })
+        | (Value::Text(_), Value::LangText { .. }) => {
+            actual.as_text().partial_cmp(&expected.as_text())
+        }
         _ => {
             // Cross-type: only equality makes sense.
             return matches!(op, ComparisonOp::Eq) && actual == expected;

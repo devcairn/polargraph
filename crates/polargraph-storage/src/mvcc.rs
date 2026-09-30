@@ -32,7 +32,6 @@ use polargraph_core::{
     id::NodeId,
     temporal::{BiTemporalRange, Timestamp},
     triple::Triple,
-    value::Value,
 };
 use rocksdb::{Direction, IteratorMode, WriteBatch};
 use std::{
@@ -287,11 +286,10 @@ impl Transaction {
                         &encode_value(triple, &temporal_stamped)?,
                     )?;
                     // Trigram index: write TRI CF entries for text property values.
-                    if let Triple::Property {
-                        value: Value::Text(text),
-                        ..
-                    } = triple
-                    {
+                    if let Some(text) = match triple {
+                        Triple::Property { value, .. } => value.as_text(),
+                        _ => None,
+                    } {
                         self.store.batch_text_trigrams(
                             &mut batch,
                             &triple.subject(),

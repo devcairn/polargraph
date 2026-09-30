@@ -80,7 +80,7 @@ Recorded after auditing this plan against the code at `849839a`.
 | 2a | Canonical term mapping (`polargraph-core::term`) on every path; SPARQL IRIs/literals never widen to wildcards (`Term::Literal`); SPARQL DELETE closes exactly the named triple | none | ✅ |
 | 2b | IRI dictionary CF; IRI bindings on insert/import; `ResolveIris` RPC | additive CF | ✅ |
 | 2c | Export paths render stored IRIs; optional de-skolemization | none | ✅ |
-| 2d | Literal datatypes + language tags preserved | none | |
+| 2d | Literal datatypes + language tags preserved (`Value::LangText`, `Value::Typed`, `term::literal_to_value`) | none | ✅ |
 | 3 | New key layout: value-hashed property keys (1.2), 48-byte keys with `g` (2.3), `GSPO`/`GPOS`, `BLOB` CF + value refs (1.3), conflict detection on `(s,p,o,g)`, graph interning | **v3** offline rewrite | |
 | 4 | `GraphTerm` in Datalog/planner; graph RPCs; N-Quads/TriG | — | |
 | 5 | SPARQL dataset semantics + graph Update ops; Cypher `USE GRAPH` | — | |

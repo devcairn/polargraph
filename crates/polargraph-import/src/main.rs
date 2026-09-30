@@ -393,10 +393,13 @@ impl Converter {
             Term::BlankNode(b) => self.relation(&subject, predicate, &self.scope.skolem_iri(b.id)),
             Term::Literal(lit) => {
                 let value = match lit {
-                    Literal::Simple { value } | Literal::LanguageTaggedString { value, .. } => {
-                        Value::Text(value.to_string())
+                    Literal::Simple { value } => term::literal_to_value(value, None, None),
+                    Literal::LanguageTaggedString { value, language } => {
+                        term::literal_to_value(value, None, Some(language))
                     }
-                    Literal::Typed { value, datatype } => xsd_to_value(value, datatype.iri),
+                    Literal::Typed { value, datatype } => {
+                        term::literal_to_value(value, Some(datatype.iri), None)
+                    }
                 };
                 self.property(&subject, predicate, value)
             }
@@ -503,7 +506,12 @@ fn parse_input_jsonld(input: &str, conv: &Converter) -> Result<Vec<Triple>> {
                         .and_then(|t| t.as_str())
                         .unwrap_or("xsd:string");
                     let full_dt = expand_xsd_prefix(type_str);
-                    let value = xsd_to_value(raw.as_str().unwrap_or(&raw.to_string()), &full_dt);
+                    let lang = item.get("@language").and_then(|l| l.as_str());
+                    let value = term::literal_to_value(
+                        raw.as_str().unwrap_or(&raw.to_string()),
+                        Some(&full_dt),
+                        lang,
+                    );
                     triples.push(conv.property(&subject_iri, key, value));
                 }
             }
@@ -511,26 +519,6 @@ fn parse_input_jsonld(input: &str, conv: &Converter) -> Result<Vec<Triple>> {
     }
 
     Ok(triples)
-}
-
-/// Convert an XSD literal value string to a PolarGraph [`Value`].
-fn xsd_to_value(s: &str, datatype: &str) -> Value {
-    match datatype {
-        "http://www.w3.org/2001/XMLSchema#integer"
-        | "http://www.w3.org/2001/XMLSchema#long"
-        | "http://www.w3.org/2001/XMLSchema#int" => s
-            .parse::<i64>()
-            .map(Value::Int)
-            .unwrap_or_else(|_| Value::Text(s.to_string())),
-        "http://www.w3.org/2001/XMLSchema#double"
-        | "http://www.w3.org/2001/XMLSchema#float"
-        | "http://www.w3.org/2001/XMLSchema#decimal" => s
-            .parse::<f64>()
-            .map(Value::Float)
-            .unwrap_or_else(|_| Value::Text(s.to_string())),
-        "http://www.w3.org/2001/XMLSchema#boolean" => Value::Bool(matches!(s, "true" | "1")),
-        _ => Value::Text(s.to_string()),
-    }
 }
 
 fn expand_xsd_prefix(dt: &str) -> String {

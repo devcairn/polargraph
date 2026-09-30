@@ -6781,3 +6781,64 @@ async fn insert_accepts_iri_only_requests_and_rejects_empty_iris() {
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
+
+// ── Language-tagged and typed literals ───────────────────────────────────────
+
+#[tokio::test]
+async fn language_tag_is_part_of_a_literal_match() {
+    use polargraph_server::proto::LangText;
+
+    let (svc, _dir) = open();
+    let (_, s) = new_node();
+    let lang_val = |text: &str, lang: &str| Value {
+        kind: Some(ValueKind::LangText(LangText {
+            text: text.into(),
+            lang: lang.into(),
+        })),
+    };
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![Triple {
+            kind: Some(TripleKind::Property(PropertyTriple {
+                subject: Some(s.clone()),
+                predicate: "label".into(),
+                value: Some(lang_val("Acme", "en")),
+                vt_start: 0,
+                vt_end: 0,
+            })),
+        }],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    let count = |v: Value| {
+        let svc = &svc;
+        async move {
+            svc.query(Request::new(QueryRequest {
+                patterns: vec![pattern(
+                    var("s"),
+                    "label",
+                    Term {
+                        kind: Some(TermKind::Literal(v)),
+                    },
+                )],
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .bindings
+            .len()
+        }
+    };
+    assert_eq!(count(lang_val("Acme", "en")).await, 1);
+    assert_eq!(count(lang_val("Acme", "fr")).await, 0, "different tag");
+    assert_eq!(
+        count(Value {
+            kind: Some(ValueKind::TextVal("Acme".into())),
+        })
+        .await,
+        0,
+        "plain string is a different literal"
+    );
+}

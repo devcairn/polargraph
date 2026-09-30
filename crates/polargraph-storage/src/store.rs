@@ -1763,22 +1763,17 @@ impl TripleStore {
 
         // Snapshot-confirm: the live text value must exist and contain the query.
         // This eliminates stale TRI entries from superseded text values.
-        use polargraph_core::{triple::Triple, value::Value};
+        use polargraph_core::triple::Triple;
         let query_lower = query.to_lowercase();
         let mut result = Vec::new();
         for node_id in candidates {
             let triples =
                 self.scan_by_subject_predicate_at(&node_id, predicate, snapshot_ts, vt_as_of)?;
-            let confirmed = triples.iter().any(|t| {
-                if let Triple::Property {
-                    value: Value::Text(text),
-                    ..
-                } = t
-                {
-                    text.to_lowercase().contains(&query_lower)
-                } else {
-                    false
-                }
+            let confirmed = triples.iter().any(|t| match t {
+                Triple::Property { value, .. } => value
+                    .as_text()
+                    .is_some_and(|text| text.to_lowercase().contains(&query_lower)),
+                _ => false,
             });
             if confirmed {
                 result.push(node_id);
@@ -1843,7 +1838,7 @@ impl TripleStore {
                 let p = self.intern_predicate(&predicate.0)?;
                 self.batch_triple(&mut batch, *subject, p, sentinel, tt, &value_bytes)?;
                 // Trigram index for text properties.
-                if let Value::Text(text) = value {
+                if let Some(text) = value.as_text() {
                     self.batch_text_trigrams(&mut batch, subject, p, text)?;
                 }
             }

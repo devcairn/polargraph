@@ -202,12 +202,10 @@ impl SstImporter {
         for triple in &self.triples {
             let p = *pred_ids.get(triple.predicate().0.as_str()).unwrap();
             match triple {
-                Triple::Property {
-                    subject,
-                    value: polargraph_core::value::Value::Text(text),
-                    ..
-                } => {
-                    store.batch_text_trigrams(&mut tri_batch, subject, p, text)?;
+                Triple::Property { subject, value, .. } => {
+                    if let Some(text) = value.as_text() {
+                        store.batch_text_trigrams(&mut tri_batch, subject, p, text)?;
+                    }
                 }
                 Triple::EdgeProperty {
                     edge,

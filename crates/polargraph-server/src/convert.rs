@@ -51,6 +51,24 @@ pub fn value_from_proto(proto: &proto::Value) -> Result<Value, Status> {
         Some(ValueKind::TextVal(s)) => Ok(Value::Text(s.clone())),
         Some(ValueKind::BlobVal(b)) => Ok(Value::Blob(b.clone())),
         Some(ValueKind::VecVal(fa)) => Ok(Value::Vector(fa.values.clone())),
+        Some(ValueKind::LangText(l)) => {
+            if l.lang.is_empty() {
+                return Err(Status::invalid_argument("lang_text.lang must not be empty"));
+            }
+            Ok(Value::LangText {
+                text: l.text.clone(),
+                lang: l.lang.clone(),
+            })
+        }
+        Some(ValueKind::Typed(t)) => {
+            if t.datatype.is_empty() {
+                return Err(Status::invalid_argument("typed.datatype must not be empty"));
+            }
+            Ok(Value::Typed {
+                lexical: t.lexical.clone(),
+                datatype: t.datatype.clone(),
+            })
+        }
     }
 }
 
@@ -63,6 +81,14 @@ pub fn value_to_proto(v: &Value) -> proto::Value {
         Value::Text(s) => ValueKind::TextVal(s.clone()),
         Value::Blob(b) => ValueKind::BlobVal(b.clone()),
         Value::Vector(fs) => ValueKind::VecVal(proto::FloatArray { values: fs.clone() }),
+        Value::LangText { text, lang } => ValueKind::LangText(proto::LangText {
+            text: text.clone(),
+            lang: lang.clone(),
+        }),
+        Value::Typed { lexical, datatype } => ValueKind::Typed(proto::TypedLiteral {
+            lexical: lexical.clone(),
+            datatype: datatype.clone(),
+        }),
     };
     proto::Value { kind: Some(kind) }
 }

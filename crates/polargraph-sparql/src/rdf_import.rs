@@ -99,27 +99,9 @@ impl ImportedObject {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// Map a typed literal to a [`Value`] — see [`term::literal_to_value`].
 pub(crate) fn xsd_literal_to_value(value: &str, datatype_iri: &str) -> Value {
-    match datatype_iri {
-        "http://www.w3.org/2001/XMLSchema#integer"
-        | "http://www.w3.org/2001/XMLSchema#long"
-        | "http://www.w3.org/2001/XMLSchema#int"
-        | "http://www.w3.org/2001/XMLSchema#short"
-        | "http://www.w3.org/2001/XMLSchema#byte"
-        | "http://www.w3.org/2001/XMLSchema#nonNegativeInteger"
-        | "http://www.w3.org/2001/XMLSchema#positiveInteger" => value
-            .parse::<i64>()
-            .map(Value::Int)
-            .unwrap_or_else(|_| Value::Text(value.to_string())),
-        "http://www.w3.org/2001/XMLSchema#double"
-        | "http://www.w3.org/2001/XMLSchema#float"
-        | "http://www.w3.org/2001/XMLSchema#decimal" => value
-            .parse::<f64>()
-            .map(Value::Float)
-            .unwrap_or_else(|_| Value::Text(value.to_string())),
-        "http://www.w3.org/2001/XMLSchema#boolean" => Value::Bool(matches!(value, "true" | "1")),
-        _ => Value::Text(value.to_string()),
-    }
+    term::literal_to_value(value, Some(datatype_iri), None)
 }
 
 fn rio_literal_to_imported(lit: &Literal<'_>) -> (Value, String) {
@@ -128,9 +110,10 @@ fn rio_literal_to_imported(lit: &Literal<'_>) -> (Value, String) {
             Value::Text(value.to_string()),
             "http://www.w3.org/2001/XMLSchema#string".to_string(),
         ),
-        Literal::LanguageTaggedString { value, language } => {
-            (Value::Text(value.to_string()), format!("lang:{}", language))
-        }
+        Literal::LanguageTaggedString { value, language } => (
+            term::literal_to_value(value, None, Some(language)),
+            format!("lang:{}", language),
+        ),
         Literal::Typed { value, datatype } => {
             let dt = datatype.iri.to_string();
             (xsd_literal_to_value(value, &dt), dt)
@@ -271,9 +254,11 @@ pub fn parse_jsonld(input: &str) -> Result<Vec<ImportedTriple>, String> {
                         .and_then(|t| t.as_str())
                         .unwrap_or("xsd:string");
                     let full_dt = expand_xsd_prefix(type_str);
-                    let value = xsd_literal_to_value(
+                    let lang = item.get("@language").and_then(|l| l.as_str());
+                    let value = term::literal_to_value(
                         raw_val.as_str().unwrap_or(&raw_val.to_string()),
-                        &full_dt,
+                        Some(&full_dt),
+                        lang,
                     );
                     ImportedObject::Literal {
                         value,
@@ -395,6 +380,32 @@ mod tests {
         assert!(matches!(
             &triples[0].object,
             ImportedObject::Literal { value: Value::Text(s), .. } if s == "Alice"
+        ));
+    }
+
+    #[test]
+    fn parse_keeps_language_tags_and_unknown_datatypes() {
+        let nt = concat!(
+            "<http://ex/a> <http://ex/label> \"Acme\"@en .\n",
+            "<http://ex/a> <http://ex/founded> \"1999-01-01\"^^<http://www.w3.org/2001/XMLSchema#date> .\n",
+        );
+        let t = parse_ntriples(nt.as_bytes()).unwrap();
+        assert!(matches!(
+            &t[0].object,
+            ImportedObject::Literal { value: Value::LangText { text, lang }, .. }
+                if text == "Acme" && lang == "en"
+        ));
+        assert!(matches!(
+            &t[1].object,
+            ImportedObject::Literal { value: Value::Typed { lexical, datatype }, .. }
+                if lexical == "1999-01-01" && datatype.ends_with("#date")
+        ));
+
+        let doc = r#"{"@graph": [{"@id": "http://ex/a",
+            "http://ex/label": {"@value": "Acmé", "@language": "fr"}}]}"#;
+        assert!(matches!(
+            &parse_jsonld(doc).unwrap()[0].object,
+            ImportedObject::Literal { value: Value::LangText { lang, .. }, .. } if lang == "fr"
         ));
     }
 

@@ -18,7 +18,23 @@ message Value {
         string     text_val   = 5;
         bytes      blob_val   = 6;
         FloatArray vec_val    = 7;
+        LangText   lang_text  = 8;
+        TypedLiteral typed    = 9;
     }
+}
+
+/// A language-tagged string (rdf:langString), e.g. "Acme"@en.
+message LangText {
+    string text = 1;
+    string lang = 2;
+}
+
+/// An RDF literal with a datatype that has no native Value kind,
+/// e.g. "2026-09-29"^^<http://www.w3.org/2001/XMLSchema#date>.
+message TypedLiteral {
+    string lexical  = 1;
+    /// Full datatype IRI.
+    string datatype = 2;
 }
 
 /// A dense float32 embedding vector.

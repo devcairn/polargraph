@@ -491,11 +491,12 @@ fn translate_term_pattern(tp: &TermPattern) -> Result<Term, SparqlError> {
         // must never widen to a wildcard.
         TermPattern::NamedNode(n) => Ok(Term::Bound(iri_to_node_id(n.as_str()))),
         TermPattern::BlankNode(b) => Ok(Term::Var(format!("_bn_{}", b.as_str()))),
-        // A literal matches only property triples with an equal value.
-        // (Language tags are not stored yet, so they are ignored here.)
-        TermPattern::Literal(l) => Ok(Term::Literal(crate::rdf_import::xsd_literal_to_value(
+        // A literal matches only property triples with an equal value
+        // (language tag and datatype included).
+        TermPattern::Literal(l) => Ok(Term::Literal(polargraph_core::term::literal_to_value(
             l.value(),
-            l.datatype().as_str(),
+            Some(l.datatype().as_str()),
+            l.language(),
         ))),
         // Nested quoted triples in general position are handled at the BGP level;
         // if we reach here it means a triple appeared somewhere unexpected — treat as wildcard.

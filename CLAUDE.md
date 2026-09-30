@@ -106,11 +106,11 @@ Dependency-free. No I/O, no async. Contains every shared type.
 | `id` | `NodeId`, `EdgeId` — UUID v7 wrappers |
 | `temporal` | `Timestamp` (i64 µs), `BiTemporalRange` |
 | `triple` | `Triple` (enum), `Node`, `Edge`, `Predicate` |
-| `value` | `Value` enum: Null, Bool, Int, Float, Text, Blob, Vector |
+| `value` | `Value` enum: Null, Bool, Int, Float, Text, Blob, Vector, LangText, Typed; `as_text()` |
 | `view` | `View`, `ViewId`, `NodeFilter`, `EdgePresentation` |
 | `schema` | `FieldKind`, `FieldDef`, `NodeTypeDef`, `EdgeTypeDef`, `VectorSpaceDef` |
 | `skolem` | `ImportScope` — per-import blank-node skolemization (`{base}/.well-known/genid/{import_id}/{label}`) |
-| `term` | `iri_to_node_id`, `fallback_iri`, `edge_id_for` — the one IRI ↔ NodeId mapping every path uses |
+| `term` | `iri_to_node_id`, `fallback_iri`, `edge_id_for`, `literal_to_value` — the one IRI ↔ NodeId and RDF literal ↔ Value mapping every path uses |
 
 **Do not add I/O or async imports here.**
 

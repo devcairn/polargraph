@@ -190,11 +190,30 @@ pub enum Value {
     Text(String),
     Blob(Vec<u8>),
     Vector(Vec<f32>),   // dense embedding; binary codec (not JSON)
+    LangText { text: String, lang: String },       // "Acme"@en
+    Typed { lexical: String, datatype: String },   // "2026-09-29"^^xsd:date
 }
 ```
 
 `From<bool>`, `From<i64>`, `From<f64>`, `From<String>`, `From<&str>` are
-all implemented.
+all implemented. `value.as_text()` returns the string of `Text` and
+`LangText` (used by trigram indexing, text search and Cypher string
+predicates, so tagged labels stay searchable).
+
+RDF literals map to values through `polargraph_core::term::literal_to_value`
+on every path: a language tag → `LangText`; no datatype or `xsd:string` →
+`Text`; XSD integer types → `Int`; `double`/`float`/`decimal` → `Float`;
+`boolean` → `Bool`; any other datatype, or a lexical form that doesn't parse
+as its datatype → `Typed`. Language tag and datatype are part of equality, so
+the SPARQL pattern `?s :label "Acme"@en` doesn't match `"Acme"` or
+`"Acme"@fr`. Cypher, which has no language tags, compares a `LangText` by its
+text.
+
+On the wire these are `Value.lang_text` (`LangText { text, lang }`) and
+`Value.typed` (`TypedLiteral { lexical, datatype }`). The REST gateway renders
+them as JSON-LD value objects (`{"@value", "@language"}` /
+`{"@value", "@type"}`) and accepts the same objects on input. The Python,
+Go and TypeScript SDKs don't decode the new kinds yet.
 
 Non-vector variants serialize to tagged JSON: `{ "type": "Int", "v": 42 }`.
 `Vector` uses a dedicated binary codec (discriminant `0x03` + little-endian
