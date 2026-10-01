@@ -1167,6 +1167,41 @@ every graph when there is no `GRAPH`. IRIs map to nodes the same way as `/import
 
 ---
 
+## `ApplyChanges` (atomic changesets)
+
+```
+rpc ApplyChanges(ApplyChangesRequest) returns (ApplyChangesResponse)
+```
+
+| Request field | Meaning |
+|---|---|
+| `adds` | `repeated GraphTriples { graph, repeated Triple triples }` ("" = default graph) |
+| `retractions` | `repeated QuadRef { subject, predicate, node \| value, graph }` — closed at now |
+| `read_ts` | Precondition: fail (`ABORTED`) if any touched quad changed after it; 0 = none |
+| `strict` | Fail (`FAILED_PRECONDITION`) if a retraction matches no live quad |
+| `iris` | IRI dictionary bindings |
+| `user_id` | Author; graph ACL (`write` on every graph touched) |
+
+Response: `{commit_ts, added, retracted, retractions_not_found, edge_ids}`.
+At most 100 000 adds + retractions (`RESOURCE_EXHAUSTED`).
+
+REST `POST /changes`:
+
+```json
+{"adds": [{"graph": "urn:g:approved",
+           "triples": [{"subject": "http://ex/svc", "predicate": "http://ex/owner", "value": "team-b"}]}],
+ "retractions": [{"subject": "http://ex/svc", "predicate": "http://ex/dependsOn",
+                  "object": "http://ex/db", "graph": "urn:g:approved"}],
+ "read_ts": 1790859327388631, "strict": false}
+```
+
+Nodes are UUIDs or IRIs (IRIs are recorded in the dictionary). 409 = changed
+since `read_ts`, 412 = strict miss.
+
+Storage: `TripleStore::begin_at(read_ts)`, `polargraph_storage::close_at`.
+
+---
+
 ## `Subscribe` (change feed)
 
 ```

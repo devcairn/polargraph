@@ -7981,3 +7981,163 @@ async fn subscribe_before_pruned_log_is_out_of_range() {
         .await
         .is_ok());
 }
+
+#[tokio::test]
+async fn apply_changes_is_atomic_with_precondition() {
+    use polargraph_server::proto::{
+        quad_ref::Object as QObject, ApplyChangesRequest, GraphStatsRequest, GraphTriples, QuadRef,
+    };
+
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let svc = PolarGraphServer::new(store.clone()).unwrap();
+    let (_, s) = new_node();
+    let (_, o) = new_node();
+    let base = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![
+                rel(s.clone(), "dependsOn", o.clone()),
+                text_prop(s.clone(), "owner", "a"),
+            ],
+            graph: "urn:g:approved".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .commit_ts;
+
+    let retract_rel = || QuadRef {
+        subject: Some(s.clone()),
+        predicate: "dependsOn".into(),
+        object: Some(QObject::Node(o.clone())),
+        graph: "urn:g:approved".into(),
+    };
+    let retract_owner = || QuadRef {
+        subject: Some(s.clone()),
+        predicate: "owner".into(),
+        object: Some(QObject::Value(Value {
+            kind: Some(ValueKind::TextVal("a".into())),
+        })),
+        graph: "urn:g:approved".into(),
+    };
+    let live = |iri: &'static str| {
+        let svc = &svc;
+        async move {
+            svc.graph_stats(Request::new(GraphStatsRequest { iri: iri.into() }))
+                .await
+                .unwrap()
+                .into_inner()
+                .live_quads
+        }
+    };
+
+    // strict: a retraction that matches nothing aborts everything.
+    let err = svc
+        .apply_changes(Request::new(ApplyChangesRequest {
+            adds: vec![GraphTriples {
+                graph: "urn:g:approved".into(),
+                triples: vec![text_prop(s.clone(), "owner", "b")],
+            }],
+            retractions: vec![QuadRef {
+                predicate: "nope".into(),
+                ..retract_owner()
+            }],
+            strict: true,
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(live("urn:g:approved").await, 2, "nothing applied");
+
+    // Adds across two graphs + two retractions, one commit.
+    let floor = store.changes_floor().unwrap();
+    let before = store.changes_after(floor, 100).unwrap().len();
+    let resp = svc
+        .apply_changes(Request::new(ApplyChangesRequest {
+            adds: vec![
+                GraphTriples {
+                    graph: "urn:g:approved".into(),
+                    triples: vec![text_prop(s.clone(), "owner", "b")],
+                },
+                GraphTriples {
+                    graph: "urn:g:audit".into(),
+                    triples: vec![rel(s.clone(), "reviewedBy", o.clone())],
+                },
+            ],
+            retractions: vec![retract_rel(), retract_owner()],
+            read_ts: base,
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        (resp.added, resp.retracted, resp.retractions_not_found),
+        (2, 2, 0)
+    );
+    assert_eq!(resp.edge_ids.len(), 1);
+    assert_eq!(live("urn:g:approved").await, 1, "owner=b only");
+    assert_eq!(live("urn:g:audit").await, 1);
+    let log = store.changes_after(floor, 100).unwrap();
+    assert_eq!(
+        log.len() - before,
+        2,
+        "graph creation + one changeset commit"
+    );
+    assert_eq!(log.last().unwrap().quads.len(), 4, "2 adds + 2 closes");
+
+    // A changeset based on `base` conflicts with what changed since.
+    let err = svc
+        .apply_changes(Request::new(ApplyChangesRequest {
+            adds: vec![GraphTriples {
+                graph: "urn:g:approved".into(),
+                triples: vec![text_prop(s.clone(), "owner", "c")],
+            }],
+            read_ts: base,
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Aborted);
+    assert_eq!(live("urn:g:approved").await, 1);
+
+    // Non-strict: unmatched retractions are counted.
+    let resp = svc
+        .apply_changes(Request::new(ApplyChangesRequest {
+            retractions: vec![retract_rel()],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((resp.retracted, resp.retractions_not_found), (0, 1));
+
+    // A user needs write access to every graph it touches.
+    let err = svc
+        .apply_changes(Request::new(ApplyChangesRequest {
+            retractions: vec![retract_owner()],
+            user_id: uuid::Uuid::now_v7().to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+    // Empty changesets and future read points are rejected.
+    let err = svc
+        .apply_changes(Request::new(ApplyChangesRequest::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    let err = svc
+        .apply_changes(Request::new(ApplyChangesRequest {
+            retractions: vec![retract_rel()],
+            read_ts: i64::MAX,
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}

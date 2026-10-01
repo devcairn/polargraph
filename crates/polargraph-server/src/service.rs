@@ -3,6 +3,10 @@
 
 const STREAM_CHUNK_SIZE: usize = 500;
 
+/// Most adds + retractions one `ApplyChanges` call may carry (one bounded
+/// transaction).
+const MAX_CHANGESET: usize = 100_000;
+
 use crate::{
     auth::KeyStore,
     convert,
@@ -10,18 +14,18 @@ use crate::{
         grant_access_request::Target as GrantTarget, polar_graph_service_server::PolarGraphService,
         revoke_access_request::Target as RevokeTarget, search_vector_filtered_request::Filter,
         vector_seed_query_request::Filter as SeedFilter, AddApiKeyRequest, AddApiKeyResponse,
-        AddUserToGroupRequest, AddUserToGroupResponse, AppliedMigrationInfo,
-        BackupInfo as ProtoBackupInfo, BatchInsertError, BatchInsertVectorsRequest,
-        BatchInsertVectorsResponse, BeginTransactionRequest, BeginTransactionResponse, ChangeEvent,
-        ChangeKind, ColumnFamilyInfo, CommitTransactionRequest, CommitTransactionResponse,
-        CopyGraphRequest, CopyGraphResponse, CreateBackupRequest, CreateBackupResponse,
-        CreateGraphRequest, CreateGraphResponse, CypherBinding, CypherQueryRequest,
-        CypherQueryResponse, CypherWriteRequest, CypherWriteResponse, DeleteTriplesRequest,
-        DeleteTriplesResponse, DropGraphRequest, DropGraphResponse, ExplainResponse,
-        ExportGraphChunk, ExportGraphRequest, ExportedQuad, GetEdgeAnnotationsRequest,
-        GetEdgeAnnotationsResponse, GetEdgeIdsByTripleRequest, GetEdgeIdsByTripleResponse,
-        GetEdgeTypeRequest, GetEdgeTypeResponse, GetGraphAccessRequest, GetGraphAccessResponse,
-        GetNodeTypeRequest, GetNodeTypeResponse, GetPropertyHistoryRequest,
+        AddUserToGroupRequest, AddUserToGroupResponse, AppliedMigrationInfo, ApplyChangesRequest,
+        ApplyChangesResponse, BackupInfo as ProtoBackupInfo, BatchInsertError,
+        BatchInsertVectorsRequest, BatchInsertVectorsResponse, BeginTransactionRequest,
+        BeginTransactionResponse, ChangeEvent, ChangeKind, ColumnFamilyInfo,
+        CommitTransactionRequest, CommitTransactionResponse, CopyGraphRequest, CopyGraphResponse,
+        CreateBackupRequest, CreateBackupResponse, CreateGraphRequest, CreateGraphResponse,
+        CypherBinding, CypherQueryRequest, CypherQueryResponse, CypherWriteRequest,
+        CypherWriteResponse, DeleteTriplesRequest, DeleteTriplesResponse, DropGraphRequest,
+        DropGraphResponse, ExplainResponse, ExportGraphChunk, ExportGraphRequest, ExportedQuad,
+        GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse, GetEdgeIdsByTripleRequest,
+        GetEdgeIdsByTripleResponse, GetEdgeTypeRequest, GetEdgeTypeResponse, GetGraphAccessRequest,
+        GetGraphAccessResponse, GetNodeTypeRequest, GetNodeTypeResponse, GetPropertyHistoryRequest,
         GetPropertyHistoryResponse, GetUserAccessRequest, GetUserAccessResponse,
         GrantAccessRequest, GrantAccessResponse, GrantGraphAccessRequest, GrantGraphAccessResponse,
         GraphAccessEntry, GraphInfo, GraphMetadata, GraphStatsRequest, GraphStatsResponse,
@@ -1271,6 +1275,182 @@ impl PolarGraphService for PolarGraphServer {
             }
         });
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn apply_changes(
+        &self,
+        request: Request<ApplyChangesRequest>,
+    ) -> Result<Response<ApplyChangesResponse>, Status> {
+        self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
+        let req = request.into_inner();
+        let author = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&author);
+
+        let n_adds: usize = req.adds.iter().map(|g| g.triples.len()).sum();
+        let n_changes = n_adds + req.retractions.len();
+        if n_changes == 0 && req.iris.is_empty() {
+            return Err(Status::invalid_argument(
+                "changeset must contain adds, retractions or IRIs",
+            ));
+        }
+        if n_changes > MAX_CHANGESET {
+            return Err(Status::resource_exhausted(format!(
+                "changeset has {n_changes} adds + retractions; the limit is {MAX_CHANGESET} — split it"
+            )));
+        }
+        if req.iris.iter().any(|iri| iri.is_empty()) {
+            return Err(Status::invalid_argument(
+                "iris must not contain empty strings",
+            ));
+        }
+        if req.read_ts < 0 {
+            return Err(Status::invalid_argument("read_ts must not be negative"));
+        }
+
+        // ── adds ──────────────────────────────────────────────────────────────
+        type Add = (
+            Triple,
+            polargraph_core::id::GraphId,
+            polargraph_storage::WriteMode,
+        );
+        let mut adds: Vec<Add> = Vec::with_capacity(n_adds);
+        let mut edge_ids: Vec<Vec<u8>> = Vec::new();
+        for group in &req.adds {
+            let g = self.graph_for(&access, &group.graph, GraphAccessLevel::Write, true)?;
+            for proto_triple in &group.triples {
+                let (triples, edge_id) = convert::triples_from_proto(proto_triple)?;
+                let mode = convert::write_mode_from_proto(proto_triple)?;
+                adds.extend(triples.into_iter().map(|t| (t, g, mode)));
+                if let Some(eid) = edge_id {
+                    edge_ids.push(eid.0.as_bytes().to_vec());
+                }
+            }
+        }
+        for (triple, _, _) in &adds {
+            if let Triple::Relation {
+                subject,
+                predicate,
+                object,
+                ..
+            } = triple
+            {
+                self.edge_registry
+                    .validate_cardinality(predicate.0.as_str(), *subject, *object, &self.store)
+                    .map_err(|e| Status::failed_precondition(e.message))?;
+            }
+        }
+
+        // ── retractions: resolve each to the live quad at the read point ──────
+        let read_at = if req.read_ts > 0 {
+            polargraph_core::temporal::Timestamp(req.read_ts)
+        } else {
+            self.store.begin().read_ts
+        };
+        let snapshot = self.store.snapshot(read_at);
+        let mut closes: Vec<(Triple, polargraph_core::id::GraphId)> = Vec::new();
+        let mut not_found: u64 = 0;
+        for r in &req.retractions {
+            let g = if access.is_some() {
+                self.graph_for(&access, &r.graph, GraphAccessLevel::Write, false)?
+            } else {
+                match self.existing_graph(&r.graph) {
+                    Ok(g) => g,
+                    Err(_) => {
+                        not_found += 1;
+                        continue;
+                    }
+                }
+            };
+            let subject = convert::node_id_from_proto(
+                r.subject
+                    .as_ref()
+                    .ok_or_else(|| Status::invalid_argument("retraction subject is required"))?,
+            )?;
+            let (object, value) = match &r.object {
+                Some(crate::proto::quad_ref::Object::Node(n)) => {
+                    (convert::node_id_from_proto(n)?, None)
+                }
+                Some(crate::proto::quad_ref::Object::Value(v)) => {
+                    let v = convert::value_from_proto(v)?;
+                    (polargraph_storage::keys::value_object(&v), Some(v))
+                }
+                None => {
+                    return Err(Status::invalid_argument(
+                        "retraction object (node or value) is required",
+                    ))
+                }
+            };
+            let matched: Vec<Triple> = snapshot
+                .scan_scoped(
+                    Some(&subject),
+                    Some(r.predicate.as_str()),
+                    Some(&object),
+                    &polargraph_storage::GraphScope::One(g),
+                )
+                .map_err(storage_err_to_status)?
+                .into_iter()
+                .map(|(_, t)| t)
+                .filter(|t| match (t, &value) {
+                    (Triple::Property { value: tv, .. }, Some(v)) => tv == v,
+                    (Triple::Relation { .. }, None) => true,
+                    _ => false,
+                })
+                .collect();
+            if matched.is_empty() {
+                not_found += 1;
+            }
+            closes.extend(matched.into_iter().map(|t| (t, g)));
+        }
+        if req.strict && not_found > 0 {
+            return Err(Status::failed_precondition(format!(
+                "{not_found} retraction(s) match no live quad; nothing was applied"
+            )));
+        }
+        reject_user_acl_writes(
+            &access,
+            adds.iter()
+                .map(|(t, _, _)| t.predicate().0.as_str())
+                .chain(closes.iter().map(|(t, _)| t.predicate().0.as_str())),
+        )?;
+
+        // ── one transaction ───────────────────────────────────────────────────
+        let mut tx = if req.read_ts > 0 {
+            self.store
+                .begin_at(polargraph_core::temporal::Timestamp(req.read_ts))
+                .map_err(|e| Status::invalid_argument(e.to_string()))?
+        } else {
+            self.store.begin()
+        };
+        tx.set_author(author);
+        let now = polargraph_core::temporal::Timestamp::now();
+        for (t, g) in &closes {
+            tx.insert_in(
+                polargraph_storage::close_at(t.clone(), now),
+                *g,
+                polargraph_storage::WriteMode::Add,
+            );
+        }
+        for (t, g, mode) in &adds {
+            tx.insert_in(t.clone(), *g, *mode);
+        }
+        for iri in &req.iris {
+            tx.bind_iri(iri.as_str());
+        }
+        let commit_ts = tx.commit().map_err(storage_err_to_status)?;
+
+        let added: Vec<Triple> = adds.into_iter().map(|(t, _, _)| t).collect();
+        self.update_type_cache(&added);
+        self.update_access_cache_if_needed(&added);
+        metrics::gauge!("polargraph_triples_total").increment(added.len() as f64);
+
+        Ok(Response::new(ApplyChangesResponse {
+            commit_ts: commit_ts.0,
+            added: added.len() as u64,
+            retracted: closes.len() as u64,
+            retractions_not_found: not_found,
+            edge_ids,
+        }))
     }
 
     async fn subscribe(

@@ -710,6 +710,22 @@ impl TripleStore {
         Transaction::new(self.clone(), read_ts)
     }
 
+    /// Begin a transaction that reads as of `read_ts`, an earlier commit time
+    /// the caller based its changes on. Commit then fails with
+    /// [`StorageError::WriteConflict`] if any quad the transaction writes was
+    /// committed after `read_ts` — an optimistic "nothing I looked at changed"
+    /// precondition. `read_ts` must not be in the future.
+    pub fn begin_at(&self, read_ts: Timestamp) -> Result<Transaction, StorageError> {
+        let now = self.inner.oracle.read_ts();
+        if read_ts > now {
+            return Err(StorageError::Validation(format!(
+                "read_ts {} is ahead of the latest commit {}",
+                read_ts.0, now.0
+            )));
+        }
+        Ok(Transaction::new(self.clone(), read_ts))
+    }
+
     /// Return a read-only snapshot at `ts`.
     pub fn snapshot(&self, ts: Timestamp) -> Snapshot {
         Snapshot::new(self.clone(), ts)
@@ -1727,7 +1743,17 @@ impl TripleStore {
                     if w.mode.resolve(&w.triple) == WriteMode::Replace {
                         let closing_at = temporal.vt_start;
                         let mut to_close = Self::open_values(&mut gspo, subject, p, g, closing_at)?;
-                        to_close.append(slot);
+                        // Values staged earlier in this batch supersede their
+                        // stored versions; ones the batch already closed
+                        // (an explicit retraction) aren't closed again.
+                        for (staged_o, staged_bytes) in slot.drain(..) {
+                            to_close.retain(|(other, _)| *other != staged_o);
+                            if codec::valid_time(&staged_bytes)
+                                .is_some_and(|(_, end)| end == Timestamp::END_OF_TIME)
+                            {
+                                to_close.push((staged_o, staged_bytes));
+                            }
+                        }
                         for (other, other_bytes) in to_close {
                             if other == o {
                                 continue;

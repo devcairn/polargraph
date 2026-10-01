@@ -1054,6 +1054,165 @@ async fn ndjson_streaming_response(
         .unwrap()
 }
 
+// ── POST /changes (atomic changeset) ──────────────────────────────────────────
+
+/// A quad in a changeset: `object` (node) or `value` (literal, the usual JSON
+/// value encoding). Nodes are UUIDs or IRIs.
+#[derive(Deserialize)]
+struct ChangeQuadJson {
+    subject: String,
+    predicate: String,
+    #[serde(default)]
+    object: Option<String>,
+    #[serde(default)]
+    value: Option<serde_json::Value>,
+    /// Graph IRI (retractions; omitted = default graph).
+    #[serde(default)]
+    graph: String,
+}
+
+#[derive(Deserialize)]
+struct ChangeGroupJson {
+    #[serde(default)]
+    graph: String,
+    triples: Vec<ChangeQuadJson>,
+}
+
+#[derive(Deserialize)]
+struct ChangesBody {
+    #[serde(default)]
+    adds: Vec<ChangeGroupJson>,
+    #[serde(default)]
+    retractions: Vec<ChangeQuadJson>,
+    #[serde(default)]
+    read_ts: i64,
+    #[serde(default)]
+    strict: bool,
+}
+
+/// A node given as a UUID or an IRI (recorded for the IRI dictionary).
+fn change_node(s: &str, iris: &mut Vec<String>) -> proto::NodeId {
+    match Uuid::parse_str(s) {
+        Ok(u) => proto::NodeId {
+            bytes: u.as_bytes().to_vec(),
+        },
+        Err(_) => {
+            iris.push(s.to_string());
+            pg_node_id_to_proto(iri_to_node_id(s))
+        }
+    }
+}
+
+/// `POST /changes` — apply adds and retractions across graphs atomically
+/// (`ApplyChanges`). Body: `{adds: [{graph, triples: [{subject, predicate,
+/// object | value}]}], retractions: [{subject, predicate, object | value,
+/// graph}], read_ts, strict}`. A precondition failure is HTTP 409.
+async fn handle_apply_changes(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ChangesBody>,
+) -> Response {
+    let mut iris = Vec::new();
+    let bad = |msg: &str| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response()
+    };
+    let mut adds = Vec::new();
+    for group in body.adds {
+        let mut triples = Vec::new();
+        for t in group.triples {
+            let subject = Some(change_node(&t.subject, &mut iris));
+            let kind = match (t.object, t.value) {
+                (Some(o), None) => proto::triple::Kind::Relation(proto::RelationTriple {
+                    subject,
+                    predicate: t.predicate,
+                    object: Some(change_node(&o, &mut iris)),
+                    vt_start: 0,
+                    vt_end: i64::MAX,
+                    properties: vec![],
+                }),
+                (None, Some(v)) => proto::triple::Kind::Property(proto::PropertyTriple {
+                    subject,
+                    predicate: t.predicate,
+                    value: Some(json_to_proto_value(&v)),
+                    vt_start: 0,
+                    vt_end: i64::MAX,
+                    mode: proto::PropertyWriteMode::Auto as i32,
+                }),
+                _ => return bad("each triple needs exactly one of object or value"),
+            };
+            triples.push(proto::Triple { kind: Some(kind) });
+        }
+        adds.push(proto::GraphTriples {
+            graph: group.graph,
+            triples,
+        });
+    }
+    let mut retractions = Vec::new();
+    for r in body.retractions {
+        let object = match (r.object, r.value) {
+            (Some(o), None) => proto::quad_ref::Object::Node(change_node(&o, &mut iris)),
+            (None, Some(v)) => proto::quad_ref::Object::Value(json_to_proto_value(&v)),
+            _ => return bad("each retraction needs exactly one of object or value"),
+        };
+        retractions.push(proto::QuadRef {
+            subject: Some(change_node(&r.subject, &mut iris)),
+            predicate: r.predicate,
+            object: Some(object),
+            graph: r.graph,
+        });
+    }
+    iris.sort();
+    iris.dedup();
+    let req = proto::ApplyChangesRequest {
+        adds,
+        retractions,
+        read_ts: body.read_ts,
+        strict: body.strict,
+        iris,
+        user_id: String::new(),
+    };
+    match state
+        .client
+        .clone()
+        .apply_changes(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            let r = r.into_inner();
+            let edge_ids: Vec<String> = r
+                .edge_ids
+                .iter()
+                .filter_map(|b| <[u8; 16]>::try_from(b.as_slice()).ok())
+                .map(|a| Uuid::from_bytes(a).to_string())
+                .collect();
+            Json(serde_json::json!({
+                "commit_ts": r.commit_ts,
+                "added": r.added,
+                "retracted": r.retracted,
+                "retractions_not_found": r.retractions_not_found,
+                "edge_ids": edge_ids,
+            }))
+            .into_response()
+        }
+        // Something changed since read_ts: a conflict.
+        Err(e) if e.code() == tonic::Code::Aborted => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": e.message() })),
+        )
+            .into_response(),
+        // strict: a retraction matched nothing.
+        Err(e) if e.code() == tonic::Code::FailedPrecondition => (
+            StatusCode::PRECONDITION_FAILED,
+            Json(serde_json::json!({ "error": e.message() })),
+        )
+            .into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
 // ── GET /subscribe (Server-Sent Events) ───────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -5206,6 +5365,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/graphs/copy", post(handle_copy_graph))
         .route("/graphs/move", post(handle_move_graph))
         .route("/subscribe", get(handle_subscribe))
+        .route("/changes", post(handle_apply_changes))
         .route(
             "/graphs/access",
             get(handle_get_graph_access)
