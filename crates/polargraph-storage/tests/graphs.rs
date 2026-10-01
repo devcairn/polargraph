@@ -198,3 +198,52 @@ fn readable_graphs_restrict_every_scan() {
     let all = store.snapshot(Timestamp(store.oracle_ts()));
     assert_eq!(all.scan_by_subject(&a).unwrap().len(), 4);
 }
+
+#[test]
+fn graph_grants_and_access_index() {
+    use polargraph_core::schema::{GraphAccessLevel as L, BUILTIN_MEMBER_OF_PRED};
+    use polargraph_storage::GraphAccessIndex;
+
+    let (store, _dir) = open();
+    let g1 = store.create_graph("urn:g:1", &[]).unwrap();
+    let g2 = store.create_graph("urn:g:2", &[]).unwrap();
+    let (alice, bob, team) = (NodeId::new(), NodeId::new(), NodeId::new());
+    fill(
+        &store,
+        GraphId::DEFAULT,
+        vec![rel(bob, BUILTIN_MEMBER_OF_PRED, team)],
+    );
+
+    store.grant_graph_access(alice, g1, L::Read).unwrap();
+    store.grant_graph_access(alice, g1, L::Write).unwrap(); // re-grant replaces
+    store.grant_graph_access(team, g2, L::Admin).unwrap();
+    assert!(store
+        .grant_graph_access(alice, GraphId::DEFAULT, L::Read)
+        .is_err());
+    assert_eq!(store.graph_grants().unwrap().len(), 2);
+
+    let index = GraphAccessIndex::build(&store).unwrap();
+    let a = index.for_user(&alice);
+    assert_eq!(a.level(g1), Some(L::Write));
+    assert!(a.allows(g1, L::Propose) && !a.allows(g1, L::Admin));
+    assert_eq!(a.level(g2), None);
+    assert_eq!(
+        a.level(GraphId::DEFAULT),
+        Some(L::Write),
+        "default graph is open"
+    );
+    assert!(a.readable().contains(g1.0) && !a.readable().contains(g2.0));
+
+    let b = index.for_user(&bob);
+    assert_eq!(b.level(g2), Some(L::Admin), "inherited from the group");
+
+    let stranger = index.for_user(&NodeId::new());
+    assert_eq!(stranger.readable().len(), 1, "default graph only");
+
+    assert!(store.revoke_graph_access(alice, g1).unwrap());
+    assert!(!store.revoke_graph_access(alice, g1).unwrap());
+    let index = GraphAccessIndex::build(&store).unwrap();
+    assert_eq!(index.for_user(&alice).level(g1), None);
+    // Grants live in the system graph, not the data graphs.
+    assert_eq!(live(&store, g1), 0);
+}
