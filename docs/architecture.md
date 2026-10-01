@@ -1726,6 +1726,40 @@ sequenceDiagram
     end
 ```
 
+## SHACL validation (ValidateShapes)
+
+Design and implementation choices: `docs/design/proposals-shacl.md` (8b).
+The `polargraph-shacl` crate reads shapes from **shapes graphs** and
+validates a **dataset** — named data graphs, or every readable graph — at a
+read point, optionally with an **overlay** of uncommitted adds and
+retractions. That lets a workflow check a changeset against the target's
+shapes before `ApplyChanges` commits it.
+
+```mermaid
+flowchart LR
+    SG[("shapes graphs")] -->|"Shapes::load"| SH["Shapes<br/>(node / property shapes)"]
+    DG[("data graphs at read_ts")] --> DV["DataView"]
+    OV["overlay adds / retractions<br/>(not committed)"] --> DV
+    SH --> V["validate()"]
+    DV --> V
+    V --> R["ValidationReport<br/>JSON · Turtle sh:ValidationReport"]
+```
+
+Supported (v1): node and property shapes; `sh:targetClass` (with
+`rdfs:subClassOf`), `sh:targetNode`, `sh:targetSubjectsOf`,
+`sh:targetObjectsOf`; predicate, inverse and sequence paths; `minCount` /
+`maxCount`; `datatype`, `class`, `nodeKind`; `minInclusive` / `maxInclusive`
+/ `minExclusive` / `maxExclusive`; `pattern` (+ `flags`), `minLength` /
+`maxLength`; `in`; `node` (recursion-safe); `closed` +
+`ignoredProperties`; `severity`, `message`, `deactivated`. Not supported:
+`sh:sparql`, `qualifiedValueShape`, alternative / `*` / `+` / `?` paths
+(rejected as invalid shapes).
+
+With an overlay only the nodes it touches are validated (cost scales with
+the change); `all_focus_nodes` validates every target. The engine never
+stores reports — the caller decides. Graph ACL: shapes and data graphs must
+be readable.
+
 ## Change feed (Subscribe)
 
 Design, decisions and write-cost numbers: `docs/design/change-feed.md`.

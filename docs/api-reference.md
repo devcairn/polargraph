@@ -1202,6 +1202,36 @@ Storage: `TripleStore::begin_at(read_ts)`, `polargraph_storage::close_at`.
 
 ---
 
+## `ValidateShapes` (SHACL)
+
+```
+rpc ValidateShapes(ValidateShapesRequest) returns (ValidateShapesResponse)
+```
+
+| Request field | Meaning |
+|---|---|
+| `shapes_graphs` | Graphs holding the shapes (required) |
+| `data_graphs` | Dataset to validate ("" = default graph); empty = every readable graph |
+| `overlay_adds` / `overlay_retractions` | Uncommitted changes (`GraphTriples` / `QuadRef`, as in `ApplyChanges`) validated as if applied |
+| `read_ts` | Read point; 0 = latest |
+| `all_focus_nodes` | With an overlay, validate every target, not only touched nodes |
+| `user_id` | Shapes and data graphs must be readable |
+
+Response: `{conforms, no_violations, results: [ValidationResult]}` with
+`ValidationResult {focus_node | focus_literal, path, value_node |
+value_literal, source_shape, constraint_component, severity, message}` —
+IRIs in full, `path` in SPARQL property-path syntax.
+
+REST `POST /validate` with `{shapes_graphs, data_graphs, overlay: {adds,
+retractions}, read_ts, all_focus_nodes}` (overlay entries as in
+`POST /changes`); JSON by default, `Accept: text/turtle` for an
+`sh:ValidationReport`.
+
+Library: `polargraph_shacl::{Shapes::load, DataView::new, Overlay, validate,
+ValidationReport}`.
+
+---
+
 ## `Subscribe` (change feed)
 
 ```
