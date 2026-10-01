@@ -7778,3 +7778,206 @@ async fn graph_acl_checks_writes() {
         tonic::Code::PermissionDenied
     );
 }
+
+#[tokio::test]
+async fn subscribe_streams_filtered_changes_with_resume() {
+    use polargraph_server::proto::{
+        ChangeEvent, ChangeKind, CreateGraphRequest, DropGraphRequest, GrantGraphAccessRequest,
+        SubscribeRequest,
+    };
+    use tokio_stream::StreamExt;
+
+    let (svc, _dir) = open();
+    let alice = uuid::Uuid::now_v7().to_string();
+    let subscribe = |req: SubscribeRequest| {
+        let svc = &svc;
+        async move { svc.subscribe(Request::new(req)).await.unwrap().into_inner() }
+    };
+    async fn take(
+        stream: &mut (impl tokio_stream::Stream<Item = Result<ChangeEvent, tonic::Status>> + Unpin),
+        n: usize,
+    ) -> Vec<ChangeEvent> {
+        let mut out = Vec::new();
+        while out.len() < n {
+            let next = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+                .await
+                .expect("timed out waiting for change events");
+            out.push(next.unwrap().unwrap());
+        }
+        out
+    }
+
+    let mut all = subscribe(SubscribeRequest {
+        include_values: true,
+        ..Default::default()
+    })
+    .await;
+    let mut as_alice = subscribe(SubscribeRequest {
+        user_id: alice.clone(),
+        ..Default::default()
+    })
+    .await;
+    let mut names_only = subscribe(SubscribeRequest {
+        predicates: vec!["name".into()],
+        ..Default::default()
+    })
+    .await;
+
+    let (_, s) = new_node();
+    let (_, o) = new_node();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![
+            rel(s.clone(), "knows", o.clone()),
+            text_prop(s.clone(), "name", "Ann"),
+        ],
+        user_id: alice.clone(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    svc.create_graph(Request::new(CreateGraphRequest {
+        iri: "urn:g:secret".into(),
+        metadata: vec![],
+        user_id: String::new(),
+    }))
+    .await
+    .unwrap();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(s.clone(), "name", "Hidden")],
+        graph: "urn:g:secret".into(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    svc.drop_graph(Request::new(DropGraphRequest {
+        iri: "urn:g:secret".into(),
+        user_id: String::new(),
+    }))
+    .await
+    .unwrap();
+
+    // Service subscriber: 2 asserts, graph created, 1 assert, 1 close + dropped.
+    let events = take(&mut all, 6).await;
+    let kinds: Vec<_> = events.iter().map(|e| e.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ChangeKind::Assert as i32,
+            ChangeKind::Assert as i32,
+            ChangeKind::GraphCreated as i32,
+            ChangeKind::Assert as i32,
+            ChangeKind::Close as i32,
+            ChangeKind::GraphDropped as i32,
+        ]
+    );
+    assert_eq!(events[0].author, alice);
+    assert!(events[0].commit_ts > 0);
+    assert_eq!(events[3].graph, "urn:g:secret");
+    assert!(events
+        .iter()
+        .filter_map(|e| e.quad.as_ref())
+        .any(|q| matches!(&q.kind, Some(TripleKind::Property(p)) if p.value.is_some())));
+
+    // Alice has no grant on the secret graph: only her default-graph inserts.
+    let alice_events = take(&mut as_alice, 2).await;
+    assert!(alice_events.iter().all(|e| e.graph.is_empty()));
+    assert!(alice_events.iter().all(|e| {
+        e.quad.as_ref().is_some_and(|q| {
+            matches!(&q.kind, Some(TripleKind::Property(p)) if p.value.is_none())
+                || matches!(&q.kind, Some(TripleKind::Relation(_)))
+        })
+    }));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), as_alice.next())
+            .await
+            .is_err(),
+        "nothing from the secret graph"
+    );
+
+    // Predicate filter: only `name` quads (+ graph events).
+    let named = take(&mut names_only, 5).await;
+    assert!(named
+        .iter()
+        .filter(|e| e.quad.is_some())
+        .all(|e| matches!(&e.quad.as_ref().unwrap().kind, Some(TripleKind::Property(p)) if p.predicate == "name")));
+
+    // Resume after the first commit replays the rest.
+    let first_ts = events[0].commit_ts;
+    let mut resumed = subscribe(SubscribeRequest {
+        resume_after_ts: first_ts,
+        ..Default::default()
+    })
+    .await;
+    let replay = take(&mut resumed, 4).await;
+    assert!(replay.iter().all(|e| e.commit_ts > first_ts));
+
+    // Grant alice the secret graph after the fact: future events flow.
+    svc.create_graph(Request::new(CreateGraphRequest {
+        iri: "urn:g:shared".into(),
+        metadata: vec![],
+        user_id: String::new(),
+    }))
+    .await
+    .unwrap();
+    svc.grant_graph_access(Request::new(GrantGraphAccessRequest {
+        principal: alice.clone(),
+        graph: "urn:g:shared".into(),
+        level: "read".into(),
+        user_id: String::new(),
+    }))
+    .await
+    .unwrap();
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(s.clone(), "name", "Shared")],
+        graph: "urn:g:shared".into(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    let shared = take(&mut as_alice, 1).await;
+    assert_eq!(shared[0].graph, "urn:g:shared");
+}
+
+#[tokio::test]
+async fn subscribe_before_pruned_log_is_out_of_range() {
+    use polargraph_server::proto::SubscribeRequest;
+
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let svc = PolarGraphServer::new(store.clone()).unwrap();
+    let (_, s) = new_node();
+    let first = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![text_prop(s.clone(), "name", "a")],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .commit_ts;
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![text_prop(s, "name", "b")],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    store
+        .prune_changes(polargraph_core::temporal::Timestamp(first + 1))
+        .unwrap();
+
+    let err = svc
+        .subscribe(Request::new(SubscribeRequest {
+            resume_after_ts: first - 1,
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::OutOfRange);
+    assert!(svc
+        .subscribe(Request::new(SubscribeRequest {
+            resume_after_ts: first,
+            ..Default::default()
+        }))
+        .await
+        .is_ok());
+}

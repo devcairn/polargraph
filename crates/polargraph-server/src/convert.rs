@@ -73,6 +73,44 @@ pub fn value_from_proto(proto: &proto::Value) -> Result<Value, Status> {
     }
 }
 
+/// Proto form of a relation or property triple (with its valid time); other
+/// kinds return `None`. Property values are omitted unless `include_values`.
+pub fn triple_to_proto(t: &Triple, include_values: bool) -> Option<proto::Triple> {
+    use proto::triple::Kind;
+    Some(proto::Triple {
+        kind: Some(match t {
+            Triple::Relation {
+                subject,
+                predicate,
+                object,
+                temporal,
+                ..
+            } => Kind::Relation(proto::RelationTriple {
+                subject: Some(node_id_to_proto(*subject)),
+                predicate: predicate.0.clone(),
+                object: Some(node_id_to_proto(*object)),
+                vt_start: temporal.vt_start.0,
+                vt_end: temporal.vt_end.0,
+                properties: vec![],
+            }),
+            Triple::Property {
+                subject,
+                predicate,
+                value,
+                temporal,
+            } => Kind::Property(proto::PropertyTriple {
+                subject: Some(node_id_to_proto(*subject)),
+                predicate: predicate.0.clone(),
+                value: include_values.then(|| value_to_proto(value)),
+                vt_start: temporal.vt_start.0,
+                vt_end: temporal.vt_end.0,
+                mode: proto::PropertyWriteMode::Add as i32,
+            }),
+            _ => return None,
+        }),
+    })
+}
+
 pub fn value_to_proto(v: &Value) -> proto::Value {
     let kind = match v {
         Value::Null => ValueKind::NullVal(true),
