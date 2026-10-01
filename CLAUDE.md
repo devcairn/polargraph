@@ -263,7 +263,7 @@ Endpoints include: `POST /query`, `POST /query/stream`, `POST /insert`, `GET /tr
 `POST /materialize`, `GET /property-history`, `POST /edge-annotations`, `GET /edge-annotations/:id`,
 `POST /access/grant`, `POST /access/revoke`, `POST /access/add-user`, `GET /access/user/:id`,
 `POST` / `DELETE` / `GET /graphs/access` (graph grants; `X-User-Id` is forwarded on every endpoint),
-`GET /subscribe` (change feed as Server-Sent Events),
+`GET /subscribe` (change feed as Server-Sent Events), `POST /changes` (atomic changeset),
 `POST /graphs`, `GET /graphs`, `DELETE /graphs?iri=`, `GET /graphs/stats`, `POST /graphs/copy`,
 `POST /graphs/move`, `GET /graphs/export`, `POST /import/rdf` (incl. N-Quads/TriG, `?graph=`),
 `GET /export/subgraph`. Query patterns take an optional `@default` / `@<iri>` / `@?g` graph suffix.
@@ -477,6 +477,7 @@ entries were superseded by storage format v3 (last entries below).
 - [x] Graph-aware SPARQL and Cypher (ContxtBroker plan step 5) — `GraphTerm::Iri`, `scope_to_graph`; SPARQL `GRAPH <iri>` / `GRAPH ?g` / `FROM` / `FROM NAMED` (SELECT, ASK, CONSTRUCT; default graph = union), protocol `default-graph-uri` / `named-graph-uri`; SPARQL Update with `GRAPH`, `USING`, `CLEAR` / `DROP` / `CREATE`, `ADD` / `COPY` / `MOVE` via `CopyGraph`; Cypher `USE GRAPH <iri>`, `CypherQueryRequest.graphs`, `CypherWriteRequest.graph`, `execute_write_ops_in`; `DeleteTriplesRequest.graph`; fixed `DeleteTriples` and Cypher DELETE closing named-graph triples in the default graph
 - [x] Graph-level access control (ContxtBroker plan step 6, **always enforced, breaking**) — `GraphAccessLevel` (read < propose < write < admin), `HAS_GRAPH_ACCESS` + `GRAPH_ACCESS_LEVEL` grants in the system graph; `polargraph-storage::graph_acl` (`GraphAccessIndex`, `UserGraphAccess`); readable-graph `RoaringBitmap` on `Snapshot` checked in `snapshot_scan_keyed` (plus text search, annotations, property history, edge ids); server: deny-by-default reads on every query/graph/export RPC for requests with a user id, vector-hit visibility, write/admin checks (`user_id` on write requests), access-control triples + node-ACL RPCs service-only; `GrantGraphAccess` / `RevokeGraphAccess` / `GetGraphAccess` + REST `/graphs/access`; REST forwards `X-User-Id` everywhere; see `docs/design/graph-acl.md`, upgrade guide `docs/upgrade-graph-acl.md`
 - [x] Change feed (ContxtBroker plan step 7) — `chg` CF written in each commit batch (author, graph ops, quad versions; `polargraph-storage::changes`); `Subscribe` server-streaming RPC (resume by commit ts, `OUT_OF_RANGE` below the floor, graph / predicate / current-type filters, per-event graph ACL, `ASSERT` / `CLOSE` / `GRAPH_*` events); authors recorded on writes; `--change-retention-secs` (default 7 days) hourly pruner; REST `GET /subscribe` (SSE, `Last-Event-ID`); +9.5 % write bytes, no measurable latency — see `docs/design/change-feed.md`
+- [x] Atomic changesets (ContxtBroker plan step 8a; promotion workflow lives in a ContxtBroker service) — `ApplyChanges` RPC + REST `POST /changes`: adds across graphs + exact-quad retractions in one transaction / one change-feed entry; `read_ts` precondition via `TripleStore::begin_at` (MVCC conflict → `ABORTED` / 409); `strict` retractions; ≤ 100 000 changes; graph ACL; `polargraph_storage::close_at`; see `docs/design/proposals-shacl.md`
 
 ## Adding a new predicate
 

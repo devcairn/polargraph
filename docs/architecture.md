@@ -1691,6 +1691,41 @@ This is a full bitemporal point query — a precise snapshot along both axes.
 
 ---
 
+## Atomic changesets (ApplyChanges)
+
+Design: `docs/design/proposals-shacl.md` (8a). Workflows such as ContxtBroker
+promotion live above the engine; the engine gives them one primitive to
+apply a reviewed set of changes safely.
+
+`ApplyChanges` (REST `POST /changes`) applies **adds** (triples per graph)
+and **retractions** (exact quads, closed at `vt_end = now`) across any number
+of graphs in **one transaction**: one commit timestamp, one change-feed entry
+with the caller as author, all or nothing.
+
+- **Precondition**: with `read_ts`, the transaction reads as of that time
+  (`TripleStore::begin_at`), so the standard MVCC write-write check fails the
+  commit (`ABORTED`, HTTP 409) if any quad it adds or retracts — or any value
+  of a single-valued property it replaces — was committed after `read_ts`.
+- **Retractions** close exactly the named quad in the named graph. One that
+  matches nothing is counted (`retractions_not_found`); with `strict` the
+  whole changeset fails (`FAILED_PRECONDITION`, HTTP 412).
+- At most 100 000 adds + retractions per call (`RESOURCE_EXHAUSTED`).
+- Graph ACL: `write` on every graph touched; users can't change
+  access-control triples; edge-type cardinality is checked as on `Insert`.
+
+```mermaid
+sequenceDiagram
+    participant S as ContxtBroker service
+    participant E as polargraphd
+    S->>E: read target (snapshot at t0), ValidateShapes(target + overlay)
+    S->>E: ApplyChanges(adds, retractions, read_ts = t0)
+    alt nothing touched changed since t0
+        E-->>S: commit_ts, counts (one change-feed entry)
+    else a touched quad changed
+        E-->>S: ABORTED — re-read and retry
+    end
+```
+
 ## Change feed (Subscribe)
 
 Design, decisions and write-cost numbers: `docs/design/change-feed.md`.

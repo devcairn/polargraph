@@ -1,6 +1,8 @@
 # Trust-layer primitives — changesets, SHACL validation, graph diff (plan step 8, WS3) — design note
 
-Status: **proposal, awaiting decisions A–F** (branch `db/ws3-proposals`).
+Status: decisions A–F **approved as recommended** (Mark, 2026-10-01).
+**8a built** on branch `db/ws3-proposals` (`ApplyChanges`, REST
+`POST /changes`); 8b (SHACL) next, after 8a merges.
 
 ## The split (approved by Mark, 2026-10-01)
 
