@@ -190,6 +190,11 @@ pub struct Transaction {
     write_meta: Vec<(GraphId, WriteMode)>,
     /// IRIs to record in the IRI dictionary on commit.
     iris: Vec<String>,
+    /// Who is writing (a user id; empty for service calls) — recorded in the
+    /// change log.
+    author: String,
+    /// Graph-level operations to record in the change log.
+    graph_ops: Vec<crate::changes::GraphOp>,
 }
 
 impl Transaction {
@@ -200,7 +205,20 @@ impl Transaction {
             write_buffer: Vec::new(),
             write_meta: Vec::new(),
             iris: Vec::new(),
+            author: String::new(),
+            graph_ops: Vec::new(),
         }
+    }
+
+    /// Record `author` (the caller's user id) on this commit's change-log
+    /// entry.
+    pub fn set_author(&mut self, author: impl Into<String>) {
+        self.author = author.into();
+    }
+
+    /// Record a graph-level operation on this commit's change-log entry.
+    pub fn record_graph_op(&mut self, op: crate::changes::GraphOp) {
+        self.graph_ops.push(op);
     }
 
     /// Record `iri` in the IRI dictionary when this transaction commits, so
@@ -307,8 +325,10 @@ impl Transaction {
             write_buffer,
             write_meta,
             iris,
+            author,
+            graph_ops,
         } = self;
-        if write_buffer.is_empty() && iris.is_empty() {
+        if write_buffer.is_empty() && iris.is_empty() && graph_ops.is_empty() {
             return Ok(read_ts);
         }
 
@@ -340,7 +360,9 @@ impl Transaction {
 
         // ── build WriteBatch ──────────────────────────────────────────────────
         let mut batch = WriteBatch::default();
-        store.stage_writes(&mut batch, &writes, commit_ts)?;
+        let mut staged = Vec::new();
+        store.stage_writes(&mut batch, &writes, commit_ts, &mut staged)?;
+        store.batch_change(&mut batch, commit_ts, &author, &graph_ops, &staged)?;
 
         // IRI dictionary entries — checked and written under the commit lock,
         // so concurrent bindings of one node are serialized.
@@ -354,6 +376,7 @@ impl Transaction {
         batch.put_cf(&meta_cf, META_ORACLE_CTR, commit_ts.0.to_be_bytes());
 
         store.db_write(batch)?;
+        store.notify_commit(commit_ts);
         Ok(commit_ts)
     }
 }

@@ -15,6 +15,7 @@
 
 pub mod backup;
 pub mod cf;
+pub mod changes;
 pub mod codec;
 pub mod compaction;
 pub mod error;
@@ -32,6 +33,7 @@ pub mod store;
 pub mod wal_stream;
 
 pub use backup::BackupManager;
+pub use changes::{ChangeRecord, GraphOp};
 pub use compaction::{CompactionManager, RetentionStats};
 pub use error::StorageError;
 pub use graph_acl::{GraphAccessIndex, GraphGrant, UserGraphAccess};

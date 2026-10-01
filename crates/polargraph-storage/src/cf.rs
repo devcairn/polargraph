@@ -42,9 +42,14 @@ pub const IRI: &str = "iri";
 /// Out-of-line property values: `[value_hash(16)]` → `[disc][payload]`.
 pub const BLOB: &str = "blob";
 
+/// Change log for `Subscribe`: `[commit_ts BE(8)]` → one commit's changes
+/// (see [`crate::changes`]).
+pub const CHG: &str = "chg";
+
 /// Every column family of the current format.
 pub const ALL: &[&str] = &[
     SPOG, SOPG, PSOG, POSG, OSPG, OPSG, GSPO, GPOS, META, HNSW, TRI, EPA, EPO, PEA, DRV, IRI, BLOB,
+    CHG,
 ];
 
 /// Column families of storage format v2, read only by `migrate_v3` and
