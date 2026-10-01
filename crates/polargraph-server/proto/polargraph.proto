@@ -219,6 +219,9 @@ message InsertRequest {
     /// Named graph (IRI) every triple and annotation in this request goes to;
     /// interned on first use. Empty = the default graph.
     string graph = 5;
+    /// Caller identity (optional; also `x-polargraph-user-id`). When set, the
+    /// graph ACL applies — see docs/design/graph-acl.md.
+    string user_id = 6;
 }
 
 message InsertResponse {
@@ -820,6 +823,9 @@ message CypherWriteRequest {
     /// `USE GRAPH <iri>`. Empty = the default graph for writes and every
     /// graph for MATCH / MERGE / DELETE.
     string graph = 3;
+    /// Caller identity (optional; also `x-polargraph-user-id`). When set, the
+    /// graph ACL applies — see docs/design/graph-acl.md.
+    string user_id = 4;
 }
 
 message CypherWriteResponse {
@@ -1004,6 +1010,9 @@ message DeleteTriplesRequest {
     /// `iri` or `set` restrict it (a graph variable is invalid). An unknown
     /// IRI is NOT_FOUND.
     GraphTerm graph = 6;
+    /// Caller identity (optional; also `x-polargraph-user-id`). When set, the
+    /// graph ACL applies — see docs/design/graph-acl.md.
+    string user_id = 7;
 }
 
 message DeleteTriplesResponse {
@@ -1052,6 +1061,9 @@ message CreateGraphRequest {
     string iri = 1;
     /// Set (replace) these metadata properties.
     repeated GraphMetadata metadata = 2;
+    /// Caller identity (optional; also `x-polargraph-user-id`). When set, the
+    /// graph ACL applies — see docs/design/graph-acl.md.
+    string user_id = 3;
 }
 
 message CreateGraphResponse {
@@ -1089,6 +1101,9 @@ message CopyGraphRequest {
     string target = 2;
     /// true: drop the target's quads first (SPARQL COPY); false: add (ADD).
     bool clear_target = 3;
+    /// Caller identity (optional; also `x-polargraph-user-id`). When set, the
+    /// graph ACL applies — see docs/design/graph-acl.md.
+    string user_id = 4;
 }
 
 message CopyGraphResponse {
@@ -1098,11 +1113,17 @@ message CopyGraphResponse {
 message MoveGraphRequest {
     string source = 1;
     string target = 2;
+    /// Caller identity (optional; also `x-polargraph-user-id`). When set, the
+    /// graph ACL applies — see docs/design/graph-acl.md.
+    string user_id = 3;
 }
 
 message DropGraphRequest {
     /// Graph IRI; empty = the default graph.
     string iri = 1;
+    /// Caller identity (optional; also `x-polargraph-user-id`). When set, the
+    /// graph ACL applies — see docs/design/graph-acl.md.
+    string user_id = 2;
 }
 
 message DropGraphResponse {

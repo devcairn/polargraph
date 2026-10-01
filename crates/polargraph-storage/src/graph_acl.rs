@@ -205,6 +205,16 @@ impl UserGraphAccess {
             .find(|l| self.at_least[*l as usize].contains(g.0))
     }
 
+    /// Graphs where the user has at least `level`, the default graph
+    /// included up to `Write`.
+    pub fn graphs_at_least(&self, level: GraphAccessLevel) -> RoaringBitmap {
+        let mut graphs = self.at_least[level as usize].clone();
+        if level <= GraphAccessLevel::Write {
+            graphs.insert(GraphId::DEFAULT.0);
+        }
+        graphs
+    }
+
     /// Whether the user has at least `level` on `g`.
     pub fn allows(&self, g: GraphId, level: GraphAccessLevel) -> bool {
         self.level(g).is_some_and(|l| l >= level)

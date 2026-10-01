@@ -875,6 +875,7 @@ async fn handle_cypher_write(
     Json(body): Json<CypherWriteBody>,
 ) -> Response {
     let req = proto::CypherWriteRequest {
+        user_id: String::new(),
         cypher: body.cypher,
         tx_id: body.tx_id.unwrap_or_default(),
         graph: body.graph,
@@ -2654,6 +2655,7 @@ async fn handle_sparql_update(
                     graph_copy_shape(&delete, &insert, using.as_ref(), &pattern)
                 {
                     let req = proto::CopyGraphRequest {
+                        user_id: String::new(),
                         source,
                         target,
                         clear_target: false,
@@ -2838,7 +2840,10 @@ async fn handle_sparql_update(
                     }
                 };
                 for iri in iris {
-                    let req = proto::DropGraphRequest { iri: iri.clone() };
+                    let req = proto::DropGraphRequest {
+                        iri: iri.clone(),
+                        user_id: String::new(),
+                    };
                     match client.drop_graph(tonic::Request::new(req)).await {
                         Ok(r) => deleted += r.into_inner().quads_closed,
                         Err(_) if silent => {}
@@ -2849,6 +2854,7 @@ async fn handle_sparql_update(
             spargebra::GraphUpdateOperation::Create { graph, .. } => {
                 // Idempotent: creating an existing graph is not an error.
                 let req = proto::CreateGraphRequest {
+                    user_id: String::new(),
                     iri: graph.as_str().to_string(),
                     metadata: vec![],
                 };
@@ -4491,6 +4497,7 @@ async fn handle_create_graph(
     Json(body): Json<CreateGraphBody>,
 ) -> Response {
     let req = proto::CreateGraphRequest {
+        user_id: String::new(),
         iri: body.iri,
         metadata: body
             .metadata
@@ -4730,6 +4737,7 @@ async fn handle_copy_graph(
     Json(body): Json<CopyGraphBody>,
 ) -> Response {
     let req = proto::CopyGraphRequest {
+        user_id: String::new(),
         source: body.source,
         target: body.target,
         clear_target: body.clear_target,
@@ -4750,6 +4758,7 @@ async fn handle_move_graph(
     Json(body): Json<CopyGraphBody>,
 ) -> Response {
     let req = proto::MoveGraphRequest {
+        user_id: String::new(),
         source: body.source,
         target: body.target,
     };
@@ -4768,7 +4777,10 @@ async fn handle_drop_graph(
     State(state): State<Arc<AppState>>,
     QueryParams(params): QueryParams<GraphIriParams>,
 ) -> Response {
-    let req = proto::DropGraphRequest { iri: params.iri };
+    let req = proto::DropGraphRequest {
+        iri: params.iri,
+        user_id: String::new(),
+    };
     match state
         .client
         .clone()
