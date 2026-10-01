@@ -40,6 +40,8 @@ pub use mvcc::{ConflictError, Snapshot, Transaction, WriteMode};
 pub use owl_rl::MaterializationStats;
 pub use polargraph_core::schema::{RetentionPolicy, VectorSpaceDef};
 pub use registry::{EdgeTypeRegistry, NodeTypeRegistry, ValidationError, SCHEMA_REGISTRY_NODE};
+/// Bitmap of graph ids, used for readable-graph restrictions.
+pub use roaring::RoaringBitmap;
 pub use sst_import::{ImportStats, SstImporter};
 pub use store::{
     EdgeAnnotation, EdgeAnnotationValue, GraphScope, StoreMode, TripleStore,

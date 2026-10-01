@@ -235,7 +235,8 @@ impl Transaction {
 
     /// Snapshot reads — see state as of `read_ts`. ─────────────────────────
     pub fn scan_by_subject(&self, subject: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_subject_at(subject, self.read_ts, None)
+        self.store
+            .scan_by_subject_at(subject, &crate::store::ReadAt::latest(self.read_ts))
     }
 
     pub fn scan_by_subject_predicate(
@@ -243,13 +244,16 @@ impl Transaction {
         subject: &NodeId,
         predicate: &str,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store
-            .scan_by_subject_predicate_at(subject, predicate, self.read_ts, None)
+        self.store.scan_by_subject_predicate_at(
+            subject,
+            predicate,
+            &crate::store::ReadAt::latest(self.read_ts),
+        )
     }
 
     pub fn scan_by_predicate(&self, predicate: &str) -> Result<Vec<Triple>, StorageError> {
         self.store
-            .scan_by_predicate_at(predicate, self.read_ts, None)
+            .scan_by_predicate_at(predicate, &crate::store::ReadAt::latest(self.read_ts))
     }
 
     pub fn scan_by_predicate_object(
@@ -257,12 +261,16 @@ impl Transaction {
         predicate: &str,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store
-            .scan_by_predicate_object_at(predicate, object, self.read_ts, None)
+        self.store.scan_by_predicate_object_at(
+            predicate,
+            object,
+            &crate::store::ReadAt::latest(self.read_ts),
+        )
     }
 
     pub fn scan_by_object(&self, object: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_object_at(object, self.read_ts, None)
+        self.store
+            .scan_by_object_at(object, &crate::store::ReadAt::latest(self.read_ts))
     }
 
     pub fn scan_by_subject_object(
@@ -270,12 +278,16 @@ impl Transaction {
         subject: &NodeId,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.store
-            .scan_by_subject_object_at(subject, object, self.read_ts, None)
+        self.store.scan_by_subject_object_at(
+            subject,
+            object,
+            &crate::store::ReadAt::latest(self.read_ts),
+        )
     }
 
     pub fn scan_all(&self) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_all_at(self.read_ts, None)
+        self.store
+            .scan_all_at(&crate::store::ReadAt::latest(self.read_ts))
     }
 
     /// Commit the transaction.
@@ -416,6 +428,9 @@ pub struct Snapshot {
     /// "now" so closed (deleted) triples aren't visible unless a caller
     /// explicitly asks for a historical point via `with_vt_as_of`.
     pub vt_as_of: Option<i64>,
+    /// Graphs this snapshot may read (`None` = every graph). Enforced in the
+    /// scan itself, before values are decoded — see [`Self::with_readable_graphs`].
+    readable: Option<std::sync::Arc<roaring::RoaringBitmap>>,
 }
 
 impl Snapshot {
@@ -424,6 +439,36 @@ impl Snapshot {
             store,
             ts,
             vt_as_of: Some(Timestamp::now().0),
+            readable: None,
+        }
+    }
+
+    /// Restrict every read of this snapshot to the graphs in `readable`
+    /// (graph ids). Quads in other graphs are skipped inside the scan, so they
+    /// never reach query evaluation, filters or projections.
+    pub fn with_readable_graphs(
+        mut self,
+        readable: std::sync::Arc<roaring::RoaringBitmap>,
+    ) -> Self {
+        self.readable = Some(readable);
+        self
+    }
+
+    /// The readable-graph restriction, if any.
+    pub fn readable_graphs(&self) -> Option<&roaring::RoaringBitmap> {
+        self.readable.as_deref()
+    }
+
+    /// Whether this snapshot may read graph `g`.
+    pub fn can_read_graph(&self, g: GraphId) -> bool {
+        crate::store::readable_admits(self.readable_graphs(), g)
+    }
+
+    fn read_at(&self) -> crate::store::ReadAt {
+        crate::store::ReadAt {
+            ts: self.ts,
+            vt_as_of: self.vt_as_of,
+            readable: self.readable.clone(),
         }
     }
 
@@ -438,8 +483,7 @@ impl Snapshot {
     }
 
     pub fn scan_by_subject(&self, subject: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.store
-            .scan_by_subject_at(subject, self.ts, self.vt_as_of)
+        self.store.scan_by_subject_at(subject, &self.read_at())
     }
 
     pub fn scan_by_subject_predicate(
@@ -448,12 +492,11 @@ impl Snapshot {
         predicate: &str,
     ) -> Result<Vec<Triple>, StorageError> {
         self.store
-            .scan_by_subject_predicate_at(subject, predicate, self.ts, self.vt_as_of)
+            .scan_by_subject_predicate_at(subject, predicate, &self.read_at())
     }
 
     pub fn scan_by_predicate(&self, predicate: &str) -> Result<Vec<Triple>, StorageError> {
-        self.store
-            .scan_by_predicate_at(predicate, self.ts, self.vt_as_of)
+        self.store.scan_by_predicate_at(predicate, &self.read_at())
     }
 
     pub fn scan_by_predicate_object(
@@ -462,11 +505,11 @@ impl Snapshot {
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
         self.store
-            .scan_by_predicate_object_at(predicate, object, self.ts, self.vt_as_of)
+            .scan_by_predicate_object_at(predicate, object, &self.read_at())
     }
 
     pub fn scan_by_object(&self, object: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_by_object_at(object, self.ts, self.vt_as_of)
+        self.store.scan_by_object_at(object, &self.read_at())
     }
 
     pub fn scan_by_subject_object(
@@ -475,11 +518,11 @@ impl Snapshot {
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
         self.store
-            .scan_by_subject_object_at(subject, object, self.ts, self.vt_as_of)
+            .scan_by_subject_object_at(subject, object, &self.read_at())
     }
 
     pub fn scan_all(&self) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_all_at(self.ts, self.vt_as_of)
+        self.store.scan_all_at(&self.read_at())
     }
 
     /// Property triples of `predicate` whose value equals `value` — an index
@@ -490,7 +533,7 @@ impl Snapshot {
         value: &Value,
     ) -> Result<Vec<Triple>, StorageError> {
         self.store
-            .scan_by_predicate_value_at(predicate, value, self.ts, self.vt_as_of)
+            .scan_by_predicate_value_at(predicate, value, &self.read_at())
     }
 
     /// Triples matching the bound slots within `scope`, each with its graph
@@ -504,7 +547,7 @@ impl Snapshot {
         scope: &crate::store::GraphScope,
     ) -> Result<Vec<(GraphId, Triple)>, StorageError> {
         self.store
-            .scan_scoped_at(subject, predicate, object, scope, self.ts, self.vt_as_of)
+            .scan_scoped_at(subject, predicate, object, scope, &self.read_at())
     }
 
     /// The store this snapshot reads (for graph ↔ node lookups).
@@ -514,7 +557,7 @@ impl Snapshot {
 
     /// Every triple in graph `g`.
     pub fn scan_graph(&self, g: GraphId) -> Result<Vec<Triple>, StorageError> {
-        self.store.scan_graph_at(g, self.ts, self.vt_as_of)
+        self.store.scan_graph_at(g, &self.read_at())
     }
 
     /// Triples of `subject` in graph `g`.
@@ -524,7 +567,7 @@ impl Snapshot {
         subject: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
         self.store
-            .scan_by_subject_in_graph_at(g, subject, self.ts, self.vt_as_of)
+            .scan_by_subject_in_graph_at(g, subject, &self.read_at())
     }
 
     /// Return `NodeId`s confirmed to have a live text value for `predicate` containing `query`.
@@ -534,8 +577,7 @@ impl Snapshot {
         predicate: &str,
         query: &str,
     ) -> Result<Vec<polargraph_core::id::NodeId>, StorageError> {
-        self.store
-            .text_search(predicate, query, self.ts, self.vt_as_of)
+        self.store.text_search_at(predicate, query, &self.read_at())
     }
 
     /// Return all annotations on `edge` as of this snapshot's timestamp.
@@ -543,7 +585,8 @@ impl Snapshot {
         &self,
         edge: polargraph_core::id::EdgeId,
     ) -> Result<Vec<crate::store::EdgeAnnotation>, StorageError> {
-        self.store.scan_edge_annotations(edge, self.ts)
+        self.store
+            .scan_edge_annotations_with(edge, self.ts, self.readable_graphs())
     }
 
     /// Return edge property annotations for `predicate` as `Triple::EdgeProperty` variants.
@@ -551,7 +594,8 @@ impl Snapshot {
         &self,
         predicate: &str,
     ) -> Result<Vec<polargraph_core::triple::Triple>, StorageError> {
-        self.store.scan_annotations_by_predicate(predicate, self.ts)
+        self.store
+            .scan_annotations_by_predicate_with(predicate, self.ts, self.readable_graphs())
     }
 
     /// Return all annotations on `edge` as Triple variants.
@@ -559,6 +603,7 @@ impl Snapshot {
         &self,
         edge: polargraph_core::id::EdgeId,
     ) -> Result<Vec<polargraph_core::triple::Triple>, StorageError> {
-        self.store.scan_edge_annotations_as_triples(edge, self.ts)
+        self.store
+            .scan_edge_annotations_as_triples_with(edge, self.ts, self.readable_graphs())
     }
 }

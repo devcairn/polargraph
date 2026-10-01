@@ -156,3 +156,45 @@ fn copy_add_and_move_graphs() {
     };
     assert_eq!(edge_of(dst), edge_of(archive));
 }
+
+#[test]
+fn readable_graphs_restrict_every_scan() {
+    use polargraph_storage::GraphScope;
+    use std::sync::Arc;
+
+    let (store, _dir) = open();
+    let open_g = store.create_graph("urn:g:open", &[]).unwrap();
+    let secret = store.create_graph("urn:g:secret", &[]).unwrap();
+    let (a, b, c) = (NodeId::new(), NodeId::new(), NodeId::new());
+    fill(&store, GraphId::DEFAULT, vec![rel(a, "knows", b)]);
+    fill(&store, open_g, vec![prop(a, "title", "public report")]);
+    fill(
+        &store,
+        secret,
+        vec![rel(a, "knows", c), prop(a, "title", "secret report")],
+    );
+
+    let mut readable = roaring::RoaringBitmap::new();
+    readable.insert(GraphId::DEFAULT.0);
+    readable.insert(open_g.0);
+    let snap = store
+        .snapshot(Timestamp(store.oracle_ts()))
+        .with_readable_graphs(Arc::new(readable));
+
+    assert_eq!(snap.scan_by_subject(&a).unwrap().len(), 2, "union read");
+    assert_eq!(snap.scan_by_predicate("knows").unwrap().len(), 1);
+    assert!(snap.scan_by_object(&c).unwrap().is_empty());
+    assert!(snap.scan_graph(secret).unwrap().is_empty());
+    assert!(snap
+        .scan_scoped(Some(&a), None, None, &GraphScope::Named)
+        .unwrap()
+        .iter()
+        .all(|(g, _)| *g == open_g));
+    assert_eq!(snap.text_search("title", "report").unwrap(), vec![a]);
+    assert!(snap.text_search("title", "secret").unwrap().is_empty());
+    assert!(snap.can_read_graph(open_g) && !snap.can_read_graph(secret));
+
+    // An unrestricted snapshot still sees everything.
+    let all = store.snapshot(Timestamp(store.oracle_ts()));
+    assert_eq!(all.scan_by_subject(&a).unwrap().len(), 4);
+}

@@ -19,6 +19,7 @@ uuid        = { workspace = true }
 memmap2     = { workspace = true }
 tokio       = { workspace = true }
 xxhash-rust = { workspace = true }
+roaring     = { workspace = true }
 
 [dev-dependencies]
 tempfile    = { workspace = true }
