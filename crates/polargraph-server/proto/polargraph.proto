@@ -1131,6 +1131,57 @@ message DropGraphResponse {
     uint64 quads_closed = 1;
 }
 
+// ── Atomic changesets ─────────────────────────────────────────────────────────
+//
+// See docs/design/proposals-shacl.md (8a). Adds and retractions across graphs
+// in one transaction, with an optional optimistic precondition.
+
+/// Triples to add to one graph.
+message GraphTriples {
+    /// Graph IRI ("" = default graph).
+    string graph = 1;
+    repeated Triple triples = 2;
+}
+
+/// One exact quad, e.g. to retract.
+message QuadRef {
+    NodeId subject = 1;
+    string predicate = 2;
+    oneof object {
+        NodeId node = 3;
+        Value value = 4;
+    }
+    /// Graph IRI ("" = default graph).
+    string graph = 5;
+}
+
+message ApplyChangesRequest {
+    repeated GraphTriples adds = 1;
+    /// Live quads to close (valid time ends now).
+    repeated QuadRef retractions = 2;
+    /// The commit time the changes were based on (0 = none). If any quad the
+    /// changeset adds or retracts — or any value of a single-valued property
+    /// it replaces — was committed after it, nothing is applied (ABORTED).
+    int64 read_ts = 3;
+    /// Fail (FAILED_PRECONDITION, nothing applied) if a retraction matches no
+    /// live quad; otherwise such retractions are only counted.
+    bool strict = 4;
+    /// IRIs to record in the IRI dictionary.
+    repeated string iris = 5;
+    /// Caller identity (optional; also `x-polargraph-user-id`): author of the
+    /// change, and the graph ACL applies (write on every graph touched).
+    string user_id = 6;
+}
+
+message ApplyChangesResponse {
+    int64 commit_ts = 1;
+    uint64 added = 2;
+    uint64 retracted = 3;
+    uint64 retractions_not_found = 4;
+    /// Edge ids of added relations, in request order.
+    repeated bytes edge_ids = 5;
+}
+
 // ── Change feed ───────────────────────────────────────────────────────────────
 //
 // See docs/design/change-feed.md. Events come from the change log written by
@@ -1289,6 +1340,8 @@ service PolarGraphService {
     rpc DropGraph(DropGraphRequest) returns (DropGraphResponse);
     /// Stream the live quads of one graph, or of the whole dataset.
     rpc ExportGraph(ExportGraphRequest) returns (stream ExportGraphChunk);
+    /// Apply adds and retractions across graphs atomically.
+    rpc ApplyChanges(ApplyChangesRequest) returns (ApplyChangesResponse);
     /// Stream committed changes (with resume), filtered by graph access.
     rpc Subscribe(SubscribeRequest) returns (stream ChangeEvent);
     /// Grant a user or group a level on a named graph.
