@@ -3,6 +3,17 @@
 # Stage 1 (builder): compiles the full workspace with all Rust and C++ tooling.
 # Stage 2 (runtime): slim image that ships only the binary.
 
+# ── Stage 0: dependency skeleton ─────────────────────────────────────────────
+# Manifests, build scripts and protos unchanged, plus a stub for every Cargo
+# target root (lib, bins, benches, examples, tests) — see
+# scripts/docker-skeleton.sh. Its output only changes when manifests or the
+# set of targets change, so the dependency layer below stays cached.
+FROM debian:bookworm-slim AS skeleton
+WORKDIR /src
+COPY scripts/docker-skeleton.sh /usr/local/bin/docker-skeleton.sh
+COPY crates/ crates/
+RUN sh /usr/local/bin/docker-skeleton.sh /src /skeleton
+
 # ── Stage 1: Build ────────────────────────────────────────────────────────────
 FROM rust:1-bookworm AS builder
 
@@ -19,33 +30,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy workspace manifests first so Docker can cache the dependency-fetch layer.
+# Workspace manifests + the stubbed crate skeleton, so Docker can cache the
+# dependency build until a manifest (or the set of targets) changes.
 COPY Cargo.toml Cargo.lock ./
-COPY crates/polargraph-core/Cargo.toml      crates/polargraph-core/Cargo.toml
-COPY crates/polargraph-storage/Cargo.toml   crates/polargraph-storage/Cargo.toml
-COPY crates/polargraph-query/Cargo.toml     crates/polargraph-query/Cargo.toml
-COPY crates/polargraph-server/Cargo.toml    crates/polargraph-server/Cargo.toml
-COPY crates/polargraph-server/build.rs      crates/polargraph-server/build.rs
-COPY crates/polargraph-server/proto/        crates/polargraph-server/proto/
-COPY crates/polargraph-bench/Cargo.toml     crates/polargraph-bench/Cargo.toml
-COPY crates/polargraph-import/Cargo.toml    crates/polargraph-import/Cargo.toml
-COPY crates/polargraph-rest/Cargo.toml      crates/polargraph-rest/Cargo.toml
-COPY crates/polargraph-rest/build.rs        crates/polargraph-rest/build.rs
-COPY crates/polargraph-sparql/Cargo.toml   crates/polargraph-sparql/Cargo.toml
-
-# Stub out every crate's source so `cargo fetch` / dependency compilation
-# succeeds without the real source files.
-RUN for crate in polargraph-core polargraph-storage polargraph-query polargraph-rest polargraph-sparql; do \
-        mkdir -p crates/$crate/src && \
-        printf 'pub fn _stub() {}' > crates/$crate/src/lib.rs; \
-    done && \
-    for crate in polargraph-server polargraph-bench polargraph-import; do \
-        mkdir -p crates/$crate/src && \
-        printf 'pub fn _stub() {}' > crates/$crate/src/lib.rs && \
-        printf 'fn main() {}'      > crates/$crate/src/main.rs; \
-    done && \
-    mkdir -p crates/polargraph-storage/benches && \
-    printf 'fn main() {}'  > crates/polargraph-storage/benches/storage.rs
+COPY --from=skeleton /skeleton/crates crates
 
 # Pre-compile dependencies (cached as long as Cargo.toml/lock don't change).
 RUN cargo build --release -p polargraph-server 2>&1 || true
