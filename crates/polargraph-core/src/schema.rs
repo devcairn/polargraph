@@ -253,6 +253,48 @@ pub const BUILTIN_HAS_ACCESS_PRED: &str = "HAS_ACCESS";
 /// Predicate: `(Group) -[HAS_ACCESS_TYPE]-> type_name_text` — type-level grant.
 pub const BUILTIN_HAS_ACCESS_TYPE_PRED: &str = "HAS_ACCESS_TYPE";
 
+/// Predicate: `(User | Group) -[HAS_GRAPH_ACCESS]-> (graph IRI node)` — a
+/// graph-level grant, stored in the system graph. Its level is the edge
+/// annotation [`BUILTIN_GRAPH_ACCESS_LEVEL_PRED`].
+pub const BUILTIN_HAS_GRAPH_ACCESS_PRED: &str = "HAS_GRAPH_ACCESS";
+/// Edge annotation on a `HAS_GRAPH_ACCESS` grant: the [`GraphAccessLevel`]
+/// as text (`read`, `propose`, `write`, `admin`).
+pub const BUILTIN_GRAPH_ACCESS_LEVEL_PRED: &str = "GRAPH_ACCESS_LEVEL";
+
+/// A graph-level access grant. Each level implies the ones below it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphAccessLevel {
+    /// Read the graph's quads.
+    Read = 0,
+    /// Submit proposals against the graph (used by the proposal workflow).
+    Propose = 1,
+    /// Write quads into the graph.
+    Write = 2,
+    /// Manage the graph: grants, metadata, copy/move into it, drop.
+    Admin = 3,
+}
+
+impl GraphAccessLevel {
+    pub const ALL: [GraphAccessLevel; 4] = [Self::Read, Self::Propose, Self::Write, Self::Admin];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Propose => "propose",
+            Self::Write => "write",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// Parse a level name (case-insensitive).
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|l| l.as_str().eq_ignore_ascii_case(s))
+    }
+}
+
 /// Returns the built-in node type definitions for `User` and `Group`.
 ///
 /// These definitions are registered at server startup if not already present.

@@ -48,6 +48,7 @@ use polargraph_core::{
     triple::{Predicate, Triple},
     value::Value,
 };
+use roaring::RoaringBitmap;
 use rocksdb::{
     BoundColumnFamily, ColumnFamilyDescriptor, DBWithThreadMode, Direction, IteratorMode,
     MultiThreaded, Options, WriteBatch,
@@ -207,6 +208,37 @@ type QuadIds = (NodeId, PredId, NodeId, GraphId);
 
 /// Property values staged in one write batch, per `(s, p, g)`.
 type StagedValues = HashMap<(NodeId, PredId, GraphId), Vec<(NodeId, Vec<u8>)>>;
+
+/// The point a read looks at — transaction time, valid time — and the graphs
+/// the reader may see (`None` = every graph; see `Snapshot::with_readable_graphs`).
+#[derive(Clone, Debug)]
+pub(crate) struct ReadAt {
+    pub ts: Timestamp,
+    /// `None` = valid now.
+    pub vt_as_of: Option<i64>,
+    pub readable: Option<Arc<RoaringBitmap>>,
+}
+
+impl ReadAt {
+    /// Latest committed state, valid now, every graph.
+    pub(crate) fn latest(ts: Timestamp) -> Self {
+        Self {
+            ts,
+            vt_as_of: None,
+            readable: None,
+        }
+    }
+
+    /// Whether the reader may see graph `g`.
+    pub(crate) fn can_read(&self, g: GraphId) -> bool {
+        readable_admits(self.readable.as_deref(), g)
+    }
+}
+
+/// `true` when `readable` is `None` (no restriction) or contains `g`.
+pub(crate) fn readable_admits(readable: Option<&RoaringBitmap>, g: GraphId) -> bool {
+    readable.map_or(true, |r| r.contains(g.0))
+}
 
 /// Which graphs a scan reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -851,7 +883,7 @@ impl TripleStore {
     // Useful for tests and simple read paths that don't need a named snapshot.
 
     pub fn scan_by_subject(&self, subject: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.scan_by_subject_at(subject, self.inner.oracle.read_ts(), None)
+        self.scan_by_subject_at(subject, &ReadAt::latest(self.inner.oracle.read_ts()))
     }
 
     pub fn scan_by_subject_predicate(
@@ -859,11 +891,15 @@ impl TripleStore {
         subject: &NodeId,
         predicate: &str,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.scan_by_subject_predicate_at(subject, predicate, self.inner.oracle.read_ts(), None)
+        self.scan_by_subject_predicate_at(
+            subject,
+            predicate,
+            &ReadAt::latest(self.inner.oracle.read_ts()),
+        )
     }
 
     pub fn scan_by_predicate(&self, predicate: &str) -> Result<Vec<Triple>, StorageError> {
-        self.scan_by_predicate_at(predicate, self.inner.oracle.read_ts(), None)
+        self.scan_by_predicate_at(predicate, &ReadAt::latest(self.inner.oracle.read_ts()))
     }
 
     pub fn scan_by_predicate_object(
@@ -871,11 +907,15 @@ impl TripleStore {
         predicate: &str,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.scan_by_predicate_object_at(predicate, object, self.inner.oracle.read_ts(), None)
+        self.scan_by_predicate_object_at(
+            predicate,
+            object,
+            &ReadAt::latest(self.inner.oracle.read_ts()),
+        )
     }
 
     pub fn scan_by_object(&self, object: &NodeId) -> Result<Vec<Triple>, StorageError> {
-        self.scan_by_object_at(object, self.inner.oracle.read_ts(), None)
+        self.scan_by_object_at(object, &ReadAt::latest(self.inner.oracle.read_ts()))
     }
 
     pub fn scan_by_subject_object(
@@ -883,11 +923,15 @@ impl TripleStore {
         subject: &NodeId,
         object: &NodeId,
     ) -> Result<Vec<Triple>, StorageError> {
-        self.scan_by_subject_object_at(subject, object, self.inner.oracle.read_ts(), None)
+        self.scan_by_subject_object_at(
+            subject,
+            object,
+            &ReadAt::latest(self.inner.oracle.read_ts()),
+        )
     }
 
     pub fn scan_all(&self) -> Result<Vec<Triple>, StorageError> {
-        self.scan_all_at(self.inner.oracle.read_ts(), None)
+        self.scan_all_at(&ReadAt::latest(self.inner.oracle.read_ts()))
     }
 
     /// Fast approximate triple count using RocksDB's built-in key estimate on
@@ -1183,6 +1227,19 @@ impl TripleStore {
         object: NodeId,
         snapshot_ts: Timestamp,
     ) -> Result<Vec<EdgeId>, StorageError> {
+        self.scan_spo_for_edge_ids_in(subject, pred_id, object, snapshot_ts, None)
+    }
+
+    /// [`Self::scan_spo_for_edge_ids`] over the graphs in `readable` only
+    /// (`None` = every graph).
+    pub fn scan_spo_for_edge_ids_in(
+        &self,
+        subject: NodeId,
+        pred_id: PredId,
+        object: NodeId,
+        snapshot_ts: Timestamp,
+        readable: Option<&RoaringBitmap>,
+    ) -> Result<Vec<EdgeId>, StorageError> {
         let prefix = Order::Spog.prefix(Some(&subject), Some(pred_id), Some(&object), None);
         let cf = self.cf_handle(Order::Spog.cf())?;
         let iter = self
@@ -1198,7 +1255,7 @@ impl TripleStore {
                 break;
             }
             let tt = keys::key_tt(&key);
-            if tt > snapshot_ts {
+            if tt > snapshot_ts || !readable_admits(readable, Order::Spog.graph_of(&key)) {
                 continue;
             }
             if let Ok(DecodedValue::Relation { edge_id, .. }) = codec::decode_value(&value) {
@@ -1231,38 +1288,35 @@ impl TripleStore {
     pub(crate) fn scan_by_subject_at(
         &self,
         subject: &NodeId,
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
     ) -> Result<Vec<Triple>, StorageError> {
         let prefix = Order::Spog.prefix(Some(subject), None, None, None);
-        self.scan_union(Order::Spog, &prefix, snapshot_ts, vt_as_of)
+        self.scan_union(Order::Spog, &prefix, at)
     }
 
     pub(crate) fn scan_by_subject_predicate_at(
         &self,
         subject: &NodeId,
         predicate: &str,
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
     ) -> Result<Vec<Triple>, StorageError> {
         let Some(p) = self.predicate_id(predicate) else {
             return Ok(vec![]);
         };
         let prefix = Order::Spog.prefix(Some(subject), Some(p), None, None);
-        self.scan_union(Order::Spog, &prefix, snapshot_ts, vt_as_of)
+        self.scan_union(Order::Spog, &prefix, at)
     }
 
     pub(crate) fn scan_by_predicate_at(
         &self,
         predicate: &str,
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
     ) -> Result<Vec<Triple>, StorageError> {
         let Some(p) = self.predicate_id(predicate) else {
             return Ok(vec![]);
         };
         let prefix = Order::Psog.prefix(None, Some(p), None, None);
-        self.scan_union(Order::Psog, &prefix, snapshot_ts, vt_as_of)
+        self.scan_union(Order::Psog, &prefix, at)
     }
 
     /// Triples with `(predicate, object)`. `object` may be a node or — for
@@ -1271,14 +1325,13 @@ impl TripleStore {
         &self,
         predicate: &str,
         object: &NodeId,
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
     ) -> Result<Vec<Triple>, StorageError> {
         let Some(p) = self.predicate_id(predicate) else {
             return Ok(vec![]);
         };
         let prefix = Order::Posg.prefix(None, Some(p), Some(object), None);
-        self.scan_union(Order::Posg, &prefix, snapshot_ts, vt_as_of)
+        self.scan_union(Order::Posg, &prefix, at)
     }
 
     /// Property triples whose value equals `value` — an index lookup on the
@@ -1287,12 +1340,10 @@ impl TripleStore {
         &self,
         predicate: &str,
         value: &Value,
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
     ) -> Result<Vec<Triple>, StorageError> {
         let object = keys::value_object(value);
-        let mut triples =
-            self.scan_by_predicate_object_at(predicate, &object, snapshot_ts, vt_as_of)?;
+        let mut triples = self.scan_by_predicate_object_at(predicate, &object, at)?;
         triples.retain(|t| matches!(t, Triple::Property { value: v, .. } if v == value));
         Ok(triples)
     }
@@ -1300,11 +1351,10 @@ impl TripleStore {
     pub(crate) fn scan_by_object_at(
         &self,
         object: &NodeId,
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
     ) -> Result<Vec<Triple>, StorageError> {
         let prefix = Order::Ospg.prefix(None, None, Some(object), None);
-        self.scan_union(Order::Ospg, &prefix, snapshot_ts, vt_as_of)
+        self.scan_union(Order::Ospg, &prefix, at)
     }
 
     /// All triples for (subject, object) visible at `snapshot_ts` — uses `sopg`.
@@ -1312,28 +1362,22 @@ impl TripleStore {
         &self,
         subject: &NodeId,
         object: &NodeId,
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
     ) -> Result<Vec<Triple>, StorageError> {
         let prefix = Order::Sopg.prefix(Some(subject), None, Some(object), None);
-        self.scan_union(Order::Sopg, &prefix, snapshot_ts, vt_as_of)
+        self.scan_union(Order::Sopg, &prefix, at)
     }
 
     /// All triples in the store visible at `snapshot_ts` — full `spog` scan.
-    pub(crate) fn scan_all_at(
-        &self,
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
-    ) -> Result<Vec<Triple>, StorageError> {
-        self.scan_union(Order::Spog, &[], snapshot_ts, vt_as_of)
+    pub(crate) fn scan_all_at(&self, at: &ReadAt) -> Result<Vec<Triple>, StorageError> {
+        self.scan_union(Order::Spog, &[], at)
     }
 
     /// Every triple in graph `g` — a `gspo` prefix scan.
     pub(crate) fn scan_graph_at(
         &self,
         g: GraphId,
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
     ) -> Result<Vec<Triple>, StorageError> {
         let prefix = Order::Gspo.prefix(None, None, None, Some(g));
         Ok(self
@@ -1341,8 +1385,7 @@ impl TripleStore {
                 Order::Gspo.cf(),
                 Order::Gspo,
                 &prefix,
-                snapshot_ts,
-                vt_as_of,
+                at,
                 &GraphScope::One(g),
             )?
             .into_iter()
@@ -1355,8 +1398,7 @@ impl TripleStore {
         &self,
         g: GraphId,
         subject: &NodeId,
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
     ) -> Result<Vec<Triple>, StorageError> {
         let prefix = Order::Gspo.prefix(Some(subject), None, None, Some(g));
         Ok(self
@@ -1364,8 +1406,7 @@ impl TripleStore {
                 Order::Gspo.cf(),
                 Order::Gspo,
                 &prefix,
-                snapshot_ts,
-                vt_as_of,
+                at,
                 &GraphScope::One(g),
             )?
             .into_iter()
@@ -1386,8 +1427,7 @@ impl TripleStore {
         predicate: Option<&str>,
         object: Option<&NodeId>,
         scope: &GraphScope,
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
     ) -> Result<Vec<(GraphId, Triple)>, StorageError> {
         let p = match predicate {
             Some(name) => match self.predicate_id(name) {
@@ -1418,8 +1458,7 @@ impl TripleStore {
             (_, None, None, Some(_)) => (Order::Ospg, Order::Ospg.prefix(None, None, o, None)),
             (_, None, None, None) => (Order::Spog, Order::Spog.prefix(None, None, None, None)),
         };
-        let mut quads =
-            self.snapshot_scan_keyed(order.cf(), order, &prefix, snapshot_ts, vt_as_of, scope)?;
+        let mut quads = self.snapshot_scan_keyed(order.cf(), order, &prefix, at, scope)?;
         // A prefix may cover fewer slots than are bound; filter the rest.
         quads.retain(|((qs, qp, qo, _), _)| {
             s.map_or(true, |s| s == qs)
@@ -1436,17 +1475,9 @@ impl TripleStore {
         &self,
         order: Order,
         prefix: &[u8],
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
     ) -> Result<Vec<Triple>, StorageError> {
-        let quads = self.snapshot_scan_keyed(
-            order.cf(),
-            order,
-            prefix,
-            snapshot_ts,
-            vt_as_of,
-            &GraphScope::Union,
-        )?;
+        let quads = self.snapshot_scan_keyed(order.cf(), order, prefix, at, &GraphScope::Union)?;
         // With no named graphs every quad is in the default graph, so there
         // is nothing to de-duplicate.
         if self.inner.graph_fwd.read().unwrap().is_empty() {
@@ -1488,12 +1519,11 @@ impl TripleStore {
         cf_name: &str,
         order: Order,
         prefix: &[u8],
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
         graphs: &GraphScope,
     ) -> Result<Vec<(GraphId, Triple)>, StorageError> {
         Ok(self
-            .snapshot_scan_keyed(cf_name, order, prefix, snapshot_ts, vt_as_of, graphs)?
+            .snapshot_scan_keyed(cf_name, order, prefix, at, graphs)?
             .into_iter()
             .map(|((_, _, _, g), t)| (g, t))
             .collect())
@@ -1505,11 +1535,16 @@ impl TripleStore {
         cf_name: &str,
         order: Order,
         prefix: &[u8],
-        snapshot_ts: Timestamp,
-        vt_as_of: Option<i64>,
+        at: &ReadAt,
         graphs: &GraphScope,
     ) -> Result<Vec<(QuadIds, Triple)>, StorageError> {
-        let vt = vt_as_of.unwrap_or_else(|| Timestamp::now().0);
+        // A single unreadable graph: nothing to scan.
+        if let GraphScope::One(g) = graphs {
+            if !at.can_read(*g) {
+                return Ok(vec![]);
+            }
+        }
+        let vt = at.vt_as_of.unwrap_or_else(|| Timestamp::now().0);
         let cf = self.cf_handle(cf_name)?;
         let iter = self
             .inner
@@ -1523,8 +1558,12 @@ impl TripleStore {
             if !key.starts_with(prefix) {
                 break;
             }
-            // Cheap checks before decoding: tt, then graph.
-            if keys::key_tt(&key) > snapshot_ts || !graphs.admits(order.graph_of(&key)) {
+            // Cheap checks before decoding: tt, then graph (scope and access).
+            if keys::key_tt(&key) > at.ts {
+                continue;
+            }
+            let g = order.graph_of(&key);
+            if !graphs.admits(g) || !at.can_read(g) {
                 continue;
             }
             let Some((vt_start, vt_end)) = codec::valid_time(&value) else {
@@ -1884,6 +1923,15 @@ impl TripleStore {
         edge: EdgeId,
         snapshot_ts: Timestamp,
     ) -> Result<Vec<EdgeAnnotation>, StorageError> {
+        self.scan_edge_annotations_with(edge, snapshot_ts, None)
+    }
+
+    pub(crate) fn scan_edge_annotations_with(
+        &self,
+        edge: EdgeId,
+        snapshot_ts: Timestamp,
+        readable: Option<&RoaringBitmap>,
+    ) -> Result<Vec<EdgeAnnotation>, StorageError> {
         let mut result = Vec::new();
         let prefix = keys::annotation_prefix_edge(&edge);
 
@@ -1902,7 +1950,7 @@ impl TripleStore {
                     break;
                 }
                 let dk = keys::decode_epa_key(&key)?;
-                if dk.tt > snapshot_ts {
+                if dk.tt > snapshot_ts || !readable_admits(readable, dk.g) {
                     continue;
                 }
                 let slot = latest
@@ -1941,7 +1989,7 @@ impl TripleStore {
                     break;
                 }
                 let dk = keys::decode_epo_key(&key)?;
-                if dk.tt > snapshot_ts {
+                if dk.tt > snapshot_ts || !readable_admits(readable, dk.g) {
                     continue;
                 }
                 let slot = latest
@@ -1976,6 +2024,16 @@ impl TripleStore {
         predicate: &str,
         snapshot_ts: Timestamp,
     ) -> Result<Option<EdgeAnnotation>, StorageError> {
+        self.get_edge_annotation_with(edge, predicate, snapshot_ts, None)
+    }
+
+    pub(crate) fn get_edge_annotation_with(
+        &self,
+        edge: EdgeId,
+        predicate: &str,
+        snapshot_ts: Timestamp,
+        readable: Option<&RoaringBitmap>,
+    ) -> Result<Option<EdgeAnnotation>, StorageError> {
         let Some(pred_id) = self.predicate_id(predicate) else {
             return Ok(None);
         };
@@ -1995,7 +2053,7 @@ impl TripleStore {
                     break;
                 }
                 let dk = keys::decode_epa_key(&key)?;
-                if dk.tt > snapshot_ts {
+                if dk.tt > snapshot_ts || !readable_admits(readable, dk.g) {
                     continue;
                 }
                 match &best {
@@ -2027,7 +2085,7 @@ impl TripleStore {
                     break;
                 }
                 let dk = keys::decode_epo_key(&key)?;
-                if dk.tt > snapshot_ts {
+                if dk.tt > snapshot_ts || !readable_admits(readable, dk.g) {
                     continue;
                 }
                 match &best {
@@ -2055,6 +2113,15 @@ impl TripleStore {
         predicate: &str,
         snapshot_ts: Timestamp,
     ) -> Result<Vec<Triple>, StorageError> {
+        self.scan_annotations_by_predicate_with(predicate, snapshot_ts, None)
+    }
+
+    pub(crate) fn scan_annotations_by_predicate_with(
+        &self,
+        predicate: &str,
+        snapshot_ts: Timestamp,
+        readable: Option<&RoaringBitmap>,
+    ) -> Result<Vec<Triple>, StorageError> {
         let Some(pred_id) = self.predicate_id(predicate) else {
             return Ok(vec![]);
         };
@@ -2074,7 +2141,7 @@ impl TripleStore {
                 break;
             }
             let dk = keys::decode_pea_key(&key)?;
-            if dk.tt > snapshot_ts {
+            if dk.tt > snapshot_ts || !readable_admits(readable, dk.g) {
                 continue;
             }
             let slot = latest
@@ -2106,7 +2173,16 @@ impl TripleStore {
         edge: EdgeId,
         snapshot_ts: Timestamp,
     ) -> Result<Vec<Triple>, StorageError> {
-        let annotations = self.scan_edge_annotations(edge, snapshot_ts)?;
+        self.scan_edge_annotations_as_triples_with(edge, snapshot_ts, None)
+    }
+
+    pub(crate) fn scan_edge_annotations_as_triples_with(
+        &self,
+        edge: EdgeId,
+        snapshot_ts: Timestamp,
+        readable: Option<&RoaringBitmap>,
+    ) -> Result<Vec<Triple>, StorageError> {
+        let annotations = self.scan_edge_annotations_with(edge, snapshot_ts, readable)?;
         let triples = annotations
             .into_iter()
             .map(|ann| match ann.value {
@@ -2143,6 +2219,18 @@ impl TripleStore {
         predicate: &str,
         limit: u32,
     ) -> Result<Vec<(Value, i64)>, StorageError> {
+        self.scan_property_history_in(subject, predicate, limit, None)
+    }
+
+    /// [`Self::scan_property_history`] over the graphs in `readable` only
+    /// (`None` = every graph).
+    pub fn scan_property_history_in(
+        &self,
+        subject: NodeId,
+        predicate: &str,
+        limit: u32,
+        readable: Option<&RoaringBitmap>,
+    ) -> Result<Vec<(Value, i64)>, StorageError> {
         let limit = if limit == 0 { 50 } else { limit as usize };
         let Some(pred_id) = self.predicate_id(predicate) else {
             return Ok(vec![]);
@@ -2162,7 +2250,9 @@ impl TripleStore {
             if !key.starts_with(&prefix) {
                 break;
             }
-            if value_bytes.first() == Some(&codec::DISC_RELATION) {
+            if value_bytes.first() == Some(&codec::DISC_RELATION)
+                || !readable_admits(readable, Order::Spog.graph_of(&key))
+            {
                 continue;
             }
             let Some((_, vt_end)) = codec::valid_time(&value_bytes) else {
@@ -2234,6 +2324,20 @@ impl TripleStore {
         snapshot_ts: Timestamp,
         vt_as_of: Option<i64>,
     ) -> Result<Vec<NodeId>, StorageError> {
+        let at = ReadAt {
+            vt_as_of,
+            ..ReadAt::latest(snapshot_ts)
+        };
+        self.text_search_at(predicate, query, &at)
+    }
+
+    /// [`Self::text_search`] at a read point (readable graphs included).
+    pub(crate) fn text_search_at(
+        &self,
+        predicate: &str,
+        query: &str,
+        at: &ReadAt,
+    ) -> Result<Vec<NodeId>, StorageError> {
         let pred_id = match self.predicate_id(predicate) {
             Some(id) => id,
             None => return Ok(vec![]),
@@ -2264,8 +2368,7 @@ impl TripleStore {
         let query_lower = query.to_lowercase();
         let mut result = Vec::new();
         for node_id in candidates {
-            let triples =
-                self.scan_by_subject_predicate_at(&node_id, predicate, snapshot_ts, vt_as_of)?;
+            let triples = self.scan_by_subject_predicate_at(&node_id, predicate, at)?;
             let confirmed = triples.iter().any(|t| match t {
                 Triple::Property { value, .. } => value
                     .as_text()
@@ -2519,8 +2622,7 @@ impl TripleStore {
                 cf::DRV,
                 Order::Spog,
                 &[],
-                snapshot_ts,
-                None,
+                &ReadAt::latest(snapshot_ts),
                 &GraphScope::Union,
             )?
             .into_iter()

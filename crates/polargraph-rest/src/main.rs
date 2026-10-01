@@ -81,8 +81,40 @@ impl tonic::service::Interceptor for AuthInterceptor {
                 })?;
             req.metadata_mut().insert("authorization", val);
         }
+        // Forward the HTTP caller's identity (see `forward_user_id`) unless a
+        // handler already set one.
+        if !req.metadata().contains_key("x-polargraph-user-id") {
+            if let Ok(Some(val)) = REQUEST_USER.try_with(|u| {
+                (!u.is_empty())
+                    .then(|| u.parse::<MetadataValue<tonic::metadata::Ascii>>().ok())
+                    .flatten()
+            }) {
+                req.metadata_mut().insert("x-polargraph-user-id", val);
+            }
+        }
         Ok(req)
     }
+}
+
+tokio::task_local! {
+    /// The `X-User-Id` of the HTTP request being handled.
+    static REQUEST_USER: String;
+}
+
+/// Middleware: make the request's `X-User-Id` header the identity of every
+/// gRPC call the handler makes, so the server's graph access control applies
+/// to all endpoints (SPARQL, imports, exports, `/graphs`, …).
+async fn forward_user_id<B>(
+    req: axum::http::Request<B>,
+    next: axum::middleware::Next<B>,
+) -> Response {
+    let user = req
+        .headers()
+        .get("x-user-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    REQUEST_USER.scope(user, next.run(req)).await
 }
 
 /// Attach an `x-polargraph-user-id` metadata header to a gRPC request when
@@ -875,6 +907,7 @@ async fn handle_cypher_write(
     Json(body): Json<CypherWriteBody>,
 ) -> Response {
     let req = proto::CypherWriteRequest {
+        user_id: String::new(),
         cypher: body.cypher,
         tx_id: body.tx_id.unwrap_or_default(),
         graph: body.graph,
@@ -2654,6 +2687,7 @@ async fn handle_sparql_update(
                     graph_copy_shape(&delete, &insert, using.as_ref(), &pattern)
                 {
                     let req = proto::CopyGraphRequest {
+                        user_id: String::new(),
                         source,
                         target,
                         clear_target: false,
@@ -2838,7 +2872,10 @@ async fn handle_sparql_update(
                     }
                 };
                 for iri in iris {
-                    let req = proto::DropGraphRequest { iri: iri.clone() };
+                    let req = proto::DropGraphRequest {
+                        iri: iri.clone(),
+                        user_id: String::new(),
+                    };
                     match client.drop_graph(tonic::Request::new(req)).await {
                         Ok(r) => deleted += r.into_inner().quads_closed,
                         Err(_) if silent => {}
@@ -2849,6 +2886,7 @@ async fn handle_sparql_update(
             spargebra::GraphUpdateOperation::Create { graph, .. } => {
                 // Idempotent: creating an existing graph is not an error.
                 let req = proto::CreateGraphRequest {
+                    user_id: String::new(),
                     iri: graph.as_str().to_string(),
                     metadata: vec![],
                 };
@@ -4491,6 +4529,7 @@ async fn handle_create_graph(
     Json(body): Json<CreateGraphBody>,
 ) -> Response {
     let req = proto::CreateGraphRequest {
+        user_id: String::new(),
         iri: body.iri,
         metadata: body
             .metadata
@@ -4556,6 +4595,94 @@ async fn handle_graph_stats(
                 "last_write_tt": s.last_write_tt,
             }))
             .into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct GraphAccessBody {
+    /// User or group: node UUID or IRI.
+    principal: String,
+    graph: String,
+    /// `read`, `propose`, `write` or `admin`.
+    level: String,
+}
+
+#[derive(Deserialize)]
+struct GraphAccessParams {
+    principal: String,
+    #[serde(default)]
+    graph: String,
+}
+
+/// `POST /graphs/access {principal, graph, level}` — grant (caller from
+/// `X-User-Id` must be admin of the graph, unless it is a service call).
+async fn handle_grant_graph_access(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<GraphAccessBody>,
+) -> Response {
+    let req = proto::GrantGraphAccessRequest {
+        principal: body.principal,
+        graph: body.graph,
+        level: body.level,
+        user_id: String::new(),
+    };
+    match state
+        .client
+        .clone()
+        .grant_graph_access(tonic::Request::new(req))
+        .await
+    {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+/// `DELETE /graphs/access?principal=&graph=` — revoke.
+async fn handle_revoke_graph_access(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<GraphAccessParams>,
+) -> Response {
+    let req = proto::RevokeGraphAccessRequest {
+        principal: params.principal,
+        graph: params.graph,
+        user_id: String::new(),
+    };
+    match state
+        .client
+        .clone()
+        .revoke_graph_access(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => Json(serde_json::json!({ "revoked": r.into_inner().revoked })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+/// `GET /graphs/access?principal=` — a user's effective graph access.
+async fn handle_get_graph_access(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<GraphAccessParams>,
+) -> Response {
+    let req = proto::GetGraphAccessRequest {
+        principal: params.principal,
+        user_id: String::new(),
+    };
+    match state
+        .client
+        .clone()
+        .get_graph_access(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            let graphs: Vec<_> = r
+                .into_inner()
+                .graphs
+                .into_iter()
+                .map(|g| serde_json::json!({ "graph": g.graph, "level": g.level }))
+                .collect();
+            Json(serde_json::json!({ "graphs": graphs })).into_response()
         }
         Err(e) => grpc_error(e),
     }
@@ -4730,6 +4857,7 @@ async fn handle_copy_graph(
     Json(body): Json<CopyGraphBody>,
 ) -> Response {
     let req = proto::CopyGraphRequest {
+        user_id: String::new(),
         source: body.source,
         target: body.target,
         clear_target: body.clear_target,
@@ -4750,6 +4878,7 @@ async fn handle_move_graph(
     Json(body): Json<CopyGraphBody>,
 ) -> Response {
     let req = proto::MoveGraphRequest {
+        user_id: String::new(),
         source: body.source,
         target: body.target,
     };
@@ -4768,7 +4897,10 @@ async fn handle_drop_graph(
     State(state): State<Arc<AppState>>,
     QueryParams(params): QueryParams<GraphIriParams>,
 ) -> Response {
-    let req = proto::DropGraphRequest { iri: params.iri };
+    let req = proto::DropGraphRequest {
+        iri: params.iri,
+        user_id: String::new(),
+    };
     match state
         .client
         .clone()
@@ -4893,6 +5025,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/graphs/export", get(handle_export_graph))
         .route("/graphs/copy", post(handle_copy_graph))
         .route("/graphs/move", post(handle_move_graph))
+        .route(
+            "/graphs/access",
+            get(handle_get_graph_access)
+                .post(handle_grant_graph_access)
+                .delete(handle_revoke_graph_access),
+        )
+        .layer(axum::middleware::from_fn(forward_user_id))
         .with_state(state);
 
     info!(addr = %args.listen, upstream = %args.upstream, "polargraph-rest listening");
@@ -4994,6 +5133,35 @@ mod tests {
 
     /// attach_user_id sets the x-polargraph-user-id metadata header for a
     /// non-empty user_id and leaves the request unmodified for an empty one.
+    #[tokio::test]
+    async fn interceptor_forwards_the_request_user() {
+        use tonic::service::Interceptor;
+        let mut interceptor = AuthInterceptor { token: None };
+        let req = REQUEST_USER
+            .scope("urn:user:alice".to_string(), async {
+                interceptor.call(tonic::Request::new(())).unwrap()
+            })
+            .await;
+        assert_eq!(
+            req.metadata().get("x-polargraph-user-id").unwrap(),
+            "urn:user:alice"
+        );
+        // Outside a request scope, and with an explicit header, nothing changes.
+        let req = interceptor.call(tonic::Request::new(())).unwrap();
+        assert!(req.metadata().get("x-polargraph-user-id").is_none());
+        let req = REQUEST_USER
+            .scope("urn:user:alice".to_string(), async {
+                interceptor
+                    .call(attach_user_id(tonic::Request::new(()), "urn:user:bob"))
+                    .unwrap()
+            })
+            .await;
+        assert_eq!(
+            req.metadata().get("x-polargraph-user-id").unwrap(),
+            "urn:user:bob"
+        );
+    }
+
     #[test]
     fn attach_user_id_sets_metadata_when_non_empty() {
         let req = tonic::Request::new(());

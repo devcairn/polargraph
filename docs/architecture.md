@@ -2761,8 +2761,10 @@ are stored together so access checks are a single `HashSet::contains` call.
 
 Every query RPC (`Query`, `CypherQuery`, `VectorSeedQuery`,
 `SearchVectorFiltered`) accepts an optional `user_id: string` field.
-When non-empty the server looks up the access set for that user and post-filters
-result bindings to those whose bound `NodeId` values all appear in the set.
+When non-empty the server restricts reads to the user's graphs (see
+[Graph-level access control](#graph-level-access-control)), then looks up the
+node access set for that user and post-filters result bindings to those whose
+bound `NodeId` values all appear in the set.
 Bindings with no `NodeId` values (e.g., scalar-only results) are retained.
 
 The user identity can also be supplied out-of-band via the
@@ -2787,6 +2789,40 @@ REST equivalents: `POST /access/add-user`, `POST /access/grant`,
 `FAILED_PRECONDITION` on read replicas (write RPCs are always blocked). The
 cache on a replica is built from replicated triples at startup and refreshed
 on each WAL-applied batch that touches AC predicates.
+
+### Graph-level access control
+
+Graph grants are the primary mechanism; the node grants above post-filter on
+top. Design and decisions: `docs/design/graph-acl.md`; upgrade path and
+release note: `docs/upgrade-graph-acl.md`.
+
+- **Always enforced** for requests that carry a user id (field,
+  `x-polargraph-user-id`, or REST `X-User-Id` — forwarded on every REST
+  endpoint). Requests without one are trusted service calls.
+- **Grants**: `(User|Group) -[HAS_GRAPH_ACCESS]-> (graph IRI node)` in the
+  system graph, annotated `GRAPH_ACCESS_LEVEL` = `read` < `propose` <
+  `write` < `admin`. Managed with `GrantGraphAccess` / `RevokeGraphAccess` /
+  `GetGraphAccess` (REST `POST` / `DELETE` / `GET /graphs/access`); granting
+  needs `admin` on the graph unless it's a service call.
+- **Deny by default**: a user reads the default graph plus granted graphs.
+  The default graph is readable and writable by everyone.
+- **In the scan**: the user's readable graphs become a `RoaringBitmap` on the
+  `Snapshot`; scans skip keys in other graphs before decoding values, so
+  Datalog, Cypher, SPARQL, streaming, exports, annotations and property
+  history are all covered. Vector hits are kept only for nodes with a live
+  quad in a readable graph.
+- **Writes**: `write` to insert into / delete from a graph, `admin` to manage
+  it; a user creating a graph becomes its admin. Access-control triples and
+  the node-ACL RPCs are service-only.
+
+| Operation (user caller) | Needs |
+|---|---|
+| Read quads, list / stats / export a graph | `read` |
+| `Insert`, `CypherWrite`, `DeleteTriples` into a graph | `write` (default graph: always allowed) |
+| `CreateGraph` (new graph) | nothing — caller becomes `admin` |
+| `CreateGraph` metadata update, `CopyGraph` target, `MoveGraph` source + target, `DropGraph`, grant / revoke | `admin` |
+| `CopyGraph` source | `read` |
+| Write `MEMBER_OF` / `HAS_ACCESS*` / `HAS_GRAPH_ACCESS`; `GrantAccess`, `RevokeAccess`, `AddUserToGroup` | service call only |
 
 ---
 

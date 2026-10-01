@@ -84,5 +84,8 @@ spargebra    = { version = "0.3", features = ["rdf-star"] }
 rio_api    = { version = "0.8" }
 rio_turtle = { version = "0.8" }
 
+# compressed bitmaps (graph access control)
+roaring      = { version = "0.10" }
+
 # testing
 tempfile     = { version = "3" }

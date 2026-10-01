@@ -1167,6 +1167,43 @@ every graph when there is no `GRAPH`. IRIs map to nodes the same way as `/import
 
 ---
 
+## Graph access control RPCs
+
+See `docs/design/graph-acl.md` and `docs/upgrade-graph-acl.md`. Principals
+and callers are node UUIDs or IRIs. The caller is `user_id` or the
+`x-polargraph-user-id` metadata; without one the call is a trusted service
+call.
+
+| RPC | Request → Response | Notes |
+|---|---|---|
+| `GrantGraphAccess` | `{principal, graph, level, user_id}` → `{}` | `level` ∈ `read`, `propose`, `write`, `admin` (replaces an earlier level). Caller needs `admin` on the graph. The default graph takes no grants |
+| `RevokeGraphAccess` | `{principal, graph, user_id}` → `{revoked}` | Bitemporal close of the grant. Caller needs `admin` |
+| `GetGraphAccess` | `{principal, user_id}` → `{graphs: [{graph, level}]}` | Effective access (own + group grants). A caller other than the principal only sees graphs it administers |
+
+`user_id` (string) is also accepted on `InsertRequest`, `CypherWriteRequest`,
+`DeleteTriplesRequest`, `CreateGraphRequest`, `CopyGraphRequest`,
+`MoveGraphRequest` and `DropGraphRequest`; the write rules are in the
+"Graph-level access control" table in `docs/architecture.md`. A denied
+operation is `PERMISSION_DENIED` (HTTP 403).
+
+REST: `POST /graphs/access {principal, graph, level}`,
+`DELETE /graphs/access?principal=&graph=`, `GET /graphs/access?principal=`.
+The gateway forwards the `X-User-Id` header on every upstream call.
+
+Storage API (`polargraph_storage`):
+
+```rust
+store.grant_graph_access(principal: NodeId, g: GraphId, level: GraphAccessLevel) -> Result<(), StorageError>
+store.revoke_graph_access(principal: NodeId, g: GraphId) -> Result<bool, StorageError>
+store.graph_grants() -> Result<Vec<GraphGrant>, StorageError>
+GraphAccessIndex::build(&store)?.for_user(&user) -> Arc<UserGraphAccess>
+    // .readable() -> Arc<RoaringBitmap>, .level(g), .allows(g, level), .graphs_at_least(level)
+snapshot.with_readable_graphs(Arc<RoaringBitmap>)   // enforced inside every scan
+snapshot.can_read_graph(g)
+```
+
+---
+
 ## REST gateway — additional endpoints
 
 | Method | Path | Description |

@@ -20,13 +20,14 @@ use crate::{
         DropGraphRequest, DropGraphResponse, ExplainResponse, ExportGraphChunk, ExportGraphRequest,
         ExportedQuad, GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse,
         GetEdgeIdsByTripleRequest, GetEdgeIdsByTripleResponse, GetEdgeTypeRequest,
-        GetEdgeTypeResponse, GetNodeTypeRequest, GetNodeTypeResponse, GetPropertyHistoryRequest,
-        GetPropertyHistoryResponse, GetUserAccessRequest, GetUserAccessResponse,
-        GrantAccessRequest, GrantAccessResponse, GraphInfo, GraphMetadata, GraphStatsRequest,
-        GraphStatsResponse, InsertRequest, InsertResponse, InsertVectorRequest,
-        InsertVectorResponse, ListApiKeysRequest, ListApiKeysResponse, ListBackupsRequest,
-        ListBackupsResponse, ListEdgeTypesRequest, ListEdgeTypesResponse, ListGraphsRequest,
-        ListGraphsResponse, ListNodeTypesRequest, ListNodeTypesResponse,
+        GetEdgeTypeResponse, GetGraphAccessRequest, GetGraphAccessResponse, GetNodeTypeRequest,
+        GetNodeTypeResponse, GetPropertyHistoryRequest, GetPropertyHistoryResponse,
+        GetUserAccessRequest, GetUserAccessResponse, GrantAccessRequest, GrantAccessResponse,
+        GrantGraphAccessRequest, GrantGraphAccessResponse, GraphAccessEntry, GraphInfo,
+        GraphMetadata, GraphStatsRequest, GraphStatsResponse, InsertRequest, InsertResponse,
+        InsertVectorRequest, InsertVectorResponse, ListApiKeysRequest, ListApiKeysResponse,
+        ListBackupsRequest, ListBackupsResponse, ListEdgeTypesRequest, ListEdgeTypesResponse,
+        ListGraphsRequest, ListGraphsResponse, ListNodeTypesRequest, ListNodeTypesResponse,
         ListPredicatesBetweenRequest, ListPredicatesBetweenResponse, MigrateRequest,
         MigrateResponse, MigrationStatusRequest, MigrationStatusResponse, MoveGraphRequest,
         OntologyViolation, PlanNode, PropertyVersion, PurgeOldBackupsRequest,
@@ -34,23 +35,24 @@ use crate::{
         ReachableResponse, RegisterEdgeTypeRequest, RegisterEdgeTypeResponse,
         RegisterNodeTypeRequest, RegisterNodeTypeResponse, ReplicaStatusRequest,
         ReplicaStatusResponse, ResolveIrisRequest, ResolveIrisResponse, RevokeAccessRequest,
-        RevokeAccessResponse, RevokeApiKeyRequest, RevokeApiKeyResponse,
-        RollbackTransactionRequest, RollbackTransactionResponse, RunMaterializationRequest,
-        RunMaterializationResponse, RunRetentionRequest, RunRetentionResponse, ScoredBinding,
-        SearchVectorFilteredRequest, SearchVectorFilteredResponse, SearchVectorInSetRequest,
-        SearchVectorInSetResponse, SearchVectorRequest, SearchVectorResponse, ShowIndexesRequest,
-        ShowIndexesResponse, ShowStatsRequest, ShowStatsResponse, StreamWalRequest,
-        ValidateEdgeRequest, ValidateEdgeResponse, ValidateNodeRequest, ValidateNodeResponse,
-        ValidateOntologyRequest, ValidateOntologyResponse, VectorSearchResult,
-        VectorSeedQueryRequest, VectorSeedQueryResponse, VectorSpaceInfo, WalEntry,
+        RevokeAccessResponse, RevokeApiKeyRequest, RevokeApiKeyResponse, RevokeGraphAccessRequest,
+        RevokeGraphAccessResponse, RollbackTransactionRequest, RollbackTransactionResponse,
+        RunMaterializationRequest, RunMaterializationResponse, RunRetentionRequest,
+        RunRetentionResponse, ScoredBinding, SearchVectorFilteredRequest,
+        SearchVectorFilteredResponse, SearchVectorInSetRequest, SearchVectorInSetResponse,
+        SearchVectorRequest, SearchVectorResponse, ShowIndexesRequest, ShowIndexesResponse,
+        ShowStatsRequest, ShowStatsResponse, StreamWalRequest, ValidateEdgeRequest,
+        ValidateEdgeResponse, ValidateNodeRequest, ValidateNodeResponse, ValidateOntologyRequest,
+        ValidateOntologyResponse, VectorSearchResult, VectorSeedQueryRequest,
+        VectorSeedQueryResponse, VectorSpaceInfo, WalEntry,
     },
 };
 use dashmap::DashMap;
 use polargraph_core::{
     id::{EdgeId, NodeId},
     schema::{
-        RetentionPolicy, StorageMode, BUILTIN_HAS_ACCESS_PRED, BUILTIN_HAS_ACCESS_TYPE_PRED,
-        BUILTIN_MEMBER_OF_PRED,
+        GraphAccessLevel, RetentionPolicy, StorageMode, BUILTIN_HAS_ACCESS_PRED,
+        BUILTIN_HAS_ACCESS_TYPE_PRED, BUILTIN_HAS_GRAPH_ACCESS_PRED, BUILTIN_MEMBER_OF_PRED,
     },
     triple::Triple,
     value::Value,
@@ -153,6 +155,12 @@ type TypeCache = Arc<RwLock<HashMap<String, HashSet<NodeId>>>>;
 /// Filtering is only applied when `user_id` is set on a request.
 type AccessCache = Arc<RwLock<HashMap<String, HashSet<NodeId>>>>;
 
+/// The graph access index and when it was built.
+type GraphAccessState = Arc<RwLock<(Arc<polargraph_storage::GraphAccessIndex>, Instant)>>;
+
+/// How stale a replica's graph access index may get (grants arrive by WAL).
+const GRAPH_ACCESS_REFRESH: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 pub struct PolarGraphServer {
     store: TripleStore,
@@ -162,6 +170,11 @@ pub struct PolarGraphServer {
     /// Graph-native access control cache. Populated at startup and updated
     /// incrementally after every Insert that touches access-control triples.
     access_cache: AccessCache,
+    /// Graph-level access (`docs/design/graph-acl.md`): per-user readable /
+    /// writable graph bitmaps, always enforced for requests carrying a user
+    /// id. Rebuilt when grants or memberships change (on replicas, at most
+    /// every [`GRAPH_ACCESS_REFRESH`]).
+    graph_access: GraphAccessState,
     backup_manager: Option<Arc<BackupManager>>,
     /// Non-None when this server is a read replica.
     replica_state: Option<Arc<ReplicaState>>,
@@ -217,6 +230,10 @@ impl PolarGraphServer {
         let access_cache_map = Self::build_access_cache(&store, &type_cache_map)?;
         let type_cache = Arc::new(RwLock::new(type_cache_map));
         let access_cache = Arc::new(RwLock::new(access_cache_map));
+        let graph_access = Arc::new(RwLock::new((
+            Arc::new(polargraph_storage::GraphAccessIndex::build(&store)?),
+            Instant::now(),
+        )));
         let backup_manager = backup_dir
             .map(|dir| BackupManager::open(dir, &store).map(Arc::new))
             .transpose()?;
@@ -226,6 +243,7 @@ impl PolarGraphServer {
             edge_registry,
             type_cache,
             access_cache,
+            graph_access,
             backup_manager,
             replica_state: None,
             query_timeout_ms: 30_000,
@@ -330,6 +348,10 @@ impl PolarGraphServer {
         let access_cache_map = Self::build_access_cache(&store, &type_cache_map)?;
         let type_cache = Arc::new(RwLock::new(type_cache_map));
         let access_cache = Arc::new(RwLock::new(access_cache_map));
+        let graph_access = Arc::new(RwLock::new((
+            Arc::new(polargraph_storage::GraphAccessIndex::build(&store)?),
+            Instant::now(),
+        )));
         let replica_state = ReplicaState::new(primary_address.to_owned());
         let server = Self {
             store,
@@ -337,6 +359,7 @@ impl PolarGraphServer {
             edge_registry,
             type_cache,
             access_cache,
+            graph_access,
             backup_manager: None,
             replica_state: Some(replica_state.clone()),
             query_timeout_ms: 30_000,
@@ -537,7 +560,99 @@ impl PolarGraphServer {
     /// triples that could expand type-level grants.
     ///
     /// Called after every successful `Insert` commit.
+    /// Rebuild the graph access index (after grants or memberships change).
+    fn rebuild_graph_access(&self) {
+        match polargraph_storage::GraphAccessIndex::build(&self.store) {
+            Ok(index) => *self.graph_access.write().unwrap() = (Arc::new(index), Instant::now()),
+            Err(e) => warn!("failed to rebuild graph access index: {e}"),
+        }
+    }
+
+    /// The caller's graph access: `None` for a request without a user id (a
+    /// trusted service call, full access); otherwise the user's grants, the
+    /// default graph only when it has none. A user id is a node UUID or an
+    /// IRI (mapped like any other IRI).
+    fn caller_access(&self, user_id: &str) -> Option<Arc<polargraph_storage::UserGraphAccess>> {
+        if user_id.is_empty() {
+            return None;
+        }
+        let user = principal_node(user_id).ok()?;
+        if self.store.is_replica()
+            && self.graph_access.read().unwrap().1.elapsed() > GRAPH_ACCESS_REFRESH
+        {
+            self.rebuild_graph_access();
+        }
+        let index = Arc::clone(&self.graph_access.read().unwrap().0);
+        Some(index.for_user(&user))
+    }
+
+    /// Whether a vector hit is visible to `access`: the node must have a live
+    /// quad in a readable graph (HNSW itself isn't graph-aware).
+    fn node_visible(
+        &self,
+        node: &NodeId,
+        access: &Option<Arc<polargraph_storage::UserGraphAccess>>,
+    ) -> bool {
+        access.is_none()
+            || self
+                .snapshot_for(self.store.begin().read_ts, access)
+                .scan_by_subject(node)
+                .is_ok_and(|t| !t.is_empty())
+    }
+
+    /// The graph `iri` names, checked for `level` when the caller is a user.
+    /// A service call may create the graph (`create`); a user's graph must
+    /// already exist (it would otherwise have no grants), so unknown graphs
+    /// are `PERMISSION_DENIED` rather than created.
+    #[allow(clippy::result_large_err)]
+    fn graph_for(
+        &self,
+        access: &Option<Arc<polargraph_storage::UserGraphAccess>>,
+        iri: &str,
+        level: GraphAccessLevel,
+        create: bool,
+    ) -> Result<polargraph_core::id::GraphId, Status> {
+        if access.is_none() {
+            return if create {
+                self.target_graph(iri)
+            } else {
+                self.existing_graph(iri)
+            };
+        }
+        let g = match self.existing_graph(iri) {
+            Ok(g) => g,
+            Err(e) if e.code() == tonic::Code::NotFound => {
+                return Err(Status::permission_denied(format!(
+                    "{} access to graph <{iri}> required (create it with CreateGraph first)",
+                    level.as_str()
+                )))
+            }
+            Err(e) => return Err(e),
+        };
+        require_level(access, g, level, iri)?;
+        Ok(g)
+    }
+
+    /// A snapshot at `ts` restricted to what `access` may read.
+    fn snapshot_for(
+        &self,
+        ts: polargraph_core::temporal::Timestamp,
+        access: &Option<Arc<polargraph_storage::UserGraphAccess>>,
+    ) -> polargraph_storage::Snapshot {
+        let snapshot = self.store.snapshot(ts);
+        match access {
+            Some(a) => snapshot.with_readable_graphs(a.readable()),
+            None => snapshot,
+        }
+    }
+
     fn update_access_cache_if_needed(&self, triples: &[Triple]) {
+        if triples.iter().any(|t| {
+            let p = &t.predicate().0;
+            p == BUILTIN_MEMBER_OF_PRED || p == BUILTIN_HAS_GRAPH_ACCESS_PRED
+        }) {
+            self.rebuild_graph_access();
+        }
         let needs_rebuild = triples.iter().any(|t| match t {
             Triple::Relation { predicate, .. }
                 if predicate.0 == BUILTIN_MEMBER_OF_PRED
@@ -715,6 +830,94 @@ fn resolve_user_id(field: &str, from_meta: &str) -> String {
     }
 }
 
+/// A user or group named by node UUID or IRI.
+#[allow(clippy::result_large_err)]
+fn principal_node(s: &str) -> Result<NodeId, Status> {
+    if s.is_empty() {
+        return Err(Status::invalid_argument("principal must not be empty"));
+    }
+    Ok(uuid::Uuid::parse_str(s)
+        .map(NodeId)
+        .unwrap_or_else(|_| polargraph_core::term::iri_to_node_id(s)))
+}
+
+/// Predicates that define access control. Only service calls may write them:
+/// a user adding `MEMBER_OF` to a privileged group would escalate itself.
+const ACCESS_CONTROL_PREDS: [&str; 5] = [
+    BUILTIN_MEMBER_OF_PRED,
+    BUILTIN_HAS_ACCESS_PRED,
+    BUILTIN_HAS_ACCESS_TYPE_PRED,
+    BUILTIN_HAS_GRAPH_ACCESS_PRED,
+    polargraph_core::schema::BUILTIN_GRAPH_ACCESS_LEVEL_PRED,
+];
+
+/// `PERMISSION_DENIED` when a user's write contains access-control triples.
+#[allow(clippy::result_large_err)]
+fn reject_user_acl_writes<'a>(
+    access: &Option<Arc<polargraph_storage::UserGraphAccess>>,
+    predicates: impl IntoIterator<Item = &'a str>,
+) -> Result<(), Status> {
+    if access.is_none() {
+        return Ok(());
+    }
+    match predicates
+        .into_iter()
+        .find(|p| ACCESS_CONTROL_PREDS.contains(p))
+    {
+        Some(p) => Err(Status::permission_denied(format!(
+            "{p} triples are access control and can only be written by a service call"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Predicates a Cypher write would store (relation types, property keys).
+fn write_predicates(ops: &[polargraph_query::cypher::WriteOp]) -> Vec<&str> {
+    use polargraph_query::cypher::WriteOp;
+    let mut preds = Vec::new();
+    for op in ops {
+        match op {
+            WriteOp::CreateNode { props, .. } | WriteOp::Merge { props, .. } => {
+                preds.extend(props.iter().map(|(k, _)| k.as_str()))
+            }
+            WriteOp::CreateRelation { predicate, .. } => preds.push(predicate.as_str()),
+            WriteOp::Set(clauses) => preds.extend(clauses.iter().map(|c| c.key.as_str())),
+            WriteOp::Delete(_) => {}
+        }
+    }
+    preds
+}
+
+/// `PERMISSION_DENIED` when the caller is a user (service-only RPCs).
+#[allow(clippy::result_large_err)]
+fn require_service(
+    access: &Option<Arc<polargraph_storage::UserGraphAccess>>,
+) -> Result<(), Status> {
+    match access {
+        Some(_) => Err(Status::permission_denied(
+            "this RPC is limited to service calls (no user id)",
+        )),
+        None => Ok(()),
+    }
+}
+
+/// `PERMISSION_DENIED` unless the caller (if any) has `level` on `g`.
+#[allow(clippy::result_large_err)]
+fn require_level(
+    access: &Option<Arc<polargraph_storage::UserGraphAccess>>,
+    g: polargraph_core::id::GraphId,
+    level: GraphAccessLevel,
+    graph_name: &str,
+) -> Result<(), Status> {
+    match access {
+        Some(a) if !a.allows(g, level) => Err(Status::permission_denied(format!(
+            "{} access to graph <{graph_name}> required",
+            level.as_str()
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Filter a set of Datalog `Bindings` rows to only those where every bound
 /// NodeId is present in `allowed`. When `allowed` is `None`, returns all rows.
 fn filter_bindings(results: Vec<Bindings>, allowed: Option<&HashSet<NodeId>>) -> Vec<Bindings> {
@@ -757,19 +960,37 @@ impl PolarGraphService for PolarGraphServer {
         request: Request<CreateGraphRequest>,
     ) -> Result<Response<CreateGraphResponse>, Status> {
         self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
         if req.iri.is_empty() {
             return Err(Status::invalid_argument("graph iri must not be empty"));
         }
+        // A user may create a new graph (and becomes its admin); changing an
+        // existing graph's metadata needs admin.
+        let creator = match (&access, self.store.graph_id(&req.iri)) {
+            (Some(_), Some(g)) => {
+                require_level(&access, g, GraphAccessLevel::Admin, &req.iri)?;
+                None
+            }
+            (Some(_), None) => Some(principal_node(&resolve_user_id(&req.user_id, &meta_uid))?),
+            (None, _) => None,
+        };
         let metadata = metadata_from_proto(&req.metadata)?;
         let store = self.store.clone();
         let graph = tokio::task::spawn_blocking(move || -> Result<GraphInfo, StorageError> {
             let g = store.create_graph(&req.iri, &metadata)?;
+            if let Some(user) = creator {
+                store.grant_graph_access(user, g, GraphAccessLevel::Admin)?;
+            }
             graph_info(&store, g, req.iri)
         })
         .await
         .map_err(|e| Status::internal(format!("create_graph task failed: {e}")))?
         .map_err(storage_err_to_status)?;
+        if access.is_some() {
+            self.rebuild_graph_access();
+        }
         Ok(Response::new(CreateGraphResponse { graph: Some(graph) }))
     }
 
@@ -777,11 +998,21 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<ListGraphsRequest>,
     ) -> Result<Response<ListGraphsResponse>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
         let filter = metadata_from_proto(&req.filter)?;
         let mut graphs = Vec::new();
         for (g, iri) in self.store.list_graphs() {
             if iri == polargraph_storage::SYSTEM_GRAPH_IRI && !req.include_system {
+                continue;
+            }
+            // Users only see graphs they can read (the system graph is never
+            // readable through a user's grants).
+            if access
+                .as_ref()
+                .is_some_and(|a| !a.allows(g, GraphAccessLevel::Read))
+            {
                 continue;
             }
             let info = graph_info(&self.store, g, iri).map_err(storage_err_to_status)?;
@@ -806,8 +1037,10 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<GraphStatsRequest>,
     ) -> Result<Response<GraphStatsResponse>, Status> {
+        let access = self.caller_access(&meta_user_id(request.metadata()));
         let iri = request.into_inner().iri;
         let g = self.existing_graph(&iri)?;
+        require_level(&access, g, GraphAccessLevel::Read, &iri)?;
         let store = self.store.clone();
         let stats = tokio::task::spawn_blocking(move || store.graph_stats(g))
             .await
@@ -825,9 +1058,11 @@ impl PolarGraphService for PolarGraphServer {
         request: Request<CopyGraphRequest>,
     ) -> Result<Response<CopyGraphResponse>, Status> {
         self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
-        let source = self.existing_graph(&req.source)?;
-        let target = self.target_graph(&req.target)?;
+        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        let source = self.graph_for(&access, &req.source, GraphAccessLevel::Read, false)?;
+        let target = self.graph_for(&access, &req.target, GraphAccessLevel::Admin, true)?;
         let store = self.store.clone();
         let quads =
             tokio::task::spawn_blocking(move || store.copy_graph(source, target, req.clear_target))
@@ -844,9 +1079,11 @@ impl PolarGraphService for PolarGraphServer {
         request: Request<MoveGraphRequest>,
     ) -> Result<Response<CopyGraphResponse>, Status> {
         self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
-        let source = self.existing_graph(&req.source)?;
-        let target = self.target_graph(&req.target)?;
+        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        let source = self.graph_for(&access, &req.source, GraphAccessLevel::Admin, false)?;
+        let target = self.graph_for(&access, &req.target, GraphAccessLevel::Admin, true)?;
         let store = self.store.clone();
         let quads = tokio::task::spawn_blocking(move || store.move_graph(source, target))
             .await
@@ -862,7 +1099,10 @@ impl PolarGraphService for PolarGraphServer {
         request: Request<DropGraphRequest>,
     ) -> Result<Response<DropGraphResponse>, Status> {
         self.check_not_replica()?;
-        let g = self.existing_graph(&request.into_inner().iri)?;
+        let meta_uid = meta_user_id(request.metadata());
+        let req = request.into_inner();
+        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        let g = self.graph_for(&access, &req.iri, GraphAccessLevel::Admin, false)?;
         let store = self.store.clone();
         let closed = tokio::task::spawn_blocking(move || store.drop_graph(g))
             .await
@@ -877,7 +1117,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<ExportGraphRequest>,
     ) -> Result<Response<Self::ExportGraphStream>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
         let graphs: Vec<(polargraph_core::id::GraphId, String)> = if req.all_graphs {
             std::iter::once((polargraph_core::id::GraphId::DEFAULT, String::new()))
                 .chain(
@@ -886,14 +1128,21 @@ impl PolarGraphService for PolarGraphServer {
                         .into_iter()
                         .filter(|(_, iri)| iri != polargraph_storage::SYSTEM_GRAPH_IRI),
                 )
+                // A user's dataset export covers the graphs it can read.
+                .filter(|(g, _)| {
+                    access
+                        .as_ref()
+                        .map_or(true, |a| a.allows(*g, GraphAccessLevel::Read))
+                })
                 .collect()
         } else {
-            vec![(self.existing_graph(&req.iri)?, req.iri)]
+            let g = self.existing_graph(&req.iri)?;
+            require_level(&access, g, GraphAccessLevel::Read, &req.iri)?;
+            vec![(g, req.iri)]
         };
-        let store = self.store.clone();
+        let snapshot = self.snapshot_for(self.store.begin().read_ts, &access);
         let (tx, rx) = mpsc::channel::<Result<ExportGraphChunk, Status>>(4);
         tokio::task::spawn_blocking(move || {
-            let snapshot = store.snapshot(store.begin().read_ts);
             for (g, iri) in graphs {
                 let triples = match snapshot.scan_graph(g) {
                     Ok(t) => t,
@@ -914,6 +1163,86 @@ impl PolarGraphService for PolarGraphServer {
             }
         });
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn grant_graph_access(
+        &self,
+        request: Request<GrantGraphAccessRequest>,
+    ) -> Result<Response<GrantGraphAccessResponse>, Status> {
+        self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
+        let req = request.into_inner();
+        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        let level = GraphAccessLevel::parse(&req.level).ok_or_else(|| {
+            Status::invalid_argument(format!(
+                "level must be read, propose, write or admin, got {:?}",
+                req.level
+            ))
+        })?;
+        if req.graph.is_empty() {
+            return Err(Status::invalid_argument(
+                "the default graph is open to everyone and takes no grants",
+            ));
+        }
+        let g = self.existing_graph(&req.graph)?;
+        require_level(&access, g, GraphAccessLevel::Admin, &req.graph)?;
+        self.store
+            .grant_graph_access(principal_node(&req.principal)?, g, level)
+            .map_err(storage_err_to_status)?;
+        self.rebuild_graph_access();
+        Ok(Response::new(GrantGraphAccessResponse {}))
+    }
+
+    async fn revoke_graph_access(
+        &self,
+        request: Request<RevokeGraphAccessRequest>,
+    ) -> Result<Response<RevokeGraphAccessResponse>, Status> {
+        self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
+        let req = request.into_inner();
+        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        let g = self.existing_graph(&req.graph)?;
+        require_level(&access, g, GraphAccessLevel::Admin, &req.graph)?;
+        let revoked = self
+            .store
+            .revoke_graph_access(principal_node(&req.principal)?, g)
+            .map_err(storage_err_to_status)?;
+        self.rebuild_graph_access();
+        Ok(Response::new(RevokeGraphAccessResponse { revoked }))
+    }
+
+    async fn get_graph_access(
+        &self,
+        request: Request<GetGraphAccessRequest>,
+    ) -> Result<Response<GetGraphAccessResponse>, Status> {
+        let meta_uid = meta_user_id(request.metadata());
+        let req = request.into_inner();
+        let caller_id = resolve_user_id(&req.user_id, &meta_uid);
+        let caller = self.caller_access(&caller_id);
+        let principal = principal_node(&req.principal)?;
+        let target = self
+            .caller_access(&principal.to_string())
+            .expect("a non-empty principal always has access");
+        let is_self = caller_id.is_empty() || principal_node(&caller_id)? == principal;
+        let graphs = self
+            .store
+            .list_graphs()
+            .into_iter()
+            .filter(|(_, iri)| iri != polargraph_storage::SYSTEM_GRAPH_IRI)
+            .filter(|(g, _)| {
+                is_self
+                    || caller
+                        .as_ref()
+                        .is_some_and(|c| c.allows(*g, GraphAccessLevel::Admin))
+            })
+            .filter_map(|(g, iri)| {
+                target.level(g).map(|level| GraphAccessEntry {
+                    graph: iri,
+                    level: level.as_str().to_string(),
+                })
+            })
+            .collect();
+        Ok(Response::new(GetGraphAccessResponse { graphs }))
     }
 
     async fn resolve_iris(
@@ -950,7 +1279,9 @@ impl PolarGraphService for PolarGraphServer {
         request: Request<InsertRequest>,
     ) -> Result<Response<InsertResponse>, Status> {
         self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
 
         if req.triples.is_empty() && req.edge_annotations.is_empty() && req.iris.is_empty() {
             return Err(Status::invalid_argument(
@@ -963,14 +1294,9 @@ impl PolarGraphService for PolarGraphServer {
             ));
         }
 
-        // Target graph (interned on first use; empty = default graph).
-        let graph = if req.graph.is_empty() {
-            polargraph_core::id::GraphId::DEFAULT
-        } else {
-            self.store
-                .intern_graph(&req.graph)
-                .map_err(storage_err_to_status)?
-        };
+        // Target graph (empty = default graph). Service calls intern it on
+        // first use; users need write access to an existing graph.
+        let graph = self.graph_for(&access, &req.graph, GraphAccessLevel::Write, true)?;
 
         // Convert proto triples → core triples (with each one's write mode),
         // collecting EdgeIds for relations.
@@ -993,6 +1319,10 @@ impl PolarGraphService for PolarGraphServer {
             all_triples.push(triple);
             modes.push(polargraph_storage::WriteMode::Auto);
         }
+        reject_user_acl_writes(
+            &access,
+            all_triples.iter().map(|t| t.predicate().0.as_str()),
+        )?;
 
         debug!(
             "insert: {} triple(s) ({} relation(s), {} annotation(s))",
@@ -1067,6 +1397,7 @@ impl PolarGraphService for PolarGraphServer {
         let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
         let user_id = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&user_id);
 
         if req.patterns.is_empty() {
             return Err(Status::invalid_argument(
@@ -1095,7 +1426,7 @@ impl PolarGraphService for PolarGraphServer {
             req.snapshot_ts
         };
         let mut snapshot = if tx_ts == 0 {
-            self.store.snapshot(self.store.begin().read_ts)
+            self.snapshot_for(self.store.begin().read_ts, &access)
         } else {
             self.store
                 .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
@@ -1130,7 +1461,7 @@ impl PolarGraphService for PolarGraphServer {
             })?;
             let mut guard = entry.lock().await;
             guard.last_used = Instant::now();
-            let tx_snapshot = self.store.snapshot(guard.tx.read_ts);
+            let tx_snapshot = self.snapshot_for(guard.tx.read_ts, &access);
             // Collect pending triples while we hold the lock.
             let pending: Vec<Triple> = guard.tx.pending_triples().to_vec();
             drop(guard);
@@ -1242,7 +1573,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<SearchVectorRequest>,
     ) -> Result<Response<SearchVectorResponse>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
 
         if req.query.is_empty() {
             return Err(Status::invalid_argument("query vector must not be empty"));
@@ -1265,9 +1598,13 @@ impl PolarGraphService for PolarGraphServer {
             req.query.len()
         );
 
-        let hits = self.store.search_vector_ef(space, &req.query, k, ef);
+        // A restricted caller over-fetches, then drops hits it can't see.
+        let fetch = if access.is_some() { k.max(ef) } else { k };
+        let hits = self.store.search_vector_ef(space, &req.query, fetch, ef);
         let results = hits
             .into_iter()
+            .filter(|(id, _)| self.node_visible(id, &access))
+            .take(k)
             .map(|(id, score)| VectorSearchResult {
                 node_id: Some(convert::node_id_to_proto(id)),
                 similarity: score,
@@ -1285,6 +1622,7 @@ impl PolarGraphService for PolarGraphServer {
         let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
         let user_id = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&user_id);
 
         if req.query.is_empty() {
             return Err(Status::invalid_argument("query vector must not be empty"));
@@ -1326,6 +1664,7 @@ impl PolarGraphService for PolarGraphServer {
                     .into_iter()
                     .filter(|(id, _)| type_allowed.contains(id))
                     .filter(|(id, _)| access_allowed.as_ref().map_or(true, |s| s.contains(id)))
+                    .filter(|(id, _)| self.node_visible(id, &access))
                     .take(k)
                     .map(|(id, score)| VectorSearchResult {
                         node_id: Some(convert::node_id_to_proto(id)),
@@ -1344,7 +1683,7 @@ impl PolarGraphService for PolarGraphServer {
                         .ok_or_else(|| Status::invalid_argument("from_node is required"))?,
                 )?;
 
-                let snapshot = self.store.snapshot(self.store.begin().read_ts);
+                let snapshot = self.snapshot_for(self.store.begin().read_ts, &access);
                 let deadline = self.make_deadline();
                 let reach_allowed: HashSet<NodeId> = if f.max_hops == 0 {
                     reachable_from(from, &f.predicate, &snapshot, deadline)
@@ -1364,6 +1703,7 @@ impl PolarGraphService for PolarGraphServer {
                     .into_iter()
                     .filter(|(id, _)| reach_allowed.contains(id))
                     .filter(|(id, _)| access_allowed.as_ref().map_or(true, |s| s.contains(id)))
+                    .filter(|(id, _)| self.node_visible(id, &access))
                     .take(k)
                     .map(|(id, score)| VectorSearchResult {
                         node_id: Some(convert::node_id_to_proto(id)),
@@ -1383,7 +1723,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<SearchVectorInSetRequest>,
     ) -> Result<Response<SearchVectorInSetResponse>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
 
         if req.query.is_empty() {
             return Err(Status::invalid_argument("query vector must not be empty"));
@@ -1412,6 +1754,7 @@ impl PolarGraphService for PolarGraphServer {
             .search_vector_in_set(space, &req.query, k, &allowed);
         let results = hits
             .into_iter()
+            .filter(|(id, _)| self.node_visible(id, &access))
             .map(|(id, score)| VectorSearchResult {
                 node_id: Some(convert::node_id_to_proto(id)),
                 similarity: score,
@@ -1520,7 +1863,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<ReachableRequest>,
     ) -> Result<Response<ReachableResponse>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
 
         let start = convert::node_id_from_proto(
             req.start
@@ -1532,7 +1877,7 @@ impl PolarGraphService for PolarGraphServer {
             return Err(Status::invalid_argument("predicate must not be empty"));
         }
 
-        let snapshot = self.store.snapshot(self.store.begin().read_ts);
+        let snapshot = self.snapshot_for(self.store.begin().read_ts, &access);
 
         debug!(
             "reachable: start={} predicate={} max_hops={}",
@@ -1908,6 +2253,7 @@ impl PolarGraphService for PolarGraphServer {
         let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
         let user_id = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&user_id);
 
         if req.query_vector.is_empty() {
             return Err(Status::invalid_argument("query_vector must not be empty"));
@@ -1948,6 +2294,7 @@ impl PolarGraphService for PolarGraphServer {
                     .search_vector_ef(space, &req.query_vector, ef, ef)
                     .into_iter()
                     .filter(|(id, _)| allowed.contains(id))
+                    .filter(|(id, _)| self.node_visible(id, &access))
                     .take(k)
                     .collect()
             }
@@ -1957,7 +2304,7 @@ impl PolarGraphService for PolarGraphServer {
                         .as_ref()
                         .ok_or_else(|| Status::invalid_argument("from_node is required"))?,
                 )?;
-                let snap = self.store.snapshot(self.store.begin().read_ts);
+                let snap = self.snapshot_for(self.store.begin().read_ts, &access);
                 let deadline = self.make_deadline();
                 let allowed: HashSet<NodeId> = if f.max_hops == 0 {
                     reachable_from(from, &f.predicate, &snap, deadline)
@@ -1969,9 +2316,17 @@ impl PolarGraphService for PolarGraphServer {
                     .search_vector_ef(space, &req.query_vector, ef, ef)
                     .into_iter()
                     .filter(|(id, _)| allowed.contains(id))
+                    .filter(|(id, _)| self.node_visible(id, &access))
                     .take(k)
                     .collect()
             }
+            None if access.is_some() => self
+                .store
+                .search_vector_ef(space, &req.query_vector, k.max(ef), ef)
+                .into_iter()
+                .filter(|(id, _)| self.node_visible(id, &access))
+                .take(k)
+                .collect(),
             None => self.store.search_vector(space, req.query_vector.clone(), k),
         };
 
@@ -1993,7 +2348,7 @@ impl PolarGraphService for PolarGraphServer {
 
         // Step 3: if no patterns, return seed bindings directly; otherwise join.
         let snapshot = if req.snapshot_ts == 0 {
-            self.store.snapshot(self.store.begin().read_ts)
+            self.snapshot_for(self.store.begin().read_ts, &access)
         } else {
             self.store
                 .snapshot(polargraph_core::temporal::Timestamp(req.snapshot_ts))
@@ -2311,6 +2666,7 @@ impl PolarGraphService for PolarGraphServer {
         let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
         let user_id = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&user_id);
 
         if req.cypher.is_empty() {
             return Err(Status::invalid_argument(
@@ -2377,7 +2733,7 @@ impl PolarGraphService for PolarGraphServer {
             };
             let mut guard = open_arc.lock().await;
             guard.last_used = Instant::now();
-            self.store.snapshot(guard.tx.read_ts)
+            self.snapshot_for(guard.tx.read_ts, &access)
         } else {
             let tx_ts = if req.as_of_tx_time != 0 {
                 req.as_of_tx_time
@@ -2385,7 +2741,7 @@ impl PolarGraphService for PolarGraphServer {
                 0
             };
             if tx_ts == 0 {
-                self.store.snapshot(self.store.begin().read_ts)
+                self.snapshot_for(self.store.begin().read_ts, &access)
             } else {
                 self.store
                     .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
@@ -2422,6 +2778,7 @@ impl PolarGraphService for PolarGraphServer {
                 .store
                 .search_vector_ef(space, &req.vector, ef, ef)
                 .into_iter()
+                .filter(|(id, _)| self.node_visible(id, &access))
                 .take(k)
                 .collect::<Vec<_>>();
 
@@ -2603,7 +2960,9 @@ impl PolarGraphService for PolarGraphServer {
         request: Request<CypherWriteRequest>,
     ) -> Result<Response<CypherWriteResponse>, Status> {
         self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
 
         if req.cypher.is_empty() {
             return Err(Status::invalid_argument(
@@ -2629,10 +2988,15 @@ impl PolarGraphService for PolarGraphServer {
                 Some(b.to_string())
             }
         };
-        let write_graph = graph_iri
-            .as_deref()
-            .map(|iri| self.target_graph(iri))
-            .transpose()?;
+        // A user writes into a graph it can write — the default graph when
+        // none is named, in which case MERGE / DELETE also stay there.
+        let write_graph = match (&access, graph_iri.as_deref()) {
+            (None, iri) => iri.map(|iri| self.target_graph(iri)).transpose()?,
+            (Some(_), iri) => {
+                Some(self.graph_for(&access, iri.unwrap_or(""), GraphAccessLevel::Write, false)?)
+            }
+        };
+        reject_user_acl_writes(&access, write_predicates(&compiled.writes))?;
 
         let map_write_err = |e: polargraph_query::cypher::CypherWriteError| match e {
             polargraph_query::cypher::CypherWriteError::UnboundVariable(v) => {
@@ -2651,7 +3015,7 @@ impl PolarGraphService for PolarGraphServer {
         // Returns the WriteResult without committing.
         let execute_writes =
             |tx: &mut Transaction| -> Result<polargraph_query::cypher::WriteResult, Status> {
-                let snapshot = self.store.snapshot(tx.read_ts);
+                let snapshot = self.snapshot_for(tx.read_ts, &access);
                 if let Some(ref mq) = compiled.match_query {
                     let raw = execute_query(&mq.query, &snapshot, None, None)
                         .map_err(|e| Status::internal(format!("match query error: {e}")))?;
@@ -2824,7 +3188,10 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<QueryRequest>,
     ) -> Result<Response<Self::QueryStreamStream>, Status> {
+        let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let user_id = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&user_id);
 
         if req.patterns.is_empty() {
             return Err(Status::invalid_argument(
@@ -2848,7 +3215,7 @@ impl PolarGraphService for PolarGraphServer {
             req.snapshot_ts
         };
         let mut snapshot = if tx_ts == 0 {
-            self.store.snapshot(self.store.begin().read_ts)
+            self.snapshot_for(self.store.begin().read_ts, &access)
         } else {
             self.store
                 .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
@@ -2899,7 +3266,10 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<CypherQueryRequest>,
     ) -> Result<Response<Self::CypherQueryStreamStream>, Status> {
+        let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let user_id = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&user_id);
 
         if req.cypher.is_empty() {
             return Err(Status::invalid_argument(
@@ -2950,7 +3320,7 @@ impl PolarGraphService for PolarGraphServer {
             0
         };
         let mut snapshot = if tx_ts == 0 {
-            self.store.snapshot(self.store.begin().read_ts)
+            self.snapshot_for(self.store.begin().read_ts, &access)
         } else {
             self.store
                 .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
@@ -2984,6 +3354,7 @@ impl PolarGraphService for PolarGraphServer {
                 .store
                 .search_vector_ef(space, &req.vector, ef, ef)
                 .into_iter()
+                .filter(|(id, _)| self.node_visible(id, &access))
                 .take(k)
                 .collect::<Vec<_>>();
             if ann_hits.is_empty() {
@@ -3244,7 +3615,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<GetEdgeAnnotationsRequest>,
     ) -> Result<Response<GetEdgeAnnotationsResponse>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
         let edge_bytes: [u8; 16] = req
             .edge_id
             .as_slice()
@@ -3252,10 +3625,9 @@ impl PolarGraphService for PolarGraphServer {
             .map_err(|_| Status::invalid_argument("edge_id must be exactly 16 bytes"))?;
         let edge = polargraph_core::id::EdgeId(uuid::Uuid::from_bytes(edge_bytes));
 
-        let snapshot_ts = self.store.begin().read_ts;
         let annotations = self
-            .store
-            .scan_edge_annotations(edge, snapshot_ts)
+            .snapshot_for(self.store.begin().read_ts, &access)
+            .scan_edge_annotations(edge)
             .map_err(storage_err_to_status)?;
 
         let proto_annotations = annotations
@@ -3272,7 +3644,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<GetEdgeIdsByTripleRequest>,
     ) -> Result<Response<GetEdgeIdsByTripleResponse>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
 
         let subj_bytes: [u8; 16] = req
             .subject_id
@@ -3305,7 +3679,13 @@ impl PolarGraphService for PolarGraphServer {
         // all MVCC versions. The CF value bytes contain the edge_id.
         let edge_ids = self
             .store
-            .scan_spo_for_edge_ids(subject, pred_id, object, snapshot_ts)
+            .scan_spo_for_edge_ids_in(
+                subject,
+                pred_id,
+                object,
+                snapshot_ts,
+                access.as_ref().map(|a| a.readable()).as_deref(),
+            )
             .map_err(storage_err_to_status)?
             .into_iter()
             .map(|eid: EdgeId| eid.as_bytes().to_vec())
@@ -3412,6 +3792,7 @@ impl PolarGraphService for PolarGraphServer {
         request: Request<GrantAccessRequest>,
     ) -> Result<Response<GrantAccessResponse>, Status> {
         self.check_not_replica()?;
+        require_service(&self.caller_access(&meta_user_id(request.metadata())))?;
         let req = request.into_inner();
 
         let group_id = NodeId(
@@ -3476,6 +3857,7 @@ impl PolarGraphService for PolarGraphServer {
         request: Request<RevokeAccessRequest>,
     ) -> Result<Response<RevokeAccessResponse>, Status> {
         self.check_not_replica()?;
+        require_service(&self.caller_access(&meta_user_id(request.metadata())))?;
         let req = request.into_inner();
 
         let group_id = NodeId(
@@ -3584,6 +3966,7 @@ impl PolarGraphService for PolarGraphServer {
         request: Request<AddUserToGroupRequest>,
     ) -> Result<Response<AddUserToGroupResponse>, Status> {
         self.check_not_replica()?;
+        require_service(&self.caller_access(&meta_user_id(request.metadata())))?;
         let req = request.into_inner();
 
         let user_id = NodeId(
@@ -3682,7 +4065,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<GetPropertyHistoryRequest>,
     ) -> Result<Response<GetPropertyHistoryResponse>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
         let subject_bytes: [u8; 16] = req
             .subject_id
             .as_slice()
@@ -3692,7 +4077,12 @@ impl PolarGraphService for PolarGraphServer {
 
         let versions = self
             .store
-            .scan_property_history(subject, &req.predicate, req.limit)
+            .scan_property_history_in(
+                subject,
+                &req.predicate,
+                req.limit,
+                access.as_ref().map(|a| a.readable()).as_deref(),
+            )
             .map_err(storage_err_to_status)?;
 
         let proto_versions = versions
@@ -3717,7 +4107,10 @@ impl PolarGraphService for PolarGraphServer {
         request: Request<DeleteTriplesRequest>,
     ) -> Result<Response<DeleteTriplesResponse>, Status> {
         self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        reject_user_acl_writes(&access, [req.predicate.as_str()])?;
 
         let vt_end_ts = if req.vt_end != 0 {
             polargraph_core::temporal::Timestamp(req.vt_end)
@@ -3746,7 +4139,24 @@ impl PolarGraphService for PolarGraphServer {
                 "object_id and value are mutually exclusive",
             ));
         }
-        let scope = self.delete_scope(req.graph.as_ref())?;
+        let mut scope = self.delete_scope(req.graph.as_ref())?;
+        // A user only closes triples in graphs it can write.
+        if let Some(a) = &access {
+            let writable = a.graphs_at_least(GraphAccessLevel::Write);
+            scope = match scope {
+                polargraph_storage::GraphScope::One(g) => {
+                    require_level(&access, g, GraphAccessLevel::Write, &g.to_string())?;
+                    polargraph_storage::GraphScope::One(g)
+                }
+                other => polargraph_storage::GraphScope::set(
+                    writable
+                        .iter()
+                        .map(polargraph_core::id::GraphId)
+                        .filter(|g| other.admits(*g))
+                        .collect(),
+                ),
+            };
+        }
         let snapshot = self.store.snapshot(self.store.begin().read_ts);
         let mut deleted_count: u64 = 0;
 

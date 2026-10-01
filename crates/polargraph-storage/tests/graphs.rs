@@ -156,3 +156,94 @@ fn copy_add_and_move_graphs() {
     };
     assert_eq!(edge_of(dst), edge_of(archive));
 }
+
+#[test]
+fn readable_graphs_restrict_every_scan() {
+    use polargraph_storage::GraphScope;
+    use std::sync::Arc;
+
+    let (store, _dir) = open();
+    let open_g = store.create_graph("urn:g:open", &[]).unwrap();
+    let secret = store.create_graph("urn:g:secret", &[]).unwrap();
+    let (a, b, c) = (NodeId::new(), NodeId::new(), NodeId::new());
+    fill(&store, GraphId::DEFAULT, vec![rel(a, "knows", b)]);
+    fill(&store, open_g, vec![prop(a, "title", "public report")]);
+    fill(
+        &store,
+        secret,
+        vec![rel(a, "knows", c), prop(a, "title", "secret report")],
+    );
+
+    let mut readable = roaring::RoaringBitmap::new();
+    readable.insert(GraphId::DEFAULT.0);
+    readable.insert(open_g.0);
+    let snap = store
+        .snapshot(Timestamp(store.oracle_ts()))
+        .with_readable_graphs(Arc::new(readable));
+
+    assert_eq!(snap.scan_by_subject(&a).unwrap().len(), 2, "union read");
+    assert_eq!(snap.scan_by_predicate("knows").unwrap().len(), 1);
+    assert!(snap.scan_by_object(&c).unwrap().is_empty());
+    assert!(snap.scan_graph(secret).unwrap().is_empty());
+    assert!(snap
+        .scan_scoped(Some(&a), None, None, &GraphScope::Named)
+        .unwrap()
+        .iter()
+        .all(|(g, _)| *g == open_g));
+    assert_eq!(snap.text_search("title", "report").unwrap(), vec![a]);
+    assert!(snap.text_search("title", "secret").unwrap().is_empty());
+    assert!(snap.can_read_graph(open_g) && !snap.can_read_graph(secret));
+
+    // An unrestricted snapshot still sees everything.
+    let all = store.snapshot(Timestamp(store.oracle_ts()));
+    assert_eq!(all.scan_by_subject(&a).unwrap().len(), 4);
+}
+
+#[test]
+fn graph_grants_and_access_index() {
+    use polargraph_core::schema::{GraphAccessLevel as L, BUILTIN_MEMBER_OF_PRED};
+    use polargraph_storage::GraphAccessIndex;
+
+    let (store, _dir) = open();
+    let g1 = store.create_graph("urn:g:1", &[]).unwrap();
+    let g2 = store.create_graph("urn:g:2", &[]).unwrap();
+    let (alice, bob, team) = (NodeId::new(), NodeId::new(), NodeId::new());
+    fill(
+        &store,
+        GraphId::DEFAULT,
+        vec![rel(bob, BUILTIN_MEMBER_OF_PRED, team)],
+    );
+
+    store.grant_graph_access(alice, g1, L::Read).unwrap();
+    store.grant_graph_access(alice, g1, L::Write).unwrap(); // re-grant replaces
+    store.grant_graph_access(team, g2, L::Admin).unwrap();
+    assert!(store
+        .grant_graph_access(alice, GraphId::DEFAULT, L::Read)
+        .is_err());
+    assert_eq!(store.graph_grants().unwrap().len(), 2);
+
+    let index = GraphAccessIndex::build(&store).unwrap();
+    let a = index.for_user(&alice);
+    assert_eq!(a.level(g1), Some(L::Write));
+    assert!(a.allows(g1, L::Propose) && !a.allows(g1, L::Admin));
+    assert_eq!(a.level(g2), None);
+    assert_eq!(
+        a.level(GraphId::DEFAULT),
+        Some(L::Write),
+        "default graph is open"
+    );
+    assert!(a.readable().contains(g1.0) && !a.readable().contains(g2.0));
+
+    let b = index.for_user(&bob);
+    assert_eq!(b.level(g2), Some(L::Admin), "inherited from the group");
+
+    let stranger = index.for_user(&NodeId::new());
+    assert_eq!(stranger.readable().len(), 1, "default graph only");
+
+    assert!(store.revoke_graph_access(alice, g1).unwrap());
+    assert!(!store.revoke_graph_access(alice, g1).unwrap());
+    let index = GraphAccessIndex::build(&store).unwrap();
+    assert_eq!(index.for_user(&alice).level(g1), None);
+    // Grants live in the system graph, not the data graphs.
+    assert_eq!(live(&store, g1), 0);
+}

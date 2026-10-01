@@ -7017,6 +7017,7 @@ async fn graph_management_rpcs() {
     };
     let created = svc
         .create_graph(Request::new(CreateGraphRequest {
+            user_id: String::new(),
             iri: "urn:g:p1".into(),
             metadata: vec![status("Proposed")],
         }))
@@ -7072,6 +7073,7 @@ async fn graph_management_rpcs() {
 
     let copied = svc
         .copy_graph(Request::new(CopyGraphRequest {
+            user_id: String::new(),
             source: "urn:g:p1".into(),
             target: "urn:g:approved".into(),
             clear_target: true,
@@ -7084,6 +7086,7 @@ async fn graph_management_rpcs() {
     assert_eq!(stats("urn:g:approved").await, 2);
 
     svc.move_graph(Request::new(MoveGraphRequest {
+        user_id: String::new(),
         source: "urn:g:approved".into(),
         target: "urn:g:archive".into(),
     }))
@@ -7094,6 +7097,7 @@ async fn graph_management_rpcs() {
 
     let closed = svc
         .drop_graph(Request::new(DropGraphRequest {
+            user_id: String::new(),
             iri: "urn:g:p1".into(),
         }))
         .await
@@ -7312,4 +7316,465 @@ async fn cypher_use_graph_and_datasets() {
         .unwrap();
     assert_eq!(count("MATCH (a:Person) RETURN a", vec![]).await, 2);
     assert_eq!(count("MATCH (a:Person) RETURN a", vec!["urn:g:1"]).await, 0);
+}
+
+#[tokio::test]
+async fn graph_acl_restricts_reads() {
+    use polargraph_server::proto::{
+        graph_term::Kind as GraphKind, GetGraphAccessRequest, GrantGraphAccessRequest, GraphTerm,
+        RevokeGraphAccessRequest, SearchVectorRequest,
+    };
+    use tokio_stream::StreamExt;
+
+    let (svc, _dir) = open();
+    let (_, s) = new_node();
+    let (_, pub_o) = new_node();
+    let (_, g1_o) = new_node();
+    let (_, g2_o) = new_node();
+    let (alice, _) = new_node();
+    for (graph, o) in [("", &pub_o), ("urn:g:1", &g1_o), ("urn:g:2", &g2_o)] {
+        svc.insert(Request::new(InsertRequest {
+            triples: vec![rel(s.clone(), "knows", o.clone())],
+            graph: graph.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    }
+    svc.insert_vector(Request::new(InsertVectorRequest {
+        node_id: Some(g2_o.clone()),
+        vector: vec![1.0, 0.0],
+        space: String::new(),
+    }))
+    .await
+    .unwrap();
+
+    let grant = |principal: String, graph: &'static str, level: &'static str, caller: String| {
+        let svc = &svc;
+        async move {
+            svc.grant_graph_access(Request::new(GrantGraphAccessRequest {
+                principal,
+                graph: graph.into(),
+                level: level.into(),
+                user_id: caller,
+            }))
+            .await
+        }
+    };
+    grant(alice.to_string(), "urn:g:1", "read", String::new())
+        .await
+        .unwrap();
+    // Alice isn't an admin of g:2, so she can't grant herself access.
+    let err = grant(alice.to_string(), "urn:g:2", "read", alice.to_string())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+    let query = |user: String, graph: Option<GraphKind>| {
+        let svc = &svc;
+        let s = s.clone();
+        async move {
+            let mut p = pattern(
+                Term {
+                    kind: Some(TermKind::Bound(s)),
+                },
+                "knows",
+                Term {
+                    kind: Some(TermKind::Var("o".into())),
+                },
+            );
+            p.graph = graph.map(|k| GraphTerm { kind: Some(k) });
+            svc.query(Request::new(QueryRequest {
+                patterns: vec![p],
+                user_id: user,
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .bindings
+            .len()
+        }
+    };
+    assert_eq!(
+        query(String::new(), None).await,
+        3,
+        "service call: everything"
+    );
+    assert_eq!(query(alice.to_string(), None).await, 2, "default + g:1");
+    assert_eq!(
+        query(alice.to_string(), Some(GraphKind::Var("g".into()))).await,
+        1
+    );
+    assert_eq!(
+        query(alice.to_string(), Some(GraphKind::Iri("urn:g:2".into()))).await,
+        0
+    );
+    assert_eq!(
+        query(uuid::Uuid::now_v7().to_string(), None).await,
+        1,
+        "no grants: default only"
+    );
+
+    // Streaming and Cypher go through the same restricted snapshot.
+    let mut stream = svc
+        .query_stream(Request::new(QueryRequest {
+            patterns: vec![pattern(
+                Term {
+                    kind: Some(TermKind::Var("s".into())),
+                },
+                "knows",
+                Term {
+                    kind: Some(TermKind::Var("o".into())),
+                },
+            )],
+            user_id: alice.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut streamed = 0;
+    while let Some(chunk) = stream.next().await {
+        streamed += chunk.unwrap().results.len();
+    }
+    assert_eq!(streamed, 2);
+    let rows = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (a)-[:knows]->(b) RETURN a, b".into(),
+            user_id: alice.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .rows;
+    assert_eq!(rows.len(), 2);
+
+    // Vector hits on nodes only visible in g:2 are dropped.
+    let search = |user: String| {
+        let svc = &svc;
+        async move {
+            let mut req = Request::new(SearchVectorRequest {
+                query: vec![1.0, 0.0],
+                k: 5,
+                ..Default::default()
+            });
+            if !user.is_empty() {
+                req.metadata_mut()
+                    .insert("x-polargraph-user-id", user.parse().unwrap());
+            }
+            svc.search_vector(req)
+                .await
+                .unwrap()
+                .into_inner()
+                .results
+                .len()
+        }
+    };
+    assert_eq!(search(String::new()).await, 1);
+    assert_eq!(search(alice.to_string()).await, 0);
+
+    let access = svc
+        .get_graph_access(Request::new(GetGraphAccessRequest {
+            principal: alice.to_string(),
+            user_id: String::new(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .graphs;
+    assert_eq!(access.len(), 1);
+    assert_eq!(
+        (access[0].graph.as_str(), access[0].level.as_str()),
+        ("urn:g:1", "read")
+    );
+
+    let revoked = svc
+        .revoke_graph_access(Request::new(RevokeGraphAccessRequest {
+            principal: alice.to_string(),
+            graph: "urn:g:1".into(),
+            user_id: String::new(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .revoked;
+    assert!(revoked);
+    assert_eq!(query(alice.to_string(), None).await, 1);
+}
+
+#[tokio::test]
+async fn graph_acl_restricts_graph_rpcs() {
+    use polargraph_server::proto::{
+        ExportGraphRequest, GetEdgeIdsByTripleRequest, GetPropertyHistoryRequest,
+        GrantGraphAccessRequest, GraphStatsRequest, ListGraphsRequest,
+    };
+    use tokio_stream::StreamExt;
+
+    let (svc, _dir) = open();
+    let (_, s) = new_node();
+    let (_, o) = new_node();
+    let (alice, _) = new_node();
+    for graph in ["urn:g:1", "urn:g:2"] {
+        svc.insert(Request::new(InsertRequest {
+            triples: vec![
+                rel(s.clone(), "knows", o.clone()),
+                text_prop(s.clone(), "title", graph),
+            ],
+            graph: graph.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    }
+    svc.grant_graph_access(Request::new(GrantGraphAccessRequest {
+        principal: alice.to_string(),
+        graph: "urn:g:1".into(),
+        level: "read".into(),
+        user_id: String::new(),
+    }))
+    .await
+    .unwrap();
+    fn as_user<T>(mut req: Request<T>, user: &str) -> Request<T> {
+        req.metadata_mut()
+            .insert("x-polargraph-user-id", user.parse().unwrap());
+        req
+    }
+    let alice_id = alice.to_string();
+    let as_alice = |req| as_user(req, &alice_id);
+
+    let graphs = svc
+        .list_graphs(as_user(
+            Request::new(ListGraphsRequest::default()),
+            &alice_id,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .graphs;
+    assert_eq!(graphs.len(), 1);
+    assert_eq!(graphs[0].iri, "urn:g:1");
+
+    let err = svc
+        .graph_stats(as_user(
+            Request::new(GraphStatsRequest {
+                iri: "urn:g:2".into(),
+            }),
+            &alice_id,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+    let mut stream = svc
+        .export_graph(as_user(
+            Request::new(ExportGraphRequest {
+                iri: String::new(),
+                all_graphs: true,
+            }),
+            &alice_id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut graphs_seen = std::collections::BTreeSet::new();
+    while let Some(chunk) = stream.next().await {
+        graphs_seen.extend(chunk.unwrap().quads.into_iter().map(|q| q.graph));
+    }
+    assert_eq!(graphs_seen.into_iter().collect::<Vec<_>>(), vec!["urn:g:1"]);
+
+    let history = svc
+        .get_property_history(as_alice(Request::new(GetPropertyHistoryRequest {
+            subject_id: s.bytes.clone(),
+            predicate: "title".into(),
+            limit: 0,
+        })))
+        .await
+        .unwrap()
+        .into_inner()
+        .versions;
+    assert_eq!(history.len(), 1);
+    assert!(history[0].value_json.contains("urn:g:1"));
+
+    let edge_ids = |req: Request<GetEdgeIdsByTripleRequest>| {
+        let svc = &svc;
+        async move {
+            svc.get_edge_ids_by_triple(req)
+                .await
+                .unwrap()
+                .into_inner()
+                .edge_ids
+                .len()
+        }
+    };
+    let req = || GetEdgeIdsByTripleRequest {
+        subject_id: s.bytes.clone(),
+        predicate: "knows".into(),
+        object_id: o.bytes.clone(),
+    };
+    // One edge per insert (graph); a user only sees edges in readable graphs.
+    assert_eq!(edge_ids(Request::new(req())).await, 2);
+    assert_eq!(edge_ids(as_user(Request::new(req()), &alice_id)).await, 1);
+    let stranger = {
+        let mut r = Request::new(req());
+        r.metadata_mut().insert(
+            "x-polargraph-user-id",
+            uuid::Uuid::now_v7().to_string().parse().unwrap(),
+        );
+        r
+    };
+    assert_eq!(edge_ids(stranger).await, 0);
+}
+
+#[tokio::test]
+async fn graph_acl_checks_writes() {
+    use polargraph_server::proto::{
+        CreateGraphRequest, DeleteTriplesRequest, DropGraphRequest, GrantGraphAccessRequest,
+        GraphStatsRequest,
+    };
+
+    let (svc, _dir) = open();
+    let (_, s) = new_node();
+    let (_, o) = new_node();
+    let (_, group) = new_node();
+    let alice = uuid::Uuid::now_v7().to_string();
+    for graph in ["urn:g:1", "urn:g:2"] {
+        svc.insert(Request::new(InsertRequest {
+            triples: vec![rel(s.clone(), "knows", o.clone())],
+            graph: graph.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    }
+    for (graph, level) in [("urn:g:1", "write"), ("urn:g:2", "read")] {
+        svc.grant_graph_access(Request::new(GrantGraphAccessRequest {
+            principal: alice.clone(),
+            graph: graph.into(),
+            level: level.into(),
+            user_id: String::new(),
+        }))
+        .await
+        .unwrap();
+    }
+
+    let insert = |graph: &'static str, triple: Triple| {
+        let svc = &svc;
+        let alice = alice.clone();
+        async move {
+            svc.insert(Request::new(InsertRequest {
+                triples: vec![triple],
+                graph: graph.into(),
+                user_id: alice,
+                ..Default::default()
+            }))
+            .await
+            .map(|_| ())
+            .map_err(|e| e.code())
+        }
+    };
+    let t = || rel(s.clone(), "likes", o.clone());
+    assert_eq!(insert("urn:g:1", t()).await, Ok(()));
+    assert_eq!(insert("", t()).await, Ok(()), "default graph is open");
+    assert_eq!(
+        insert("urn:g:2", t()).await,
+        Err(tonic::Code::PermissionDenied)
+    );
+    assert_eq!(
+        insert("urn:g:new", t()).await,
+        Err(tonic::Code::PermissionDenied)
+    );
+    assert_eq!(
+        insert("", rel(s.clone(), "MEMBER_OF", group.clone())).await,
+        Err(tonic::Code::PermissionDenied),
+        "users can't write access-control triples"
+    );
+    let stats = svc
+        .graph_stats(Request::new(GraphStatsRequest {
+            iri: "urn:g:new".into(),
+        }))
+        .await;
+    assert_eq!(
+        stats.unwrap_err().code(),
+        tonic::Code::NotFound,
+        "a denied insert doesn't create the graph"
+    );
+
+    // Creating a graph makes the creator its admin.
+    svc.create_graph(Request::new(CreateGraphRequest {
+        iri: "urn:g:mine".into(),
+        metadata: vec![],
+        user_id: alice.clone(),
+    }))
+    .await
+    .unwrap();
+    assert_eq!(insert("urn:g:mine", t()).await, Ok(()));
+    let drop = |iri: &'static str| {
+        let svc = &svc;
+        let alice = alice.clone();
+        async move {
+            svc.drop_graph(Request::new(DropGraphRequest {
+                iri: iri.into(),
+                user_id: alice,
+            }))
+            .await
+            .map(|_| ())
+            .map_err(|e| e.code())
+        }
+    };
+    assert_eq!(
+        drop("urn:g:1").await,
+        Err(tonic::Code::PermissionDenied),
+        "write < admin"
+    );
+    assert_eq!(drop("urn:g:mine").await, Ok(()));
+
+    // Cypher writes need write access to the target graph.
+    let cypher = |q: &'static str| {
+        let svc = &svc;
+        let alice = alice.clone();
+        async move {
+            svc.cypher_write(Request::new(CypherWriteRequest {
+                cypher: q.into(),
+                user_id: alice,
+                ..Default::default()
+            }))
+            .await
+            .map(|_| ())
+            .map_err(|e| e.code())
+        }
+    };
+    assert_eq!(cypher("USE GRAPH <urn:g:1> CREATE (a:Note)").await, Ok(()));
+    assert_eq!(
+        cypher("USE GRAPH <urn:g:2> CREATE (a:Note)").await,
+        Err(tonic::Code::PermissionDenied)
+    );
+    assert_eq!(
+        cypher("CREATE (a:Group {HAS_ACCESS_TYPE: \"Secret\"})").await,
+        Err(tonic::Code::PermissionDenied)
+    );
+
+    // DeleteTriples without a graph only closes copies in writable graphs.
+    let deleted = svc
+        .delete_triples(Request::new(DeleteTriplesRequest {
+            subject_ids: vec![s.bytes.clone()],
+            predicate: "knows".into(),
+            user_id: alice.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .deleted_count;
+    assert_eq!(deleted, 1, "g:1 only; g:2 is read-only for alice");
+
+    // Node-level ACL management is service-only.
+    let mut req = Request::new(polargraph_server::proto::AddUserToGroupRequest::default());
+    req.metadata_mut()
+        .insert("x-polargraph-user-id", alice.parse().unwrap());
+    assert_eq!(
+        svc.add_user_to_group(req).await.unwrap_err().code(),
+        tonic::Code::PermissionDenied
+    );
 }

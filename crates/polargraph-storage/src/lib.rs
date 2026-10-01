@@ -18,6 +18,7 @@ pub mod cf;
 pub mod codec;
 pub mod compaction;
 pub mod error;
+pub mod graph_acl;
 pub mod graphs;
 pub mod hnsw;
 pub mod keys;
@@ -33,6 +34,7 @@ pub mod wal_stream;
 pub use backup::BackupManager;
 pub use compaction::{CompactionManager, RetentionStats};
 pub use error::StorageError;
+pub use graph_acl::{GraphAccessIndex, GraphGrant, UserGraphAccess};
 pub use graphs::{GraphStats, SYSTEM_GRAPH_IRI};
 pub use migrate_v3::MigrationReport;
 pub use migrations::{AppliedMigration, MigrationRunner, MigrationStats, MIGRATIONS};
@@ -40,6 +42,8 @@ pub use mvcc::{ConflictError, Snapshot, Transaction, WriteMode};
 pub use owl_rl::MaterializationStats;
 pub use polargraph_core::schema::{RetentionPolicy, VectorSpaceDef};
 pub use registry::{EdgeTypeRegistry, NodeTypeRegistry, ValidationError, SCHEMA_REGISTRY_NODE};
+/// Bitmap of graph ids, used for readable-graph restrictions.
+pub use roaring::RoaringBitmap;
 pub use sst_import::{ImportStats, SstImporter};
 pub use store::{
     EdgeAnnotation, EdgeAnnotationValue, GraphScope, StoreMode, TripleStore,
