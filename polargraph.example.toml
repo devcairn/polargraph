@@ -52,6 +52,11 @@
 # Equivalent to --retention-vt-lookback-secs / POLARGRAPH_RETENTION_VT_LOOKBACK_SECS
 # retention_vt_lookback_secs = 604800   # 7 days
 
+# Change-feed (Subscribe) history kept for resuming subscribers; pruned hourly
+# on the primary.  0 keeps it forever.  Default 604800 (7 days).
+# Equivalent to --change-retention-secs / POLARGRAPH_CHANGE_RETENTION_SECS
+# change_retention_secs = 604800
+
 # Scheduled (periodic) retention — fires a full retention pass in the background
 # at the configured interval.  Requires retention_tx_age_secs to be set.
 [storage.retention_schedule]

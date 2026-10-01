@@ -21,7 +21,7 @@ use polargraph_core::{
     value::Value,
 };
 
-use crate::{error::StorageError, mvcc::WriteMode, store::TripleStore};
+use crate::{changes::GraphOp, error::StorageError, mvcc::WriteMode, store::TripleStore};
 
 /// The system graph holding graph metadata.
 pub const SYSTEM_GRAPH_IRI: &str = "urn:pg:graph:meta";
@@ -54,7 +54,25 @@ impl TripleStore {
         iri: &str,
         metadata: &[(String, Value)],
     ) -> Result<GraphId, StorageError> {
+        self.create_graph_by(iri, metadata, "")
+    }
+
+    /// [`Self::create_graph`], recording `author` in the change log (a new
+    /// graph is logged as [`GraphOp::Created`]).
+    pub fn create_graph_by(
+        &self,
+        iri: &str,
+        metadata: &[(String, Value)],
+        author: &str,
+    ) -> Result<GraphId, StorageError> {
+        let is_new = self.graph_id(iri).is_none();
         let g = self.intern_graph(iri)?;
+        if is_new {
+            let mut tx = self.begin();
+            tx.set_author(author);
+            tx.record_graph_op(GraphOp::Created(g));
+            tx.commit()?;
+        }
         if !metadata.is_empty() {
             self.set_graph_metadata(g, metadata)?;
         }
@@ -121,13 +139,30 @@ impl TripleStore {
     /// Close every live quad of `g` at `now` (bitemporal drop). Returns the
     /// number of quads closed. The graph id and its metadata remain.
     pub fn drop_graph(&self, g: GraphId) -> Result<usize, StorageError> {
+        self.drop_graph_by(g, "")
+    }
+
+    /// [`Self::drop_graph`], recording `author`; the last commit carries
+    /// [`GraphOp::Dropped`].
+    pub fn drop_graph_by(&self, g: GraphId, author: &str) -> Result<usize, StorageError> {
         let now = Timestamp::now();
         let live = self.live_quads(g)?;
-        for chunk in live.chunks(GRAPH_OP_CHUNK) {
+        let chunks: Vec<&[Triple]> = live.chunks(GRAPH_OP_CHUNK).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
             let mut tx = self.begin();
-            for t in chunk {
+            tx.set_author(author);
+            for t in chunk.iter() {
                 tx.insert_in(close_at(t.clone(), now), g, WriteMode::Add);
             }
+            if i + 1 == chunks.len() {
+                tx.record_graph_op(GraphOp::Dropped(g));
+            }
+            tx.commit()?;
+        }
+        if chunks.is_empty() {
+            let mut tx = self.begin();
+            tx.set_author(author);
+            tx.record_graph_op(GraphOp::Dropped(g));
             tx.commit()?;
         }
         Ok(live.len())
@@ -143,22 +178,45 @@ impl TripleStore {
         target: GraphId,
         clear_target: bool,
     ) -> Result<usize, StorageError> {
+        self.copy_graph_by(source, target, clear_target, "")
+    }
+
+    /// [`Self::copy_graph`], recording `author`; the last commit carries
+    /// [`GraphOp::Copied`] (a cleared target also logs `Dropped`).
+    pub fn copy_graph_by(
+        &self,
+        source: GraphId,
+        target: GraphId,
+        clear_target: bool,
+        author: &str,
+    ) -> Result<usize, StorageError> {
         if source == target {
             return Ok(0);
         }
         if clear_target {
-            self.drop_graph(target)?;
+            self.drop_graph_by(target, author)?;
         }
         let live = self.live_quads(source)?;
         let chunked = live.len() > GRAPH_OP_CHUNK;
         if chunked && target != GraphId::DEFAULT {
             self.set_graph_metadata(target, &[(COPY_IN_PROGRESS_PRED.into(), Value::Bool(true))])?;
         }
-        for chunk in live.chunks(GRAPH_OP_CHUNK) {
+        let chunks: Vec<&[Triple]> = live.chunks(GRAPH_OP_CHUNK).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
             let mut tx = self.begin();
-            for t in chunk {
+            tx.set_author(author);
+            for t in chunk.iter() {
                 tx.insert_in(t.clone(), target, WriteMode::Add);
             }
+            if i + 1 == chunks.len() {
+                tx.record_graph_op(GraphOp::Copied { source, target });
+            }
+            tx.commit()?;
+        }
+        if chunks.is_empty() {
+            let mut tx = self.begin();
+            tx.set_author(author);
+            tx.record_graph_op(GraphOp::Copied { source, target });
             tx.commit()?;
         }
         if chunked && target != GraphId::DEFAULT {
@@ -170,11 +228,22 @@ impl TripleStore {
     /// Copy `source` into `target` (replacing it), then drop `source`
     /// (SPARQL `MOVE`). Returns the number of quads moved.
     pub fn move_graph(&self, source: GraphId, target: GraphId) -> Result<usize, StorageError> {
+        self.move_graph_by(source, target, "")
+    }
+
+    /// [`Self::move_graph`], recording `author` (logged as `Dropped(target)`,
+    /// `Copied`, `Dropped(source)`).
+    pub fn move_graph_by(
+        &self,
+        source: GraphId,
+        target: GraphId,
+        author: &str,
+    ) -> Result<usize, StorageError> {
         if source == target {
             return Ok(0);
         }
-        let n = self.copy_graph(source, target, true)?;
-        self.drop_graph(source)?;
+        let n = self.copy_graph_by(source, target, true, author)?;
+        self.drop_graph_by(source, author)?;
         Ok(n)
     }
 

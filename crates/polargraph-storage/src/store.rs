@@ -185,6 +185,8 @@ struct Inner {
     data_dir: PathBuf,
     /// Whether this is a primary or replica instance.
     mode: StoreMode,
+    /// Latest commit (or replicated batch) time, for change-feed subscribers.
+    commits: tokio::sync::watch::Sender<Timestamp>,
 }
 
 // META key for persisting the last replicated WAL sequence number.
@@ -361,7 +363,7 @@ impl TripleStore {
             "TripleStore opened"
         );
 
-        Ok(Self {
+        let store = Self {
             inner: Arc::new(Inner {
                 db,
                 oracle,
@@ -375,9 +377,30 @@ impl TripleStore {
                 inline_value_max_bytes: AtomicUsize::new(DEFAULT_INLINE_VALUE_MAX_BYTES),
                 hnsw_spaces: RwLock::new(hnsw_spaces),
                 data_dir: path.to_path_buf(),
+                commits: tokio::sync::watch::channel(Timestamp(oracle_ts)).0,
                 mode,
             }),
-        })
+        };
+        if !store.is_replica() {
+            store.init_changes_floor()?;
+        }
+        Ok(store)
+    }
+
+    /// Watch the latest commit time — changes whenever a commit lands (or a
+    /// replicated batch is applied). Used by `Subscribe` to wake up.
+    pub fn commit_watch(&self) -> tokio::sync::watch::Receiver<Timestamp> {
+        self.inner.commits.subscribe()
+    }
+
+    pub(crate) fn notify_commit(&self, ts: Timestamp) {
+        self.inner.commits.send_if_modified(|cur| {
+            let newer = ts > *cur;
+            if newer {
+                *cur = ts;
+            }
+            newer
+        });
     }
 
     /// The storage format recorded in META, if any.
@@ -486,6 +509,7 @@ impl TripleStore {
         self.inner
             .oracle
             .advance_to(polargraph_core::temporal::Timestamp(oracle_ts));
+        self.notify_commit(polargraph_core::temporal::Timestamp(oracle_ts));
 
         Ok(())
     }
@@ -1662,6 +1686,7 @@ impl TripleStore {
         batch: &mut WriteBatch,
         writes: &[PendingWrite],
         tt: Timestamp,
+        staged_quads: &mut Vec<crate::changes::StagedQuad>,
     ) -> Result<(), StorageError> {
         // Property values staged in this batch, per (s, p, g): a later Replace
         // in the same batch must close them too.
@@ -1691,12 +1716,9 @@ impl TripleStore {
                         g,
                         tt,
                     };
-                    Self::batch_quad(
-                        batch,
-                        &handles,
-                        &q,
-                        &codec::encode_relation(edge_id, &temporal),
-                    );
+                    let value = codec::encode_relation(edge_id, &temporal);
+                    Self::batch_quad(batch, &handles, &q, &value);
+                    staged_quads.push(crate::changes::StagedQuad { key: q, value });
                 }
                 Triple::Property { subject, value, .. } => {
                     let o = keys::value_object(value);
@@ -1719,6 +1741,10 @@ impl TripleStore {
                             };
                             let closed = codec::with_vt_end(&other_bytes, closing_at)?;
                             Self::batch_quad(batch, &handles, &q, &closed);
+                            staged_quads.push(crate::changes::StagedQuad {
+                                key: q,
+                                value: closed,
+                            });
                         }
                     }
                     slot.push((o, bytes.clone()));
@@ -1730,6 +1756,10 @@ impl TripleStore {
                         tt,
                     };
                     Self::batch_quad(batch, &handles, &q, &bytes);
+                    staged_quads.push(crate::changes::StagedQuad {
+                        key: q,
+                        value: bytes.clone(),
+                    });
                     if let Some(text) = value.as_text() {
                         self.batch_text_trigrams(batch, subject, p, g, text)?;
                     }
@@ -2419,10 +2449,13 @@ impl TripleStore {
             graph: GraphId::DEFAULT,
             mode: WriteMode::Auto,
         };
-        self.stage_writes(&mut batch, std::slice::from_ref(&write), tt)?;
+        let mut staged = Vec::new();
+        self.stage_writes(&mut batch, std::slice::from_ref(&write), tt, &mut staged)?;
+        self.batch_change(&mut batch, tt, "", &[], &staged)?;
         self.db_write(batch)?;
         // Advance oracle so subsequent scans can see this triple.
         self.inner.oracle.advance_to(tt);
+        self.notify_commit(tt);
         Ok(())
     }
 
@@ -2637,7 +2670,7 @@ impl TripleStore {
 
     // ── reconstruction ────────────────────────────────────────────────────────
 
-    fn reconstruct(
+    pub(crate) fn reconstruct(
         &self,
         subject: NodeId,
         pred_id: PredId,

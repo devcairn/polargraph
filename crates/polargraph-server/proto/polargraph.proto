@@ -1131,6 +1131,57 @@ message DropGraphResponse {
     uint64 quads_closed = 1;
 }
 
+// ── Change feed ───────────────────────────────────────────────────────────────
+//
+// See docs/design/change-feed.md. Events come from the change log written by
+// every commit; resume with the last `commit_ts` seen.
+
+message SubscribeRequest {
+    /// Graph IRIs to follow (empty = every graph the caller can read; "" is
+    /// the default graph).
+    repeated string graphs = 1;
+    /// Only quads with these predicates (empty = all). Graph events always pass.
+    repeated string predicates = 2;
+    /// Only quads whose subject currently has one of these `__type`s.
+    repeated string types = 3;
+    /// Deliver commits after this transaction time; 0 = from now. Older than
+    /// the retained log → OUT_OF_RANGE (re-sync, then subscribe from now).
+    int64 resume_after_ts = 4;
+    /// Include property values (otherwise property quads carry no value).
+    bool include_values = 5;
+    /// Caller identity (optional; also `x-polargraph-user-id`). Events in
+    /// graphs the caller can't read are never sent.
+    string user_id = 6;
+}
+
+enum ChangeKind {
+    CHANGE_KIND_UNSPECIFIED   = 0;
+    /// A quad version asserted (open-ended valid time).
+    CHANGE_KIND_ASSERT        = 1;
+    /// A quad version closed (delete, replaced value, graph drop).
+    CHANGE_KIND_CLOSE         = 2;
+    CHANGE_KIND_GRAPH_CREATED = 3;
+    CHANGE_KIND_GRAPH_DROPPED = 4;
+    /// Quads of `source_graph` copied into `graph` (ADD / COPY / MOVE).
+    CHANGE_KIND_GRAPH_COPIED  = 5;
+}
+
+message ChangeEvent {
+    /// Commit transaction time — the resume token.
+    int64 commit_ts = 1;
+    /// Graph IRI ("" = default graph).
+    string graph = 2;
+    ChangeKind kind = 3;
+    /// The quad version (assert / close events).
+    Triple quad = 4;
+    /// The relation's edge id (relation quads).
+    bytes edge_id = 5;
+    /// User id that made the change ("" = service call).
+    string author = 6;
+    /// Source graph of a GRAPH_COPIED event.
+    string source_graph = 7;
+}
+
 // ── Graph access control ──────────────────────────────────────────────────────
 //
 // Principals (users and groups) and callers are named by node UUID or IRI.
@@ -1238,6 +1289,8 @@ service PolarGraphService {
     rpc DropGraph(DropGraphRequest) returns (DropGraphResponse);
     /// Stream the live quads of one graph, or of the whole dataset.
     rpc ExportGraph(ExportGraphRequest) returns (stream ExportGraphChunk);
+    /// Stream committed changes (with resume), filtered by graph access.
+    rpc Subscribe(SubscribeRequest) returns (stream ChangeEvent);
     /// Grant a user or group a level on a named graph.
     rpc GrantGraphAccess(GrantGraphAccessRequest) returns (GrantGraphAccessResponse);
     /// Revoke a user's or group's grant on a named graph.

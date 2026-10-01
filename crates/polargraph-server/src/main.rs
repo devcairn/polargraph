@@ -284,6 +284,16 @@ struct Cli {
     )]
     inline_value_max_bytes: Option<usize>,
 
+    /// Keep change-feed (`Subscribe`) history for this many seconds
+    /// (default 604800 = 7 days; 0 = keep forever). Pruned hourly on the
+    /// primary.
+    #[arg(
+        long = "change-retention-secs",
+        env = "POLARGRAPH_CHANGE_RETENTION_SECS",
+        value_name = "SECS"
+    )]
+    change_retention_secs: Option<u64>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -387,6 +397,11 @@ async fn main() -> Result<()> {
         cli.inline_value_max_bytes,
         cfg.storage.inline_value_max_bytes,
         polargraph_storage::DEFAULT_INLINE_VALUE_MAX_BYTES,
+    );
+    let change_retention_secs = resolve(
+        cli.change_retention_secs,
+        cfg.storage.change_retention_secs,
+        retention_scheduler::DEFAULT_CHANGE_RETENTION_SECS,
     );
     let listen_addr: SocketAddr = cli.listen_addr.unwrap_or_else(|| {
         cfg.server
@@ -616,6 +631,21 @@ async fn main() -> Result<()> {
                 "startup retention complete"
             );
         }
+    }
+
+    // ── Change-log pruning (primary only) ─────────────────────────────────────
+    if replica_address.is_none() && change_retention_secs > 0 {
+        let prune_store = store.clone();
+        let prune_token = token.clone();
+        tokio::spawn(async move {
+            retention_scheduler::run_change_log_pruner(
+                prune_store,
+                Duration::from_secs(change_retention_secs),
+                Duration::from_secs(3600),
+                prune_token,
+            )
+            .await;
+        });
     }
 
     // ── Scheduled retention (primary only) ────────────────────────────────────

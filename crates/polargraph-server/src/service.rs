@@ -12,39 +12,39 @@ use crate::{
         vector_seed_query_request::Filter as SeedFilter, AddApiKeyRequest, AddApiKeyResponse,
         AddUserToGroupRequest, AddUserToGroupResponse, AppliedMigrationInfo,
         BackupInfo as ProtoBackupInfo, BatchInsertError, BatchInsertVectorsRequest,
-        BatchInsertVectorsResponse, BeginTransactionRequest, BeginTransactionResponse,
-        ColumnFamilyInfo, CommitTransactionRequest, CommitTransactionResponse, CopyGraphRequest,
-        CopyGraphResponse, CreateBackupRequest, CreateBackupResponse, CreateGraphRequest,
-        CreateGraphResponse, CypherBinding, CypherQueryRequest, CypherQueryResponse,
-        CypherWriteRequest, CypherWriteResponse, DeleteTriplesRequest, DeleteTriplesResponse,
-        DropGraphRequest, DropGraphResponse, ExplainResponse, ExportGraphChunk, ExportGraphRequest,
-        ExportedQuad, GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse,
-        GetEdgeIdsByTripleRequest, GetEdgeIdsByTripleResponse, GetEdgeTypeRequest,
-        GetEdgeTypeResponse, GetGraphAccessRequest, GetGraphAccessResponse, GetNodeTypeRequest,
-        GetNodeTypeResponse, GetPropertyHistoryRequest, GetPropertyHistoryResponse,
-        GetUserAccessRequest, GetUserAccessResponse, GrantAccessRequest, GrantAccessResponse,
-        GrantGraphAccessRequest, GrantGraphAccessResponse, GraphAccessEntry, GraphInfo,
-        GraphMetadata, GraphStatsRequest, GraphStatsResponse, InsertRequest, InsertResponse,
-        InsertVectorRequest, InsertVectorResponse, ListApiKeysRequest, ListApiKeysResponse,
-        ListBackupsRequest, ListBackupsResponse, ListEdgeTypesRequest, ListEdgeTypesResponse,
-        ListGraphsRequest, ListGraphsResponse, ListNodeTypesRequest, ListNodeTypesResponse,
-        ListPredicatesBetweenRequest, ListPredicatesBetweenResponse, MigrateRequest,
-        MigrateResponse, MigrationStatusRequest, MigrationStatusResponse, MoveGraphRequest,
-        OntologyViolation, PlanNode, PropertyVersion, PurgeOldBackupsRequest,
-        PurgeOldBackupsResponse, QueryRequest, QueryResponse, QueryStreamChunk, ReachableRequest,
-        ReachableResponse, RegisterEdgeTypeRequest, RegisterEdgeTypeResponse,
-        RegisterNodeTypeRequest, RegisterNodeTypeResponse, ReplicaStatusRequest,
-        ReplicaStatusResponse, ResolveIrisRequest, ResolveIrisResponse, RevokeAccessRequest,
-        RevokeAccessResponse, RevokeApiKeyRequest, RevokeApiKeyResponse, RevokeGraphAccessRequest,
-        RevokeGraphAccessResponse, RollbackTransactionRequest, RollbackTransactionResponse,
-        RunMaterializationRequest, RunMaterializationResponse, RunRetentionRequest,
-        RunRetentionResponse, ScoredBinding, SearchVectorFilteredRequest,
+        BatchInsertVectorsResponse, BeginTransactionRequest, BeginTransactionResponse, ChangeEvent,
+        ChangeKind, ColumnFamilyInfo, CommitTransactionRequest, CommitTransactionResponse,
+        CopyGraphRequest, CopyGraphResponse, CreateBackupRequest, CreateBackupResponse,
+        CreateGraphRequest, CreateGraphResponse, CypherBinding, CypherQueryRequest,
+        CypherQueryResponse, CypherWriteRequest, CypherWriteResponse, DeleteTriplesRequest,
+        DeleteTriplesResponse, DropGraphRequest, DropGraphResponse, ExplainResponse,
+        ExportGraphChunk, ExportGraphRequest, ExportedQuad, GetEdgeAnnotationsRequest,
+        GetEdgeAnnotationsResponse, GetEdgeIdsByTripleRequest, GetEdgeIdsByTripleResponse,
+        GetEdgeTypeRequest, GetEdgeTypeResponse, GetGraphAccessRequest, GetGraphAccessResponse,
+        GetNodeTypeRequest, GetNodeTypeResponse, GetPropertyHistoryRequest,
+        GetPropertyHistoryResponse, GetUserAccessRequest, GetUserAccessResponse,
+        GrantAccessRequest, GrantAccessResponse, GrantGraphAccessRequest, GrantGraphAccessResponse,
+        GraphAccessEntry, GraphInfo, GraphMetadata, GraphStatsRequest, GraphStatsResponse,
+        InsertRequest, InsertResponse, InsertVectorRequest, InsertVectorResponse,
+        ListApiKeysRequest, ListApiKeysResponse, ListBackupsRequest, ListBackupsResponse,
+        ListEdgeTypesRequest, ListEdgeTypesResponse, ListGraphsRequest, ListGraphsResponse,
+        ListNodeTypesRequest, ListNodeTypesResponse, ListPredicatesBetweenRequest,
+        ListPredicatesBetweenResponse, MigrateRequest, MigrateResponse, MigrationStatusRequest,
+        MigrationStatusResponse, MoveGraphRequest, OntologyViolation, PlanNode, PropertyVersion,
+        PurgeOldBackupsRequest, PurgeOldBackupsResponse, QueryRequest, QueryResponse,
+        QueryStreamChunk, ReachableRequest, ReachableResponse, RegisterEdgeTypeRequest,
+        RegisterEdgeTypeResponse, RegisterNodeTypeRequest, RegisterNodeTypeResponse,
+        ReplicaStatusRequest, ReplicaStatusResponse, ResolveIrisRequest, ResolveIrisResponse,
+        RevokeAccessRequest, RevokeAccessResponse, RevokeApiKeyRequest, RevokeApiKeyResponse,
+        RevokeGraphAccessRequest, RevokeGraphAccessResponse, RollbackTransactionRequest,
+        RollbackTransactionResponse, RunMaterializationRequest, RunMaterializationResponse,
+        RunRetentionRequest, RunRetentionResponse, ScoredBinding, SearchVectorFilteredRequest,
         SearchVectorFilteredResponse, SearchVectorInSetRequest, SearchVectorInSetResponse,
         SearchVectorRequest, SearchVectorResponse, ShowIndexesRequest, ShowIndexesResponse,
-        ShowStatsRequest, ShowStatsResponse, StreamWalRequest, ValidateEdgeRequest,
-        ValidateEdgeResponse, ValidateNodeRequest, ValidateNodeResponse, ValidateOntologyRequest,
-        ValidateOntologyResponse, VectorSearchResult, VectorSeedQueryRequest,
-        VectorSeedQueryResponse, VectorSpaceInfo, WalEntry,
+        ShowStatsRequest, ShowStatsResponse, StreamWalRequest, SubscribeRequest,
+        ValidateEdgeRequest, ValidateEdgeResponse, ValidateNodeRequest, ValidateNodeResponse,
+        ValidateOntologyRequest, ValidateOntologyResponse, VectorSearchResult,
+        VectorSeedQueryRequest, VectorSeedQueryResponse, VectorSpaceInfo, WalEntry,
     },
 };
 use dashmap::DashMap;
@@ -769,7 +769,10 @@ impl PolarGraphServer {
         if iri.is_empty() {
             return Ok(polargraph_core::id::GraphId::DEFAULT);
         }
-        self.store.intern_graph(iri).map_err(storage_err_to_status)
+        // create_graph logs GRAPH_CREATED for a new graph (change feed).
+        self.store
+            .create_graph(iri, &[])
+            .map_err(storage_err_to_status)
     }
 
     fn check_not_replica(&self) -> Result<(), Status> {
@@ -827,6 +830,104 @@ fn resolve_user_id(field: &str, from_meta: &str) -> String {
         field.to_string()
     } else {
         from_meta.to_string()
+    }
+}
+
+/// What a `Subscribe` stream delivers.
+struct ChangeFilter {
+    graphs: Option<HashSet<polargraph_core::id::GraphId>>,
+    predicates: Option<HashSet<String>>,
+    types: Vec<String>,
+    include_values: bool,
+}
+
+impl PolarGraphServer {
+    /// The events a logged commit produces for one subscriber.
+    fn change_events(
+        &self,
+        record: &polargraph_storage::ChangeRecord,
+        filter: &ChangeFilter,
+        access: &Option<Arc<polargraph_storage::UserGraphAccess>>,
+    ) -> Vec<ChangeEvent> {
+        use polargraph_storage::GraphOp;
+        let visible = |g: polargraph_core::id::GraphId| {
+            filter.graphs.as_ref().map_or(true, |gs| gs.contains(&g))
+                && access
+                    .as_ref()
+                    .map_or(true, |a| a.allows(g, GraphAccessLevel::Read))
+        };
+        let iri = |g: polargraph_core::id::GraphId| self.store.graph_iri(g).unwrap_or_default();
+        let event = |g, kind: ChangeKind| ChangeEvent {
+            commit_ts: record.commit_ts.0,
+            graph: iri(g),
+            kind: kind as i32,
+            author: record.author.clone(),
+            ..Default::default()
+        };
+
+        let types: Option<HashSet<NodeId>> = (!filter.types.is_empty()).then(|| {
+            let cache = self.type_cache.read().unwrap();
+            filter
+                .types
+                .iter()
+                .filter_map(|t| cache.get(t))
+                .flatten()
+                .copied()
+                .collect()
+        });
+
+        let mut out = Vec::new();
+        for (g, triple) in &record.quads {
+            if !visible(*g)
+                || filter
+                    .predicates
+                    .as_ref()
+                    .is_some_and(|ps| !ps.contains(&triple.predicate().0))
+                || types
+                    .as_ref()
+                    .is_some_and(|ts| !ts.contains(&triple.subject()))
+            {
+                continue;
+            }
+            let Some(quad) = convert::triple_to_proto(triple, filter.include_values) else {
+                continue;
+            };
+            let kind =
+                if triple.temporal().vt_end == polargraph_core::temporal::Timestamp::END_OF_TIME {
+                    ChangeKind::Assert
+                } else {
+                    ChangeKind::Close
+                };
+            let edge_id = match triple {
+                Triple::Relation { edge_id, .. } => edge_id.as_bytes().to_vec(),
+                _ => vec![],
+            };
+            out.push(ChangeEvent {
+                quad: Some(quad),
+                edge_id,
+                ..event(*g, kind)
+            });
+        }
+        for op in &record.graph_ops {
+            match *op {
+                GraphOp::Created(g) if visible(g) => out.push(event(g, ChangeKind::GraphCreated)),
+                GraphOp::Dropped(g) if visible(g) => out.push(event(g, ChangeKind::GraphDropped)),
+                GraphOp::Copied { source, target } if visible(target) => out.push(ChangeEvent {
+                    // Don't name a source graph the subscriber can't read.
+                    source_graph: if access
+                        .as_ref()
+                        .map_or(true, |a| a.allows(source, GraphAccessLevel::Read))
+                    {
+                        iri(source)
+                    } else {
+                        String::new()
+                    },
+                    ..event(target, ChangeKind::GraphCopied)
+                }),
+                _ => {}
+            }
+        }
+        out
     }
 }
 
@@ -953,6 +1054,7 @@ impl PolarGraphService for PolarGraphServer {
     type QueryStreamStream = ReceiverStream<Result<QueryStreamChunk, Status>>;
     type CypherQueryStreamStream = ReceiverStream<Result<QueryStreamChunk, Status>>;
     type ExportGraphStream = ReceiverStream<Result<ExportGraphChunk, Status>>;
+    type SubscribeStream = ReceiverStream<Result<ChangeEvent, Status>>;
 
     /// Insert one or more triples atomically.
     async fn create_graph(
@@ -962,7 +1064,8 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
-        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        let author = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&author);
         if req.iri.is_empty() {
             return Err(Status::invalid_argument("graph iri must not be empty"));
         }
@@ -979,7 +1082,7 @@ impl PolarGraphService for PolarGraphServer {
         let metadata = metadata_from_proto(&req.metadata)?;
         let store = self.store.clone();
         let graph = tokio::task::spawn_blocking(move || -> Result<GraphInfo, StorageError> {
-            let g = store.create_graph(&req.iri, &metadata)?;
+            let g = store.create_graph_by(&req.iri, &metadata, &author)?;
             if let Some(user) = creator {
                 store.grant_graph_access(user, g, GraphAccessLevel::Admin)?;
             }
@@ -1060,15 +1163,17 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
-        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        let author = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&author);
         let source = self.graph_for(&access, &req.source, GraphAccessLevel::Read, false)?;
         let target = self.graph_for(&access, &req.target, GraphAccessLevel::Admin, true)?;
         let store = self.store.clone();
-        let quads =
-            tokio::task::spawn_blocking(move || store.copy_graph(source, target, req.clear_target))
-                .await
-                .map_err(|e| Status::internal(format!("copy_graph task failed: {e}")))?
-                .map_err(storage_err_to_status)?;
+        let quads = tokio::task::spawn_blocking(move || {
+            store.copy_graph_by(source, target, req.clear_target, &author)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("copy_graph task failed: {e}")))?
+        .map_err(storage_err_to_status)?;
         Ok(Response::new(CopyGraphResponse {
             quads: quads as u64,
         }))
@@ -1081,14 +1186,16 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
-        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        let author = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&author);
         let source = self.graph_for(&access, &req.source, GraphAccessLevel::Admin, false)?;
         let target = self.graph_for(&access, &req.target, GraphAccessLevel::Admin, true)?;
         let store = self.store.clone();
-        let quads = tokio::task::spawn_blocking(move || store.move_graph(source, target))
-            .await
-            .map_err(|e| Status::internal(format!("move_graph task failed: {e}")))?
-            .map_err(storage_err_to_status)?;
+        let quads =
+            tokio::task::spawn_blocking(move || store.move_graph_by(source, target, &author))
+                .await
+                .map_err(|e| Status::internal(format!("move_graph task failed: {e}")))?
+                .map_err(storage_err_to_status)?;
         Ok(Response::new(CopyGraphResponse {
             quads: quads as u64,
         }))
@@ -1101,10 +1208,11 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
-        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        let author = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&author);
         let g = self.graph_for(&access, &req.iri, GraphAccessLevel::Admin, false)?;
         let store = self.store.clone();
-        let closed = tokio::task::spawn_blocking(move || store.drop_graph(g))
+        let closed = tokio::task::spawn_blocking(move || store.drop_graph_by(g, &author))
             .await
             .map_err(|e| Status::internal(format!("drop_graph task failed: {e}")))?
             .map_err(storage_err_to_status)?;
@@ -1158,6 +1266,83 @@ impl PolarGraphService for PolarGraphServer {
                         .collect();
                     if tx.blocking_send(Ok(ExportGraphChunk { quads })).is_err() {
                         return;
+                    }
+                }
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn subscribe(
+        &self,
+        request: Request<SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        let meta_uid = meta_user_id(request.metadata());
+        let req = request.into_inner();
+        let user_id = resolve_user_id(&req.user_id, &meta_uid);
+
+        let floor = self.store.changes_floor().map_err(storage_err_to_status)?;
+        let start = if req.resume_after_ts == 0 {
+            polargraph_core::temporal::Timestamp(self.store.oracle_ts())
+        } else if req.resume_after_ts < floor.0 {
+            return Err(Status::out_of_range(format!(
+                "resume_after_ts {} is older than the retained change log (floor {}); \
+                 re-sync and subscribe from now",
+                req.resume_after_ts, floor.0
+            )));
+        } else {
+            polargraph_core::temporal::Timestamp(req.resume_after_ts)
+        };
+        let filter = ChangeFilter {
+            graphs: (!req.graphs.is_empty()).then(|| {
+                req.graphs
+                    .iter()
+                    .filter_map(|iri| {
+                        if iri.is_empty() {
+                            Some(polargraph_core::id::GraphId::DEFAULT)
+                        } else {
+                            self.store.graph_id(iri)
+                        }
+                    })
+                    .collect()
+            }),
+            predicates: (!req.predicates.is_empty())
+                .then(|| req.predicates.iter().cloned().collect()),
+            types: req.types.clone(),
+            include_values: req.include_values,
+        };
+
+        let (tx, rx) = mpsc::channel::<Result<ChangeEvent, Status>>(64);
+        let server = self.clone();
+        tokio::spawn(async move {
+            let mut commits = server.store.commit_watch();
+            let mut cursor = start;
+            loop {
+                // Access is re-evaluated per batch, so a revoked grant stops
+                // the flow mid-stream.
+                let access = server.caller_access(&user_id);
+                let records = match server.store.changes_after(cursor, 256) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = tx.send(Err(storage_err_to_status(e))).await;
+                        return;
+                    }
+                };
+                let caught_up = records.len() < 256;
+                for record in records {
+                    cursor = record.commit_ts;
+                    for event in server.change_events(&record, &filter, &access) {
+                        if tx.send(Ok(event)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                if caught_up {
+                    tokio::select! {
+                        _ = commits.changed() => {}
+                        _ = tx.closed() => return,
+                        // Replicas apply batches without a local commit; poll.
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                     }
                 }
             }
@@ -1281,7 +1466,8 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
-        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        let author = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&author);
 
         if req.triples.is_empty() && req.edge_annotations.is_empty() && req.iris.is_empty() {
             return Err(Status::invalid_argument(
@@ -1338,6 +1524,7 @@ impl PolarGraphService for PolarGraphServer {
             })?;
             let mut guard = entry.lock().await;
             for (triple, mode) in all_triples.iter().zip(&modes) {
+                guard.tx.set_author(author.clone());
                 guard.tx.insert_in(triple.clone(), graph, *mode);
             }
             for iri in &req.iris {
@@ -1368,6 +1555,7 @@ impl PolarGraphService for PolarGraphServer {
 
         // Auto-commit path: begin a new transaction, insert all, commit.
         let mut tx = self.store.begin();
+        tx.set_author(author.clone());
         for (triple, mode) in all_triples.iter().zip(&modes) {
             tx.insert_in(triple.clone(), graph, *mode);
         }
@@ -2962,7 +3150,8 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
-        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        let author = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&author);
 
         if req.cypher.is_empty() {
             return Err(Status::invalid_argument(
@@ -3076,6 +3265,7 @@ impl PolarGraphService for PolarGraphServer {
                 Arc::clone(entry.value())
             };
             let mut guard = open_arc.lock().await;
+            guard.tx.set_author(author.clone());
             let result = execute_writes(&mut guard.tx)?;
             guard.last_used = Instant::now();
             debug!(
@@ -3096,6 +3286,7 @@ impl PolarGraphService for PolarGraphServer {
 
         // Auto-commit path.
         let mut tx = self.store.begin();
+        tx.set_author(author.clone());
         let result = execute_writes(&mut tx)?;
 
         let commit_ts = tx.commit().map_err(storage_err_to_status)?;
@@ -4109,7 +4300,8 @@ impl PolarGraphService for PolarGraphServer {
         self.check_not_replica()?;
         let meta_uid = meta_user_id(request.metadata());
         let req = request.into_inner();
-        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        let author = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&author);
         reject_user_acl_writes(&access, [req.predicate.as_str()])?;
 
         let vt_end_ts = if req.vt_end != 0 {
@@ -4173,6 +4365,7 @@ impl PolarGraphService for PolarGraphServer {
                 .map_err(storage_err_to_status)?;
 
             let mut tx = self.store.begin();
+            tx.set_author(author.clone());
             for (g, triple) in quads {
                 let selected = match &triple {
                     Triple::Relation { object, .. } => {
