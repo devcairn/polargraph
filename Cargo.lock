@@ -1854,6 +1854,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "polargraph-core",
  "polargraph-query",
+ "polargraph-shacl",
  "polargraph-storage",
  "prost",
  "reqwest",

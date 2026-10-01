@@ -7,6 +7,7 @@ const STREAM_CHUNK_SIZE: usize = 500;
 /// transaction).
 const MAX_CHANGESET: usize = 100_000;
 
+use crate::proto::{ValidateShapesRequest, ValidateShapesResponse, ValidationResult};
 use crate::{
     auth::KeyStore,
     convert,
@@ -837,6 +838,43 @@ fn resolve_user_id(field: &str, from_meta: &str) -> String {
     }
 }
 
+/// Proto form of a SHACL result, nodes rendered as IRIs.
+fn validation_result_to_proto(
+    r: &polargraph_shacl::ValidationResult,
+    view: &polargraph_shacl::DataView<'_>,
+) -> Result<ValidationResult, StorageError> {
+    use polargraph_shacl::{shapes::Path, vocab::SH, Obj};
+    fn path_str(p: &Path) -> String {
+        match p {
+            Path::Predicate(iri) => format!("<{iri}>"),
+            Path::Inverse(inner) => format!("^{}", path_str(inner)),
+            Path::Sequence(steps) => steps.iter().map(path_str).collect::<Vec<_>>().join("/"),
+        }
+    }
+    let split = |o: &Obj| -> Result<(String, Option<crate::proto::Value>), StorageError> {
+        Ok(match o {
+            Obj::Node(n) => (view.iri(n)?, None),
+            Obj::Lit(v) => (String::new(), Some(convert::value_to_proto(v))),
+        })
+    };
+    let (focus_node, focus_literal) = split(&r.focus_node)?;
+    let (value_node, value_literal) = match &r.value {
+        Some(v) => split(v)?,
+        None => (String::new(), None),
+    };
+    Ok(ValidationResult {
+        focus_node,
+        focus_literal,
+        path: r.path.as_ref().map(path_str).unwrap_or_default(),
+        value_node,
+        value_literal,
+        source_shape: view.iri(&r.source_shape)?,
+        constraint_component: format!("{SH}{}", r.component),
+        severity: format!("{SH}{}", r.severity.local_name()),
+        message: r.message.clone(),
+    })
+}
+
 /// What a `Subscribe` stream delivers.
 struct ChangeFilter {
     graphs: Option<HashSet<polargraph_core::id::GraphId>>,
@@ -1451,6 +1489,113 @@ impl PolarGraphService for PolarGraphServer {
             retractions_not_found: not_found,
             edge_ids,
         }))
+    }
+
+    async fn validate_shapes(
+        &self,
+        request: Request<ValidateShapesRequest>,
+    ) -> Result<Response<ValidateShapesResponse>, Status> {
+        use polargraph_shacl::{DataView, Obj, Overlay, Shapes};
+        let meta_uid = meta_user_id(request.metadata());
+        let req = request.into_inner();
+        let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
+        if req.shapes_graphs.is_empty() {
+            return Err(Status::invalid_argument(
+                "shapes_graphs must name at least one graph",
+            ));
+        }
+        if req.read_ts < 0 {
+            return Err(Status::invalid_argument("read_ts must not be negative"));
+        }
+        let readable = |iri: &str| -> Result<polargraph_core::id::GraphId, Status> {
+            let g = self.existing_graph(iri)?;
+            require_level(&access, g, GraphAccessLevel::Read, iri)?;
+            Ok(g)
+        };
+        let shapes_scope = polargraph_storage::GraphScope::set(
+            req.shapes_graphs
+                .iter()
+                .map(|iri| readable(iri))
+                .collect::<Result<_, _>>()?,
+        );
+        let data_scope = if req.data_graphs.is_empty() {
+            polargraph_storage::GraphScope::Union
+        } else {
+            polargraph_storage::GraphScope::set(
+                req.data_graphs
+                    .iter()
+                    .map(|iri| readable(iri))
+                    .collect::<Result<_, _>>()?,
+            )
+        };
+
+        let mut overlay = Overlay::default();
+        for group in &req.overlay_adds {
+            for t in &group.triples {
+                overlay.adds.extend(convert::triples_from_proto(t)?.0);
+            }
+        }
+        for r in &req.overlay_retractions {
+            let Ok(g) = self.existing_graph(&r.graph) else {
+                continue;
+            };
+            let subject = convert::node_id_from_proto(
+                r.subject
+                    .as_ref()
+                    .ok_or_else(|| Status::invalid_argument("retraction subject is required"))?,
+            )?;
+            let object = match &r.object {
+                Some(crate::proto::quad_ref::Object::Node(n)) => {
+                    Obj::Node(convert::node_id_from_proto(n)?)
+                }
+                Some(crate::proto::quad_ref::Object::Value(v)) => {
+                    Obj::Lit(convert::value_from_proto(v)?)
+                }
+                None => {
+                    return Err(Status::invalid_argument(
+                        "retraction object (node or value) is required",
+                    ))
+                }
+            };
+            overlay
+                .retractions
+                .push((g, subject, r.predicate.clone(), object));
+        }
+        let has_overlay = !overlay.adds.is_empty() || !overlay.retractions.is_empty();
+
+        let ts = if req.read_ts > 0 {
+            polargraph_core::temporal::Timestamp(req.read_ts)
+        } else {
+            self.store.begin().read_ts
+        };
+        let snapshot = self.snapshot_for(ts, &access);
+        let all_focus = req.all_focus_nodes;
+        let response = tokio::task::spawn_blocking(move || -> Result<_, Status> {
+            let to_status = |e: polargraph_shacl::ShapeError| match e {
+                polargraph_shacl::ShapeError::Storage(e) => storage_err_to_status(e),
+                e => Status::invalid_argument(e.to_string()),
+            };
+            let shapes_view = DataView::new(&snapshot, shapes_scope, &Overlay::default());
+            let shapes = Shapes::load(&shapes_view).map_err(to_status)?;
+            let view = DataView::new(&snapshot, data_scope, &overlay);
+            let touched = view.touched();
+            let focus = (has_overlay && !all_focus).then_some(&touched);
+            let report = polargraph_shacl::validate(&shapes, &view, focus).map_err(to_status)?;
+            let results = report
+                .results
+                .iter()
+                .map(|r| validation_result_to_proto(r, &view))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage_err_to_status)?;
+            Ok(ValidateShapesResponse {
+                conforms: report.conforms(),
+                no_violations: !report.has_violations(),
+                results,
+            })
+        })
+        .await
+        .map_err(|e| Status::internal(format!("validation task failed: {e}")))??;
+        Ok(Response::new(response))
     }
 
     async fn subscribe(

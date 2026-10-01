@@ -19,6 +19,7 @@ path = "src/main.rs"
 polargraph-core    = { path = "../polargraph-core" }
 polargraph-storage = { path = "../polargraph-storage" }
 polargraph-query   = { path = "../polargraph-query" }
+polargraph-shacl   = { path = "../polargraph-shacl" }
 
 tokio        = { workspace = true }
 tonic        = { workspace = true }

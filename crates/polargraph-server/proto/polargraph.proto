@@ -1182,6 +1182,53 @@ message ApplyChangesResponse {
     repeated bytes edge_ids = 5;
 }
 
+// ── SHACL validation ──────────────────────────────────────────────────────────
+//
+// See docs/design/proposals-shacl.md (8b). Validates a dataset against the
+// shapes in shapes graphs, optionally with uncommitted changes overlaid.
+
+message ValidateShapesRequest {
+    /// Graphs holding the shapes (at least one).
+    repeated string shapes_graphs = 1;
+    /// Dataset to validate ("" = default graph); empty = every readable graph.
+    repeated string data_graphs = 2;
+    /// Uncommitted changes to validate as if applied.
+    repeated GraphTriples overlay_adds = 3;
+    repeated QuadRef overlay_retractions = 4;
+    /// Read point (0 = latest).
+    int64 read_ts = 5;
+    /// Caller identity (optional; also `x-polargraph-user-id`); shapes and
+    /// data graphs must be readable.
+    string user_id = 6;
+    /// With an overlay, only nodes it touches are validated unless this is set.
+    bool all_focus_nodes = 7;
+}
+
+message ValidationResult {
+    /// Focus node IRI, or unset with `focus_literal` for a literal focus.
+    string focus_node = 1;
+    Value focus_literal = 2;
+    /// Result path in SPARQL property-path syntax (`<p>`, `^<p>`, `<a>/<b>`).
+    string path = 3;
+    /// Offending value: IRI in `value_node` or a literal in `value_literal`.
+    string value_node = 4;
+    Value value_literal = 5;
+    string source_shape = 6;
+    /// Full constraint component IRI.
+    string constraint_component = 7;
+    /// `sh:Violation`, `sh:Warning` or `sh:Info` (full IRI).
+    string severity = 8;
+    string message = 9;
+}
+
+message ValidateShapesResponse {
+    /// `sh:conforms` — no results of any severity.
+    bool conforms = 1;
+    /// No results of severity sh:Violation.
+    bool no_violations = 2;
+    repeated ValidationResult results = 3;
+}
+
 // ── Change feed ───────────────────────────────────────────────────────────────
 //
 // See docs/design/change-feed.md. Events come from the change log written by
@@ -1342,6 +1389,8 @@ service PolarGraphService {
     rpc ExportGraph(ExportGraphRequest) returns (stream ExportGraphChunk);
     /// Apply adds and retractions across graphs atomically.
     rpc ApplyChanges(ApplyChangesRequest) returns (ApplyChangesResponse);
+    /// Validate a dataset (optionally with uncommitted changes) against SHACL shapes.
+    rpc ValidateShapes(ValidateShapesRequest) returns (ValidateShapesResponse);
     /// Stream committed changes (with resume), filtered by graph access.
     rpc Subscribe(SubscribeRequest) returns (stream ChangeEvent);
     /// Grant a user or group a level on a named graph.
