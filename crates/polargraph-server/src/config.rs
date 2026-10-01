@@ -90,6 +90,9 @@ pub struct StorageConfig {
     /// `blob` column family.  Equivalent to `--inline-value-max-bytes` /
     /// `POLARGRAPH_INLINE_VALUE_MAX_BYTES`.  Default 256.
     pub inline_value_max_bytes: Option<usize>,
+    /// Seconds of change-feed history to keep (default 7 days; 0 = forever).
+    /// Equivalent to `--change-retention-secs` / `POLARGRAPH_CHANGE_RETENTION_SECS`.
+    pub change_retention_secs: Option<u64>,
 }
 
 /// Configuration for the periodic scheduled retention task.

@@ -69,6 +69,41 @@ pub async fn run_retention_scheduler(
     }
 }
 
+/// Default change-feed history kept: 7 days.
+pub const DEFAULT_CHANGE_RETENTION_SECS: u64 = 7 * 24 * 3600;
+
+/// Prune the change log (`Subscribe` history) every `interval`, keeping
+/// `retention`. Runs once at start, then until `cancel` is cancelled.
+pub async fn run_change_log_pruner(
+    store: TripleStore,
+    retention: Duration,
+    interval: Duration,
+    cancel: CancellationToken,
+) {
+    info!(
+        retention_secs = retention.as_secs(),
+        "change-log pruner started"
+    );
+    loop {
+        let before = polargraph_core::temporal::Timestamp(
+            polargraph_core::temporal::Timestamp::now().0
+                - i64::try_from(retention.as_micros()).unwrap_or(i64::MAX),
+        );
+        match store.prune_changes(before) {
+            Ok(n) if n > 0 => info!(pruned = n, "change log pruned"),
+            Ok(_) => {}
+            Err(e) => warn!(error = %e, "change-log pruning failed"),
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("change-log pruner shutting down");
+                return;
+            }
+            _ = tokio::time::sleep(interval) => {}
+        }
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -76,6 +111,38 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    /// The pruner trims entries older than the retention window at start.
+    #[tokio::test]
+    async fn change_log_pruner_trims_old_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TripleStore::open(dir.path()).unwrap();
+        let mut tx = store.begin();
+        tx.insert(polargraph_core::triple::Triple::Property {
+            subject: polargraph_core::id::NodeId::new(),
+            predicate: polargraph_core::triple::Predicate::new("n"),
+            value: polargraph_core::value::Value::Int(1),
+            temporal: polargraph_core::temporal::BiTemporalRange::assert_now(
+                polargraph_core::temporal::Timestamp(0),
+            ),
+        });
+        tx.commit().unwrap();
+        let floor = store.changes_floor().unwrap();
+        assert_eq!(store.changes_after(floor, 10).unwrap().len(), 1);
+
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn(run_change_log_pruner(
+            store.clone(),
+            Duration::ZERO,
+            Duration::from_secs(3600),
+            cancel.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.cancel();
+        handle.await.unwrap();
+        assert!(store.changes_after(floor, 10).unwrap().is_empty());
+        assert!(store.changes_floor().unwrap() > floor);
+    }
 
     /// The scheduler must exit promptly when the token is cancelled.
     #[tokio::test]
