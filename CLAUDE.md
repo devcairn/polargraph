@@ -133,6 +133,7 @@ RocksDB-backed persistence. Owns the quad-index layout (storage format v3,
 | `codec` | Value serialization (discriminant + temporal + payload); `PropertyRef` and blob payloads; `valid_time`, `with_vt_end` |
 | `cf` | Column family names (`spog sopg psog posg ospg opsg gspo gpos meta hnsw trig epag epog peag drvg iri blob`); `cf::v2` legacy names |
 | `migrate_v3` | `migrate`, `open_for_migration`, `MigrationReport` — offline v2 → v3 storage migration |
+| `graph_acl` | Graph-level access control: `grant_graph_access` / `revoke_graph_access` / `graph_grants` (grants in the system graph), `GraphAccessIndex` → `UserGraphAccess` (roaring bitmaps per level); enforced via `Snapshot::with_readable_graphs` inside scans |
 | `graphs` | Named-graph management on `TripleStore`: `create_graph`, graph metadata (system graph `urn:pg:graph:meta`), `graph_stats`, bitemporal `drop_graph`, `copy_graph` / `move_graph` (chunked, `urn:pg:copyInProgress` flag) |
 | `error` | `StorageError` |
 | `hnsw` | `HnswIndex` — pure-Rust HNSW, named-space key helpers, serialize/deserialize, mmap storage |
@@ -259,6 +260,7 @@ Endpoints include: `POST /query`, `POST /query/stream`, `POST /insert`, `GET /tr
 `POST /tx/begin`, `POST /tx/commit`, `POST /tx/rollback`, `GET /indexes`, `GET /stats`,
 `POST /materialize`, `GET /property-history`, `POST /edge-annotations`, `GET /edge-annotations/:id`,
 `POST /access/grant`, `POST /access/revoke`, `POST /access/add-user`, `GET /access/user/:id`,
+`POST` / `DELETE` / `GET /graphs/access` (graph grants; `X-User-Id` is forwarded on every endpoint),
 `POST /graphs`, `GET /graphs`, `DELETE /graphs?iri=`, `GET /graphs/stats`, `POST /graphs/copy`,
 `POST /graphs/move`, `GET /graphs/export`, `POST /import/rdf` (incl. N-Quads/TriG, `?graph=`),
 `GET /export/subgraph`. Query patterns take an optional `@default` / `@<iri>` / `@?g` graph suffix.
@@ -469,6 +471,7 @@ entries were superseded by storage format v3 (last entries below).
 - [x] Storage format v3 — 8 quad orders with graph slot (`keys::Order`), value-hashed property keys + value index, graph interning (`intern_graph`), `WriteMode` Auto/Replace/Add (`InsertRequest.graph`, `PropertyTriple.mode`), out-of-line values (`blob` CF, 17-byte `PropertyRef`, retention sweep), reads default to "valid now", offline `polargraphd migrate` with verification; see `docs/design/v3-key-layout.md` (§10 as built, benchmarks)
 - [x] Named graphs (ContxtBroker plan step 4) — `GraphScope` + `Snapshot::scan_scoped`; `GraphTerm` on `VarPattern` (`?g` binds the graph IRI node, named graphs only), proto `VarPattern.graph` + `QueryRequest.graphs` dataset, REST `@graph` pattern suffix; `polargraph-storage::graphs` (metadata in system graph, bitemporal drop, copy/add/move, stats); `CreateGraph`, `ListGraphs`, `GraphStats`, `CopyGraph`, `MoveGraph`, `DropGraph`, `ExportGraph` (streaming) RPCs + REST `/graphs*`; N-Quads/TriG import (REST, `polargraph-import`) and export (`/graphs/export`, `/export/subgraph`); see "Named graphs" in `docs/architecture.md`. Limits: pending tx writes and rule-derived facts only match Union patterns; `max_hops` ignores graph terms
 - [x] Graph-aware SPARQL and Cypher (ContxtBroker plan step 5) — `GraphTerm::Iri`, `scope_to_graph`; SPARQL `GRAPH <iri>` / `GRAPH ?g` / `FROM` / `FROM NAMED` (SELECT, ASK, CONSTRUCT; default graph = union), protocol `default-graph-uri` / `named-graph-uri`; SPARQL Update with `GRAPH`, `USING`, `CLEAR` / `DROP` / `CREATE`, `ADD` / `COPY` / `MOVE` via `CopyGraph`; Cypher `USE GRAPH <iri>`, `CypherQueryRequest.graphs`, `CypherWriteRequest.graph`, `execute_write_ops_in`; `DeleteTriplesRequest.graph`; fixed `DeleteTriples` and Cypher DELETE closing named-graph triples in the default graph
+- [x] Graph-level access control (ContxtBroker plan step 6, **always enforced, breaking**) — `GraphAccessLevel` (read < propose < write < admin), `HAS_GRAPH_ACCESS` + `GRAPH_ACCESS_LEVEL` grants in the system graph; `polargraph-storage::graph_acl` (`GraphAccessIndex`, `UserGraphAccess`); readable-graph `RoaringBitmap` on `Snapshot` checked in `snapshot_scan_keyed` (plus text search, annotations, property history, edge ids); server: deny-by-default reads on every query/graph/export RPC for requests with a user id, vector-hit visibility, write/admin checks (`user_id` on write requests), access-control triples + node-ACL RPCs service-only; `GrantGraphAccess` / `RevokeGraphAccess` / `GetGraphAccess` + REST `/graphs/access`; REST forwards `X-User-Id` everywhere; see `docs/design/graph-acl.md`, upgrade guide `docs/upgrade-graph-acl.md`
 
 ## Adding a new predicate
 

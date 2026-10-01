@@ -1,58 +1,79 @@
 # Graph-level access control (plan step 6, §2.8) — design note
 
-Status: **proposal, awaiting decisions A–F** (branch `db/ws2-graph-acl`).
+Status: **built** on branch `db/ws2-graph-acl`. Decisions approved by Mark
+on 2026-09-30: A changed to "always enforced, no flag"; B–F and the `roaring`
+dependency as proposed. Upgrade path and release note:
+[`docs/upgrade-graph-acl.md`](../upgrade-graph-acl.md).
 
-## Today
+## Before
 
-- Identity is `QueryRequest.user_id` / `x-polargraph-user-id` (REST
-  `X-User-Id`). It is **asserted by the client**: the API key authenticates
-  the caller as a service, not the user.
-- `AccessCache: HashMap<user, HashSet<NodeId>>` built from `MEMBER_OF`,
-  `HAS_ACCESS`, `HAS_ACCESS_TYPE`; results are post-filtered so every bound
-  node must be allowed.
-- Applied only to `Query`, `CypherQuery`, `VectorSeedQuery`,
-  `SearchVectorFiltered`. Not applied to `QueryStream`, `CypherQueryStream`,
-  SPARQL (REST doesn't forward the user), `ExportGraph`, `/export/*`,
-  `GraphStats`, `ListGraphs`.
-- A request with no user, **or a user with no grants**, sees everything.
+- Identity is `user_id` / `x-polargraph-user-id` (REST `X-User-Id`),
+  **asserted by the client**; the API key authenticates the service.
+- `AccessCache: HashMap<user, HashSet<NodeId>>` (from `MEMBER_OF`,
+  `HAS_ACCESS`, `HAS_ACCESS_TYPE`) post-filtered results of only `Query`,
+  `CypherQuery`, `VectorSeedQuery`, `SearchVectorFiltered`.
+- A request with no user, or a user with no grants, saw everything.
 
-## Proposal
+## Decisions
 
-1. **Grants.** `(principal) -[HAS_GRAPH_ACCESS]-> (graph IRI node)` where the
-   principal is a `User` or `Group`, stored in the system graph
-   `urn:pg:graph:meta`. The level is a property of the grant edge,
-   `GRAPH_ACCESS_LEVEL` ∈ `read` < `propose` < `write` < `admin` (each level
-   implies the ones below it). New RPCs `GrantGraphAccess` /
-   `RevokeGraphAccess` / `GetGraphAccess` (+ REST) write and read these, so
-   clients never hand-craft grant triples.
-2. **Cache.** `GraphAccessCache: HashMap<user, GraphGrants>` with one
-   `RoaringBitmap` per level (graph ids are `u32`), rebuilt like today's
-   cache when grant, membership or graph triples change.
-3. **Enforcement in the scan.** `Snapshot` gains an optional
-   `Arc<RoaringBitmap>` of readable graphs. `snapshot_scan_keyed` checks the
-   4-byte graph slot of each key before decoding the value; graph-leading
-   scans (`gspo`/`gpos`) skip whole disallowed graphs. Because every read
-   path goes through a `Snapshot`, this covers Datalog, Cypher (including
-   property filters/projections), streaming, SPARQL, exports and graph
-   stats in one place. Union reads de-duplicate after filtering.
-4. **Vector search.** HNSW isn't graph-aware: hits are kept only if the node
-   has a live quad in a readable graph (k small, so one scoped lookup each).
-5. **Writes.** `user_id` added to `Insert`, `CypherWrite` and the graph RPCs;
-   when present, writing into a graph requires `write`, and
-   create/copy-into/move/drop/grant require `admin` on the target.
-   `propose` is stored now and used by the proposal RPCs in step 8.
-6. **Node-level grants** keep working as a post-filter on top, as §2.8
-   says.
+| # | Decision |
+|---|----------|
+| A | **Always enforced** for requests carrying a user id; no flag. Breaking for user-scoped callers — see the upgrade guide. |
+| B | Requests **without** a user id are trusted service calls (full access). |
+| C | A user with no graph grants sees only the default graph (deny by default). |
+| D | The default graph is readable and writable by everyone. The system graph `urn:pg:graph:meta` is never readable through grants; users see graph metadata only via `ListGraphs` for graphs they can read. |
+| E | A grant is one `HAS_GRAPH_ACCESS` edge per principal and graph, with the level as the edge annotation `GRAPH_ACCESS_LEVEL`, managed through RPCs. |
+| F | Reads everywhere + write/admin checks when a user id is present. `propose` is stored now and used by the proposal RPCs (step 8). Binding users to API keys is out of scope. |
 
-## Decisions needed
+## As built
 
-| # | Question | Recommendation |
-|---|----------|----------------|
-| A | Enforcement switch | Server flag `--graph-acl off\|enforce` (TOML `[auth] graph_acl`), **default `off`** so existing deployments are unchanged. |
-| B | Requests **without** a user id when enforcing | Treated as trusted service calls (full access), because the user id is client-asserted anyway; operators who need more should bind users to API keys (later). |
-| C | A user **with no graph grants** when enforcing | Sees only the readable-by-all graphs (D) — deny by default. (Today's node ACL is allow-by-default; the graph ACL shouldn't copy that.) |
-| D | Default graph and system graph | Default graph readable by everyone (legacy/untagged data); writes to it need no grant. System graph readable only for metadata of graphs the user can read; grant triples readable by `admin`s of that graph. |
-| E | Grant storage shape | As in 1: grant edge in the system graph with a `GRAPH_ACCESS_LEVEL` property (not four separate predicates), managed through RPCs. |
-| F | Scope of this step | Reads everywhere (3, 4) + write/admin checks when a user id is present (5). `propose` semantics wait for step 8. Binding user identity to API keys stays out of scope. |
+```mermaid
+flowchart LR
+    REQ["request + user id"] --> CA["caller_access(user)"]
+    CA -->|"no user id"| FULL["None: full access"]
+    CA -->|"user"| IDX["GraphAccessIndex.for_user"]
+    IDX --> UGA["UserGraphAccess<br/>bitmaps per level (roaring)"]
+    UGA -->|"readable()"| SNAP["Snapshot::with_readable_graphs"]
+    SNAP --> SCAN["snapshot_scan_keyed:<br/>skip keys whose graph slot isn't readable,<br/>before decoding values"]
+    UGA -->|"allows(g, level)"| WRITE["write / admin checks"]
+    G["GrantGraphAccess / RevokeGraphAccess<br/>MEMBER_OF changes"] -->|rebuild| IDX
+```
 
-New dependency: `roaring` (pure Rust, widely used).
+- **Grants** (`polargraph-storage::graph_acl`): `grant_graph_access`,
+  `revoke_graph_access` (bitemporal close), `graph_grants`. The grant edge id
+  is deterministic (`term::edge_id_for(principal, HAS_GRAPH_ACCESS, graph)`),
+  so a re-grant replaces the level. Grants live in the system graph.
+- **Index**: `GraphAccessIndex::build` folds each principal's own grants and
+  its groups' grants (`MEMBER_OF`, one level) into `UserGraphAccess`
+  (`at_least[level]` bitmaps; `readable()` adds the default graph). Rebuilt
+  after grant/revoke RPCs, inserts touching `MEMBER_OF` / `HAS_GRAPH_ACCESS`,
+  and user graph creation; on replicas at most every 5 s.
+- **Reads**: `Snapshot` carries `Option<Arc<RoaringBitmap>>`; reads go
+  through an internal `ReadAt { ts, vt_as_of, readable }`. Quad scans check
+  the key's 4-byte graph slot first; single-graph scans of an unreadable graph
+  return immediately; union reads de-duplicate after filtering. Text search,
+  RDF-star annotations, property history and edge-id lookups honour the same
+  bitmap. Vector hits are kept only for nodes with a live quad in a readable
+  graph (restricted callers over-fetch to `max(k, ef)`).
+- **Writes** (user callers): `Insert`, `CypherWrite` (`USE GRAPH` / `graph`,
+  default graph otherwise), `DeleteTriples` (writable graphs only) need
+  `write`; a user's `CreateGraph` of a new graph grants it `admin`;
+  metadata changes, copy/move into, move from and drop need `admin`; copy
+  from needs `read`. Unknown graphs are `PERMISSION_DENIED`, never created.
+  Access-control predicates (`MEMBER_OF`, `HAS_ACCESS*`, `HAS_GRAPH_ACCESS`,
+  `GRAPH_ACCESS_LEVEL`) and the node-ACL RPCs are service-only.
+- **REST**: middleware puts `X-User-Id` in a task-local that the gRPC
+  interceptor forwards on every upstream call; `/graphs/access` manages
+  grants.
+- Node-level grants (`HAS_ACCESS`) still post-filter on top, as before.
+
+## Known limits
+
+- The user id is client-asserted (REST: any client that omits `X-User-Id` is
+  a service call) — deploy behind a trusted front end.
+- `InsertVector` / `BatchInsertVectors` aren't graph-scoped; vectors are only
+  filtered on read.
+- `ResolveIris`, `ExplainQuery`, `ShowIndexes`, `ShowStats` and operator RPCs
+  (backup, retention, migration, materialization) don't consult the graph
+  ACL.
+- Group nesting is one level (user → group), as with the node ACL.
