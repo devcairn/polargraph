@@ -1878,6 +1878,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "polargraph-shacl"
+version = "0.1.0"
+dependencies = [
+ "polargraph-core",
+ "polargraph-sparql",
+ "polargraph-storage",
+ "regex",
+ "serde",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "polargraph-sparql"
 version = "0.1.0"
 dependencies = [
