@@ -256,12 +256,13 @@ def test_stats(base_url: str):
 
 
 def test_indexes(base_url: str):
-    """GET /indexes returns column_families array containing SPO."""
+    """GET /indexes lists the storage-format-v3 column families."""
     status, data = http_get(base_url + "/indexes")
     assert status == 200, f"indexes failed with status {status}: {data}"
     assert "column_families" in data, f"expected 'column_families' key: {data}"
     cf_names = [cf.get("name") for cf in data["column_families"]]
-    assert "spo" in cf_names, f"expected 'spo' in column families, got: {cf_names}"
+    for expected in ("spog", "gspo", "meta", "iri", "chg"):
+        assert expected in cf_names, f"expected {expected!r} in column families, got: {cf_names}"
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────
