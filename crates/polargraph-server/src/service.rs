@@ -887,11 +887,21 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<ListGraphsRequest>,
     ) -> Result<Response<ListGraphsResponse>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
         let filter = metadata_from_proto(&req.filter)?;
         let mut graphs = Vec::new();
         for (g, iri) in self.store.list_graphs() {
             if iri == polargraph_storage::SYSTEM_GRAPH_IRI && !req.include_system {
+                continue;
+            }
+            // Users only see graphs they can read (the system graph is never
+            // readable through a user's grants).
+            if access
+                .as_ref()
+                .is_some_and(|a| !a.allows(g, GraphAccessLevel::Read))
+            {
                 continue;
             }
             let info = graph_info(&self.store, g, iri).map_err(storage_err_to_status)?;
@@ -916,8 +926,10 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<GraphStatsRequest>,
     ) -> Result<Response<GraphStatsResponse>, Status> {
+        let access = self.caller_access(&meta_user_id(request.metadata()));
         let iri = request.into_inner().iri;
         let g = self.existing_graph(&iri)?;
+        require_level(&access, g, GraphAccessLevel::Read, &iri)?;
         let store = self.store.clone();
         let stats = tokio::task::spawn_blocking(move || store.graph_stats(g))
             .await
@@ -987,7 +999,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<ExportGraphRequest>,
     ) -> Result<Response<Self::ExportGraphStream>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
         let graphs: Vec<(polargraph_core::id::GraphId, String)> = if req.all_graphs {
             std::iter::once((polargraph_core::id::GraphId::DEFAULT, String::new()))
                 .chain(
@@ -996,14 +1010,21 @@ impl PolarGraphService for PolarGraphServer {
                         .into_iter()
                         .filter(|(_, iri)| iri != polargraph_storage::SYSTEM_GRAPH_IRI),
                 )
+                // A user's dataset export covers the graphs it can read.
+                .filter(|(g, _)| {
+                    access
+                        .as_ref()
+                        .map_or(true, |a| a.allows(*g, GraphAccessLevel::Read))
+                })
                 .collect()
         } else {
-            vec![(self.existing_graph(&req.iri)?, req.iri)]
+            let g = self.existing_graph(&req.iri)?;
+            require_level(&access, g, GraphAccessLevel::Read, &req.iri)?;
+            vec![(g, req.iri)]
         };
-        let store = self.store.clone();
+        let snapshot = self.snapshot_for(self.store.begin().read_ts, &access);
         let (tx, rx) = mpsc::channel::<Result<ExportGraphChunk, Status>>(4);
         tokio::task::spawn_blocking(move || {
-            let snapshot = store.snapshot(store.begin().read_ts);
             for (g, iri) in graphs {
                 let triples = match snapshot.scan_graph(g) {
                     Ok(t) => t,
@@ -3468,7 +3489,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<GetEdgeAnnotationsRequest>,
     ) -> Result<Response<GetEdgeAnnotationsResponse>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
         let edge_bytes: [u8; 16] = req
             .edge_id
             .as_slice()
@@ -3476,10 +3499,9 @@ impl PolarGraphService for PolarGraphServer {
             .map_err(|_| Status::invalid_argument("edge_id must be exactly 16 bytes"))?;
         let edge = polargraph_core::id::EdgeId(uuid::Uuid::from_bytes(edge_bytes));
 
-        let snapshot_ts = self.store.begin().read_ts;
         let annotations = self
-            .store
-            .scan_edge_annotations(edge, snapshot_ts)
+            .snapshot_for(self.store.begin().read_ts, &access)
+            .scan_edge_annotations(edge)
             .map_err(storage_err_to_status)?;
 
         let proto_annotations = annotations
@@ -3496,7 +3518,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<GetEdgeIdsByTripleRequest>,
     ) -> Result<Response<GetEdgeIdsByTripleResponse>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
 
         let subj_bytes: [u8; 16] = req
             .subject_id
@@ -3529,7 +3553,13 @@ impl PolarGraphService for PolarGraphServer {
         // all MVCC versions. The CF value bytes contain the edge_id.
         let edge_ids = self
             .store
-            .scan_spo_for_edge_ids(subject, pred_id, object, snapshot_ts)
+            .scan_spo_for_edge_ids_in(
+                subject,
+                pred_id,
+                object,
+                snapshot_ts,
+                access.as_ref().map(|a| a.readable()).as_deref(),
+            )
             .map_err(storage_err_to_status)?
             .into_iter()
             .map(|eid: EdgeId| eid.as_bytes().to_vec())
@@ -3906,7 +3936,9 @@ impl PolarGraphService for PolarGraphServer {
         &self,
         request: Request<GetPropertyHistoryRequest>,
     ) -> Result<Response<GetPropertyHistoryResponse>, Status> {
+        let user_id = meta_user_id(request.metadata());
         let req = request.into_inner();
+        let access = self.caller_access(&user_id);
         let subject_bytes: [u8; 16] = req
             .subject_id
             .as_slice()
@@ -3916,7 +3948,12 @@ impl PolarGraphService for PolarGraphServer {
 
         let versions = self
             .store
-            .scan_property_history(subject, &req.predicate, req.limit)
+            .scan_property_history_in(
+                subject,
+                &req.predicate,
+                req.limit,
+                access.as_ref().map(|a| a.readable()).as_deref(),
+            )
             .map_err(storage_err_to_status)?;
 
         let proto_versions = versions

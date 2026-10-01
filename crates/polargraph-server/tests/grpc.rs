@@ -7499,3 +7499,126 @@ async fn graph_acl_restricts_reads() {
     assert!(revoked);
     assert_eq!(query(alice.to_string(), None).await, 1);
 }
+
+#[tokio::test]
+async fn graph_acl_restricts_graph_rpcs() {
+    use polargraph_server::proto::{
+        ExportGraphRequest, GetEdgeIdsByTripleRequest, GetPropertyHistoryRequest,
+        GrantGraphAccessRequest, GraphStatsRequest, ListGraphsRequest,
+    };
+    use tokio_stream::StreamExt;
+
+    let (svc, _dir) = open();
+    let (_, s) = new_node();
+    let (_, o) = new_node();
+    let (alice, _) = new_node();
+    for graph in ["urn:g:1", "urn:g:2"] {
+        svc.insert(Request::new(InsertRequest {
+            triples: vec![
+                rel(s.clone(), "knows", o.clone()),
+                text_prop(s.clone(), "title", graph),
+            ],
+            graph: graph.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    }
+    svc.grant_graph_access(Request::new(GrantGraphAccessRequest {
+        principal: alice.to_string(),
+        graph: "urn:g:1".into(),
+        level: "read".into(),
+        user_id: String::new(),
+    }))
+    .await
+    .unwrap();
+    fn as_user<T>(mut req: Request<T>, user: &str) -> Request<T> {
+        req.metadata_mut()
+            .insert("x-polargraph-user-id", user.parse().unwrap());
+        req
+    }
+    let alice_id = alice.to_string();
+    let as_alice = |req| as_user(req, &alice_id);
+
+    let graphs = svc
+        .list_graphs(as_user(
+            Request::new(ListGraphsRequest::default()),
+            &alice_id,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .graphs;
+    assert_eq!(graphs.len(), 1);
+    assert_eq!(graphs[0].iri, "urn:g:1");
+
+    let err = svc
+        .graph_stats(as_user(
+            Request::new(GraphStatsRequest {
+                iri: "urn:g:2".into(),
+            }),
+            &alice_id,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+    let mut stream = svc
+        .export_graph(as_user(
+            Request::new(ExportGraphRequest {
+                iri: String::new(),
+                all_graphs: true,
+            }),
+            &alice_id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut graphs_seen = std::collections::BTreeSet::new();
+    while let Some(chunk) = stream.next().await {
+        graphs_seen.extend(chunk.unwrap().quads.into_iter().map(|q| q.graph));
+    }
+    assert_eq!(graphs_seen.into_iter().collect::<Vec<_>>(), vec!["urn:g:1"]);
+
+    let history = svc
+        .get_property_history(as_alice(Request::new(GetPropertyHistoryRequest {
+            subject_id: s.bytes.clone(),
+            predicate: "title".into(),
+            limit: 0,
+        })))
+        .await
+        .unwrap()
+        .into_inner()
+        .versions;
+    assert_eq!(history.len(), 1);
+    assert!(history[0].value_json.contains("urn:g:1"));
+
+    let edge_ids = |req: Request<GetEdgeIdsByTripleRequest>| {
+        let svc = &svc;
+        async move {
+            svc.get_edge_ids_by_triple(req)
+                .await
+                .unwrap()
+                .into_inner()
+                .edge_ids
+                .len()
+        }
+    };
+    let req = || GetEdgeIdsByTripleRequest {
+        subject_id: s.bytes.clone(),
+        predicate: "knows".into(),
+        object_id: o.bytes.clone(),
+    };
+    // One edge per insert (graph); a user only sees edges in readable graphs.
+    assert_eq!(edge_ids(Request::new(req())).await, 2);
+    assert_eq!(edge_ids(as_user(Request::new(req()), &alice_id)).await, 1);
+    let stranger = {
+        let mut r = Request::new(req());
+        r.metadata_mut().insert(
+            "x-polargraph-user-id",
+            uuid::Uuid::now_v7().to_string().parse().unwrap(),
+        );
+        r
+    };
+    assert_eq!(edge_ids(stranger).await, 0);
+}

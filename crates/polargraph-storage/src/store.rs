@@ -1227,6 +1227,19 @@ impl TripleStore {
         object: NodeId,
         snapshot_ts: Timestamp,
     ) -> Result<Vec<EdgeId>, StorageError> {
+        self.scan_spo_for_edge_ids_in(subject, pred_id, object, snapshot_ts, None)
+    }
+
+    /// [`Self::scan_spo_for_edge_ids`] over the graphs in `readable` only
+    /// (`None` = every graph).
+    pub fn scan_spo_for_edge_ids_in(
+        &self,
+        subject: NodeId,
+        pred_id: PredId,
+        object: NodeId,
+        snapshot_ts: Timestamp,
+        readable: Option<&RoaringBitmap>,
+    ) -> Result<Vec<EdgeId>, StorageError> {
         let prefix = Order::Spog.prefix(Some(&subject), Some(pred_id), Some(&object), None);
         let cf = self.cf_handle(Order::Spog.cf())?;
         let iter = self
@@ -1242,7 +1255,7 @@ impl TripleStore {
                 break;
             }
             let tt = keys::key_tt(&key);
-            if tt > snapshot_ts {
+            if tt > snapshot_ts || !readable_admits(readable, Order::Spog.graph_of(&key)) {
                 continue;
             }
             if let Ok(DecodedValue::Relation { edge_id, .. }) = codec::decode_value(&value) {
@@ -2206,6 +2219,18 @@ impl TripleStore {
         predicate: &str,
         limit: u32,
     ) -> Result<Vec<(Value, i64)>, StorageError> {
+        self.scan_property_history_in(subject, predicate, limit, None)
+    }
+
+    /// [`Self::scan_property_history`] over the graphs in `readable` only
+    /// (`None` = every graph).
+    pub fn scan_property_history_in(
+        &self,
+        subject: NodeId,
+        predicate: &str,
+        limit: u32,
+        readable: Option<&RoaringBitmap>,
+    ) -> Result<Vec<(Value, i64)>, StorageError> {
         let limit = if limit == 0 { 50 } else { limit as usize };
         let Some(pred_id) = self.predicate_id(predicate) else {
             return Ok(vec![]);
@@ -2225,7 +2250,9 @@ impl TripleStore {
             if !key.starts_with(&prefix) {
                 break;
             }
-            if value_bytes.first() == Some(&codec::DISC_RELATION) {
+            if value_bytes.first() == Some(&codec::DISC_RELATION)
+                || !readable_admits(readable, Order::Spog.graph_of(&key))
+            {
                 continue;
             }
             let Some((_, vt_end)) = codec::valid_time(&value_bytes) else {
