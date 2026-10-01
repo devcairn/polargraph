@@ -401,6 +401,8 @@ pub fn grpc_to_http_status(code: tonic::Code) -> StatusCode {
         Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
         Code::DeadlineExceeded => StatusCode::REQUEST_TIMEOUT,
         Code::InvalidArgument => StatusCode::BAD_REQUEST,
+        // Resume point older than the retained change log.
+        Code::OutOfRange => StatusCode::GONE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -1050,6 +1052,184 @@ async fn ndjson_streaming_response(
         .header(header::CONTENT_TYPE, "application/x-ndjson")
         .body(axum::body::boxed(body))
         .unwrap()
+}
+
+// ── GET /subscribe (Server-Sent Events) ───────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SubscribeParams {
+    /// Comma-separated graph IRIs ("default" = the default graph).
+    #[serde(default)]
+    graphs: String,
+    /// Comma-separated predicates.
+    #[serde(default)]
+    predicates: String,
+    /// Comma-separated `__type` names (matched against current types).
+    #[serde(default)]
+    types: String,
+    /// Resume after this commit timestamp (also `Last-Event-ID`).
+    resume_after: Option<i64>,
+    #[serde(default)]
+    include_values: bool,
+}
+
+fn split_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// `GET /subscribe` — the change feed as Server-Sent Events. Each event has
+/// `id:` = commit timestamp (so `Last-Event-ID` resumes), `event:` = the
+/// change kind, and a JSON `data:` line. A resume point older than the
+/// retained log is HTTP 410. Comment lines keep idle connections alive.
+async fn handle_subscribe(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    QueryParams(params): QueryParams<SubscribeParams>,
+) -> Response {
+    let resume_after_ts = params.resume_after.unwrap_or_else(|| {
+        headers
+            .get("last-event-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    });
+    let req = proto::SubscribeRequest {
+        graphs: split_list(&params.graphs)
+            .into_iter()
+            .map(|g| if g == "default" { String::new() } else { g })
+            .collect(),
+        predicates: split_list(&params.predicates),
+        types: split_list(&params.types),
+        resume_after_ts,
+        include_values: params.include_values,
+        user_id: String::new(),
+    };
+    let mut client = state.client.clone();
+    let mut stream = match client.subscribe(tonic::Request::new(req)).await {
+        Ok(r) => r.into_inner(),
+        Err(e) => return grpc_error(e),
+    };
+
+    let (mut body_tx, body) = hyper::Body::channel();
+    tokio::spawn(async move {
+        let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(15));
+        keepalive.tick().await;
+        loop {
+            let event = tokio::select! {
+                msg = stream.message() => match msg {
+                    Ok(Some(event)) => event,
+                    Ok(None) => return,
+                    Err(e) => {
+                        let frame = format!(
+                            "event: error\ndata: {}\n\n",
+                            serde_json::json!({ "error": e.message() })
+                        );
+                        let _ = body_tx.send_data(bytes::Bytes::from(frame)).await;
+                        return;
+                    }
+                },
+                _ = keepalive.tick() => {
+                    if body_tx.send_data(bytes::Bytes::from_static(b": keep-alive\n\n")).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            };
+            let names = resolve_names(&mut client, change_event_nodes(&event), false).await;
+            let frame = format!(
+                "id: {}\nevent: {}\ndata: {}\n\n",
+                event.commit_ts,
+                change_kind_name(event.kind),
+                change_event_json(&event, &names)
+            );
+            if body_tx.send_data(bytes::Bytes::from(frame)).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(axum::body::boxed(body))
+        .unwrap()
+}
+
+fn change_kind_name(kind: i32) -> &'static str {
+    match proto::ChangeKind::try_from(kind).unwrap_or(proto::ChangeKind::Unspecified) {
+        proto::ChangeKind::Assert => "assert",
+        proto::ChangeKind::Close => "close",
+        proto::ChangeKind::GraphCreated => "graph_created",
+        proto::ChangeKind::GraphDropped => "graph_dropped",
+        proto::ChangeKind::GraphCopied => "graph_copied",
+        proto::ChangeKind::Unspecified => "unknown",
+    }
+}
+
+/// Nodes named by an event's quad (for IRI resolution).
+fn change_event_nodes(event: &proto::ChangeEvent) -> Vec<NodeId> {
+    use proto::triple::Kind;
+    let mut ids = Vec::new();
+    match event.quad.as_ref().and_then(|q| q.kind.as_ref()) {
+        Some(Kind::Relation(r)) => {
+            ids.extend(r.subject.as_ref().and_then(proto_node_id));
+            ids.extend(r.object.as_ref().and_then(proto_node_id));
+        }
+        Some(Kind::Property(p)) => ids.extend(p.subject.as_ref().and_then(proto_node_id)),
+        None => {}
+    }
+    ids
+}
+
+/// The JSON `data:` payload of a change event; nodes rendered as IRIs.
+fn change_event_json(
+    event: &proto::ChangeEvent,
+    names: &polargraph_sparql::IriNames,
+) -> serde_json::Value {
+    use proto::triple::Kind;
+    let node = |n: &Option<proto::NodeId>| {
+        n.as_ref()
+            .and_then(proto_node_id)
+            .map(|id| serde_json::Value::String(names.iri(&id)))
+            .unwrap_or(serde_json::Value::Null)
+    };
+    let mut obj = serde_json::json!({
+        "commit_ts": event.commit_ts,
+        "kind": change_kind_name(event.kind),
+        "graph": event.graph,
+        "author": event.author,
+    });
+    if !event.source_graph.is_empty() {
+        obj["source_graph"] = serde_json::json!(event.source_graph);
+    }
+    match event.quad.as_ref().and_then(|q| q.kind.as_ref()) {
+        Some(Kind::Relation(r)) => {
+            obj["subject"] = node(&r.subject);
+            obj["predicate"] = serde_json::json!(r.predicate);
+            obj["object"] = node(&r.object);
+            obj["vt_start"] = serde_json::json!(r.vt_start);
+            obj["vt_end"] = serde_json::json!(r.vt_end);
+            if let Ok(arr) = <[u8; 16]>::try_from(event.edge_id.as_slice()) {
+                obj["edge_id"] = serde_json::json!(Uuid::from_bytes(arr).to_string());
+            }
+        }
+        Some(Kind::Property(p)) => {
+            obj["subject"] = node(&p.subject);
+            obj["predicate"] = serde_json::json!(p.predicate);
+            if let Some(v) = &p.value {
+                obj["value"] = proto_value_to_json(v);
+            }
+            obj["vt_start"] = serde_json::json!(p.vt_start);
+            obj["vt_end"] = serde_json::json!(p.vt_end);
+        }
+        None => {}
+    }
+    obj
 }
 
 // ── POST /explain ─────────────────────────────────────────────────────────────
@@ -5025,6 +5205,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/graphs/export", get(handle_export_graph))
         .route("/graphs/copy", post(handle_copy_graph))
         .route("/graphs/move", post(handle_move_graph))
+        .route("/subscribe", get(handle_subscribe))
         .route(
             "/graphs/access",
             get(handle_get_graph_access)
@@ -5133,6 +5314,40 @@ mod tests {
 
     /// attach_user_id sets the x-polargraph-user-id metadata header for a
     /// non-empty user_id and leaves the request unmodified for an empty one.
+    #[test]
+    fn change_event_json_renders_nodes_and_kind() {
+        let id = uuid::Uuid::now_v7();
+        let event = proto::ChangeEvent {
+            commit_ts: 42,
+            graph: "urn:g:1".into(),
+            kind: proto::ChangeKind::Close as i32,
+            quad: Some(proto::Triple {
+                kind: Some(proto::triple::Kind::Property(proto::PropertyTriple {
+                    subject: Some(proto::NodeId {
+                        bytes: id.as_bytes().to_vec(),
+                    }),
+                    predicate: "name".into(),
+                    value: None,
+                    vt_start: 1,
+                    vt_end: 2,
+                    mode: 0,
+                })),
+            }),
+            author: "urn:user:alice".into(),
+            ..Default::default()
+        };
+        let names = polargraph_sparql::IriNames::new(
+            std::collections::HashMap::from([(NodeId(id), "http://ex/a".to_string())]),
+            false,
+        );
+        let json = change_event_json(&event, &names);
+        assert_eq!(json["kind"], "close");
+        assert_eq!(json["subject"], "http://ex/a");
+        assert_eq!(json["author"], "urn:user:alice");
+        assert!(json.get("value").is_none());
+        assert_eq!(change_event_nodes(&event), vec![NodeId(id)]);
+    }
+
     #[tokio::test]
     async fn interceptor_forwards_the_request_user() {
         use tonic::service::Interceptor;

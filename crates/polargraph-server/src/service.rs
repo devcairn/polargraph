@@ -769,7 +769,10 @@ impl PolarGraphServer {
         if iri.is_empty() {
             return Ok(polargraph_core::id::GraphId::DEFAULT);
         }
-        self.store.intern_graph(iri).map_err(storage_err_to_status)
+        // create_graph logs GRAPH_CREATED for a new graph (change feed).
+        self.store
+            .create_graph(iri, &[])
+            .map_err(storage_err_to_status)
     }
 
     fn check_not_replica(&self) -> Result<(), Status> {
