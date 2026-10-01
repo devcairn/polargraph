@@ -279,8 +279,8 @@ impl TripleStore {
 }
 
 /// `t` with its valid time closed at `now` (same `vt_start`, so it shadows
-/// the open version).
-pub(crate) fn close_at(t: Triple, now: Timestamp) -> Triple {
+/// the open version) — write it to retract `t` bitemporally.
+pub fn close_at(t: Triple, now: Timestamp) -> Triple {
     let close = |temporal: BiTemporalRange| BiTemporalRange {
         vt_end: now.max(temporal.vt_start),
         ..temporal

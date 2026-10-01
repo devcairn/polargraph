@@ -459,3 +459,41 @@ fn data_from_before_reopen_visible_after_reopen() {
         assert_eq!(triples[0].predicate().0, "knows");
     }
 }
+
+#[test]
+fn begin_at_fails_when_touched_quads_changed_since_read_ts() {
+    let (store, _dir) = open_store();
+    let (a, b, c) = (NodeId::new(), NodeId::new(), NodeId::new());
+    let mut tx = store.begin();
+    tx.insert(relation(a, "knows", b));
+    let t1 = tx.commit().unwrap();
+
+    // Someone retracts a→b after t1.
+    let snap = store.snapshot(t1);
+    let live = snap.scan_by_subject(&a).unwrap();
+    let mut tx = store.begin();
+    tx.insert(polargraph_storage::close_at(
+        live[0].clone(),
+        Timestamp::now(),
+    ));
+    tx.commit().unwrap();
+
+    // A changeset based on t1 that also retracts a→b conflicts…
+    let mut stale = store.begin_at(t1).unwrap();
+    stale.insert(polargraph_storage::close_at(
+        live[0].clone(),
+        Timestamp::now(),
+    ));
+    assert!(matches!(
+        stale.commit(),
+        Err(StorageError::WriteConflict(_))
+    ));
+
+    // …one that only touches other quads goes through.
+    let mut other = store.begin_at(t1).unwrap();
+    other.insert(relation(a, "knows", c));
+    assert!(other.commit().is_ok());
+
+    // A read point in the future is rejected.
+    assert!(store.begin_at(Timestamp(i64::MAX)).is_err());
+}

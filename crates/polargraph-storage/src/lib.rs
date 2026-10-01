@@ -37,7 +37,7 @@ pub use changes::{ChangeRecord, GraphOp};
 pub use compaction::{CompactionManager, RetentionStats};
 pub use error::StorageError;
 pub use graph_acl::{GraphAccessIndex, GraphGrant, UserGraphAccess};
-pub use graphs::{GraphStats, SYSTEM_GRAPH_IRI};
+pub use graphs::{close_at, GraphStats, SYSTEM_GRAPH_IRI};
 pub use migrate_v3::MigrationReport;
 pub use migrations::{AppliedMigration, MigrationRunner, MigrationStats, MIGRATIONS};
 pub use mvcc::{ConflictError, Snapshot, Transaction, WriteMode};
