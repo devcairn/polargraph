@@ -1,6 +1,7 @@
 # Change feed — `Subscribe` (plan step 7, WS6) — design note
 
-Status: **proposal, awaiting decisions A–G** (branch `db/ws6-subscribe`).
+Status: **built** on branch `db/ws6-subscribe`; decisions A–G approved as
+proposed (2026-09-30).
 
 ## Why not tail the WAL directly
 
@@ -69,3 +70,52 @@ The plan (§6.1) builds `Subscribe` on the existing WAL stream. In practice:
 
 Out of scope here: per-node fine-grained filters beyond predicates/types,
 exactly-once delivery (consumers dedupe by `commit_ts`).
+
+## As built
+
+```mermaid
+flowchart LR
+    W["Insert / CypherWrite / DeleteTriples / graph RPCs<br/>(author = caller user id)"] --> TX["Transaction::commit"]
+    TX -->|"one WriteBatch"| Q["8 quad orders"]
+    TX -->|"same batch"| CHG[("chg CF<br/>[commit_ts] → author, graph ops, quad versions")]
+    TX --> WATCH["commit_watch()"]
+    CHG -->|"changes_after(cursor)"| SUB["Subscribe stream"]
+    WATCH -->|wake| SUB
+    SUB -->|"graph ACL + filters per event"| C1["gRPC client"]
+    SUB --> SSE["REST GET /subscribe (SSE)"]
+    PR["pruner (hourly, primary)"] -->|"prune_changes, raise floor"| CHG
+```
+
+- Storage (`polargraph-storage::changes`): `stage_writes` reports every quad
+  version it stages (including the closing versions a `Replace` writes);
+  `Transaction::commit` appends one `chg` entry with them, the author
+  (`set_author`) and graph ops (`record_graph_op`). `create_graph_by`,
+  `drop_graph_by`, `copy_graph_by`, `move_graph_by` record `Created`,
+  `Dropped`, `Copied` (a move is `Dropped(target)` + `Copied` +
+  `Dropped(source)`). `changes_after`, `changes_floor`, `prune_changes`,
+  `commit_watch`.
+- Server: `Subscribe` (resume via `resume_after_ts`, `OUT_OF_RANGE` below the
+  floor), `--change-retention-secs` (default 604800; 0 = forever) with an
+  hourly pruner on the primary. Graphs created implicitly by writes go
+  through `create_graph`, so they log `GRAPH_CREATED` too.
+- REST: `GET /subscribe?graphs=&predicates=&types=&include_values=&resume_after=`
+  (or `Last-Event-ID`), SSE frames `id: <commit_ts>`, `event: <kind>`,
+  `data: <json>`; 410 for an expired resume point; 15 s keep-alives.
+
+Not logged: bulk SST import, `polargraphd migrate`, OWL materialization,
+retention deletes, RDF-star annotations, vector inserts.
+
+## Write cost (decision G)
+
+Measured on Apple M-series, release build, 10 000 quads (half relations,
+half text properties) in 100 commits:
+
+| | WAL bytes | wall time (3 runs) |
+|---|---|---|
+| `main` (no change log) | 14 125 101 | 115 / 99 / 98 ms |
+| this branch | 15 470 138 (**+9.5 %**) | 111 / 100 / 106 ms |
+
+Criterion `triple_writes` (one commit of N properties, store opened per
+iteration), branch vs `main` baseline: N = 1 and 10 −9 % / −7 % (noise, not
+a real speed-up), N = 100 and 1 000 no significant change (p = 0.81, 0.44).
+The extra put per commit adds ~9.5 % write volume and no measurable latency.

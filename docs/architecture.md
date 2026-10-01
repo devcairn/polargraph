@@ -1691,6 +1691,39 @@ This is a full bitemporal point query — a precise snapshot along both axes.
 
 ---
 
+## Change feed (Subscribe)
+
+Design, decisions and write-cost numbers: `docs/design/change-feed.md`.
+
+Every commit that writes quads or changes a graph appends one entry to the
+`chg` column family **in the same `WriteBatch`**, keyed by commit timestamp:
+the author (the caller's user id, empty for service calls), graph operations
+(created / dropped / copied) and every quad version written — including the
+closing versions of deletes, replaced values and graph drops. The log is as
+durable as the data and replicates to read replicas with it.
+
+`Subscribe` (gRPC server streaming; REST `GET /subscribe` as Server-Sent
+Events) replays the log after `resume_after_ts` and then follows new commits
+(woken by `TripleStore::commit_watch`; replicas also poll every second).
+
+| Event kind | When |
+|---|---|
+| `ASSERT` | A quad version with open-ended valid time |
+| `CLOSE` | A quad version with a `vt_end` (delete, replaced value, graph drop) |
+| `GRAPH_CREATED` / `GRAPH_DROPPED` | Graph management (including graphs created by a write) |
+| `GRAPH_COPIED` | `CopyGraph` / `MoveGraph` / SPARQL `ADD` · `COPY` · `MOVE` (`source_graph` set) |
+
+- **Resume** with the last `commit_ts` seen (SSE: `Last-Event-ID`). Entries
+  older than `--change-retention-secs` (default 7 days) are pruned hourly on
+  the primary; resuming before the retained floor is `OUT_OF_RANGE` (HTTP
+  410), and the client re-syncs. No backfill: the log starts at the upgrade.
+- **Filters**: graphs, predicates, and `types` (the subject's *current*
+  `__type`). Property values only with `include_values`.
+- **Access control**: the subscriber's graph access applies per event and is
+  re-evaluated per batch, so a revoked grant stops the flow.
+- Not logged: bulk SST import, `polargraphd migrate`, OWL materialization,
+  retention deletes, RDF-star annotations, vector inserts.
+
 ## Read replicas
 
 A replica is a `polargraphd` started with `--replica-of <primary gRPC URL>`.

@@ -1167,6 +1167,43 @@ every graph when there is no `GRAPH`. IRIs map to nodes the same way as `/import
 
 ---
 
+## `Subscribe` (change feed)
+
+```
+rpc Subscribe(SubscribeRequest) returns (stream ChangeEvent)
+```
+
+| Request field | Meaning |
+|---|---|
+| `graphs` | Graph IRIs to follow ("" = default graph); empty = every readable graph |
+| `predicates` | Only these predicates (graph events always pass) |
+| `types` | Only subjects whose current `__type` is one of these |
+| `resume_after_ts` | Deliver commits after this transaction time; 0 = from now. Older than the retained log → `OUT_OF_RANGE` |
+| `include_values` | Include property values |
+| `user_id` | Caller (or `x-polargraph-user-id`); graph access applies per event |
+
+`ChangeEvent { commit_ts, graph, kind, quad, edge_id, author, source_graph }`,
+`kind` ∈ `CHANGE_KIND_ASSERT`, `_CLOSE`, `_GRAPH_CREATED`, `_GRAPH_DROPPED`,
+`_GRAPH_COPIED`. Several events can share a `commit_ts` (one commit);
+resume with the last one fully processed.
+
+REST: `GET /subscribe?graphs=a,b&predicates=&types=&include_values=true&resume_after=<ts>`
+(or `Last-Event-ID`) → `text/event-stream`; each frame is
+`id: <commit_ts>` / `event: <kind>` / `data: {commit_ts, kind, graph, author,
+subject, predicate, object | value, vt_start, vt_end, edge_id?, source_graph?}`
+with nodes as IRIs; `graphs=default` names the default graph; 410 when the
+resume point has been pruned.
+
+Server flag: `--change-retention-secs N` / `POLARGRAPH_CHANGE_RETENTION_SECS` /
+`[storage] change_retention_secs` (default 604800; 0 = keep forever).
+
+Storage API: `Transaction::set_author`, `Transaction::record_graph_op`,
+`TripleStore::{changes_after, changes_floor, prune_changes, commit_watch}`,
+`ChangeRecord`, `GraphOp`; `create_graph_by` / `drop_graph_by` /
+`copy_graph_by` / `move_graph_by` record the author.
+
+---
+
 ## Graph access control RPCs
 
 See `docs/design/graph-acl.md` and `docs/upgrade-graph-acl.md`. Principals

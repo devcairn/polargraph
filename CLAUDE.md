@@ -131,7 +131,8 @@ RocksDB-backed persistence. Owns the quad-index layout (storage format v3,
 | `mvcc` | `TimestampOracle`, `Transaction` (`insert`, `insert_in`, `bind_iri`), `WriteMode` (`Auto`/`Replace`/`Add`), `Snapshot`, `ConflictError` |
 | `keys` | `Order` (8 quad orders: encode/decode/prefix), `QuadKey`, `KeyPrefix`, `value_object`, ancillary keys; `keys::v2` read-only legacy layouts |
 | `codec` | Value serialization (discriminant + temporal + payload); `PropertyRef` and blob payloads; `valid_time`, `with_vt_end` |
-| `cf` | Column family names (`spog sopg psog posg ospg opsg gspo gpos meta hnsw trig epag epog peag drvg iri blob`); `cf::v2` legacy names |
+| `cf` | Column family names (`spog sopg psog posg ospg opsg gspo gpos meta hnsw trig epag epog peag drvg iri blob chg`); `cf::v2` legacy names |
+| `changes` | Change log for `Subscribe`: `chg` CF entry per commit (author, `GraphOp`s, quad versions); `changes_after`, `changes_floor`, `prune_changes`, `commit_watch` |
 | `migrate_v3` | `migrate`, `open_for_migration`, `MigrationReport` — offline v2 → v3 storage migration |
 | `graph_acl` | Graph-level access control: `grant_graph_access` / `revoke_graph_access` / `graph_grants` (grants in the system graph), `GraphAccessIndex` → `UserGraphAccess` (roaring bitmaps per level); enforced via `Snapshot::with_readable_graphs` inside scans |
 | `graphs` | Named-graph management on `TripleStore`: `create_graph`, graph metadata (system graph `urn:pg:graph:meta`), `graph_stats`, bitemporal `drop_graph`, `copy_graph` / `move_graph` (chunked, `urn:pg:copyInProgress` flag) |
@@ -217,6 +218,7 @@ See `polargraph.example.toml` in the repo root for a fully-commented example.
 | `--query-cache-size N` | `POLARGRAPH_QUERY_CACHE_SIZE` | `1000` | Max Cypher query plans to cache |
 | `--auto-materialize` | `POLARGRAPH_AUTO_MATERIALIZE` | `false` | Run OWL 2 RL materialization at startup |
 | `--inline-value-max-bytes N` | `POLARGRAPH_INLINE_VALUE_MAX_BYTES` | `256` | Property payloads above this are stored once in the `blob` CF |
+| `--change-retention-secs N` | `POLARGRAPH_CHANGE_RETENTION_SECS` | `604800` | Change-feed history kept for `Subscribe` resume (pruned hourly on the primary); 0 = forever |
 
 Subcommand: `polargraphd migrate [--backup-dir PATH | --no-backup]` — offline
 storage-format migration (v2 → v3). `--data-dir`, `--backup-dir`, `--config`
@@ -261,6 +263,7 @@ Endpoints include: `POST /query`, `POST /query/stream`, `POST /insert`, `GET /tr
 `POST /materialize`, `GET /property-history`, `POST /edge-annotations`, `GET /edge-annotations/:id`,
 `POST /access/grant`, `POST /access/revoke`, `POST /access/add-user`, `GET /access/user/:id`,
 `POST` / `DELETE` / `GET /graphs/access` (graph grants; `X-User-Id` is forwarded on every endpoint),
+`GET /subscribe` (change feed as Server-Sent Events),
 `POST /graphs`, `GET /graphs`, `DELETE /graphs?iri=`, `GET /graphs/stats`, `POST /graphs/copy`,
 `POST /graphs/move`, `GET /graphs/export`, `POST /import/rdf` (incl. N-Quads/TriG, `?graph=`),
 `GET /export/subgraph`. Query patterns take an optional `@default` / `@<iri>` / `@?g` graph suffix.
@@ -302,8 +305,8 @@ value discriminant byte.
 
 ### Column families
 
-Storage format v3 (`__storage__/format = 3` in META) uses 17 column
-families. Every quad version is written atomically to all 8 quad orders via
+Storage format v3 (`__storage__/format = 3` in META) uses 18 column
+families (`chg` added by the change feed, created automatically on open). Every quad version is written atomically to all 8 quad orders via
 one `WriteBatch` (`TripleStore::stage_writes`):
 
 | CF | Purpose |
@@ -318,6 +321,7 @@ one `WriteBatch` (`TripleStore::stage_writes`):
 | `epog` | Edge relation annotations `[edge:16][pred:4][obj:16][g:4][tt:8]` |
 | `iri` | IRI dictionary `[node_id:16]` → IRI (`Transaction::bind_iri`, `iri_of`, `iris_of`) |
 | `blob` | Out-of-line values `[value_hash:16]` → payload (> `inline_value_max_bytes`, default 256) |
+| `chg` | Change log `[commit_ts:8]` → one commit's author, graph ops and quad versions (`Subscribe`) |
 
 Key layout: `[slot][slot][slot][slot][tt(8)]` — always 48 bytes; the first
 40 identify the quad and `tt` is last, so versions sort oldest-first. The
@@ -472,6 +476,7 @@ entries were superseded by storage format v3 (last entries below).
 - [x] Named graphs (ContxtBroker plan step 4) — `GraphScope` + `Snapshot::scan_scoped`; `GraphTerm` on `VarPattern` (`?g` binds the graph IRI node, named graphs only), proto `VarPattern.graph` + `QueryRequest.graphs` dataset, REST `@graph` pattern suffix; `polargraph-storage::graphs` (metadata in system graph, bitemporal drop, copy/add/move, stats); `CreateGraph`, `ListGraphs`, `GraphStats`, `CopyGraph`, `MoveGraph`, `DropGraph`, `ExportGraph` (streaming) RPCs + REST `/graphs*`; N-Quads/TriG import (REST, `polargraph-import`) and export (`/graphs/export`, `/export/subgraph`); see "Named graphs" in `docs/architecture.md`. Limits: pending tx writes and rule-derived facts only match Union patterns; `max_hops` ignores graph terms
 - [x] Graph-aware SPARQL and Cypher (ContxtBroker plan step 5) — `GraphTerm::Iri`, `scope_to_graph`; SPARQL `GRAPH <iri>` / `GRAPH ?g` / `FROM` / `FROM NAMED` (SELECT, ASK, CONSTRUCT; default graph = union), protocol `default-graph-uri` / `named-graph-uri`; SPARQL Update with `GRAPH`, `USING`, `CLEAR` / `DROP` / `CREATE`, `ADD` / `COPY` / `MOVE` via `CopyGraph`; Cypher `USE GRAPH <iri>`, `CypherQueryRequest.graphs`, `CypherWriteRequest.graph`, `execute_write_ops_in`; `DeleteTriplesRequest.graph`; fixed `DeleteTriples` and Cypher DELETE closing named-graph triples in the default graph
 - [x] Graph-level access control (ContxtBroker plan step 6, **always enforced, breaking**) — `GraphAccessLevel` (read < propose < write < admin), `HAS_GRAPH_ACCESS` + `GRAPH_ACCESS_LEVEL` grants in the system graph; `polargraph-storage::graph_acl` (`GraphAccessIndex`, `UserGraphAccess`); readable-graph `RoaringBitmap` on `Snapshot` checked in `snapshot_scan_keyed` (plus text search, annotations, property history, edge ids); server: deny-by-default reads on every query/graph/export RPC for requests with a user id, vector-hit visibility, write/admin checks (`user_id` on write requests), access-control triples + node-ACL RPCs service-only; `GrantGraphAccess` / `RevokeGraphAccess` / `GetGraphAccess` + REST `/graphs/access`; REST forwards `X-User-Id` everywhere; see `docs/design/graph-acl.md`, upgrade guide `docs/upgrade-graph-acl.md`
+- [x] Change feed (ContxtBroker plan step 7) — `chg` CF written in each commit batch (author, graph ops, quad versions; `polargraph-storage::changes`); `Subscribe` server-streaming RPC (resume by commit ts, `OUT_OF_RANGE` below the floor, graph / predicate / current-type filters, per-event graph ACL, `ASSERT` / `CLOSE` / `GRAPH_*` events); authors recorded on writes; `--change-retention-secs` (default 7 days) hourly pruner; REST `GET /subscribe` (SSE, `Last-Event-ID`); +9.5 % write bytes, no measurable latency — see `docs/design/change-feed.md`
 
 ## Adding a new predicate
 
