@@ -7313,3 +7313,189 @@ async fn cypher_use_graph_and_datasets() {
     assert_eq!(count("MATCH (a:Person) RETURN a", vec![]).await, 2);
     assert_eq!(count("MATCH (a:Person) RETURN a", vec!["urn:g:1"]).await, 0);
 }
+
+#[tokio::test]
+async fn graph_acl_restricts_reads() {
+    use polargraph_server::proto::{
+        graph_term::Kind as GraphKind, GetGraphAccessRequest, GrantGraphAccessRequest, GraphTerm,
+        RevokeGraphAccessRequest, SearchVectorRequest,
+    };
+    use tokio_stream::StreamExt;
+
+    let (svc, _dir) = open();
+    let (_, s) = new_node();
+    let (_, pub_o) = new_node();
+    let (_, g1_o) = new_node();
+    let (_, g2_o) = new_node();
+    let (alice, _) = new_node();
+    for (graph, o) in [("", &pub_o), ("urn:g:1", &g1_o), ("urn:g:2", &g2_o)] {
+        svc.insert(Request::new(InsertRequest {
+            triples: vec![rel(s.clone(), "knows", o.clone())],
+            graph: graph.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    }
+    svc.insert_vector(Request::new(InsertVectorRequest {
+        node_id: Some(g2_o.clone()),
+        vector: vec![1.0, 0.0],
+        space: String::new(),
+    }))
+    .await
+    .unwrap();
+
+    let grant = |principal: String, graph: &'static str, level: &'static str, caller: String| {
+        let svc = &svc;
+        async move {
+            svc.grant_graph_access(Request::new(GrantGraphAccessRequest {
+                principal,
+                graph: graph.into(),
+                level: level.into(),
+                user_id: caller,
+            }))
+            .await
+        }
+    };
+    grant(alice.to_string(), "urn:g:1", "read", String::new())
+        .await
+        .unwrap();
+    // Alice isn't an admin of g:2, so she can't grant herself access.
+    let err = grant(alice.to_string(), "urn:g:2", "read", alice.to_string())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+    let query = |user: String, graph: Option<GraphKind>| {
+        let svc = &svc;
+        let s = s.clone();
+        async move {
+            let mut p = pattern(
+                Term {
+                    kind: Some(TermKind::Bound(s)),
+                },
+                "knows",
+                Term {
+                    kind: Some(TermKind::Var("o".into())),
+                },
+            );
+            p.graph = graph.map(|k| GraphTerm { kind: Some(k) });
+            svc.query(Request::new(QueryRequest {
+                patterns: vec![p],
+                user_id: user,
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .bindings
+            .len()
+        }
+    };
+    assert_eq!(
+        query(String::new(), None).await,
+        3,
+        "service call: everything"
+    );
+    assert_eq!(query(alice.to_string(), None).await, 2, "default + g:1");
+    assert_eq!(
+        query(alice.to_string(), Some(GraphKind::Var("g".into()))).await,
+        1
+    );
+    assert_eq!(
+        query(alice.to_string(), Some(GraphKind::Iri("urn:g:2".into()))).await,
+        0
+    );
+    assert_eq!(
+        query(uuid::Uuid::now_v7().to_string(), None).await,
+        1,
+        "no grants: default only"
+    );
+
+    // Streaming and Cypher go through the same restricted snapshot.
+    let mut stream = svc
+        .query_stream(Request::new(QueryRequest {
+            patterns: vec![pattern(
+                Term {
+                    kind: Some(TermKind::Var("s".into())),
+                },
+                "knows",
+                Term {
+                    kind: Some(TermKind::Var("o".into())),
+                },
+            )],
+            user_id: alice.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut streamed = 0;
+    while let Some(chunk) = stream.next().await {
+        streamed += chunk.unwrap().results.len();
+    }
+    assert_eq!(streamed, 2);
+    let rows = svc
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (a)-[:knows]->(b) RETURN a, b".into(),
+            user_id: alice.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .rows;
+    assert_eq!(rows.len(), 2);
+
+    // Vector hits on nodes only visible in g:2 are dropped.
+    let search = |user: String| {
+        let svc = &svc;
+        async move {
+            let mut req = Request::new(SearchVectorRequest {
+                query: vec![1.0, 0.0],
+                k: 5,
+                ..Default::default()
+            });
+            if !user.is_empty() {
+                req.metadata_mut()
+                    .insert("x-polargraph-user-id", user.parse().unwrap());
+            }
+            svc.search_vector(req)
+                .await
+                .unwrap()
+                .into_inner()
+                .results
+                .len()
+        }
+    };
+    assert_eq!(search(String::new()).await, 1);
+    assert_eq!(search(alice.to_string()).await, 0);
+
+    let access = svc
+        .get_graph_access(Request::new(GetGraphAccessRequest {
+            principal: alice.to_string(),
+            user_id: String::new(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .graphs;
+    assert_eq!(access.len(), 1);
+    assert_eq!(
+        (access[0].graph.as_str(), access[0].level.as_str()),
+        ("urn:g:1", "read")
+    );
+
+    let revoked = svc
+        .revoke_graph_access(Request::new(RevokeGraphAccessRequest {
+            principal: alice.to_string(),
+            graph: "urn:g:1".into(),
+            user_id: String::new(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .revoked;
+    assert!(revoked);
+    assert_eq!(query(alice.to_string(), None).await, 1);
+}

@@ -1110,6 +1110,56 @@ message DropGraphResponse {
     uint64 quads_closed = 1;
 }
 
+// ── Graph access control ──────────────────────────────────────────────────────
+//
+// Principals (users and groups) and callers are named by node UUID or IRI.
+// When a caller user id is given (field or x-polargraph-user-id), granting
+// and revoking need `admin` on the graph; without one the call is a trusted
+// service call.
+
+message GrantGraphAccessRequest {
+    /// User or group receiving the grant.
+    string principal = 1;
+    /// Named graph IRI.
+    string graph = 2;
+    /// `read`, `propose`, `write` or `admin`; replaces an earlier level.
+    string level = 3;
+    /// Caller identity (optional).
+    string user_id = 4;
+}
+
+message GrantGraphAccessResponse {}
+
+message RevokeGraphAccessRequest {
+    string principal = 1;
+    string graph = 2;
+    string user_id = 3;
+}
+
+message RevokeGraphAccessResponse {
+    /// Whether a live grant was revoked.
+    bool revoked = 1;
+}
+
+message GetGraphAccessRequest {
+    /// User whose effective access (own + group grants) to list.
+    string principal = 1;
+    /// Caller identity (optional); a caller other than `principal` only sees
+    /// graphs it administers.
+    string user_id = 2;
+}
+
+message GraphAccessEntry {
+    string graph = 1;
+    string level = 2;
+}
+
+message GetGraphAccessResponse {
+    /// Named graphs the principal can access (the default graph is open to
+    /// everyone and not listed).
+    repeated GraphAccessEntry graphs = 1;
+}
+
 message ExportGraphRequest {
     /// Graph IRI; empty = the default graph.
     string iri = 1;
@@ -1167,6 +1217,12 @@ service PolarGraphService {
     rpc DropGraph(DropGraphRequest) returns (DropGraphResponse);
     /// Stream the live quads of one graph, or of the whole dataset.
     rpc ExportGraph(ExportGraphRequest) returns (stream ExportGraphChunk);
+    /// Grant a user or group a level on a named graph.
+    rpc GrantGraphAccess(GrantGraphAccessRequest) returns (GrantGraphAccessResponse);
+    /// Revoke a user's or group's grant on a named graph.
+    rpc RevokeGraphAccess(RevokeGraphAccessRequest) returns (RevokeGraphAccessResponse);
+    /// A user's effective graph access.
+    rpc GetGraphAccess(GetGraphAccessRequest) returns (GetGraphAccessResponse);
 
     /// Execute a conjunctive query and return all satisfying variable bindings.
     rpc Query(QueryRequest) returns (QueryResponse);
