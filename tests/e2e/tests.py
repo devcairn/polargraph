@@ -311,6 +311,29 @@ def test_cypher_write_deprecated(base_url: str):
         assert "/changes" in (resp.headers.get("Warning") or ""), f"no Warning header: {resp.headers}"
 
 
+def test_changes_replace_cypher_writes(base_url: str):
+    """POST /changes writes a typed node by class name; Cypher reads it."""
+    unique = uuid.uuid4().hex[:8]
+    node = new_id()
+    label = f"E2eThing{unique}"
+    rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+    status, data = http_post(base_url + "/changes", {"adds": [{"triples": [
+        {"subject": node, "predicate": rdf_type, "object": label},
+        {"subject": node, "predicate": "name", "value": f"t-{unique}"},
+    ]}]})
+    assert status == 200, f"/changes failed with status {status}: {data}"
+
+    status, data = http_post(base_url + "/cypher", {"cypher": f"MATCH (x:{label}) RETURN x, x.name"})
+    assert status == 200, f"cypher failed with status {status}: {data}"
+    results = data.get("results", [])
+    assert len(results) == 1 and results[0].get("x") == node, f"expected the new node: {data}"
+
+    status, data = http_post(base_url + "/changes", {"strict": True, "retractions": [
+        {"subject": node, "predicate": "name", "value": f"t-{unique}"},
+    ]})
+    assert status == 200 and data.get("retracted") == 1, f"retraction failed: {status} {data}"
+
+
 TESTS = [
     test_health,
     test_insert_relation,
@@ -326,6 +349,7 @@ TESTS = [
     test_indexes,
     test_vocabulary_runtime_types,
     test_cypher_write_deprecated,
+    test_changes_replace_cypher_writes,
 ]
 
 
