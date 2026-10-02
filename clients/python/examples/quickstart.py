@@ -5,7 +5,7 @@ Run against a local polargraphd:
 """
 
 import uuid
-from polargraph import PolarGraphClient
+from polargraph import RDF_TYPE, PolarGraphClient
 
 alice_id = str(uuid.uuid4())
 bob_id   = str(uuid.uuid4())
@@ -39,5 +39,5 @@ with PolarGraphClient("localhost", 50051) as client:
 
     # Streaming query
     print("\nStreaming all Person nodes:")
-    for row in client.stream_query([{"s": "?n", "p": "__type", "o": None}]):
+    for row in client.stream_query([{"s": "?n", "p": RDF_TYPE, "o": None}]):
         print(" ", row)

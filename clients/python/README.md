@@ -12,7 +12,7 @@ pip install polargraph-client
 
 ```python
 import uuid
-from polargraph import PolarGraphClient
+from polargraph import RDF_TYPE, PolarGraphClient
 
 alice_id = str(uuid.uuid4())
 bob_id   = str(uuid.uuid4())
@@ -33,9 +33,14 @@ with PolarGraphClient("localhost", 50051, api_key="secret") as client:
     rows = client.cypher("MATCH (a:Person)-[:knows]->(b) RETURN a, b LIMIT 10")
     print(rows)
 
-    # Cypher write
-    out = client.cypher_write('CREATE (c:Company {name: "Acme"})')
-    print(out["created_node_ids"])
+    # Writes: one atomic changeset (cypher_write is deprecated)
+    acme_id = str(uuid.uuid4())
+    out = client.apply_changes(adds={"": [
+        {"subject": acme_id, "predicate": RDF_TYPE, "object_iri": "Company"},
+        {"subject": acme_id, "predicate": "name", "value": "Acme"},
+        {"subject": alice_id, "predicate": "worksAt", "object": acme_id},
+    ]})
+    print(out["commit_ts"])
 
     # Vector insert + search
     client.insert_vector(alice_id, [0.1, 0.2, 0.3], space="embeddings")
@@ -47,7 +52,7 @@ with PolarGraphClient("localhost", 50051, api_key="secret") as client:
 
 ```python
 import asyncio
-from polargraph import AsyncPolarGraphClient
+from polargraph import RDF_TYPE, AsyncPolarGraphClient
 
 async def main():
     async with AsyncPolarGraphClient("localhost", 50051) as client:
@@ -55,7 +60,7 @@ async def main():
         print(rows)
 
         # Async streaming
-        async for row in client.stream_query([{"s": "?n", "p": "__type", "o": None}]):
+        async for row in client.stream_query([{"s": "?n", "p": RDF_TYPE, "o": None}]):
             print(row)
 
 asyncio.run(main())
@@ -105,11 +110,14 @@ Transactions expire after 5 minutes of inactivity. Handle `NOT_FOUND` errors on 
 
 | Method | Description |
 |--------|-------------|
-| `insert_node(node_id, type_name, **props)` | Insert a node with `__type` and properties |
+| `insert_node(node_id, type_name, **props)` | Insert a node typed `rdf:type <type_name>` (bare name, `prefix:local` or IRI, resolved by the server's vocabulary) and properties |
 | `insert_edge(subject, predicate, object, **props)` | Insert a relation triple |
 | `query(patterns, rules=None, limit=None, as_of_tx_time=None, as_of_valid_time=None, tx_id=None)` | Conjunctive pattern query |
 | `cypher(query, vector=None, ef=None, limit=None, tx_id=None)` | Cypher read query |
-| `cypher_write(query, tx_id=None)` | Cypher write (CREATE/MERGE/SET/DELETE) |
+| `cypher_write(query)` | **Deprecated** (removed in the next server release; emits `DeprecationWarning`) — use `apply_changes` |
+| `apply_changes(adds=None, retractions=None, read_ts=0, strict=False, iris=None)` | Atomic changeset: adds per graph (`{"subject", "predicate", "object" \| "object_iri" \| "value", "mode"?}`) and exact retractions |
+| `get_vocabulary()` / `set_vocabulary_base(base)` / `put_prefix(name, ns)` / `remove_prefix(name)` | Runtime vocabulary (base IRI for bare names, prefixes) |
+| `convert_legacy_data(dry_run=False)` | One-time conversion of pre-vocabulary data (see `docs/upgrade-cypher-rdf.md`) |
 | `insert_vector(node_id, vector, space="default")` | Insert embedding into a named HNSW space |
 | `search_vector(space, vector, k, ef=None)` | k-NN search |
 | `stream_query(patterns, **kwargs)` | Iterator over streamed bindings |

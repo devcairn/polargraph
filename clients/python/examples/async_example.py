@@ -6,7 +6,7 @@ Run against a local polargraphd:
 
 import asyncio
 import uuid
-from polargraph import AsyncPolarGraphClient
+from polargraph import RDF_TYPE, AsyncPolarGraphClient
 
 alice_id = str(uuid.uuid4())
 bob_id   = str(uuid.uuid4())
@@ -25,7 +25,7 @@ async def main() -> None:
         print("Cypher Person nodes:", rows)
 
         print("Streaming:")
-        async for row in client.stream_query([{"s": "?n", "p": "__type", "o": None}]):
+        async for row in client.stream_query([{"s": "?n", "p": RDF_TYPE, "o": None}]):
             print(" ", row)
 
 

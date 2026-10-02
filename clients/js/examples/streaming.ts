@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from "crypto";
-import { PolarGraphClient } from "../src/index.js";
+import { PolarGraphClient, RDF_TYPE } from "../src/index.js";
 
 async function main() {
   const client = new PolarGraphClient("localhost", 50051);
@@ -28,7 +28,7 @@ async function main() {
   console.log("Streaming all Item nodes via streamQuery:");
   let count = 0;
   for await (const row of client.streamQuery([
-    { s: "?node", p: "__type", o: "?type" },
+    { s: "?node", p: RDF_TYPE, o: "?type" },
   ])) {
     count++;
     if (count <= 5) {

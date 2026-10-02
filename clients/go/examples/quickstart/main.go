@@ -69,10 +69,14 @@ func main() {
 		fmt.Printf("  %v\n", row)
 	}
 
-	// Cypher write
-	result, err := client.CypherWrite(ctx, `CREATE (c:Company {name: "Acme"})`)
+	// Writes: one atomic changeset (CypherWrite is deprecated)
+	acmeID := uuid.NewString()
+	result, err := client.ApplyChanges(ctx, polargraph.ChangeSet{Adds: map[string][]polargraph.Change{"": {
+		{Subject: acmeID, Predicate: polargraph.RDFType, ObjectIRI: "Company"},
+		{Subject: acmeID, Predicate: "name", Value: "Acme"},
+	}}})
 	if err != nil {
-		log.Fatalf("cypher write: %v", err)
+		log.Fatalf("apply changes: %v", err)
 	}
-	fmt.Printf("\nCreated company node IDs: %v\n", result.CreatedNodeIDs)
+	fmt.Printf("\nCreated company %s at %d\n", acmeID, result.CommitTS)
 }

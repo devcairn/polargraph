@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from "crypto";
-import { PolarGraphClient } from "../src/index.js";
+import { PolarGraphClient, RDF_TYPE } from "../src/index.js";
 
 async function main() {
   const client = new PolarGraphClient("localhost", 50051);
@@ -47,12 +47,14 @@ async function main() {
     console.log(" ", row);
   }
 
-  // Cypher write
-  const result = await client.cypherWrite(
-    'CREATE (c:Company {name: "Acme"})'
-  );
-  console.log("\nCreated company node IDs:", result.createdNodeIds);
-  console.log("Triples written:", result.triplesWritten);
+  // Writes: one atomic changeset (cypherWrite is deprecated)
+  const acmeId = randomUUID();
+  const result = await client.applyChanges({ adds: { "": [
+    { subject: acmeId, predicate: RDF_TYPE, objectIri: "Company" },
+    { subject: acmeId, predicate: "name", value: "Acme" },
+  ] } });
+  console.log("\nCreated company:", acmeId, "at", result.commitTs);
+  console.log("Triples added:", result.added);
 
   // Wire transaction example
   const txId = await client.beginTx();

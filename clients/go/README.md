@@ -19,6 +19,7 @@ import (
     "log"
 
     "github.com/devcairn/polargraph-go/polargraph"
+    "github.com/google/uuid"
 )
 
 func main() {
@@ -60,8 +61,12 @@ func main() {
     )
     fmt.Println(cyRows, err)
 
-    // Cypher write
-    result, err := client.CypherWrite(ctx, `CREATE (c:Company {name: "Acme"})`)
+    // Writes: one atomic changeset (CypherWrite is deprecated)
+    acmeID := uuid.NewString()
+    result, err := client.ApplyChanges(ctx, polargraph.ChangeSet{Adds: map[string][]polargraph.Change{"": {
+        {Subject: acmeID, Predicate: polargraph.RDFType, ObjectIRI: "Company"},
+        {Subject: acmeID, Predicate: "name", Value: "Acme"},
+    }}})
     fmt.Println(result, err)
 
     // Vector search
@@ -116,11 +121,14 @@ fmt.Printf("committed %d triples at ts=%d\n", result.TriplesWritten, result.Comm
 
 | Method | Description |
 |--------|-------------|
-| `InsertNode(ctx, nodeID, typeName, props, opts...)` | Insert a node with `__type` and property triples |
+| `InsertNode(ctx, nodeID, typeName, props, opts...)` | Insert a node typed `rdf:type <typeName>` (bare name, `prefix:local` or IRI, resolved by the server's vocabulary) and properties |
 | `InsertEdge(ctx, subject, predicate, object, props, opts...)` | Insert a relation triple |
 | `Query(ctx, QueryRequest) ([]Bindings, error)` | Conjunctive pattern query |
 | `Cypher(ctx, query, opts...) ([]CypherRow, error)` | Cypher read query |
-| `CypherWrite(ctx, query, opts...) (WriteResult, error)` | Cypher write (CREATE/MERGE/SET/DELETE) |
+| `CypherWrite(ctx, query, opts...) (WriteResult, error)` | **Deprecated** (removed in the next server release) — use `ApplyChanges` |
+| `ApplyChanges(ctx, ChangeSet) (*ChangeResult, error)` | Atomic changeset: adds per graph (`Change{Subject, Predicate, Object \| ObjectIRI \| Value, Mode}`), exact `Retractions`, `ReadTS`, `Strict` |
+| `GetVocabulary` / `SetVocabularyBase` / `PutPrefix` / `RemovePrefix` | Runtime vocabulary (base IRI for bare names, prefixes) |
+| `ConvertLegacyData(ctx, dryRun) (*ConversionReport, error)` | One-time conversion of pre-vocabulary data |
 | `InsertVector(ctx, nodeID, space, vector, opts...)` | Insert embedding into named HNSW space |
 | `SearchVector(ctx, space, vector, k, opts...) ([]SearchResult, error)` | k-NN search |
 | `BeginTransaction(ctx) (string, error)` | Open a wire transaction; returns `txID` |
