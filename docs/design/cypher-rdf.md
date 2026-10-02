@@ -126,8 +126,9 @@ immediately from Cypher, SPARQL and SHACL. This covers
 `RegisterNodeType` / `RegisterEdgeType`, plain `rdf:type` writes with a new
 class (any write path: `Insert`, `ApplyChanges`, Cypher, SPARQL Update,
 imports), later WS4 type-package installs, and prefix / vocabulary-base
-changes. The only startup-time work is the one-time, operator-triggered
-legacy conversion (§2.4).
+changes. Nothing runs at startup beyond loading the vocabulary and caches;
+the one-time legacy conversion (§2.4) is triggered by the operator on a
+running server.
 
 How the design meets it:
 

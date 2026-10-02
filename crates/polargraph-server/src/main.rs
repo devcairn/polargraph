@@ -767,6 +767,8 @@ async fn main() -> Result<()> {
         (server, None)
     };
 
+    pg_server.warn_if_legacy_pending();
+
     // ── Wire transaction TTL task ─────────────────────────────────────────────
     pg_server.spawn_tx_ttl_task(token.clone(), tx_idle_timeout_ms);
 

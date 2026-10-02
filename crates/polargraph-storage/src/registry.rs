@@ -450,9 +450,20 @@ impl EdgeTypeRegistry {
         Ok(())
     }
 
-    /// Look up a schema by predicate name.
+    /// Look up a schema by predicate name, or by the IRI that name resolves
+    /// to through the current vocabulary (`knows`, `ex:knows` and the full
+    /// IRI find the same schema).
     pub fn get_edge_type(&self, predicate: &str) -> Option<EdgeTypeDef> {
-        self.cache.read().unwrap().get(predicate).cloned()
+        let cache = self.cache.read().unwrap();
+        if let Some(def) = cache.get(predicate) {
+            return Some(def.clone());
+        }
+        let vocab = self.store.vocabulary();
+        let iri = vocab.expand(predicate);
+        cache
+            .iter()
+            .find(|(name, _)| vocab.expand(name) == iri)
+            .map(|(_, def)| def.clone())
     }
 
     /// Return all registered edge type schemas in arbitrary order.

@@ -47,7 +47,7 @@ const BUILTIN_PREDICATES: [&str; 5] = [
 ];
 
 /// Base IRI + prefix map.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Vocabulary {
     pub base: String,
     /// Prefix name → namespace IRI.
@@ -72,6 +72,14 @@ impl Vocabulary {
     /// Whether `name` is bare (no `:`), i.e. relative to the base.
     pub fn is_bare(name: &str) -> bool {
         !name.is_empty() && !name.contains(':') && !Self::is_internal(name)
+    }
+
+    /// A hash identifying this vocabulary (for caches of resolved names).
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut h);
+        h.finish()
     }
 
     /// The stored form of a predicate name: bare names under the base,
@@ -137,6 +145,12 @@ fn validate_prefix(name: &str) -> Result<(), StorageError> {
     if !ok {
         return Err(StorageError::Validation(format!(
             "prefix names start with a letter and use letters, digits, _ or -: {name:?}"
+        )));
+    }
+    // A prefix named like a URI scheme would rewrite full IRIs.
+    if ["http", "https", "urn", "file", "mailto", "tag"].contains(&name) {
+        return Err(StorageError::Validation(format!(
+            "{name:?} is a URI scheme, not a usable prefix name"
         )));
     }
     Ok(())

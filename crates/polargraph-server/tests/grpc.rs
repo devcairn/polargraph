@@ -85,6 +85,24 @@ fn rel(subject: NodeId, predicate: &str, object: NodeId) -> Triple {
     }
 }
 
+/// `subject rdf:type <class>`; a bare class name is under the default
+/// vocabulary base, as Cypher labels and type filters resolve it.
+fn type_of(subject: NodeId, class: &str) -> Triple {
+    let iri = if class.contains(':') {
+        class.to_string()
+    } else {
+        format!("urn:pg:vocab:{class}")
+    };
+    let class = polargraph_core::term::iri_to_node_id(&iri);
+    rel(
+        subject,
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        NodeId {
+            bytes: class.as_bytes().to_vec(),
+        },
+    )
+}
+
 fn text_prop(subject: NodeId, predicate: &str, text: &str) -> Triple {
     Triple {
         kind: Some(TripleKind::Property(PropertyTriple {
@@ -1645,7 +1663,7 @@ async fn search_vector_filtered_by_node_type_returns_only_matching_nodes() {
         (proto_c.clone(), "Other"),
     ] {
         svc.insert(Request::new(InsertRequest {
-            triples: vec![text_prop(id, "__type", type_name)],
+            triples: vec![type_of(id, type_name)],
             ..Default::default()
         }))
         .await
@@ -1780,7 +1798,7 @@ async fn vector_seed_query_with_node_type_filter() {
 
     // Mark proto_typed as "TypedNode".
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop(proto_typed.clone(), "__type", "TypedNode")],
+        triples: vec![type_of(proto_typed.clone(), "TypedNode")],
         ..Default::default()
     }))
     .await
@@ -2846,6 +2864,61 @@ async fn replica_receives_triples_inserted_after_connect() {
         1,
         "replica sees post-connect triple via WAL"
     );
+}
+
+#[tokio::test]
+async fn replica_sees_new_prefixes_and_classes_without_restart() {
+    use polargraph_server::proto::PutPrefixRequest;
+
+    let primary_dir = TempDir::new().unwrap();
+    let primary_store = TripleStore::open(primary_dir.path()).unwrap();
+    let (addr, _shutdown) = start_primary_server(primary_store.clone()).await;
+    let (replica, _replica_dir) = open_wal_replica(format!("http://{addr}")).await;
+
+    // Prefix + a new class on the primary, after the replica started.
+    let primary = PolarGraphServer::new(primary_store).unwrap();
+    primary
+        .put_prefix(Request::new(PutPrefixRequest {
+            name: "ex".into(),
+            namespace: "http://ex/".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    let (thing, proto_thing) = new_node();
+    primary
+        .insert(Request::new(InsertRequest {
+            triples: vec![type_of(proto_thing, "http://ex/Thing")],
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The replica's vocabulary, Cypher labels and type index all see them.
+    assert_eq!(
+        replica
+            .store()
+            .vocabulary()
+            .prefixes
+            .get("ex")
+            .map(String::as_str),
+        Some("http://ex/")
+    );
+    let rows = replica
+        .cypher_query(Request::new(CypherQueryRequest {
+            cypher: "MATCH (t:`ex:Thing`) RETURN t".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].nodes["t"].bytes, thing.as_bytes().to_vec());
+    assert!(replica
+        .instances_of_types(&["ex:Thing".to_string()])
+        .contains(&thing));
 }
 
 // ── API key authentication tests ──────────────────────────────────────────────
@@ -4106,9 +4179,9 @@ async fn cypher_query_simple() {
     // alice knows bob; alice knows carol.
     svc.insert(Request::new(InsertRequest {
         triples: vec![
-            text_prop(alice.clone(), "__type", "Person"),
-            text_prop(bob.clone(), "__type", "Person"),
-            text_prop(carol.clone(), "__type", "Robot"),
+            type_of(alice.clone(), "Person"),
+            type_of(bob.clone(), "Person"),
+            type_of(carol.clone(), "Robot"),
             rel(alice.clone(), "knows", bob.clone()),
             rel(alice.clone(), "knows", carol.clone()),
         ],
@@ -5093,9 +5166,9 @@ async fn cypher_where_contains_finds_match() {
 
     svc.insert(Request::new(InsertRequest {
         triples: vec![
-            text_prop(alice.clone(), "__type", "Person"),
+            type_of(alice.clone(), "Person"),
             text_prop(alice.clone(), "name", "Alice Smith"),
-            text_prop(bob.clone(), "__type", "Person"),
+            type_of(bob.clone(), "Person"),
             text_prop(bob.clone(), "name", "Robert Jones"),
         ],
         ..Default::default()
@@ -5131,9 +5204,9 @@ async fn cypher_where_starts_with_finds_match() {
 
     svc.insert(Request::new(InsertRequest {
         triples: vec![
-            text_prop(alice.clone(), "__type", "Person"),
+            type_of(alice.clone(), "Person"),
             text_prop(alice.clone(), "name", "Alexandra Doe"),
-            text_prop(bob.clone(), "__type", "Person"),
+            type_of(bob.clone(), "Person"),
             text_prop(bob.clone(), "name", "Robert Smith"),
         ],
         ..Default::default()
@@ -5168,7 +5241,7 @@ async fn cypher_where_contains_no_match_returns_empty() {
 
     svc.insert(Request::new(InsertRequest {
         triples: vec![
-            text_prop(n.clone(), "__type", "Person"),
+            type_of(n.clone(), "Person"),
             text_prop(n.clone(), "name", "Alice"),
         ],
         ..Default::default()
@@ -5196,9 +5269,9 @@ async fn cypher_where_regex_finds_match() {
 
     svc.insert(Request::new(InsertRequest {
         triples: vec![
-            text_prop(alice.clone(), "__type", "Person"),
+            type_of(alice.clone(), "Person"),
             text_prop(alice.clone(), "email", "alice@example.com"),
-            text_prop(bob.clone(), "__type", "Person"),
+            type_of(bob.clone(), "Person"),
             text_prop(bob.clone(), "email", "bob_at_domain_dot_org"),
         ],
         ..Default::default()
@@ -6040,7 +6113,7 @@ async fn cypher_id_n_returns_node_uuid() {
 
     // Insert a typed node so MATCH (n:Person) can find it.
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop(a.clone(), "__type", "Person")],
+        triples: vec![type_of(a.clone(), "Person")],
         ..Default::default()
     }))
     .await
@@ -6076,7 +6149,7 @@ async fn cypher_element_id_n_returns_node_uuid() {
     let (b_core, b) = new_node();
 
     svc.insert(Request::new(InsertRequest {
-        triples: vec![text_prop(b.clone(), "__type", "Employee")],
+        triples: vec![type_of(b.clone(), "Employee")],
         ..Default::default()
     }))
     .await

@@ -110,6 +110,10 @@ struct HealthResponse {
     status: &'static str,
     mode: &'static str,
     triples: u64,
+    /// Pre-vocabulary data awaits `ConvertLegacyData`.
+    legacy_conversion_pending: bool,
+    legacy_bare_predicates: usize,
+    legacy_type_labels: u64,
 }
 
 #[derive(Serialize)]
@@ -139,6 +143,7 @@ async fn health_check(State(state): State<Arc<UiState>>) -> Response {
 
     let triples = state.service.store().estimate_triple_count();
     let mode = if is_replica { "replica" } else { "primary" };
+    let legacy = state.service.legacy_status();
 
     (
         StatusCode::OK,
@@ -146,6 +151,9 @@ async fn health_check(State(state): State<Arc<UiState>>) -> Response {
             status: "ok",
             mode,
             triples,
+            legacy_conversion_pending: legacy.pending(),
+            legacy_bare_predicates: legacy.bare_predicates.len(),
+            legacy_type_labels: legacy.type_labels,
         }),
     )
         .into_response()
@@ -618,29 +626,10 @@ async fn api_search(
     {
         None
     } else {
-        let store = state.service.store();
-        let triples = match store.scan_by_predicate("__type") {
-            Ok(t) => t,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": e.to_string()})),
-                )
-                    .into_response()
-            }
-        };
         Some(
-            triples
-                .into_iter()
-                .filter_map(|t| match t {
-                    Triple::Property {
-                        subject,
-                        value: Value::Text(ref tn),
-                        ..
-                    } if tn == &params.type_filter => Some(subject),
-                    _ => None,
-                })
-                .collect(),
+            state
+                .service
+                .instances_of_types(std::slice::from_ref(&params.type_filter)),
         )
     };
 

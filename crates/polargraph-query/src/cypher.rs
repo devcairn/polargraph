@@ -20,8 +20,8 @@
 //! # Compilation strategy
 //!
 //! - Relationship patterns `(a)-[:pred]->(b)` → `VarPattern { Var("a"), pred, Var("b") }`
-//! - Node labels `(a:Label)` → value filter `a.__type = "Label"` applied post-execution
-//!   (+ a binding pattern `(a, "__type", Any)` when the node is standalone)
+//! - Node labels `(a:Label)` → pattern `(a, rdf:type, <class>)`, the class IRI
+//!   resolved through the vocabulary (`` (a:`ex:Label`) `` for a prefixed name)
 //! - Node properties `(a {key: val})` → value filter `a.key = val`
 //! - WHERE `a.prop = val` → value filter
 //! - Transitive `[:pred*]` → two Datalog rules (base + recursive) producing derived
@@ -39,7 +39,9 @@ use polargraph_core::{
     triple::{Predicate, Triple},
     value::Value,
 };
-use polargraph_storage::{GraphScope, Snapshot, StorageError, Transaction, WriteMode};
+use polargraph_storage::{
+    legacy::RDF_TYPE, GraphScope, Snapshot, StorageError, Transaction, Vocabulary, WriteMode,
+};
 use uuid::Uuid;
 
 use crate::aggregation::{AggFunc, AggregationSpec, OrderSpec, SortDir};
@@ -430,6 +432,22 @@ pub fn execute_write_ops_in(
         Some(g) => tx.insert_in(triple, g, WriteMode::Auto),
         None => tx.insert(triple),
     };
+    let vocab = snapshot.store().vocabulary();
+    // A label is written as `node rdf:type <class>` (docs/design/cypher-rdf.md).
+    let put_label = |tx: &mut Transaction, node: NodeId, label: &str, temporal| {
+        let (iri, class) = label_class(&vocab, label);
+        tx.bind_iri(iri.clone());
+        put(
+            tx,
+            Triple::Relation {
+                subject: node,
+                predicate: Predicate::new(RDF_TYPE),
+                object: class,
+                edge_id: polargraph_core::term::edge_id_for(&node.to_string(), RDF_TYPE, &iri),
+                temporal,
+            },
+        );
+    };
     let mut created_ids = Vec::new();
     let mut triples_written: u64 = 0;
     let mut triples_deleted: u64 = 0;
@@ -441,15 +459,7 @@ pub fn execute_write_ops_in(
                 let temporal = BiTemporalRange::assert_now(Timestamp::now());
 
                 if let Some(ref lbl) = label {
-                    put(
-                        tx,
-                        Triple::Property {
-                            subject: node_id,
-                            predicate: Predicate::new("__type"),
-                            value: Value::Text(lbl.clone()),
-                            temporal,
-                        },
-                    );
+                    put_label(tx, node_id, lbl, temporal);
                     triples_written += 1;
                 }
                 for (key, val) in props {
@@ -457,7 +467,7 @@ pub fn execute_write_ops_in(
                         tx,
                         Triple::Property {
                             subject: node_id,
-                            predicate: Predicate::new(key.clone()),
+                            predicate: Predicate::new(resolve_name(&vocab, key)),
                             value: val.to_core_value(),
                             temporal,
                         },
@@ -488,7 +498,7 @@ pub fn execute_write_ops_in(
                     tx,
                     Triple::Relation {
                         subject,
-                        predicate: Predicate::new(predicate.clone()),
+                        predicate: Predicate::new(resolve_name(&vocab, predicate)),
                         object,
                         edge_id: EdgeId::new(),
                         temporal: BiTemporalRange::assert_now(Timestamp::now()),
@@ -508,7 +518,7 @@ pub fn execute_write_ops_in(
                         Some(id_node)
                     }
                 } else {
-                    find_matching_node(snapshot, label.as_deref(), props, graph)?
+                    find_matching_node(snapshot, &vocab, label.as_deref(), props, graph)?
                 };
                 let node_id = if let Some(existing) = found {
                     existing
@@ -517,15 +527,7 @@ pub fn execute_write_ops_in(
                     let temporal = BiTemporalRange::assert_now(Timestamp::now());
 
                     if let Some(ref lbl) = label {
-                        put(
-                            tx,
-                            Triple::Property {
-                                subject: node_id,
-                                predicate: Predicate::new("__type"),
-                                value: Value::Text(lbl.clone()),
-                                temporal,
-                            },
-                        );
+                        put_label(tx, node_id, lbl, temporal);
                         triples_written += 1;
                     }
                     for (key, val) in props {
@@ -533,7 +535,7 @@ pub fn execute_write_ops_in(
                             tx,
                             Triple::Property {
                                 subject: node_id,
-                                predicate: Predicate::new(key.clone()),
+                                predicate: Predicate::new(resolve_name(&vocab, key)),
                                 value: val.to_core_value(),
                                 temporal,
                             },
@@ -559,7 +561,7 @@ pub fn execute_write_ops_in(
                         tx,
                         Triple::Property {
                             subject: node_id,
-                            predicate: Predicate::new(clause.key.clone()),
+                            predicate: Predicate::new(resolve_name(&vocab, &clause.key)),
                             value: clause.value.to_core_value(),
                             temporal: BiTemporalRange::assert_now(Timestamp::now()),
                         },
@@ -612,25 +614,22 @@ pub fn execute_write(
 /// Scan for the first node that matches the given label and all property constraints.
 fn find_matching_node(
     snapshot: &Snapshot,
+    vocab: &Vocabulary,
     label: Option<&str>,
     props: &[(String, CypherValue)],
     graph: Option<GraphId>,
 ) -> Result<Option<NodeId>, StorageError> {
     let candidates: Vec<NodeId> = if let Some(label_str) = label {
-        read_scoped(snapshot, None, Some("__type"), graph)?
+        let class = label_class(vocab, label_str).1;
+        let scope = graph.map_or(GraphScope::Union, GraphScope::One);
+        snapshot
+            .scan_scoped(None, Some(RDF_TYPE), Some(&class), &scope)?
             .into_iter()
-            .filter_map(|t| match t {
-                Triple::Property {
-                    subject,
-                    value: Value::Text(v),
-                    ..
-                } if v == label_str => Some(subject),
-                _ => None,
-            })
+            .map(|(_, t)| t.subject())
             .collect()
     } else if let Some((first_key, first_val)) = props.first() {
         let core_val = first_val.to_core_value();
-        read_scoped(snapshot, None, Some(first_key), graph)?
+        read_scoped(snapshot, None, Some(&resolve_name(vocab, first_key)), graph)?
             .into_iter()
             .filter_map(|t| match &t {
                 Triple::Property { subject, value, .. } if value == &core_val => Some(*subject),
@@ -644,9 +643,14 @@ fn find_matching_node(
     'outer: for node_id in candidates {
         for (key, val) in props {
             let core_val = val.to_core_value();
-            let matched = read_scoped(snapshot, Some(&node_id), Some(key), graph)?
-                .into_iter()
-                .any(|t| matches!(&t, Triple::Property { value, .. } if value == &core_val));
+            let matched = read_scoped(
+                snapshot,
+                Some(&node_id),
+                Some(&resolve_name(vocab, key)),
+                graph,
+            )?
+            .into_iter()
+            .any(|t| matches!(&t, Triple::Property { value, .. } if value == &core_val));
             if !matched {
                 continue 'outer;
             }
@@ -1104,6 +1108,28 @@ impl<'a> Lexer<'a> {
                         return Err(CypherError::at(start, "expected identifier after '$'"));
                     }
                     tokens.push((pos, Token::Param(s)));
+                }
+                Some(b'`') => {
+                    // Quoted name: `ex:Person`, `http://schema.org/Person`
+                    // (a doubled backtick is a literal one).
+                    let mut bytes = Vec::new();
+                    loop {
+                        match self.advance() {
+                            Some(b'`') if self.peek() == Some(b'`') => {
+                                self.advance();
+                                bytes.push(b'`');
+                            }
+                            Some(b'`') => break,
+                            Some(b) => bytes.push(b),
+                            None => return Err(CypherError::at(pos, "unterminated `name`")),
+                        }
+                    }
+                    let name = String::from_utf8(bytes)
+                        .map_err(|_| CypherError::at(pos, "`name` is not valid UTF-8"))?;
+                    if name.is_empty() {
+                        return Err(CypherError::at(pos, "empty `name`"));
+                    }
+                    tokens.push((pos, Token::Ident(name)));
                 }
                 Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
                     // Check for TRUE/FALSE keywords
@@ -2264,6 +2290,33 @@ pub fn is_write_statement(input: &str) -> bool {
 
 /// Compile a parsed `CypherQuery` into the Datalog IR.
 pub fn compile(cypher: CypherQuery) -> CompiledQuery {
+    compile_with_vocabulary(cypher, &Vocabulary::default())
+}
+
+/// A relationship or property name as stored: `prefix:local` expanded
+/// through the vocabulary; bare names are left for the store to place under
+/// the vocabulary base; full IRIs unchanged.
+fn resolve_name(vocab: &Vocabulary, name: &str) -> String {
+    if Vocabulary::is_bare(name) {
+        name.to_string()
+    } else {
+        vocab.expand(name)
+    }
+}
+
+/// The class node a Cypher label names: `rdf:type` object for
+/// `vocab.expand(label)` (bare → base, `prefix:local`, or a full IRI).
+pub fn label_class(vocab: &Vocabulary, label: &str) -> (String, NodeId) {
+    let iri = vocab.expand(label);
+    let node = polargraph_core::term::iri_to_node_id(&iri);
+    (iri, node)
+}
+
+/// Compile with names resolved through `vocab` (docs/design/cypher-rdf.md):
+/// labels become `rdf:type` patterns on the class IRI, and `prefix:local`
+/// relationship and property names in patterns and filters are expanded.
+/// Result keys (`n.prop`) keep the names as written.
+pub fn compile_with_vocabulary(cypher: CypherQuery, vocab: &Vocabulary) -> CompiledQuery {
     let graph = cypher.graph.clone();
     let mut patterns: Vec<VarPattern> = Vec::new();
     let mut rules: Vec<Rule> = Vec::new();
@@ -2280,6 +2333,7 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
 
     for path in &cypher.match_patterns {
         compile_path(
+            vocab,
             path,
             &rel_bound,
             &mut patterns,
@@ -2302,8 +2356,10 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
                      vn: &mut Option<VectorNearClause>,
                      eaf: &mut Vec<EdgeAnnotationFilter>,
                      evs: &HashSet<String>| {
+        let x = |prop: String| resolve_name(vocab, &prop);
         match wc {
             WhereClause::PropertyEq { var, prop, value } => {
+                let prop = x(prop);
                 if evs.contains(&var) {
                     eaf.push(EdgeAnnotationFilter {
                         var,
@@ -2325,6 +2381,7 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
                 op,
                 value,
             } => {
+                let prop = x(prop);
                 if evs.contains(&var) {
                     eaf.push(EdgeAnnotationFilter {
                         var,
@@ -2358,21 +2415,21 @@ pub fn compile(cypher: CypherQuery) -> CompiledQuery {
             WhereClause::Contains { var, prop, value } => {
                 tf.push(TextFilter {
                     var,
-                    predicate: prop,
+                    predicate: x(prop),
                     kind: TextFilterKind::Contains(value),
                 });
             }
             WhereClause::StartsWith { var, prop, value } => {
                 tf.push(TextFilter {
                     var,
-                    predicate: prop,
+                    predicate: x(prop),
                     kind: TextFilterKind::StartsWith(value),
                 });
             }
             WhereClause::Regex { var, prop, pattern } => {
                 tf.push(TextFilter {
                     var,
-                    predicate: prop,
+                    predicate: x(prop),
                     kind: TextFilterKind::Regex(pattern),
                 });
             }
@@ -2560,6 +2617,7 @@ fn get_or_anon(var: &Option<String>, anon: &mut usize) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn compile_path(
+    vocab: &Vocabulary,
     path: &CypherPath,
     _rel_bound: &HashSet<String>,
     patterns: &mut Vec<VarPattern>,
@@ -2574,6 +2632,7 @@ fn compile_path(
     if path.hops.is_empty() {
         // Standalone node — needs a binding pattern, then value filters.
         emit_node_binding(
+            vocab,
             &start_var,
             &path.start,
             /* need_binding_pattern */ true,
@@ -2586,15 +2645,16 @@ fn compile_path(
 
     // For a node at the start of a path with hops, it will be bound by the
     // first relationship pattern.  Emit value filters only.
-    emit_node_filters(&start_var, &path.start, value_filters);
+    emit_node_filters(vocab, &start_var, &path.start, patterns, value_filters);
 
     let mut current_var = start_var.clone();
 
     for hop in &path.hops {
         let end_var = get_or_anon(&hop.end.var, anon);
 
+        let rel_pred = resolve_name(vocab, &hop.rel.predicate);
         if hop.rel.recursive {
-            let pred = &hop.rel.predicate;
+            let pred = &rel_pred;
 
             if let Some(max_hops) = hop.rel.max_hops {
                 // Bounded transitive: emit a VarPattern with max_hops set.
@@ -2664,7 +2724,7 @@ fn compile_path(
             });
             patterns.push(VarPattern {
                 subject: subj,
-                predicate: Some(hop.rel.predicate.clone()),
+                predicate: Some(rel_pred.clone()),
                 object: obj,
                 edge_var: edge_var_name,
                 ..Default::default()
@@ -2672,13 +2732,14 @@ fn compile_path(
         }
 
         // End node of a hop is always rel-bound; emit filters only.
-        emit_node_filters(&end_var, &hop.end, value_filters);
+        emit_node_filters(vocab, &end_var, &hop.end, patterns, value_filters);
         current_var = end_var;
     }
 }
 
 /// Emit binding pattern + value filters for a standalone node (no relationships).
 fn emit_node_binding(
+    vocab: &Vocabulary,
     var: &str,
     node: &NodePat,
     need_binding: bool,
@@ -2686,25 +2747,14 @@ fn emit_node_binding(
     value_filters: &mut Vec<ValueFilter>,
     _anon: &mut usize,
 ) {
+    // A label is an `rdf:type` pattern, which also binds the node.
     if let Some(label) = &node.label {
-        if need_binding {
-            // `(var, "__type", Any)` — binds `var` to any node that has __type.
-            patterns.push(VarPattern {
-                subject: Term::Var(var.to_string()),
-                predicate: Some("__type".into()),
-                object: Term::Any,
-                ..Default::default()
-            });
-        }
-        value_filters.push(ValueFilter {
-            var: var.to_string(),
-            predicate: "__type".into(),
-            value: FilterValue::Literal(Value::Text(label.clone())),
-        });
+        patterns.push(label_pattern(vocab, var, label));
     }
 
     let mut first_prop = node.label.is_none(); // need binding pattern from first prop
     for (key, val) in &node.props {
+        let key = resolve_name(vocab, key);
         if need_binding && first_prop {
             patterns.push(VarPattern {
                 subject: Term::Var(var.to_string()),
@@ -2716,27 +2766,40 @@ fn emit_node_binding(
         }
         value_filters.push(ValueFilter {
             var: var.to_string(),
-            predicate: key.clone(),
+            predicate: key,
             value: val.to_filter_value(),
         });
     }
 }
 
-/// Emit only value filters for a node that is already bound by a relationship.
-fn emit_node_filters(var: &str, node: &NodePat, value_filters: &mut Vec<ValueFilter>) {
+/// Emit the label pattern and value filters for a node that is already bound
+/// by a relationship.
+fn emit_node_filters(
+    vocab: &Vocabulary,
+    var: &str,
+    node: &NodePat,
+    patterns: &mut Vec<VarPattern>,
+    value_filters: &mut Vec<ValueFilter>,
+) {
     if let Some(label) = &node.label {
-        value_filters.push(ValueFilter {
-            var: var.to_string(),
-            predicate: "__type".into(),
-            value: FilterValue::Literal(Value::Text(label.clone())),
-        });
+        patterns.push(label_pattern(vocab, var, label));
     }
     for (key, val) in &node.props {
         value_filters.push(ValueFilter {
             var: var.to_string(),
-            predicate: key.clone(),
+            predicate: resolve_name(vocab, key),
             value: val.to_filter_value(),
         });
+    }
+}
+
+/// `(var, rdf:type, <class>)` for a label.
+fn label_pattern(vocab: &Vocabulary, var: &str, label: &str) -> VarPattern {
+    VarPattern {
+        subject: Term::Var(var.to_string()),
+        predicate: Some(RDF_TYPE.to_string()),
+        object: Term::Bound(label_class(vocab, label).1),
+        ..Default::default()
     }
 }
 
@@ -3138,16 +3201,24 @@ mod tests {
     fn compile_simple_node_label() {
         let q = parse("MATCH (a:Person) RETURN a").unwrap();
         let compiled = compile(q);
-        // Should emit a binding pattern for __type
+        // The label is an `rdf:type` pattern on the class, binding `a`.
         assert_eq!(compiled.query.patterns.len(), 1);
         let p = &compiled.query.patterns[0];
-        assert_eq!(p.predicate.as_deref(), Some("__type"));
-        // Should emit a value filter for __type = Person
-        assert_eq!(compiled.value_filters.len(), 1);
-        assert_eq!(compiled.value_filters[0].predicate, "__type");
+        assert_eq!(p.predicate.as_deref(), Some(RDF_TYPE));
+        assert_eq!(p.subject, Term::Var("a".into()));
         assert_eq!(
-            compiled.value_filters[0].value,
-            FilterValue::Literal(Value::Text("Person".into()))
+            p.object,
+            Term::Bound(polargraph_core::term::iri_to_node_id("urn:pg:vocab:Person"))
+        );
+        assert!(compiled.value_filters.is_empty());
+        // A prefixed label resolves through the vocabulary.
+        let mut vocab = Vocabulary::default();
+        vocab.prefixes.insert("ex".into(), "http://ex/".into());
+        let q = parse("MATCH (a:`ex:Widget`) RETURN a").unwrap();
+        let compiled = compile_with_vocabulary(q, &vocab);
+        assert_eq!(
+            compiled.query.patterns[0].object,
+            Term::Bound(polargraph_core::term::iri_to_node_id("http://ex/Widget"))
         );
     }
 
@@ -3205,6 +3276,17 @@ mod tests {
             subject: node,
             predicate: Predicate::new(pred),
             value: val.into(),
+            temporal: BiTemporalRange::assert_now(Timestamp::now()),
+        }
+    }
+
+    /// `node rdf:type <label's class>` under the default vocabulary.
+    fn type_triple(node: NodeId, label: &str) -> Triple {
+        Triple::Relation {
+            subject: node,
+            predicate: Predicate::new(RDF_TYPE),
+            object: label_class(&Vocabulary::default(), label).1,
+            edge_id: EdgeId::new(),
             temporal: BiTemporalRange::assert_now(Timestamp::now()),
         }
     }
@@ -4061,7 +4143,7 @@ mod tests {
         // Add a prop to bind `a` in the WHERE clause
         let snap = {
             let mut tx = store.begin();
-            tx.insert(prop_triple(a, "__type", "Start"));
+            tx.insert(type_triple(a, "Start"));
             let ts = tx.commit().unwrap();
             store.snapshot(ts)
         };
@@ -4069,7 +4151,8 @@ mod tests {
         // MATCH (a:Start)-[:edge*1]->(b) should only return b (not c)
         let q = parse("MATCH (a:Start)-[:edge*1]->(b) RETURN b").unwrap();
         let compiled = compile(q);
-        assert_eq!(compiled.query.patterns[0].max_hops, Some(1));
+        // The label pattern comes first and binds `a` for the bounded hop.
+        assert_eq!(compiled.query.patterns[1].max_hops, Some(1));
 
         let raw = crate::datalog::execute_query(&compiled.query, &snap, None, None).unwrap();
         let filtered = apply_value_filters(raw, &compiled.value_filters, &snap).unwrap();
@@ -4265,7 +4348,7 @@ mod tests {
         let snap = commit(
             &store,
             vec![
-                prop_triple(n, "__type", "Crate"),
+                type_triple(n, "Crate"),
                 prop_triple(n, "name", "serde"),
                 prop_triple(n, "description", "Rust serialization framework"),
             ],
@@ -4435,10 +4518,11 @@ mod tests {
         let temporal = BiTemporalRange::assert_now(Timestamp::now());
 
         let mut tx = store.begin();
-        tx.insert(Triple::Property {
+        tx.insert(Triple::Relation {
             subject: person,
-            predicate: Predicate::new("__type"),
-            value: polargraph_core::value::Value::Text("Person".into()),
+            predicate: Predicate::new(RDF_TYPE),
+            object: label_class(&Vocabulary::default(), "Person").1,
+            edge_id: EdgeId::new(),
             temporal,
         });
         tx.commit().unwrap();

@@ -12,7 +12,7 @@ use crate::planner::{
     choose_annotation_index, choose_index, AnnotationIndexChoice, AnnotationPattern, IndexChoice,
     Pattern,
 };
-use polargraph_core::{id::NodeId, triple::Triple, value::Value};
+use polargraph_core::{id::NodeId, triple::Triple};
 use polargraph_storage::{keys, EdgeTypeRegistry, Snapshot, StorageError};
 use tracing::warn;
 
@@ -31,7 +31,7 @@ pub fn evaluate(pattern: &Pattern, snapshot: &Snapshot) -> Result<Vec<Triple>, S
 /// When `registry` is `Some` and the pattern has a bound predicate whose
 /// `EdgeTypeDef` carries `domain` or `range` constraints, the evaluator first
 /// checks whether the bound subject/object node satisfies the type requirement
-/// (`__type` property). If not, it returns an empty result immediately,
+/// (`rdf:type`). If not, it returns an empty result immediately,
 /// avoiding the hexastore scan entirely.
 ///
 /// When `registry` is `None`, this is identical to [`evaluate`].
@@ -57,19 +57,20 @@ pub fn evaluate_with_registry(
     evaluate(pattern, snapshot)
 }
 
-/// Returns `true` if `node` has a `__type` property equal to `expected_type`.
+/// Returns `true` if `node` is an `rdf:type` instance of the class
+/// `expected_type` names (resolved through the store's vocabulary).
 fn node_has_type(
     node: NodeId,
     expected_type: &str,
     snapshot: &Snapshot,
 ) -> Result<bool, StorageError> {
-    let triples = snapshot.scan_by_subject_predicate(&node, "__type")?;
-    Ok(triples.iter().any(|t| {
-        matches!(
-            t,
-            Triple::Property { value: Value::Text(v), .. } if v == expected_type
-        )
-    }))
+    let class =
+        polargraph_core::term::iri_to_node_id(&snapshot.store().vocabulary().expand(expected_type));
+    let triples =
+        snapshot.scan_by_subject_predicate(&node, polargraph_storage::legacy::RDF_TYPE)?;
+    Ok(triples
+        .iter()
+        .any(|t| matches!(t, Triple::Relation { object, .. } if *object == class)))
 }
 
 /// Evaluate a pattern against storage, then overlay pending (uncommitted)
@@ -283,6 +284,17 @@ mod tests {
             subject: node,
             predicate: Predicate::new(pred),
             value: val.into(),
+            temporal: BiTemporalRange::assert_now(Timestamp::now()),
+        }
+    }
+
+    /// `node rdf:type <urn:pg:vocab:class>`.
+    fn typed(node: NodeId, class: &str) -> Triple {
+        Triple::Relation {
+            subject: node,
+            predicate: Predicate::new(polargraph_storage::legacy::RDF_TYPE),
+            object: polargraph_core::term::iri_to_node_id(&format!("urn:pg:vocab:{class}")),
+            edge_id: polargraph_core::id::EdgeId::new(),
             temporal: BiTemporalRange::assert_now(Timestamp::now()),
         }
     }
@@ -579,8 +591,8 @@ mod tests {
             &store,
             vec![
                 rel(alice, "works_at", acme),
-                prop(alice, "__type", "Robot"),
-                prop(acme, "__type", "Company"),
+                typed(alice, "Robot"),
+                typed(acme, "Company"),
             ],
         );
 
@@ -617,8 +629,8 @@ mod tests {
             &store,
             vec![
                 rel(alice, "works_at", acme),
-                prop(alice, "__type", "Person"),
-                prop(acme, "__type", "Company"),
+                typed(alice, "Person"),
+                typed(acme, "Company"),
             ],
         );
 
@@ -656,8 +668,8 @@ mod tests {
             &store,
             vec![
                 rel(alice, "works_at", acme),
-                prop(alice, "__type", "Person"),
-                prop(acme, "__type", "Project"),
+                typed(alice, "Person"),
+                typed(acme, "Project"),
             ],
         );
 
