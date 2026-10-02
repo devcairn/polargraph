@@ -267,6 +267,9 @@ message QueryRequest {
     /// Dataset: graph IRIs that patterns without their own `graph` term match
     /// in (like SPARQL FROM). Empty = every graph.
     repeated string graphs = 9;
+    /// Leave out inferred facts (the `urn:pg:inferred:*` graphs written by
+    /// OWL RL inference); by default they are included.
+    bool exclude_inferred = 10;
 }
 
 /// One satisfying assignment of all variables in the query.
@@ -801,6 +804,9 @@ message CypherQueryRequest {
     /// Dataset: graph IRIs the MATCH patterns read (unknown IRIs match
     /// nothing). Empty = every graph. A `USE GRAPH` clause takes precedence.
     repeated string graphs = 9;
+    /// Leave out inferred facts (the `urn:pg:inferred:*` graphs written by
+    /// OWL RL inference); by default they are included.
+    bool exclude_inferred = 10;
 }
 
 /// One result row from a CypherQuery.
@@ -1039,19 +1045,23 @@ message DeleteTriplesResponse {
 
 /// Request to run OWL 2 RL forward-chaining materialization.
 message RunMaterializationRequest {
-    /// When true (default), clear the DRV column family before re-materializing.
-    /// When false, perform an incremental run starting from current DRV state.
+    /// Ignored (kept for compatibility): a run always recomputes the closure
+    /// and diffs it against the inferred graphs.
     bool clear_first = 1;
 }
 
 /// Statistics from a materialization run.
 message RunMaterializationResponse {
-    /// Number of new derived triples inserted across all fixpoint iterations.
+    /// Inferred facts asserted by this run (same as `asserted`).
     uint64 rules_fired = 1;
-    /// Total unique derived triples now in the DRV CF (approximate).
+    /// Live inferred facts after the run.
     uint64 derived_triples = 2;
-    /// Number of fixpoint iterations performed before convergence.
+    /// 1 when the run changed anything, else 0 (kept for compatibility).
     uint32 iterations = 3;
+    /// Inferred facts asserted.
+    uint64 asserted = 4;
+    /// Inferred facts closed (no longer derivable).
+    uint64 closed = 5;
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -1217,6 +1227,9 @@ message ValidateShapesRequest {
     string user_id = 6;
     /// With an overlay, only nodes it touches are validated unless this is set.
     bool all_focus_nodes = 7;
+    /// Leave out inferred facts (the `urn:pg:inferred:*` graphs written by
+    /// OWL RL inference); by default they are included.
+    bool exclude_inferred = 8;
 }
 
 message ValidationResult {

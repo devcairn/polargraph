@@ -2686,72 +2686,9 @@ impl TripleStore {
 
     // ── Derived triple store (DRV CF) ─────────────────────────────────────────
 
-    /// Insert a batch of derived (inferred) Relation triples into the DRV CF.
-    ///
-    /// Uses the `spog` key layout (default graph). Each fact is written
-    /// with a timestamp of `Timestamp::now()` so that subsequent `scan_derived()`
-    /// calls see it. Deduplication (same S,P,O already in DRV) is left to the
-    /// caller — the materializer builds its own in-memory dedup set.
-    pub fn insert_derived_batch(
-        &self,
-        facts: &[(NodeId, PredId, NodeId)],
-    ) -> Result<(), StorageError> {
-        if self.is_replica() {
-            return Err(Self::read_only_err());
-        }
-        if facts.is_empty() {
-            return Ok(());
-        }
-        let tt = Timestamp::now();
-        let drv_cf = self.cf_handle(cf::DRV)?;
-        let edge_id = polargraph_core::id::EdgeId(uuid::Uuid::from_bytes([0u8; 16]));
-        let temporal = BiTemporalRange::assert_now(tt);
-        let value_bytes = codec::encode_relation(&edge_id, &temporal);
-        let mut batch = WriteBatch::default();
-        for &(s, p, o) in facts {
-            let q = QuadKey {
-                s,
-                p,
-                o,
-                g: GraphId::DEFAULT,
-                tt,
-            };
-            batch.put_cf(&drv_cf, Order::Spog.encode(&q), &value_bytes);
-        }
-        self.inner.db.write(batch)?;
-        self.inner.oracle.advance_to(tt);
-        Ok(())
-    }
-
-    /// Delete all entries from the DRV column family.
-    ///
-    /// Called at the start of a fresh materialization run to ensure the derived
-    /// store is rebuilt from scratch without stale facts.
-    pub fn clear_derived(&self) -> Result<(), StorageError> {
-        if self.is_replica() {
-            return Err(Self::read_only_err());
-        }
-        let drv_cf = self.cf_handle(cf::DRV)?;
-        let iter = self
-            .inner
-            .db
-            .iterator_cf(&drv_cf, rocksdb::IteratorMode::Start);
-        let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
-        for item in iter {
-            let (k, _) = item?;
-            keys_to_delete.push(k.to_vec());
-        }
-        if !keys_to_delete.is_empty() {
-            let mut batch = WriteBatch::default();
-            for key in keys_to_delete {
-                batch.delete_cf(&drv_cf, &key);
-            }
-            self.inner.db.write(batch)?;
-        }
-        Ok(())
-    }
-
-    /// Scan all derived (inferred) Relation triples visible at the current oracle timestamp.
+    /// Legacy: the pre-step-9 `drvg` CF (kept by `polargraphd migrate`; no
+    /// longer written or queried — inferred facts live in inferred graphs,
+    /// see `owl_rl`).
     pub fn scan_derived(&self) -> Result<Vec<Triple>, StorageError> {
         self.scan_derived_at(self.inner.oracle.read_ts())
     }
@@ -2769,11 +2706,6 @@ impl TripleStore {
             .into_iter()
             .map(|(_, t)| t)
             .collect())
-    }
-
-    /// Approximate count of derived triples in the DRV CF (for Prometheus gauge).
-    pub fn estimate_derived_count(&self) -> u64 {
-        self.cf_approx_key_count(cf::DRV)
     }
 
     // ── reconstruction ────────────────────────────────────────────────────────

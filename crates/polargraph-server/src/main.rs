@@ -601,9 +601,9 @@ async fn main() -> Result<()> {
         let mat_stats = polargraph_storage::owl_rl::materialize(&store, true)
             .context("startup OWL 2 RL materialization failed")?;
         info!(
-            rules_fired = mat_stats.rules_fired,
-            derived_triples = mat_stats.derived_triples,
-            iterations = mat_stats.iterations,
+            asserted = mat_stats.asserted,
+            closed = mat_stats.closed,
+            derived = mat_stats.derived_triples,
             "startup OWL 2 RL materialization complete"
         );
     }

@@ -1,28 +1,25 @@
-//! Integration tests for the OWL 2 RL forward-chaining materializer.
-//!
-//! Well-known IRI constants mirror those in `owl_rl.rs`.
+//! OWL 2 RL inference into queryable inferred graphs
+//! (docs/design/step9-inference-vectors-stats.md, 9a).
 
 use polargraph_core::{
-    id::{EdgeId, NodeId},
+    id::{EdgeId, GraphId, NodeId},
+    schema::GraphAccessLevel,
     temporal::{BiTemporalRange, Timestamp},
+    term::iri_to_node_id,
     triple::{Predicate, Triple},
 };
-use polargraph_storage::{owl_rl, TripleStore};
+use polargraph_storage::{close_at, owl_rl, GraphAccessIndex, GraphScope, TripleStore, WriteMode};
 use tempfile::TempDir;
-
-// ── well-known IRIs ───────────────────────────────────────────────────────────
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
 const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
 const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
-#[allow(dead_code)]
 const RDFS_SUBPROP_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf";
 const OWL_INVERSE_OF: &str = "http://www.w3.org/2002/07/owl#inverseOf";
 const OWL_SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
 const OWL_SYMMETRIC_PROP: &str = "http://www.w3.org/2002/07/owl#SymmetricProperty";
-
-// ── helpers ───────────────────────────────────────────────────────────────────
+const OWL_TRANSITIVE_PROP: &str = "http://www.w3.org/2002/07/owl#TransitiveProperty";
 
 fn open_store() -> (TripleStore, TempDir) {
     let dir = TempDir::new().unwrap();
@@ -30,272 +27,302 @@ fn open_store() -> (TripleStore, TempDir) {
     (store, dir)
 }
 
-fn temporal() -> BiTemporalRange {
-    BiTemporalRange::assert_now(Timestamp::now())
+fn n(iri: &str) -> NodeId {
+    iri_to_node_id(iri)
 }
 
-fn insert_relation(store: &TripleStore, subject: NodeId, pred: &str, object: NodeId) {
-    let t = Triple::Relation {
-        subject,
-        predicate: Predicate::new(pred),
-        object,
-        edge_id: EdgeId::new(),
-        temporal: temporal(),
+/// Insert `(s p o)` into `graph` ("" = default graph), recording the IRIs
+/// as RDF import does (properties are named through the IRI dictionary).
+fn rel(store: &TripleStore, graph: &str, s: &str, p: &str, o: &str) {
+    let g = if graph.is_empty() {
+        GraphId::DEFAULT
+    } else {
+        store.create_graph(graph, &[]).unwrap()
     };
     let mut tx = store.begin();
-    tx.insert(t);
+    for iri in [s, p, o] {
+        tx.bind_iri(iri);
+    }
+    tx.insert_in(
+        Triple::Relation {
+            subject: n(s),
+            predicate: Predicate::new(p),
+            object: n(o),
+            edge_id: EdgeId::new(),
+            temporal: BiTemporalRange::assert_now(Timestamp::now()),
+        },
+        g,
+        WriteMode::Add,
+    );
     tx.commit().unwrap();
 }
 
-/// Check whether the DRV CF contains a specific (subject, pred, object) triple.
-fn derived_contains(store: &TripleStore, s: NodeId, pred: &str, o: NodeId) -> bool {
-    let derived = store.scan_derived().unwrap();
-    derived.iter().any(|t| {
-        if let Triple::Relation {
-            subject,
-            predicate,
-            object,
-            ..
-        } = t
-        {
-            *subject == s && predicate.0 == pred && *object == o
-        } else {
-            false
-        }
-    })
+/// Close the live `(s p o)` in `graph`.
+fn retract(store: &TripleStore, graph: &str, s: &str, p: &str, o: &str) {
+    let g = if graph.is_empty() {
+        GraphId::DEFAULT
+    } else {
+        store.graph_id(graph).unwrap()
+    };
+    let snap = store.snapshot(Timestamp(store.oracle_ts()));
+    let live = snap
+        .scan_scoped(Some(&n(s)), Some(p), Some(&n(o)), &GraphScope::One(g))
+        .unwrap();
+    let mut tx = store.begin();
+    for (g, t) in live {
+        tx.insert_in(close_at(t, Timestamp::now()), g, WriteMode::Add);
+    }
+    tx.commit().unwrap();
 }
 
-// ── rdfs9: subClassOf → type inheritance ─────────────────────────────────────
+/// Whether `(s p o)` is live in the inferred graph `inferred_iri`.
+fn inferred(store: &TripleStore, inferred_iri: &str, s: &str, p: &str, o: &str) -> bool {
+    let Some(g) = store.graph_id(inferred_iri) else {
+        return false;
+    };
+    let snap = store.snapshot(Timestamp(store.oracle_ts()));
+    !snap
+        .scan_scoped(Some(&n(s)), Some(p), Some(&n(o)), &GraphScope::One(g))
+        .unwrap()
+        .is_empty()
+}
+
+const DEFAULT_INFERRED: &str = owl_rl::INFERRED_DEFAULT_GRAPH_IRI;
 
 #[test]
-fn rdfs9_subclass_type_propagation() {
-    let (store, _dir) = open_store();
-
-    let dog_class = NodeId::new();
-    let animal_class = NodeId::new();
-    let fido = NodeId::new();
-
-    // Dog rdfs:subClassOf Animal
-    insert_relation(&store, dog_class, RDFS_SUBCLASS_OF, animal_class);
-    // Fido rdf:type Dog
-    insert_relation(&store, fido, RDF_TYPE, dog_class);
-
+fn inferred_facts_are_ordinary_queryable_quads() {
+    let (store, _d) = open_store();
+    rel(
+        &store,
+        "",
+        "http://ex/knows",
+        RDFS_DOMAIN,
+        "http://ex/Person",
+    );
+    rel(
+        &store,
+        "",
+        "http://ex/alice",
+        "http://ex/knows",
+        "http://ex/bob",
+    );
     let stats = owl_rl::materialize(&store, true).unwrap();
-
-    // Should infer: Fido rdf:type Animal
-    assert!(
-        derived_contains(&store, fido, RDF_TYPE, animal_class),
-        "rdfs9 should infer fido:type:Animal; stats={:?}",
-        stats
-    );
-    assert!(stats.rules_fired > 0);
-    assert!(stats.derived_triples > 0);
+    assert_eq!(stats.asserted, 1);
+    assert!(inferred(
+        &store,
+        DEFAULT_INFERRED,
+        "http://ex/alice",
+        RDF_TYPE,
+        "http://ex/Person"
+    ));
+    // Visible to an ordinary (union) read — no special read path.
+    let snap = store.snapshot(Timestamp(store.oracle_ts()));
+    let types = snap
+        .scan_by_subject_predicate(&n("http://ex/alice"), RDF_TYPE)
+        .unwrap();
+    assert_eq!(types.len(), 1);
+    // ... and hidden when the inferred graphs are excluded.
+    let ids = owl_rl::InferredGraphs::load(&store).ids();
+    let without = snap.without_graphs(&ids);
+    assert!(without
+        .scan_by_subject_predicate(&n("http://ex/alice"), RDF_TYPE)
+        .unwrap()
+        .is_empty());
 }
 
-// ── rdfs11: subClassOf transitivity ──────────────────────────────────────────
-
 #[test]
-fn rdfs11_subclass_transitivity() {
-    let (store, _dir) = open_store();
-
-    let poodle = NodeId::new();
-    let dog = NodeId::new();
-    let animal = NodeId::new();
-
-    // Poodle subClassOf Dog, Dog subClassOf Animal
-    insert_relation(&store, poodle, RDFS_SUBCLASS_OF, dog);
-    insert_relation(&store, dog, RDFS_SUBCLASS_OF, animal);
-
+fn every_rule_fires() {
+    let (store, _d) = open_store();
+    let ex = |l: &str| format!("http://ex/{l}");
+    // Schema.
+    rel(&store, "", &ex("worksFor"), RDFS_RANGE, &ex("Org"));
+    rel(&store, "", &ex("Employee"), RDFS_SUBCLASS_OF, &ex("Person"));
+    rel(&store, "", &ex("Person"), RDFS_SUBCLASS_OF, &ex("Agent"));
+    rel(
+        &store,
+        "",
+        &ex("manages"),
+        RDFS_SUBPROP_OF,
+        &ex("worksWith"),
+    );
+    rel(&store, "", &ex("worksWith"), RDFS_SUBPROP_OF, &ex("knows"));
+    rel(&store, "", &ex("friend"), RDF_TYPE, OWL_SYMMETRIC_PROP);
+    rel(&store, "", &ex("partOf"), RDF_TYPE, OWL_TRANSITIVE_PROP);
+    rel(&store, "", &ex("hasPart"), OWL_INVERSE_OF, &ex("partOf"));
+    // Data.
+    rel(&store, "", &ex("ann"), RDF_TYPE, &ex("Employee"));
+    rel(&store, "", &ex("ann"), &ex("worksFor"), &ex("acme"));
+    rel(&store, "", &ex("ann"), &ex("manages"), &ex("bo"));
+    rel(&store, "", &ex("ann"), &ex("friend"), &ex("cy"));
+    rel(&store, "", &ex("wheel"), &ex("partOf"), &ex("car"));
+    rel(&store, "", &ex("car"), &ex("partOf"), &ex("fleet"));
+    rel(&store, "", &ex("a1"), OWL_SAME_AS, &ex("a2"));
+    rel(&store, "", &ex("a2"), OWL_SAME_AS, &ex("a3"));
     owl_rl::materialize(&store, true).unwrap();
 
-    // Should infer: Poodle subClassOf Animal
-    assert!(
-        derived_contains(&store, poodle, RDFS_SUBCLASS_OF, animal),
-        "rdfs11 should infer poodle subClassOf animal"
-    );
+    let has = |s: &str, p: &str, o: &str| inferred(&store, DEFAULT_INFERRED, &ex(s), p, &ex(o));
+    assert!(has("acme", RDF_TYPE, "Org"), "rdfs3");
+    assert!(has("ann", RDF_TYPE, "Person"), "rdfs9");
+    assert!(has("ann", RDF_TYPE, "Agent"), "rdfs9 over rdfs11");
+    assert!(has("Employee", RDFS_SUBCLASS_OF, "Agent"), "rdfs11");
+    assert!(has("manages", RDFS_SUBPROP_OF, "knows"), "rdfs5");
+    assert!(has("ann", &ex("worksWith"), "bo"), "rdfs7");
+    assert!(has("ann", &ex("knows"), "bo"), "rdfs7 over rdfs5");
+    assert!(has("cy", &ex("friend"), "ann"), "prp-symp");
+    assert!(has("wheel", &ex("partOf"), "fleet"), "prp-trp");
+    assert!(has("car", &ex("hasPart"), "wheel"), "prp-inv2");
+    assert!(has("a2", OWL_SAME_AS, "a1"), "eq-sym");
+    assert!(has("a1", OWL_SAME_AS, "a3"), "eq-trans");
 }
 
-// ── rdfs2: domain constraint → type ──────────────────────────────────────────
-
 #[test]
-fn rdfs2_domain_type_inference() {
-    let (store, _dir) = open_store();
-
-    let alice = NodeId::new();
-    let bob = NodeId::new();
-    let person_class = NodeId::new();
-
-    // Use the bridge: the predicate "http://ex/knows" maps to its NodeId for schema triples
-    let knows_node = owl_rl::predicate_node("http://ex/knows");
-
-    // knows rdfs:domain Person
-    insert_relation(&store, knows_node, RDFS_DOMAIN, person_class);
-    // Alice knows Bob
-    insert_relation(&store, alice, "http://ex/knows", bob);
-
+fn facts_land_in_their_instance_graphs_inferred_graph() {
+    let (store, _d) = open_store();
+    // The schema lives in its own graph; the data in two others.
+    rel(
+        &store,
+        "urn:onto",
+        "http://ex/Cat",
+        RDFS_SUBCLASS_OF,
+        "http://ex/Animal",
+    );
+    rel(&store, "urn:g1", "http://ex/tom", RDF_TYPE, "http://ex/Cat");
+    rel(
+        &store,
+        "urn:g1",
+        "http://ex/a",
+        "http://ex/near",
+        "http://ex/b",
+    );
+    rel(
+        &store,
+        "urn:g2",
+        "http://ex/b",
+        "http://ex/near",
+        "http://ex/c",
+    );
+    rel(&store, "", "http://ex/near", RDF_TYPE, OWL_TRANSITIVE_PROP);
     owl_rl::materialize(&store, true).unwrap();
 
-    // Should infer: Alice rdf:type Person
-    assert!(
-        derived_contains(&store, alice, RDF_TYPE, person_class),
-        "rdfs2 should infer alice:type:Person from domain constraint"
-    );
+    assert!(inferred(
+        &store,
+        "urn:pg:inferred:urn:g1",
+        "http://ex/tom",
+        RDF_TYPE,
+        "http://ex/Animal"
+    ));
+    // Instance premises from two graphs → the cross graph.
+    assert!(inferred(
+        &store,
+        owl_rl::INFERRED_CROSS_GRAPH_IRI,
+        "http://ex/a",
+        "http://ex/near",
+        "http://ex/c"
+    ));
+    assert!(!inferred(
+        &store,
+        "urn:pg:inferred:urn:g1",
+        "http://ex/a",
+        "http://ex/near",
+        "http://ex/c"
+    ));
 }
 
-// ── rdfs3: range constraint → type ───────────────────────────────────────────
+#[test]
+fn reruns_are_idempotent_and_close_what_no_longer_follows() {
+    let (store, _d) = open_store();
+    rel(
+        &store,
+        "",
+        "http://ex/Cat",
+        RDFS_SUBCLASS_OF,
+        "http://ex/Animal",
+    );
+    rel(&store, "", "http://ex/tom", RDF_TYPE, "http://ex/Cat");
+    let first = owl_rl::materialize(&store, true).unwrap();
+    assert_eq!((first.asserted, first.closed), (1, 0));
+    let again = owl_rl::materialize(&store, true).unwrap();
+    assert_eq!((again.asserted, again.closed), (0, 0), "no change");
+
+    retract(&store, "", "http://ex/tom", RDF_TYPE, "http://ex/Cat");
+    let after = owl_rl::materialize(&store, true).unwrap();
+    assert_eq!((after.asserted, after.closed), (0, 1));
+    assert!(!inferred(
+        &store,
+        DEFAULT_INFERRED,
+        "http://ex/tom",
+        RDF_TYPE,
+        "http://ex/Animal"
+    ));
+    // Bitemporal: the inferred fact is closed, not deleted — still visible
+    // at a time when it held.
+    assert_eq!(after.derived_triples, 0);
+}
 
 #[test]
-fn rdfs3_range_type_inference() {
-    let (store, _dir) = open_store();
+fn a_base_fact_is_not_duplicated_as_inferred() {
+    let (store, _d) = open_store();
+    rel(
+        &store,
+        "",
+        "http://ex/Cat",
+        RDFS_SUBCLASS_OF,
+        "http://ex/Animal",
+    );
+    rel(&store, "", "http://ex/tom", RDF_TYPE, "http://ex/Cat");
+    rel(&store, "", "http://ex/tom", RDF_TYPE, "http://ex/Animal");
+    let stats = owl_rl::materialize(&store, true).unwrap();
+    assert_eq!(stats.asserted, 0);
+}
 
-    let alice = NodeId::new();
-    let bob = NodeId::new();
-    let person_class = NodeId::new();
-
-    let knows_node = owl_rl::predicate_node("http://ex/knows");
-
-    // knows rdfs:range Person
-    insert_relation(&store, knows_node, RDFS_RANGE, person_class);
-    // Alice knows Bob
-    insert_relation(&store, alice, "http://ex/knows", bob);
-
+#[test]
+fn inferred_graphs_inherit_readers_of_their_source() {
+    let (store, _d) = open_store();
+    rel(
+        &store,
+        "urn:g1",
+        "http://ex/Cat",
+        RDFS_SUBCLASS_OF,
+        "http://ex/Animal",
+    );
+    rel(&store, "urn:g1", "http://ex/tom", RDF_TYPE, "http://ex/Cat");
+    rel(
+        &store,
+        "urn:g1",
+        "http://ex/a",
+        "http://ex/near",
+        "http://ex/b",
+    );
+    rel(
+        &store,
+        "urn:g2",
+        "http://ex/b",
+        "http://ex/near",
+        "http://ex/c",
+    );
+    rel(
+        &store,
+        "urn:g2",
+        "http://ex/near",
+        RDF_TYPE,
+        OWL_TRANSITIVE_PROP,
+    );
     owl_rl::materialize(&store, true).unwrap();
 
-    // Should infer: Bob rdf:type Person (the *object* gets typed by rdfs:range)
+    let user = n("urn:user:u");
+    let g1 = store.graph_id("urn:g1").unwrap();
+    store
+        .grant_graph_access(user, g1, GraphAccessLevel::Read)
+        .unwrap();
+    let index = GraphAccessIndex::build(&store).unwrap();
+    let readable = index.for_user(&user).readable();
+    let inferred_g1 = store.graph_id("urn:pg:inferred:urn:g1").unwrap();
+    let cross = store.graph_id(owl_rl::INFERRED_CROSS_GRAPH_IRI).unwrap();
     assert!(
-        derived_contains(&store, bob, RDF_TYPE, person_class),
-        "rdfs3 should infer bob:type:Person from range constraint"
+        readable.contains(inferred_g1.0),
+        "companion of a readable graph"
     );
-}
-
-// ── prp-symp: SymmetricProperty ──────────────────────────────────────────────
-
-#[test]
-fn prp_symp_symmetric_property() {
-    let (store, _dir) = open_store();
-
-    let alice = NodeId::new();
-    let bob = NodeId::new();
-
-    let likes_node = owl_rl::predicate_node("http://ex/likes");
-    let owl_sym_node = owl_rl::predicate_node(OWL_SYMMETRIC_PROP);
-
-    // likes rdf:type owl:SymmetricProperty
-    // owl_symmetric_node is uri_to_node_id(OWL_SYMMETRIC_PROP)
-    let sym_prop_class = owl_rl::predicate_node(OWL_SYMMETRIC_PROP);
-    insert_relation(&store, likes_node, RDF_TYPE, sym_prop_class);
-    let _ = owl_sym_node; // used to make sure it's the same as sym_prop_class
-
-    // Alice likes Bob
-    insert_relation(&store, alice, "http://ex/likes", bob);
-
-    owl_rl::materialize(&store, true).unwrap();
-
-    // Should infer: Bob likes Alice
-    assert!(
-        derived_contains(&store, bob, "http://ex/likes", alice),
-        "prp-symp should infer bob likes alice"
-    );
-}
-
-// ── prp-inv1: inverseOf ───────────────────────────────────────────────────────
-
-#[test]
-fn prp_inv1_inverse_of() {
-    let (store, _dir) = open_store();
-
-    let alice = NodeId::new();
-    let bob = NodeId::new();
-    let dummy = NodeId::new();
-
-    let knows_node = owl_rl::predicate_node("http://ex/knows");
-    let known_by_node = owl_rl::predicate_node("http://ex/knownBy");
-
-    // Pre-intern "http://ex/knownBy" by using it as an actual predicate at least once.
-    // The materializer can only infer triples using predicates that are interned
-    // (bridge is built from intern table). A dummy self-loop achieves this without
-    // affecting the test assertion.
-    insert_relation(&store, dummy, "http://ex/knownBy", dummy);
-
-    // knows owl:inverseOf knownBy
-    insert_relation(&store, knows_node, OWL_INVERSE_OF, known_by_node);
-    // Alice knows Bob
-    insert_relation(&store, alice, "http://ex/knows", bob);
-
-    owl_rl::materialize(&store, true).unwrap();
-
-    // Should infer: Bob knownBy Alice
-    assert!(
-        derived_contains(&store, bob, "http://ex/knownBy", alice),
-        "prp-inv1 should infer bob knownBy alice"
-    );
-}
-
-// ── eq-sym: sameAs symmetry ───────────────────────────────────────────────────
-
-#[test]
-fn eq_sym_sameas_symmetry() {
-    let (store, _dir) = open_store();
-
-    let alice = NodeId::new();
-    let alice2 = NodeId::new();
-
-    // Alice owl:sameAs Alice2
-    insert_relation(&store, alice, OWL_SAME_AS, alice2);
-
-    owl_rl::materialize(&store, true).unwrap();
-
-    // Should infer: Alice2 owl:sameAs Alice
-    assert!(
-        derived_contains(&store, alice2, OWL_SAME_AS, alice),
-        "eq-sym should infer alice2 sameAs alice"
-    );
-}
-
-// ── clear_derived: wipe DRV CF ────────────────────────────────────────────────
-
-#[test]
-fn clear_derived_removes_all_derived_triples() {
-    let (store, _dir) = open_store();
-
-    let alice = NodeId::new();
-    let alice2 = NodeId::new();
-    insert_relation(&store, alice, OWL_SAME_AS, alice2);
-
-    // Run once — produces derived triples
-    owl_rl::materialize(&store, true).unwrap();
-    assert!(
-        !store.scan_derived().unwrap().is_empty(),
-        "DRV should have entries after first run"
-    );
-
-    // Clear + empty base → no derived triples remain
-    store.clear_derived().unwrap();
-    assert!(
-        store.scan_derived().unwrap().is_empty(),
-        "DRV should be empty after clear"
-    );
-}
-
-// ── incremental: second run finds fixpoint immediately ────────────────────────
-
-#[test]
-fn incremental_run_reaches_fixpoint() {
-    let (store, _dir) = open_store();
-
-    let alice = NodeId::new();
-    let alice2 = NodeId::new();
-    insert_relation(&store, alice, OWL_SAME_AS, alice2);
-
-    // Full run
-    let stats1 = owl_rl::materialize(&store, true).unwrap();
-    assert!(stats1.iterations > 0);
-
-    // Incremental run: DRV already contains all inferred facts → 0 new facts
-    let stats2 = owl_rl::materialize(&store, false).unwrap();
-    assert_eq!(
-        stats2.rules_fired, 0,
-        "incremental run on converged state should fire 0 rules"
-    );
-    assert_eq!(stats2.iterations, 0);
+    assert!(!readable.contains(cross.0), "cross graph is service-only");
+    let inferred_g2 = store.graph_id("urn:pg:inferred:urn:g2");
+    assert!(inferred_g2.map_or(true, |g| !readable.contains(g.0)));
 }

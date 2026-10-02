@@ -28,7 +28,7 @@ WAL), so every reader — scans, Datalog, SPARQL, Cypher, SHACL, exports,
 - A fact goes to the inferred graph of its **instance (A-box) premises'**
   graph. Schema (T-box) premises — `rdfs:subClassOf`, `subPropertyOf`,
   `domain`, `range`, `owl:inverseOf`, `owl:SymmetricProperty`,
-  `owl:TransitiveProperty`, `owl:sameAs` declarations as rule *schema* — don't
+  `owl:TransitiveProperty` declarations — don't
   decide the graph, so a schema kept in an ontology graph still yields
   per-graph inferences. (Consequence, documented: a user who can read a data
   graph sees inferences that used schema from a graph they can't read.)
@@ -55,6 +55,16 @@ WAL), so every reader — scans, Datalog, SPARQL, Cypher, SHACL, exports,
   means "recompute and diff", the result being the same).
 - The legacy `drvg` CF is no longer written or read; existing contents are
   ignored (re-run materialization). No migration.
+
+**As built (9a).** Two more findings fixed: the materializer named
+properties and classes with a hash in a different byte order from
+`term::iri_to_node_id` (so schema loaded as RDF never matched any rule), and
+re-scanned the whole store per fixpoint iteration. Rules now take the
+schema closed up front (rdfs5 / rdfs11 by labelled transitive closure), run
+semi-naive once, and name properties via interned predicates or the IRI
+dictionary. `owl:sameAs` facts are instance data. Opt-out field:
+`exclude_inferred` (proto booleans default to false); REST bodies
+`"inferred": false`, SPARQL `?inferred=false`.
 
 ## 9b — DRed (incremental maintenance)
 

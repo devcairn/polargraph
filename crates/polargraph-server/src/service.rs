@@ -761,6 +761,37 @@ impl PolarGraphServer {
         Ok(iris)
     }
 
+    /// After an inference run: log, update metrics, and pick up new inferred
+    /// graphs in the graph-access index (they inherit their source's
+    /// readers).
+    pub fn after_inference(&self, stats: &owl_rl::MaterializationStats) {
+        info!(
+            asserted = stats.asserted,
+            closed = stats.closed,
+            derived = stats.derived_triples,
+            full = stats.full,
+            "OWL 2 RL inference applied"
+        );
+        metrics::gauge!("polargraph_materialization_derived_total")
+            .set(stats.derived_triples as f64);
+        if stats.asserted > 0 {
+            self.rebuild_graph_access();
+        }
+    }
+
+    /// `snapshot` without the inferred graphs when the request opts out.
+    fn inferred_scope(
+        &self,
+        snapshot: polargraph_storage::Snapshot,
+        exclude_inferred: bool,
+    ) -> polargraph_storage::Snapshot {
+        if exclude_inferred {
+            snapshot.without_graphs(&owl_rl::InferredGraphs::load(&self.store).ids())
+        } else {
+            snapshot
+        }
+    }
+
     /// Checks shared by the vocabulary mutations.
     #[allow(clippy::result_large_err)]
     fn vocabulary_change_allowed(
@@ -917,6 +948,9 @@ impl PolarGraphServer {
         level: GraphAccessLevel,
         create: bool,
     ) -> Result<polargraph_core::id::GraphId, Status> {
+        if level >= GraphAccessLevel::Propose {
+            reject_inferred_graph(iri)?;
+        }
         if access.is_none() {
             return if create {
                 self.target_graph(iri)
@@ -1097,6 +1131,7 @@ impl PolarGraphServer {
         if iri.is_empty() {
             return Ok(polargraph_core::id::GraphId::DEFAULT);
         }
+        reject_inferred_graph(iri)?;
         // create_graph logs GRAPH_CREATED for a new graph (change feed).
         self.store
             .create_graph(iri, &[])
@@ -1328,6 +1363,18 @@ fn write_predicates(ops: &[polargraph_query::cypher::WriteOp]) -> Vec<&str> {
     preds
 }
 
+/// Inferred graphs are written by inference only (step 9): any other write,
+/// grant or graph admin operation on one is `PERMISSION_DENIED`.
+#[allow(clippy::result_large_err)]
+fn reject_inferred_graph(iri: &str) -> Result<(), Status> {
+    if owl_rl::is_inferred_graph_iri(iri) {
+        return Err(Status::permission_denied(format!(
+            "<{iri}> is an inferred graph; it is written by OWL RL inference only"
+        )));
+    }
+    Ok(())
+}
+
 /// `PERMISSION_DENIED` when the caller is a user (service-only RPCs).
 #[allow(clippy::result_large_err)]
 fn require_service(
@@ -1520,6 +1567,7 @@ impl PolarGraphService for PolarGraphServer {
         if req.iri.is_empty() {
             return Err(Status::invalid_argument("graph iri must not be empty"));
         }
+        reject_inferred_graph(&req.iri)?;
         // A user may create a new graph (and becomes its admin); changing an
         // existing graph's metadata needs admin.
         let creator = match (&access, self.store.graph_id(&req.iri)) {
@@ -1985,7 +2033,7 @@ impl PolarGraphService for PolarGraphServer {
         } else {
             self.store.begin().read_ts
         };
-        let snapshot = self.snapshot_for(ts, &access);
+        let snapshot = self.inferred_scope(self.snapshot_for(ts, &access), req.exclude_inferred);
         let all_focus = req.all_focus_nodes;
         let response = tokio::task::spawn_blocking(move || -> Result<_, Status> {
             let to_status = |e: polargraph_shacl::ShapeError| match e {
@@ -2116,6 +2164,7 @@ impl PolarGraphService for PolarGraphServer {
                 "the default graph is open to everyone and takes no grants",
             ));
         }
+        reject_inferred_graph(&req.graph)?;
         let g = self.existing_graph(&req.graph)?;
         require_level(&access, g, GraphAccessLevel::Admin, &req.graph)?;
         self.store
@@ -2371,6 +2420,7 @@ impl PolarGraphService for PolarGraphServer {
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
         }
+        let snapshot = self.inferred_scope(snapshot, req.exclude_inferred);
 
         debug!(
             "query: {} pattern(s) at tx_ts={} vt_as_of={:?}",
@@ -2396,7 +2446,10 @@ impl PolarGraphService for PolarGraphServer {
             })?;
             let mut guard = entry.lock().await;
             guard.last_used = Instant::now();
-            let tx_snapshot = self.snapshot_for(guard.tx.read_ts, &access);
+            let tx_snapshot = self.inferred_scope(
+                self.snapshot_for(guard.tx.read_ts, &access),
+                req.exclude_inferred,
+            );
             // Collect pending triples while we hold the lock.
             let pending: Vec<Triple> = guard.tx.pending_triples().to_vec();
             drop(guard);
@@ -3646,6 +3699,7 @@ impl PolarGraphService for PolarGraphServer {
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
         }
+        let snapshot = self.inferred_scope(snapshot, req.exclude_inferred);
 
         let deadline = self.make_deadline();
         let t0 = Instant::now();
@@ -3953,6 +4007,7 @@ impl PolarGraphService for PolarGraphServer {
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
         }
+        let snapshot = self.inferred_scope(snapshot, req.exclude_inferred);
 
         let rules: Vec<_> = req
             .rules
@@ -4030,6 +4085,7 @@ impl PolarGraphService for PolarGraphServer {
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
         }
+        let snapshot = self.inferred_scope(snapshot, req.exclude_inferred);
 
         let deadline = self.make_deadline();
         let t0 = Instant::now();
@@ -4961,39 +5017,28 @@ impl PolarGraphService for PolarGraphServer {
         Ok(Response::new(DeleteTriplesResponse { deleted_count }))
     }
 
-    /// Run OWL 2 RL forward-chaining materialization and write derived triples to DRV CF.
+    /// Recompute OWL 2 RL inference and bring the inferred graphs in line
+    /// (assert new facts, close facts that no longer follow).
     async fn run_materialization(
         &self,
-        request: Request<RunMaterializationRequest>,
+        _request: Request<RunMaterializationRequest>,
     ) -> Result<Response<RunMaterializationResponse>, Status> {
         self.check_not_replica()?;
-        let req = request.into_inner();
-        // In proto3, bool defaults to false. We treat false as "full re-materialization"
-        // (clear_first=true) since that is always safe. Pass the field value directly;
-        // callers that want incremental mode must explicitly set clear_first=false in
-        // a follow-up design; for now clear_first=true means "clear and rebuild".
-        let clear_first = req.clear_first;
         let stats = tokio::task::spawn_blocking({
             let store = self.store.clone();
-            move || owl_rl::materialize(&store, clear_first)
+            move || owl_rl::materialize(&store, true)
         })
         .await
         .map_err(|e| Status::internal(format!("materialize task panicked: {e}")))?
         .map_err(storage_err_to_status)?;
-
-        info!(
-            rules_fired = stats.rules_fired,
-            derived_triples = stats.derived_triples,
-            iterations = stats.iterations,
-            "OWL 2 RL materialization complete"
-        );
-        metrics::gauge!("polargraph_materialization_derived_total")
-            .set(stats.derived_triples as f64);
+        self.after_inference(&stats);
 
         Ok(Response::new(RunMaterializationResponse {
-            rules_fired: stats.rules_fired,
+            rules_fired: stats.asserted,
             derived_triples: stats.derived_triples,
-            iterations: stats.iterations,
+            iterations: u32::from(stats.asserted + stats.closed > 0),
+            asserted: stats.asserted,
+            closed: stats.closed,
         }))
     }
 }

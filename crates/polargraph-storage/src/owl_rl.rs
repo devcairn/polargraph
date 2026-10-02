@@ -1,9 +1,18 @@
-//! OWL 2 RL forward-chaining materializer.
+//! OWL 2 RL inference into queryable **inferred graphs**
+//! (`docs/design/step9-inference-vectors-stats.md`).
 //!
-//! Implements a subset of the OWL 2 RL rule table (RDFS entailment + property
-//! characteristic rules). Derived facts are written to the `DRV` column family.
+//! Inferred facts are ordinary relation quads in companion graphs —
+//! `urn:pg:inferred:<source graph IRI>` (`urn:pg:inferred:default` for the
+//! default graph) and the service-only `urn:pg:inferred:cross` — written
+//! through the normal commit path (author [`INFERENCE_AUTHOR`]), so every
+//! reader sees them and the graph ACL applies.
 //!
-//! # Rules implemented
+//! A fact's graph follows its **instance (A-box) premises**: all in source
+//! graph `g` → `g`'s inferred graph; several graphs → the cross graph. Schema
+//! (T-box) premises don't decide the graph, so a schema kept in its own
+//! graph still yields per-graph inferences.
+//!
+//! # Rules
 //!
 //! | Name         | Antecedent                                                  | Consequent                 |
 //! |--------------|-------------------------------------------------------------|----------------------------|
@@ -15,30 +24,45 @@
 //! | rdfs11       | (?C rdfs:subClassOf ?D), (?D rdfs:subClassOf ?E)            | (?C rdfs:subClassOf ?E)    |
 //! | prp-symp     | (?p rdf:type owl:SymmetricProperty), (?s ?p ?o)             | (?o ?p ?s)                 |
 //! | prp-trp      | (?p rdf:type owl:TransitiveProperty), (?s ?p ?m), (?m ?p ?o)| (?s ?p ?o)                 |
-//! | prp-inv1     | (?p owl:inverseOf ?q), (?s ?p ?o)                          | (?o ?q ?s)                 |
-//! | prp-inv2     | (?p owl:inverseOf ?q), (?s ?q ?o)                          | (?o ?p ?s)                 |
+//! | prp-inv1     | (?p owl:inverseOf ?q), (?s ?p ?o)                           | (?o ?q ?s)                 |
+//! | prp-inv2     | (?p owl:inverseOf ?q), (?s ?q ?o)                           | (?o ?p ?s)                 |
 //! | eq-sym       | (?s owl:sameAs ?o)                                          | (?o owl:sameAs ?s)         |
 //! | eq-trans     | (?s owl:sameAs ?m), (?m owl:sameAs ?o)                      | (?s owl:sameAs ?o)         |
 //!
-//! # Predicate bridge
+//! The schema (`subClassOf` / `subPropertyOf` closed transitively, domains,
+//! ranges, inverses, symmetric and transitive properties) is loaded up front,
+//! so every instance rule is one step; rdfs5 / rdfs11 are the schema closure.
 //!
-//! In OWL/RDFS, predicates are first-class resources that can appear as subjects
-//! of schema triples (e.g., `knows rdfs:subPropertyOf relatedTo`). In PolarGraph
-//! predicates are normally identified by their interned `PredId`; for schema
-//! triples we need a stable `NodeId` to use in the subject slot.
+//! Properties and classes are named by node — `term::iri_to_node_id(IRI)`,
+//! the mapping RDF import uses; a property node's IRI comes from the IRI
+//! dictionary, or from the interned predicate with that node.
 //!
-//! The bridge: for any interned predicate string `p`, its schema NodeId is
-//! computed deterministically as `uri_to_node_id(p)` using xxHash3-128.
-//! Importers that follow this convention (e.g. the N-Triples bulk importer) will
-//! produce matching node IDs for predicate schema assertions.
+//! # Runs
+//!
+//! - [`materialize`]: compute the closure of the base data and **diff** it
+//!   against the live inferred graphs — assert what's new, close (bitemporal
+//!   `vt_end`) what no longer follows.
+//! - [`infer_changes`]: incremental maintenance (DRed) from the change log.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use polargraph_core::{id::NodeId, triple::Triple};
+use polargraph_core::{
+    id::{GraphId, NodeId},
+    temporal::{BiTemporalRange, Timestamp},
+    term,
+    triple::{Predicate, Triple},
+    value::Value,
+};
 
-use crate::{error::StorageError, keys::PredId, store::TripleStore};
+use crate::{
+    error::StorageError,
+    graphs::close_at,
+    mvcc::{Snapshot, WriteMode},
+    store::{GraphScope, TripleStore},
+    SYSTEM_GRAPH_IRI,
+};
 
-// ── Well-known IRI constants ──────────────────────────────────────────────────
+// ── Vocabulary ────────────────────────────────────────────────────────────────
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
@@ -50,401 +74,935 @@ const OWL_SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
 const OWL_SYMMETRIC_PROP: &str = "http://www.w3.org/2002/07/owl#SymmetricProperty";
 const OWL_TRANSITIVE_PROP: &str = "http://www.w3.org/2002/07/owl#TransitiveProperty";
 
-// ── Public types ──────────────────────────────────────────────────────────────
+/// Predicates whose facts are schema (T-box).
+const TBOX_PREDICATES: [&str; 5] = [
+    RDFS_DOMAIN,
+    RDFS_RANGE,
+    RDFS_SUBCLASS_OF,
+    RDFS_SUBPROP_OF,
+    OWL_INVERSE_OF,
+];
 
-/// Statistics returned by a materialization run.
-#[derive(Debug, Default, Clone)]
-pub struct MaterializationStats {
-    /// Number of new derived triples inserted across all iterations.
-    pub rules_fired: u64,
-    /// Total unique derived triples now in the DRV CF.
-    pub derived_triples: u64,
-    /// Number of fixpoint iterations performed.
-    pub iterations: u32,
+/// Prefix of inferred graph IRIs.
+pub const INFERRED_GRAPH_PREFIX: &str = "urn:pg:inferred:";
+/// The default graph's inferred graph.
+pub const INFERRED_DEFAULT_GRAPH_IRI: &str = "urn:pg:inferred:default";
+/// Facts whose instance premises span graphs (service-only: no grants).
+pub const INFERRED_CROSS_GRAPH_IRI: &str = "urn:pg:inferred:cross";
+/// Graph metadata on an inferred graph: its source graph's IRI.
+pub const INFERRED_FROM_PRED: &str = "urn:pg:inferredFrom";
+/// Author of inference commits (skipped by incremental maintenance).
+pub const INFERENCE_AUTHOR: &str = "urn:pg:inference";
+
+/// META key: the last change-log commit incremental inference processed.
+const META_INFERENCE_APPLIED: &[u8] = b"__inference__/applied_ts";
+
+/// Commit at most this many quad writes per transaction.
+const CHUNK: usize = 10_000;
+
+/// Whether `iri` names an inferred graph.
+pub fn is_inferred_graph_iri(iri: &str) -> bool {
+    iri.starts_with(INFERRED_GRAPH_PREFIX)
 }
 
-// ── NodeId for a string (xxHash3-128 → UUID) ─────────────────────────────────
+// ── Facts ─────────────────────────────────────────────────────────────────────
 
-/// Deterministic NodeId for a predicate or class URI.
-///
-/// Used to bridge between predicate strings and NodeId subjects in schema triples.
-/// An importer using the same hash will produce the same NodeId for the same URI.
-pub fn uri_to_node_id(uri: &str) -> NodeId {
-    let hash: u128 = xxhash_rust::xxh3::xxh3_128(uri.as_bytes());
-    NodeId(uuid::Uuid::from_u128(hash))
+/// Which inferred graph a fact belongs to: a source graph's, or the cross
+/// graph. Base facts carry the label of their own graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Label {
+    Graph(GraphId),
+    Cross,
 }
 
-// ── In-memory triple indexes ──────────────────────────────────────────────────
-
-/// Lightweight in-memory index of Relation triples for rule evaluation.
-struct TripleIndex {
-    /// Set for dedup: (subject, pred_id, object) already in the index.
-    set: HashSet<(NodeId, PredId, NodeId)>,
-    /// Index: pred_id → [(subject, object)]
-    by_pred: HashMap<PredId, Vec<(NodeId, NodeId)>>,
-    /// Index: (pred_id, object) → [subject]
-    by_pred_obj: HashMap<(PredId, NodeId), Vec<NodeId>>,
-    /// Index: (pred_id, subject) → [object]
-    by_pred_subj: HashMap<(PredId, NodeId), Vec<NodeId>>,
+impl Label {
+    fn combine(self, other: Label) -> Label {
+        if self == other {
+            self
+        } else {
+            Label::Cross
+        }
+    }
 }
 
-impl TripleIndex {
-    fn new() -> Self {
+/// A relation fact `(s p o)` with its label.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Fact {
+    pub s: NodeId,
+    pub p: String,
+    pub o: NodeId,
+    pub label: Label,
+}
+
+impl Fact {
+    fn new(s: NodeId, p: &str, o: NodeId, label: Label) -> Self {
         Self {
-            set: HashSet::new(),
-            by_pred: HashMap::new(),
-            by_pred_obj: HashMap::new(),
-            by_pred_subj: HashMap::new(),
+            s,
+            p: p.to_string(),
+            o,
+            label,
         }
     }
 
-    fn insert(&mut self, s: NodeId, p: PredId, o: NodeId) {
-        if !self.set.insert((s, p, o)) {
-            return; // already present
-        }
-        self.by_pred.entry(p).or_default().push((s, o));
-        self.by_pred_obj.entry((p, o)).or_default().push(s);
-        self.by_pred_subj.entry((p, s)).or_default().push(o);
+    /// Schema facts drive rules instead of being instance premises.
+    fn is_schema(&self) -> bool {
+        TBOX_PREDICATES.contains(&self.p.as_str())
+            || (self.p == RDF_TYPE
+                && (self.o == term::iri_to_node_id(OWL_SYMMETRIC_PROP)
+                    || self.o == term::iri_to_node_id(OWL_TRANSITIVE_PROP)))
     }
 }
 
-// ── Vocab: interned PredIds for all well-known IRIs ───────────────────────────
+// ── Graphs ────────────────────────────────────────────────────────────────────
 
-struct Vocab {
-    rdf_type: PredId,
-    rdfs_domain: PredId,
-    rdfs_range: PredId,
-    rdfs_subclass_of: PredId,
-    rdfs_subprop_of: PredId,
-    owl_inverse_of: PredId,
-    owl_same_as: PredId,
-    /// NodeId for the owl:SymmetricProperty class (object in rdf:type triples).
-    owl_symmetric_node: NodeId,
-    /// NodeId for the owl:TransitiveProperty class (object in rdf:type triples).
-    owl_transitive_node: NodeId,
+/// The store's inferred graphs and how labels map to them.
+#[derive(Debug, Default, Clone)]
+pub struct InferredGraphs {
+    /// Inferred graph id → label.
+    pub label_of: HashMap<GraphId, Label>,
+    /// Label → inferred graph id (existing graphs only).
+    pub graph_of: HashMap<Label, GraphId>,
+    /// The system graph (never a premise).
+    system: Option<GraphId>,
 }
 
-impl Vocab {
-    fn intern(store: &TripleStore) -> Result<Self, StorageError> {
-        Ok(Self {
-            rdf_type: store.intern_predicate(RDF_TYPE)?,
-            rdfs_domain: store.intern_predicate(RDFS_DOMAIN)?,
-            rdfs_range: store.intern_predicate(RDFS_RANGE)?,
-            rdfs_subclass_of: store.intern_predicate(RDFS_SUBCLASS_OF)?,
-            rdfs_subprop_of: store.intern_predicate(RDFS_SUBPROP_OF)?,
-            owl_inverse_of: store.intern_predicate(OWL_INVERSE_OF)?,
-            owl_same_as: store.intern_predicate(OWL_SAME_AS)?,
-            owl_symmetric_node: uri_to_node_id(OWL_SYMMETRIC_PROP),
-            owl_transitive_node: uri_to_node_id(OWL_TRANSITIVE_PROP),
+impl InferredGraphs {
+    pub fn load(store: &TripleStore) -> Self {
+        let mut out = InferredGraphs {
+            system: store.graph_id(SYSTEM_GRAPH_IRI),
+            ..Default::default()
+        };
+        for (id, iri) in store.list_graphs() {
+            let Some(rest) = iri.strip_prefix(INFERRED_GRAPH_PREFIX) else {
+                continue;
+            };
+            let label = match rest {
+                "cross" => Label::Cross,
+                "default" => Label::Graph(GraphId::DEFAULT),
+                source => match store.graph_id(source) {
+                    Some(g) => Label::Graph(g),
+                    None => continue,
+                },
+            };
+            out.label_of.insert(id, label);
+            out.graph_of.insert(label, id);
+        }
+        out
+    }
+
+    /// The label of a quad in graph `g`: its source graph for an inferred
+    /// graph, `g` itself for a base graph; `None` for the system graph.
+    fn label(&self, g: GraphId) -> Option<Label> {
+        if Some(g) == self.system {
+            return None;
+        }
+        Some(self.label_of.get(&g).copied().unwrap_or(Label::Graph(g)))
+    }
+
+    fn is_inferred(&self, g: GraphId) -> bool {
+        self.label_of.contains_key(&g)
+    }
+
+    /// Inferred graph ids, for excluding them from a snapshot.
+    pub fn ids(&self) -> roaring::RoaringBitmap {
+        self.label_of.keys().map(|g| g.0).collect()
+    }
+
+    /// `(inferred graph, source graph)` pairs (not the cross graph).
+    pub fn companions(&self) -> impl Iterator<Item = (GraphId, GraphId)> + '_ {
+        self.label_of.iter().filter_map(|(id, label)| match label {
+            Label::Graph(src) => Some((*id, *src)),
+            Label::Cross => None,
         })
     }
+
+    /// The inferred graph for `label`, created on first use.
+    fn ensure(&mut self, store: &TripleStore, label: Label) -> Result<GraphId, StorageError> {
+        if let Some(g) = self.graph_of.get(&label) {
+            return Ok(*g);
+        }
+        let (iri, source) = match label {
+            Label::Cross => (INFERRED_CROSS_GRAPH_IRI.to_string(), None),
+            Label::Graph(GraphId::DEFAULT) => (INFERRED_DEFAULT_GRAPH_IRI.to_string(), None),
+            Label::Graph(g) => {
+                let src = store.graph_iri(g).ok_or_else(|| {
+                    StorageError::Validation(format!("unknown source graph {}", g.0))
+                })?;
+                (format!("{INFERRED_GRAPH_PREFIX}{src}"), Some(src))
+            }
+        };
+        let metadata: Vec<(String, Value)> = source
+            .map(|s| vec![(INFERRED_FROM_PRED.to_string(), Value::Text(s))])
+            .unwrap_or_default();
+        let g = store.create_graph_by(&iri, &metadata, INFERENCE_AUTHOR)?;
+        self.label_of.insert(g, label);
+        self.graph_of.insert(label, g);
+        Ok(g)
+    }
 }
 
-// ── Bridge: predicate string ↔ NodeId ────────────────────────────────────────
+// ── Fact sources ──────────────────────────────────────────────────────────────
 
-/// Build node↔predicate bridge maps.
-///
-/// For every interned predicate string P, `uri_to_node_id(P)` is its canonical
-/// schema NodeId. Returns `(node_to_pred_name, pred_name_to_node)`.
-fn build_bridge(store: &TripleStore) -> (HashMap<NodeId, String>, HashMap<String, NodeId>) {
-    let mut node_to_pred: HashMap<NodeId, String> = HashMap::new();
-    let mut pred_to_node: HashMap<String, NodeId> = HashMap::new();
+/// Lookups the rules need.
+trait FactSource {
+    /// `(s p ?o)` with labels.
+    fn objects(&self, p: &str, s: NodeId) -> Result<Vec<(NodeId, Label)>, StorageError>;
+    /// `(?s p o)` with labels.
+    fn subjects(&self, p: &str, o: NodeId) -> Result<Vec<(NodeId, Label)>, StorageError>;
+    /// Whether `f` holds with its label (or, for a cross fact, anywhere).
+    fn present(&self, f: &Fact) -> Result<bool, StorageError>;
+}
 
-    let count = store.predicate_count();
-    for id in 1..=(count + 1) {
-        if let Some(name) = store.predicate_string(id) {
-            let node = uri_to_node_id(&name);
-            node_to_pred.insert(node, name.clone());
-            pred_to_node.insert(name, node);
+/// An in-memory set of facts (full materialization, deltas).
+#[derive(Default)]
+struct MemFacts {
+    set: HashSet<Fact>,
+    any: HashSet<(NodeId, String, NodeId)>,
+    by_ps: HashMap<(String, NodeId), Vec<(NodeId, Label)>>,
+    by_po: HashMap<(String, NodeId), Vec<(NodeId, Label)>>,
+}
+
+impl MemFacts {
+    fn insert(&mut self, f: Fact) -> bool {
+        if !self.set.insert(f.clone()) {
+            return false;
+        }
+        self.any.insert((f.s, f.p.clone(), f.o));
+        self.by_ps
+            .entry((f.p.clone(), f.s))
+            .or_default()
+            .push((f.o, f.label));
+        self.by_po
+            .entry((f.p, f.o))
+            .or_default()
+            .push((f.s, f.label));
+        true
+    }
+}
+
+impl FactSource for MemFacts {
+    fn objects(&self, p: &str, s: NodeId) -> Result<Vec<(NodeId, Label)>, StorageError> {
+        Ok(self
+            .by_ps
+            .get(&(p.to_string(), s))
+            .cloned()
+            .unwrap_or_default())
+    }
+    fn subjects(&self, p: &str, o: NodeId) -> Result<Vec<(NodeId, Label)>, StorageError> {
+        Ok(self
+            .by_po
+            .get(&(p.to_string(), o))
+            .cloned()
+            .unwrap_or_default())
+    }
+    fn present(&self, f: &Fact) -> Result<bool, StorageError> {
+        Ok(self.set.contains(f)
+            || (f.label == Label::Cross && self.any.contains(&(f.s, f.p.clone(), f.o))))
+    }
+}
+
+/// The store at a snapshot, minus `removed`, plus `added`.
+struct StoreFacts<'a> {
+    snap: Snapshot,
+    graphs: &'a InferredGraphs,
+    removed: HashSet<Fact>,
+    added: MemFacts,
+}
+
+impl StoreFacts<'_> {
+    fn scan(
+        &self,
+        s: Option<NodeId>,
+        p: &str,
+        o: Option<NodeId>,
+    ) -> Result<Vec<Fact>, StorageError> {
+        let mut out = Vec::new();
+        for (g, t) in self
+            .snap
+            .scan_scoped(s.as_ref(), Some(p), o.as_ref(), &GraphScope::Union)?
+        {
+            let (
+                Triple::Relation {
+                    subject, object, ..
+                },
+                Some(label),
+            ) = (t, self.graphs.label(g))
+            else {
+                continue;
+            };
+            let f = Fact::new(subject, p, object, label);
+            if !self.removed.contains(&f) {
+                out.push(f);
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl FactSource for StoreFacts<'_> {
+    fn objects(&self, p: &str, s: NodeId) -> Result<Vec<(NodeId, Label)>, StorageError> {
+        let mut out: Vec<_> = self
+            .scan(Some(s), p, None)?
+            .into_iter()
+            .map(|f| (f.o, f.label))
+            .collect();
+        out.extend(self.added.objects(p, s)?);
+        Ok(out)
+    }
+    fn subjects(&self, p: &str, o: NodeId) -> Result<Vec<(NodeId, Label)>, StorageError> {
+        let mut out: Vec<_> = self
+            .scan(None, p, Some(o))?
+            .into_iter()
+            .map(|f| (f.s, f.label))
+            .collect();
+        out.extend(self.added.subjects(p, o)?);
+        Ok(out)
+    }
+    fn present(&self, f: &Fact) -> Result<bool, StorageError> {
+        if self.added.present(f)? {
+            return Ok(true);
+        }
+        Ok(self
+            .scan(Some(f.s), &f.p, Some(f.o))?
+            .iter()
+            .any(|x| x.label == f.label || f.label == Label::Cross))
+    }
+}
+
+// ── Schema ────────────────────────────────────────────────────────────────────
+
+/// The schema, closed transitively, for one-step instance rules.
+#[derive(Default)]
+struct Schema {
+    /// Property IRI → classes.
+    domain: HashMap<String, Vec<NodeId>>,
+    range: HashMap<String, Vec<NodeId>>,
+    /// Class → properties with it as domain / range (backward rules).
+    domain_inv: HashMap<NodeId, Vec<String>>,
+    range_inv: HashMap<NodeId, Vec<String>>,
+    /// Property → all its super-properties / its sub-properties.
+    super_props: HashMap<String, Vec<String>>,
+    sub_props: HashMap<String, Vec<String>>,
+    /// Class → all its super-classes / its sub-classes.
+    super_classes: HashMap<NodeId, Vec<NodeId>>,
+    sub_classes: HashMap<NodeId, Vec<NodeId>>,
+    /// `(s p o)` ⇒ `(o q s)`, and the reverse map for backward rules.
+    inverse: HashMap<String, Vec<String>>,
+    inverse_of: HashMap<String, Vec<String>>,
+    symmetric: HashSet<String>,
+    transitive: HashSet<String>,
+    /// Schema closure facts (rdfs5 / rdfs11), labelled.
+    closure: Vec<Fact>,
+}
+
+/// Node ↔ IRI for properties and classes.
+struct Names {
+    of_node: HashMap<NodeId, String>,
+}
+
+impl Names {
+    fn load(store: &TripleStore) -> Self {
+        let mut of_node = HashMap::new();
+        for id in 1..=(store.predicate_count() + 1) {
+            if let Some(name) = store.predicate_string(id) {
+                of_node.insert(term::iri_to_node_id(&name), name);
+            }
+        }
+        Names { of_node }
+    }
+
+    /// A property node's IRI: the interned predicate with that node, else
+    /// the IRI dictionary.
+    fn property(&self, store: &TripleStore, node: NodeId) -> Option<String> {
+        if let Some(name) = self.of_node.get(&node) {
+            return Some(name.clone());
+        }
+        store.iri_of(&node).ok().flatten()
+    }
+}
+
+/// Transitive closure of labelled edges: per-graph closures keep their
+/// graph's label; pairs only reachable across graphs get [`Label::Cross`].
+fn labelled_closure(edges: &[(NodeId, NodeId, Label)]) -> Vec<(NodeId, NodeId, Label)> {
+    fn closure(edges: &[(NodeId, NodeId)]) -> HashSet<(NodeId, NodeId)> {
+        let mut next: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for (a, b) in edges {
+            next.entry(*a).or_default().push(*b);
+        }
+        let mut out = HashSet::new();
+        for start in next.keys() {
+            let mut seen = HashSet::new();
+            let mut queue: VecDeque<NodeId> = next[start].iter().copied().collect();
+            while let Some(n) = queue.pop_front() {
+                if seen.insert(n) {
+                    out.insert((*start, n));
+                    if let Some(more) = next.get(&n) {
+                        queue.extend(more.iter().copied());
+                    }
+                }
+            }
+        }
+        out
+    }
+    let mut by_label: HashMap<Label, Vec<(NodeId, NodeId)>> = HashMap::new();
+    for (a, b, l) in edges {
+        by_label.entry(*l).or_default().push((*a, *b));
+    }
+    let mut out = Vec::new();
+    let mut covered = HashSet::new();
+    for (label, es) in &by_label {
+        for pair in closure(es) {
+            covered.insert(pair);
+            out.push((pair.0, pair.1, *label));
         }
     }
-
-    (node_to_pred, pred_to_node)
+    let all: Vec<(NodeId, NodeId)> = edges.iter().map(|(a, b, _)| (*a, *b)).collect();
+    for pair in closure(&all) {
+        if !covered.contains(&pair) {
+            out.push((pair.0, pair.1, Label::Cross));
+        }
+    }
+    out
 }
 
-// ── Forward-chaining materializer ─────────────────────────────────────────────
+impl Schema {
+    fn load(
+        store: &TripleStore,
+        snap: &Snapshot,
+        graphs: &InferredGraphs,
+    ) -> Result<Self, StorageError> {
+        let names = Names::load(store);
+        // Base schema facts only (inferred schema facts are recomputed).
+        let edges = |p: &str| -> Result<Vec<(NodeId, NodeId, Label)>, StorageError> {
+            Ok(snap
+                .scan_scoped(None, Some(p), None, &GraphScope::Union)?
+                .into_iter()
+                .filter(|(g, _)| !graphs.is_inferred(*g))
+                .filter_map(|(g, t)| match (t, graphs.label(g)) {
+                    (
+                        Triple::Relation {
+                            subject, object, ..
+                        },
+                        Some(l),
+                    ) => Some((subject, object, l)),
+                    _ => None,
+                })
+                .collect())
+        };
+        let mut schema = Schema::default();
+        let prop = |n: NodeId| names.property(store, n);
 
-/// Run OWL 2 RL forward-chaining materialization to fixpoint.
-///
-/// When `clear_first` is true (the default), the DRV CF is wiped before
-/// re-materializing. When false, materialization starts from the current DRV
-/// state and only adds incremental new facts.
-///
-/// Returns statistics about the run.
-pub fn materialize(
-    store: &TripleStore,
-    clear_first: bool,
-) -> Result<MaterializationStats, StorageError> {
-    if clear_first {
-        store.clear_derived()?;
+        let sco = edges(RDFS_SUBCLASS_OF)?;
+        for (c, d, l) in labelled_closure(&sco) {
+            if c == d {
+                continue;
+            }
+            schema.super_classes.entry(c).or_default().push(d);
+            schema.sub_classes.entry(d).or_default().push(c);
+            if !sco.contains(&(c, d, l)) {
+                schema.closure.push(Fact::new(c, RDFS_SUBCLASS_OF, d, l));
+            }
+        }
+        let spo = edges(RDFS_SUBPROP_OF)?;
+        for (p, q, l) in labelled_closure(&spo) {
+            if p == q {
+                continue;
+            }
+            if !spo.contains(&(p, q, l)) {
+                schema.closure.push(Fact::new(p, RDFS_SUBPROP_OF, q, l));
+            }
+            if let (Some(p), Some(q)) = (prop(p), prop(q)) {
+                schema
+                    .super_props
+                    .entry(p.clone())
+                    .or_default()
+                    .push(q.clone());
+                schema.sub_props.entry(q).or_default().push(p);
+            }
+        }
+        for (p, c, _) in edges(RDFS_DOMAIN)? {
+            if let Some(p) = prop(p) {
+                schema.domain.entry(p.clone()).or_default().push(c);
+                schema.domain_inv.entry(c).or_default().push(p);
+            }
+        }
+        for (p, c, _) in edges(RDFS_RANGE)? {
+            if let Some(p) = prop(p) {
+                schema.range.entry(p.clone()).or_default().push(c);
+                schema.range_inv.entry(c).or_default().push(p);
+            }
+        }
+        for (p, q, _) in edges(OWL_INVERSE_OF)? {
+            if let (Some(p), Some(q)) = (prop(p), prop(q)) {
+                // inv1: (s p o) ⇒ (o q s); inv2: (s q o) ⇒ (o p s).
+                schema.inverse.entry(p.clone()).or_default().push(q.clone());
+                schema.inverse.entry(q.clone()).or_default().push(p.clone());
+                schema
+                    .inverse_of
+                    .entry(q.clone())
+                    .or_default()
+                    .push(p.clone());
+                schema.inverse_of.entry(p).or_default().push(q);
+            }
+        }
+        let typed = |class: &str| -> Result<HashSet<String>, StorageError> {
+            Ok(snap
+                .scan_scoped(
+                    None,
+                    Some(RDF_TYPE),
+                    Some(&term::iri_to_node_id(class)),
+                    &GraphScope::Union,
+                )?
+                .into_iter()
+                .filter(|(g, _)| !graphs.is_inferred(*g))
+                .filter_map(|(_, t)| prop(t.subject()))
+                .collect())
+        };
+        schema.symmetric = typed(OWL_SYMMETRIC_PROP)?;
+        schema.transitive = typed(OWL_TRANSITIVE_PROP)?;
+        Ok(schema)
     }
 
-    // Intern OWL/RDFS vocabulary predicates.
-    let vocab = Vocab::intern(store)?;
+    /// Facts one rule step derives using the instance fact `f`.
+    fn consequences(&self, f: &Fact, src: &impl FactSource) -> Result<Vec<Fact>, StorageError> {
+        let mut out = Vec::new();
+        if f.is_schema() {
+            return Ok(out);
+        }
+        let l = f.label;
+        for c in self.domain.get(&f.p).into_iter().flatten() {
+            out.push(Fact::new(f.s, RDF_TYPE, *c, l)); // rdfs2
+        }
+        for c in self.range.get(&f.p).into_iter().flatten() {
+            out.push(Fact::new(f.o, RDF_TYPE, *c, l)); // rdfs3
+        }
+        for q in self.super_props.get(&f.p).into_iter().flatten() {
+            out.push(Fact::new(f.s, q, f.o, l)); // rdfs7
+        }
+        if f.p == RDF_TYPE {
+            for d in self.super_classes.get(&f.o).into_iter().flatten() {
+                out.push(Fact::new(f.s, RDF_TYPE, *d, l)); // rdfs9
+            }
+        }
+        if self.symmetric.contains(&f.p) || f.p == OWL_SAME_AS {
+            out.push(Fact::new(f.o, &f.p, f.s, l)); // prp-symp, eq-sym
+        }
+        for q in self.inverse.get(&f.p).into_iter().flatten() {
+            out.push(Fact::new(f.o, q, f.s, l)); // prp-inv1/2
+        }
+        if self.transitive.contains(&f.p) || f.p == OWL_SAME_AS {
+            // prp-trp, eq-trans — with f as either premise.
+            for (o2, l2) in src.objects(&f.p, f.o)? {
+                out.push(Fact::new(f.s, &f.p, o2, l.combine(l2)));
+            }
+            for (s0, l0) in src.subjects(&f.p, f.s)? {
+                out.push(Fact::new(s0, &f.p, f.o, l0.combine(l)));
+            }
+        }
+        Ok(out)
+    }
 
-    let mut stats = MaterializationStats::default();
+    /// Whether some rule derives `x` (with its label) in one step from `src`.
+    fn supported(&self, x: &Fact, src: &impl FactSource) -> Result<bool, StorageError> {
+        let has = |p: &str, s: NodeId, o: NodeId| -> Result<bool, StorageError> {
+            Ok(src.objects(p, s)?.contains(&(o, x.label)))
+        };
+        if x.p == RDF_TYPE {
+            for p in self.domain_inv.get(&x.o).into_iter().flatten() {
+                if src.objects(p, x.s)?.iter().any(|(_, l)| *l == x.label) {
+                    return Ok(true); // rdfs2
+                }
+            }
+            for p in self.range_inv.get(&x.o).into_iter().flatten() {
+                if src.subjects(p, x.s)?.iter().any(|(_, l)| *l == x.label) {
+                    return Ok(true); // rdfs3
+                }
+            }
+            for c in self.sub_classes.get(&x.o).into_iter().flatten() {
+                if has(RDF_TYPE, x.s, *c)? {
+                    return Ok(true); // rdfs9
+                }
+            }
+        }
+        for p in self.sub_props.get(&x.p).into_iter().flatten() {
+            if has(p, x.s, x.o)? {
+                return Ok(true); // rdfs7
+            }
+        }
+        if (self.symmetric.contains(&x.p) || x.p == OWL_SAME_AS) && has(&x.p, x.o, x.s)? {
+            return Ok(true); // prp-symp, eq-sym
+        }
+        for q in self.inverse_of.get(&x.p).into_iter().flatten() {
+            if has(q, x.o, x.s)? {
+                return Ok(true); // prp-inv1/2
+            }
+        }
+        if self.transitive.contains(&x.p) || x.p == OWL_SAME_AS {
+            for (m, l1) in src.objects(&x.p, x.s)? {
+                if src
+                    .objects(&x.p, m)?
+                    .iter()
+                    .any(|(o, l2)| *o == x.o && l1.combine(*l2) == x.label)
+                {
+                    return Ok(true); // prp-trp, eq-trans
+                }
+            }
+        }
+        Ok(false)
+    }
+}
 
-    loop {
-        // Build predicate ↔ node bridge maps from current interned predicates.
-        let (node_to_pred, _pred_to_node) = build_bridge(store);
+// ── Writing ───────────────────────────────────────────────────────────────────
 
-        // Collect all current triples (base + derived).
-        let base = store.scan_all()?;
-        let derived = store.scan_derived()?;
+/// What a run changed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MaterializationStats {
+    /// Inferred facts asserted.
+    pub asserted: u64,
+    /// Inferred facts closed (no longer derivable).
+    pub closed: u64,
+    /// Live inferred facts after the run.
+    pub derived_triples: u64,
+    /// Whether this was a full recompute (vs. incremental DRed).
+    pub full: bool,
+}
 
-        // Build in-memory index of all Relation triples.
-        let mut idx = TripleIndex::new();
-        for triple in base.iter().chain(derived.iter()) {
-            if let Triple::Relation {
+fn relation(f: &Fact) -> Triple {
+    Triple::Relation {
+        subject: f.s,
+        predicate: Predicate::new(&f.p),
+        object: f.o,
+        edge_id: term::edge_id_for(&f.s.to_string(), &f.p, &f.o.to_string()),
+        temporal: BiTemporalRange::assert_now(Timestamp::now()),
+    }
+}
+
+/// Assert `assert` and close the stored quads `close` in chunked commits.
+fn write(
+    store: &TripleStore,
+    graphs: &mut InferredGraphs,
+    assert: &[Fact],
+    close: &[(GraphId, Triple)],
+) -> Result<(), StorageError> {
+    let now = Timestamp::now();
+    let mut ops: Vec<(GraphId, Triple)> = Vec::with_capacity(assert.len() + close.len());
+    for f in assert {
+        ops.push((graphs.ensure(store, f.label)?, relation(f)));
+    }
+    for (g, t) in close {
+        ops.push((*g, close_at(t.clone(), now)));
+    }
+    for chunk in ops.chunks(CHUNK) {
+        let mut tx = store.begin();
+        tx.set_author(INFERENCE_AUTHOR);
+        for (g, t) in chunk {
+            tx.insert_in(t.clone(), *g, WriteMode::Add);
+        }
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+/// Live inferred quads: `(fact, graph, stored triple)`.
+fn live_inferred(
+    snap: &Snapshot,
+    graphs: &InferredGraphs,
+) -> Result<HashMap<Fact, (GraphId, Triple)>, StorageError> {
+    let mut out = HashMap::new();
+    let ids: Vec<GraphId> = graphs.label_of.keys().copied().collect();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    for (g, t) in snap.scan_scoped(None, None, None, &GraphScope::set(ids))? {
+        if let (
+            Triple::Relation {
                 subject,
                 predicate,
                 object,
                 ..
-            } = triple
-            {
-                if let Some(p_id) = store.predicate_id(&predicate.0) {
-                    idx.insert(*subject, p_id, *object);
-                }
-            }
-        }
-
-        // Collect candidate new facts (may contain duplicates; deduped below).
-        let mut candidates: Vec<(NodeId, PredId, NodeId)> = Vec::new();
-
-        // ── rdfs2: (?s ?p ?o), (?p rdfs:domain ?C) → (?s rdf:type ?C) ─────────
-        if let Some(domain_pairs) = idx.by_pred.get(&vocab.rdfs_domain) {
-            let domain_pairs: Vec<(NodeId, NodeId)> = domain_pairs.clone();
-            for (p_node, class_node) in domain_pairs {
-                if let Some(p_name) = node_to_pred.get(&p_node) {
-                    if let Some(p_id) = store.predicate_id(p_name) {
-                        if let Some(pairs) = idx.by_pred.get(&p_id) {
-                            for &(s, _o) in pairs {
-                                candidates.push((s, vocab.rdf_type, class_node));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── rdfs3: (?s ?p ?o), (?p rdfs:range ?C) → (?o rdf:type ?C) ──────────
-        if let Some(range_pairs) = idx.by_pred.get(&vocab.rdfs_range) {
-            let range_pairs: Vec<(NodeId, NodeId)> = range_pairs.clone();
-            for (p_node, class_node) in range_pairs {
-                if let Some(p_name) = node_to_pred.get(&p_node) {
-                    if let Some(p_id) = store.predicate_id(p_name) {
-                        if let Some(pairs) = idx.by_pred.get(&p_id) {
-                            for &(_s, o) in pairs {
-                                candidates.push((o, vocab.rdf_type, class_node));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── rdfs5: (?p spo ?q), (?q spo ?r) → (?p spo ?r) ─────────────────────
-        if let Some(subprop_pairs) = idx.by_pred.get(&vocab.rdfs_subprop_of) {
-            let subprop_pairs: Vec<(NodeId, NodeId)> = subprop_pairs.clone();
-            for (p_node, q_node) in subprop_pairs {
-                if let Some(r_nodes) = idx.by_pred_subj.get(&(vocab.rdfs_subprop_of, q_node)) {
-                    for &r_node in r_nodes.clone().iter() {
-                        candidates.push((p_node, vocab.rdfs_subprop_of, r_node));
-                    }
-                }
-            }
-        }
-
-        // ── rdfs7/prp-spo1: (?s ?p ?o), (?p spo ?q) → (?s ?q ?o) ─────────────
-        if let Some(subprop_pairs) = idx.by_pred.get(&vocab.rdfs_subprop_of) {
-            let subprop_pairs: Vec<(NodeId, NodeId)> = subprop_pairs.clone();
-            for (p_node, q_node) in subprop_pairs {
-                if let Some(p_name) = node_to_pred.get(&p_node) {
-                    if let Some(q_name) = node_to_pred.get(&q_node) {
-                        let p_id_opt = store.predicate_id(p_name);
-                        // intern q since it'll be used as a predicate in inferred triples
-                        let q_id_opt = store.intern_predicate(q_name).ok();
-                        if let (Some(p_id), Some(q_id)) = (p_id_opt, q_id_opt) {
-                            if let Some(pairs) = idx.by_pred.get(&p_id) {
-                                for &(s, o) in pairs.clone().iter() {
-                                    candidates.push((s, q_id, o));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── rdfs9: (?C subClassOf ?D), (?s rdf:type ?C) → (?s rdf:type ?D) ─────
-        if let Some(subclass_pairs) = idx.by_pred.get(&vocab.rdfs_subclass_of) {
-            let subclass_pairs: Vec<(NodeId, NodeId)> = subclass_pairs.clone();
-            for (c_node, d_node) in subclass_pairs {
-                if let Some(subjects) = idx.by_pred_obj.get(&(vocab.rdf_type, c_node)) {
-                    for &s in subjects.clone().iter() {
-                        candidates.push((s, vocab.rdf_type, d_node));
-                    }
-                }
-            }
-        }
-
-        // ── rdfs11: (?C sco ?D), (?D sco ?E) → (?C sco ?E) ────────────────────
-        if let Some(subclass_pairs) = idx.by_pred.get(&vocab.rdfs_subclass_of) {
-            let subclass_pairs: Vec<(NodeId, NodeId)> = subclass_pairs.clone();
-            for (c_node, d_node) in subclass_pairs {
-                if let Some(e_nodes) = idx.by_pred_subj.get(&(vocab.rdfs_subclass_of, d_node)) {
-                    for &e_node in e_nodes.clone().iter() {
-                        candidates.push((c_node, vocab.rdfs_subclass_of, e_node));
-                    }
-                }
-            }
-        }
-
-        // ── prp-symp: (?p rdf:type owl:SymmetricProperty), (?s ?p ?o) → (?o ?p ?s)
-        if let Some(sym_props) = idx
-            .by_pred_obj
-            .get(&(vocab.rdf_type, vocab.owl_symmetric_node))
+            },
+            Some(l),
+        ) = (&t, graphs.label_of.get(&g))
         {
-            let sym_props: Vec<NodeId> = sym_props.clone();
-            for p_node in sym_props {
-                if let Some(p_name) = node_to_pred.get(&p_node) {
-                    if let Some(p_id) = store.predicate_id(p_name) {
-                        if let Some(pairs) = idx.by_pred.get(&p_id) {
-                            for &(s, o) in pairs.clone().iter() {
-                                candidates.push((o, p_id, s));
-                            }
-                        }
-                    }
-                }
-            }
+            out.insert(Fact::new(*subject, &predicate.0, *object, *l), (g, t));
         }
-
-        // ── prp-trp: (?p rdf:type owl:TransitiveProperty), (?s ?p ?m), (?m ?p ?o)
-        //            → (?s ?p ?o)
-        if let Some(trp_props) = idx
-            .by_pred_obj
-            .get(&(vocab.rdf_type, vocab.owl_transitive_node))
-        {
-            let trp_props: Vec<NodeId> = trp_props.clone();
-            for p_node in trp_props {
-                if let Some(p_name) = node_to_pred.get(&p_node) {
-                    if let Some(p_id) = store.predicate_id(p_name) {
-                        if let Some(sm_pairs) = idx.by_pred.get(&p_id) {
-                            let sm_pairs: Vec<(NodeId, NodeId)> = sm_pairs.clone();
-                            for (s, m) in sm_pairs {
-                                if let Some(mo_list) = idx.by_pred_subj.get(&(p_id, m)) {
-                                    for &o in mo_list.clone().iter() {
-                                        candidates.push((s, p_id, o));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── prp-inv1: (?p owl:inverseOf ?q), (?s ?p ?o) → (?o ?q ?s) ───────────
-        if let Some(inv_pairs) = idx.by_pred.get(&vocab.owl_inverse_of) {
-            let inv_pairs: Vec<(NodeId, NodeId)> = inv_pairs.clone();
-            for (p_node, q_node) in inv_pairs {
-                if let Some(p_name) = node_to_pred.get(&p_node) {
-                    if let Some(q_name) = node_to_pred.get(&q_node) {
-                        let p_id_opt = store.predicate_id(p_name);
-                        let q_id_opt = store.intern_predicate(q_name).ok();
-                        if let (Some(p_id), Some(q_id)) = (p_id_opt, q_id_opt) {
-                            if let Some(pairs) = idx.by_pred.get(&p_id) {
-                                for &(s, o) in pairs.clone().iter() {
-                                    candidates.push((o, q_id, s));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── prp-inv2: (?p owl:inverseOf ?q), (?s ?q ?o) → (?o ?p ?s) ───────────
-        if let Some(inv_pairs) = idx.by_pred.get(&vocab.owl_inverse_of) {
-            let inv_pairs: Vec<(NodeId, NodeId)> = inv_pairs.clone();
-            for (p_node, q_node) in inv_pairs {
-                if let Some(p_name) = node_to_pred.get(&p_node) {
-                    if let Some(q_name) = node_to_pred.get(&q_node) {
-                        let p_id_opt = store.intern_predicate(p_name).ok();
-                        let q_id_opt = store.predicate_id(q_name);
-                        if let (Some(p_id), Some(q_id)) = (p_id_opt, q_id_opt) {
-                            if let Some(pairs) = idx.by_pred.get(&q_id) {
-                                for &(s, o) in pairs.clone().iter() {
-                                    candidates.push((o, p_id, s));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── eq-sym: (?s owl:sameAs ?o) → (?o owl:sameAs ?s) ────────────────────
-        if let Some(sameas_pairs) = idx.by_pred.get(&vocab.owl_same_as) {
-            let sameas_pairs: Vec<(NodeId, NodeId)> = sameas_pairs.clone();
-            for (s, o) in sameas_pairs {
-                candidates.push((o, vocab.owl_same_as, s));
-            }
-        }
-
-        // ── eq-trans: (?s owl:sameAs ?m), (?m owl:sameAs ?o) → (?s owl:sameAs ?o)
-        if let Some(sameas_pairs) = idx.by_pred.get(&vocab.owl_same_as) {
-            let sameas_pairs: Vec<(NodeId, NodeId)> = sameas_pairs.clone();
-            for (s, m) in sameas_pairs {
-                if let Some(mo_list) = idx.by_pred_subj.get(&(vocab.owl_same_as, m)) {
-                    for &o in mo_list.clone().iter() {
-                        candidates.push((s, vocab.owl_same_as, o));
-                    }
-                }
-            }
-        }
-
-        // Deduplicate: filter out facts already in idx (base or derived), and
-        // remove duplicates within this batch.
-        let mut batch_seen: HashSet<(NodeId, PredId, NodeId)> = HashSet::new();
-        let new_facts: Vec<(NodeId, PredId, NodeId)> = candidates
-            .into_iter()
-            .filter(|f| batch_seen.insert(*f) && !idx.set.contains(f))
-            .collect();
-
-        if new_facts.is_empty() {
-            break;
-        }
-
-        let count = new_facts.len() as u64;
-        store.insert_derived_batch(&new_facts)?;
-
-        stats.rules_fired += count;
-        stats.derived_triples += count;
-        stats.iterations += 1;
     }
+    Ok(out)
+}
 
-    // Final derived count from the DRV CF estimate.
-    stats.derived_triples = store.estimate_derived_count();
+/// The last commit incremental inference covered.
+fn get_applied(store: &TripleStore) -> Result<Option<Timestamp>, StorageError> {
+    let meta = store.cf_handle(crate::cf::META)?;
+    Ok(store
+        .db_ref()
+        .get_cf(&meta, META_INFERENCE_APPLIED)?
+        .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok())
+        .map(|b| Timestamp(i64::from_be_bytes(b))))
+}
 
+fn put_applied(store: &TripleStore, ts: Timestamp) -> Result<(), StorageError> {
+    let meta = store.cf_handle(crate::cf::META)?;
+    store
+        .db_ref()
+        .put_cf(&meta, META_INFERENCE_APPLIED, ts.0.to_be_bytes())?;
+    Ok(())
+}
+
+// ── Full materialization ──────────────────────────────────────────────────────
+
+/// Recompute the closure of the base data and bring the inferred graphs in
+/// line: assert new facts, close facts that no longer follow. Idempotent.
+///
+/// `_clear_first` is kept for API compatibility; the diff makes clearing
+/// unnecessary.
+pub fn materialize(
+    store: &TripleStore,
+    _clear_first: bool,
+) -> Result<MaterializationStats, StorageError> {
+    if store.is_replica() {
+        return Err(StorageError::ReadOnly(
+            "inference runs on the primary".into(),
+        ));
+    }
+    let at = Timestamp(store.oracle_ts());
+    let stats = materialize_at(store, at)?;
+    put_applied(store, at)?;
     Ok(stats)
 }
 
-// ── Helper: look up which predicates are stored as Relation triples ───────────
+fn materialize_at(
+    store: &TripleStore,
+    at: Timestamp,
+) -> Result<MaterializationStats, StorageError> {
+    let snap = store.snapshot(at);
+    let mut graphs = InferredGraphs::load(store);
+    let schema = Schema::load(store, &snap, &graphs)?;
 
-/// Return the predicate string used in a `Triple::Relation`.
-#[allow(dead_code)]
-fn relation_predicate(triple: &Triple) -> Option<&str> {
-    match triple {
-        Triple::Relation { predicate, .. } => Some(&predicate.0),
-        _ => None,
+    // Base facts: every relation outside the system and inferred graphs.
+    let mut mem = MemFacts::default();
+    let mut queue: VecDeque<Fact> = VecDeque::new();
+    for (g, t) in snap.scan_scoped(None, None, None, &GraphScope::Union)? {
+        if graphs.is_inferred(g) {
+            continue;
+        }
+        let (
+            Triple::Relation {
+                subject,
+                predicate,
+                object,
+                ..
+            },
+            Some(l),
+        ) = (t, graphs.label(g))
+        else {
+            continue;
+        };
+        let f = Fact::new(subject, &predicate.0, object, l);
+        if mem.insert(f.clone()) {
+            queue.push_back(f);
+        }
     }
+
+    // Semi-naive closure: each derivation is found when its last premise
+    // arrives.
+    let mut derived: HashSet<Fact> = HashSet::new();
+    for f in &schema.closure {
+        if !mem.present(f)? {
+            mem.insert(f.clone());
+            derived.insert(f.clone());
+        }
+    }
+    while let Some(f) = queue.pop_front() {
+        for c in schema.consequences(&f, &mem)? {
+            if !mem.present(&c)? {
+                mem.insert(c.clone());
+                derived.insert(c.clone());
+                queue.push_back(c);
+            }
+        }
+    }
+
+    let live = live_inferred(&snap, &graphs)?;
+    let assert: Vec<Fact> = derived
+        .iter()
+        .filter(|f| !live.contains_key(*f))
+        .cloned()
+        .collect();
+    let close: Vec<(GraphId, Triple)> = live
+        .iter()
+        .filter(|(f, _)| !derived.contains(*f))
+        .map(|(_, v)| v.clone())
+        .collect();
+    write(store, &mut graphs, &assert, &close)?;
+    Ok(MaterializationStats {
+        asserted: assert.len() as u64,
+        closed: close.len() as u64,
+        derived_triples: derived.len() as u64,
+        full: true,
+    })
 }
 
-/// Return the predicate NodeId via bridge for schema assertions.
-///
-/// Exposed for tests that need to build `(?p_node rdfs:domain ?C)` triples
-/// where `p_node = uri_to_node_id(pred_string)`.
+// ── Incremental maintenance (DRed) ────────────────────────────────────────────
+
+/// Bring the inferred graphs up to date with the commits logged since the
+/// last run (DRed: over-delete, re-derive, insert). Falls back to a full
+/// [`materialize`] when there is no resume point, the log was pruned past
+/// it, or a schema fact changed. Returns `None` when nothing was pending.
+pub fn infer_changes(store: &TripleStore) -> Result<Option<MaterializationStats>, StorageError> {
+    if store.is_replica() {
+        return Err(StorageError::ReadOnly(
+            "inference runs on the primary".into(),
+        ));
+    }
+    let resume = get_applied(store)?;
+    let Some(from) = resume.filter(|ts| *ts >= store.changes_floor().unwrap_or(Timestamp(0)))
+    else {
+        return materialize(store, false).map(Some);
+    };
+
+    let mut records = Vec::new();
+    let mut cursor = from;
+    loop {
+        let batch = store.changes_after(cursor, 1_000)?;
+        let Some(last) = batch.last() else { break };
+        cursor = last.commit_ts;
+        let more = batch.len() == 1_000;
+        records.extend(batch);
+        if !more {
+            break;
+        }
+    }
+    if records.is_empty() {
+        return Ok(None);
+    }
+    let to = cursor;
+
+    let mut graphs = InferredGraphs::load(store);
+    let mut asserted: Vec<Fact> = Vec::new();
+    let mut deleted: Vec<Fact> = Vec::new();
+    let mut schema_changed = false;
+    for record in records.iter().filter(|r| r.author != INFERENCE_AUTHOR) {
+        for (g, t) in &record.quads {
+            if graphs.is_inferred(*g) {
+                continue;
+            }
+            let (
+                Triple::Relation {
+                    subject,
+                    predicate,
+                    object,
+                    temporal,
+                    ..
+                },
+                Some(l),
+            ) = (t, graphs.label(*g))
+            else {
+                continue;
+            };
+            let f = Fact::new(*subject, &predicate.0, *object, l);
+            schema_changed |= f.is_schema();
+            if temporal.vt_end == Timestamp::END_OF_TIME {
+                asserted.push(f);
+            } else {
+                deleted.push(f);
+            }
+        }
+    }
+    if schema_changed {
+        let stats = materialize_at(store, to)?;
+        put_applied(store, to)?;
+        return Ok(Some(stats));
+    }
+
+    let old_snap = store.snapshot(from);
+    let schema = Schema::load(store, &old_snap, &graphs)?;
+    let old = StoreFacts {
+        snap: old_snap,
+        graphs: &graphs,
+        removed: HashSet::new(),
+        added: MemFacts::default(),
+    };
+    let live = live_inferred(&store.snapshot(to), &graphs)?;
+
+    // 1. Over-delete: inferred facts with a derivation through a deleted fact.
+    let mut over: HashSet<Fact> = HashSet::new();
+    let mut queue: VecDeque<Fact> = deleted.iter().cloned().collect();
+    while let Some(f) = queue.pop_front() {
+        for c in schema.consequences(&f, &old)? {
+            if live.contains_key(&c) && over.insert(c.clone()) {
+                queue.push_back(c);
+            }
+        }
+    }
+
+    // 2. Re-derive: over-deleted facts still supported by what remains.
+    let mut new = StoreFacts {
+        snap: store.snapshot(to),
+        graphs: &graphs,
+        removed: over.clone(),
+        added: MemFacts::default(),
+    };
+    let mut rederived: Vec<Fact> = Vec::new();
+    loop {
+        let mut found = Vec::new();
+        for x in &new.removed {
+            if schema.supported(x, &new)? {
+                found.push(x.clone());
+            }
+        }
+        if found.is_empty() {
+            break;
+        }
+        for x in found {
+            new.removed.remove(&x);
+            rederived.push(x);
+        }
+    }
+
+    // 3. Insert: forward from asserted base facts and re-derived facts.
+    let mut added: Vec<Fact> = Vec::new();
+    let mut queue: VecDeque<Fact> = asserted.into_iter().chain(rederived).collect();
+    while let Some(f) = queue.pop_front() {
+        for c in schema.consequences(&f, &new)? {
+            if !new.present(&c)? {
+                new.added.insert(c.clone());
+                if new.removed.remove(&c) {
+                    // Over-deleted, then derived again: still stored.
+                } else {
+                    added.push(c.clone());
+                }
+                queue.push_back(c);
+            }
+        }
+    }
+
+    // What stays over-deleted is closed.
+    let close: Vec<(GraphId, Triple)> = new
+        .removed
+        .iter()
+        .filter_map(|f| live.get(f).cloned())
+        .collect();
+    drop(new);
+    drop(old);
+    write(store, &mut graphs, &added, &close)?;
+    put_applied(store, to)?;
+    Ok(Some(MaterializationStats {
+        asserted: added.len() as u64,
+        closed: close.len() as u64,
+        derived_triples: (live.len() + added.len()).saturating_sub(close.len()) as u64,
+        full: false,
+    }))
+}
+
+/// The node a predicate or class IRI names (`term::iri_to_node_id`) — for
+/// schema triples such as `<p> rdfs:subPropertyOf <q>`.
 pub fn predicate_node(pred: &str) -> NodeId {
-    uri_to_node_id(pred)
+    term::iri_to_node_id(pred)
+}
+
+/// Deprecated alias of [`predicate_node`]; now the canonical IRI mapping
+/// (it used to hash with a different byte order, so schema loaded as RDF
+/// never matched).
+pub fn uri_to_node_id(uri: &str) -> NodeId {
+    term::iri_to_node_id(uri)
 }

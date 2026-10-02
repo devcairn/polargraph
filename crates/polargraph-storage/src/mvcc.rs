@@ -477,6 +477,27 @@ impl Snapshot {
         self
     }
 
+    /// This snapshot without the graphs in `excluded` (e.g. the inferred
+    /// graphs, for a request that opts out of inferred facts). Composes with
+    /// [`Self::with_readable_graphs`].
+    pub fn without_graphs(mut self, excluded: &roaring::RoaringBitmap) -> Self {
+        if excluded.is_empty() {
+            return self;
+        }
+        let mut readable = match self.readable.take() {
+            Some(r) => (*r).clone(),
+            None => {
+                let mut all: roaring::RoaringBitmap =
+                    self.store.list_graphs().iter().map(|(g, _)| g.0).collect();
+                all.insert(polargraph_core::id::GraphId::DEFAULT.0);
+                all
+            }
+        };
+        readable -= excluded;
+        self.readable = Some(std::sync::Arc::new(readable));
+        self
+    }
+
     /// The readable-graph restriction, if any.
     pub fn readable_graphs(&self) -> Option<&roaring::RoaringBitmap> {
         self.readable.as_deref()
