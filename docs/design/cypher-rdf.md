@@ -4,7 +4,16 @@ Status: decisions A–F **approved** (Mark, 2026-10-01) with the hard
 requirement in §2.5 and G2 for the legacy conversion (§2.4). **PR 1 built**
 on `db/cypher-rdf` (vocabulary, canonical names, `ConvertLegacyData`,
 `rdf:type` labels, change-log type index; upgrade guide
-`docs/upgrade-cypher-rdf.md`). PR 2 (Cypher write deprecation, SDKs) next.
+`docs/upgrade-cypher-rdf.md`) — merged (PR #11). **PR 2 built** on
+`db/cypher-rdf-writes`: Cypher write deprecation, `RelationTriple.object_iri`,
+SDKs and docs.
+
+**Finding (PR 2): what blocks removing Cypher writes.** Query variables
+bind nodes only, so `DELETE n` (close every quad of a node) and SPARQL
+updates whose `WHERE` binds a literal have no one-call replacement. Removal
+needs literal-valued variables in Datalog / SPARQL or a "close every quad of
+these subjects" option on `ApplyChanges` — to be decided before the removal
+release.
 
 **As built (PR 1).** Bare names in Cypher are left for the store to place
 under the base; only `prefix:local` names and labels are expanded at compile

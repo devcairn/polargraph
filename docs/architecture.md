@@ -1019,7 +1019,7 @@ readable graph queries without constructing `VarPattern` lists by hand.
 | Result projection | `RETURN a, b` |
 | Aggregations | `RETURN a, COUNT(*) AS cnt ORDER BY cnt DESC` |
 | WITH clause | `WITH a ORDER BY a.name MATCH (a)-[:knows]->(b) RETURN b` |
-| Write operations | `CREATE`, `MERGE`, `SET`, `DELETE` (via `CypherWrite` RPC) |
+| Write operations | `CREATE`, `MERGE`, `SET`, `DELETE` (via `CypherWrite` RPC) — **deprecated**, use `ApplyChanges` / SPARQL Update |
 | Named parameters | `WHERE a.name = $name` |
 | Row limit / skip | `LIMIT 20`, `SKIP 5` |
 
@@ -1708,6 +1708,11 @@ with the caller as author, all or nothing.
   (`TripleStore::begin_at`), so the standard MVCC write-write check fails the
   commit (`ABORTED`, HTTP 409) if any quad it adds or retracts — or any value
   of a single-valued property it replaces — was committed after `read_ts`.
+- **Objects by name**: a relation add may carry `object_iri` (a full IRI,
+  `prefix:local` or a bare vocabulary name) instead of `object`; the server
+  resolves it through the vocabulary and records the IRI — e.g.
+  `rdf:type` to a class by name. REST `POST /changes` sends any non-UUID
+  add object this way. (`Insert` accepts it too.)
 - **Retractions** close exactly the named quad in the named graph. One that
   matches nothing is counted (`retractions_not_found`); with `strict` the
   whole changeset fails (`FAILED_PRECONDITION`, HTTP 412).
@@ -2640,6 +2645,12 @@ A node label `(a:Person)` becomes the pattern `(a, rdf:type, <class>)`, the clas
 The `WITH` clause compiles to a sub-plan: run the left-hand query, apply any aggregations, then feed the resulting bindings as a seed into the right-hand query via `execute_query_seeded`.
 
 ### Cypher writes
+
+> **Deprecated** — removed in the next release (`docs/upgrade-cypher-rdf.md`).
+> `CypherWrite` still runs; responses carry a `warning` header (REST:
+> `Deprecation` / `Warning`), the first call logs a warning and
+> `polargraph_deprecated_rpc_total{rpc="CypherWrite"}` counts calls. Write
+> with `ApplyChanges` or SPARQL Update.
 
 `polargraph-query::cypher::parse_write()` parses the write portion of a Cypher statement into a `Vec<WriteOp>`:
 
