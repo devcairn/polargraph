@@ -17,6 +17,7 @@ PolarGraph is a purpose-built, Rust graph database engine. The core abstraction 
 - **RDF interoperability** — multi-format import (`POST /import/rdf`): N-Triples, Turtle, JSON-LD, N-Quads, TriG with `Content-Type` detection; JSON-LD export (`GET`/`POST /export/jsonld`); Accept-negotiated subgraph export (`GET /export/subgraph`): N-Triples, Turtle, JSON-LD, N-Quads or TriG; whole-graph / dataset export (`GET /graphs/export`); PolarGraph-to-PolarGraph transfer via `POST /import/subgraph`; OWL/RDFS schema round-trip (`GET /schema/rdf`, `POST /schema/rdf`); `polargraph-import --format ntriples|turtle|jsonld|nquads|trig`
 - **Named graphs** — every quad lives in a graph; graph-scoped query patterns (`@default`, `@<iri>`, `@?g`) and datasets; graph metadata, stats, copy/move and bitemporal drop (`CreateGraph`, `ListGraphs`, `GraphStats`, `CopyGraph`, `MoveGraph`, `DropGraph`, `ExportGraph` RPCs; REST `/graphs*`); SPARQL `GRAPH` / `FROM` / `FROM NAMED` and graph Update ops (`CLEAR`, `DROP`, `CREATE`, `ADD`, `COPY`, `MOVE`); Cypher `USE GRAPH <iri>`
 - **Graph-level access control** — per-graph `read` / `propose` / `write` / `admin` grants for users and groups, enforced inside every scan for requests that carry a user id (deny by default; the default graph stays open); `GrantGraphAccess` / `RevokeGraphAccess` / `GetGraphAccess`, REST `/graphs/access`. **Breaking for user-scoped callers** — see [`docs/upgrade-graph-acl.md`](docs/upgrade-graph-acl.md)
+- **RDF names and a runtime vocabulary** — predicates are IRIs (bare names live under a vocabulary base, default `urn:pg:vocab:`), Cypher labels are `rdf:type`, and prefixes / the base change at runtime (`/vocabulary`). **Breaking for existing data** — run the one-time conversion, see [`docs/upgrade-cypher-rdf.md`](docs/upgrade-cypher-rdf.md)
 - **Atomic changesets** — `ApplyChanges` / REST `POST /changes`: adds and retractions across graphs in one transaction, with an optimistic `read_ts` precondition (conflict = 409)
 - **SHACL validation** — `ValidateShapes` / REST `POST /validate`: SHACL Core shapes from shapes graphs, checked against a dataset — optionally with uncommitted changes overlaid — with JSON or Turtle `sh:ValidationReport` output
 - **Change feed** — `Subscribe` streams committed changes (assert / close per fact, graph create / drop / copy) with author, resume by commit timestamp, graph / predicate / type filters and per-event graph access control; REST `GET /subscribe` as Server-Sent Events
@@ -384,6 +385,17 @@ Estimated steps: 2
 ### Cypher queries
 
 `POST /cypher` accepts a Cypher string and compiles it to the Datalog IR.
+Labels are `rdf:type` classes: `(a:Person)` is `<urn:pg:vocab:Person>` (under
+the vocabulary base); prefixed or full IRIs go in backticks after declaring
+the prefix:
+
+```bash
+curl -s -X POST http://localhost:8000/vocabulary/prefixes \
+  -H 'Content-Type: application/json' -d '{"name":"ex","namespace":"http://ex/"}'
+curl -s -X POST http://localhost:8000/cypher \
+  -H 'Content-Type: application/json' \
+  -d '{"cypher": "MATCH (w:`ex:Widget`) RETURN w"}'
+```
 
 **Simple label match:**
 
@@ -645,7 +657,7 @@ Results are ordered by descending cosine similarity (range: −1 to 1; higher = 
 
 ### Filtered search
 
-**By node type** — restricts candidates to nodes whose `__type` property matches:
+**By node type** — restricts candidates to `rdf:type` instances of the named class (`Person`, `ex:Widget` or a full IRI, resolved through the vocabulary):
 
 ```bash
 grpcurl -plaintext \

@@ -8,6 +8,7 @@ pub mod rate_limit;
 pub mod retention_scheduler;
 pub mod service;
 pub mod telemetry;
+pub mod type_index;
 pub mod ui_api;
 pub mod wal_client;
 

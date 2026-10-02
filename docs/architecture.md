@@ -684,10 +684,12 @@ similarity.
 
 `SearchVectorFilteredRequest` carries a space, query, k, and a `oneof filter`:
 
-- **`NodeTypeFilter { type_name }`** — restricts candidates to nodes whose
-  `__type` property equals `type_name`. The server scans the `__type`
-  predicate in the current snapshot to build the allowed set, then runs HNSW
-  with `ef = k * 10` and post-filters.
+- **`NodeTypeFilter { type_name }`** — restricts candidates to current
+  `rdf:type` instances of the class `type_name` names (resolved through the
+  vocabulary: `Person`, `ex:Widget` or a full IRI). The allowed set comes
+  from the server's type index (kept current from the change log — see
+  "Vocabulary and RDF names"); HNSW runs with `ef = k * 10` and
+  post-filters.
 - **`ReachabilityFilter { from_node, predicate, max_hops }`** — restricts
   candidates to nodes reachable from `from_node` via `predicate` within
   `max_hops` hops (0 = unlimited). Reachability is computed first via BFS /
@@ -1006,7 +1008,7 @@ readable graph queries without constructing `VarPattern` lists by hand.
 
 | Construct | Example |
 |-----------|---------|
-| Node label match | `MATCH (a:Person)` |
+| Node label match | `MATCH (a:Person)`, `` MATCH (a:`ex:Person`) `` (prefixed / full IRI names in backticks) |
 | Relationship traversal | `MATCH (a)-[:knows]->(b)` |
 | Property filter | `WHERE a.name = "Alice"` |
 | Comparison filter | `WHERE a.age > 18` |
@@ -1029,8 +1031,8 @@ Unsupported Cypher features (multiple `MATCH` clauses in a single statement,
 The Cypher parser (`polargraph_query::cypher`) translates each clause to
 equivalent Datalog structures before execution:
 
-- **Node patterns** like `(a:Person)` become a `VarPattern` binding the type
-  predicate: `[?a, :__type, "Person"]`.
+- **Node labels** like `(a:Person)` become `[?a, rdf:type, <class>]`, the
+  class IRI resolved through the vocabulary (see "Vocabulary and RDF names").
 - **Relationship patterns** like `(a)-[:knows]->(b)` become
   `[?a, :knows, ?b]`.
 - **`[:pred*]` transitive closure** generates a recursive `Rule` with
@@ -1787,11 +1789,73 @@ Events) replays the log after `resume_after_ts` and then follows new commits
   the primary; resuming before the retained floor is `OUT_OF_RANGE` (HTTP
   410), and the client re-syncs. No backfill: the log starts at the upgrade.
 - **Filters**: graphs, predicates, and `types` (the subject's *current*
-  `__type`). Property values only with `include_values`.
+  `rdf:type`, type names resolved through the vocabulary). Property values only with `include_values`.
 - **Access control**: the subscriber's graph access applies per event and is
   re-evaluated per batch, so a revoked grant stops the flow.
 - Not logged: bulk SST import, `polargraphd migrate`, OWL materialization,
   retention deletes, RDF-star annotations, vector inserts.
+
+## Vocabulary and RDF names
+
+Design: `docs/design/cypher-rdf.md`; upgrade: `docs/upgrade-cypher-rdf.md`.
+
+Every name is an RDF IRI in storage, and Cypher labels are `rdf:type`, so
+Cypher, SPARQL, SHACL, imports and exports see one spelling of the data.
+
+**The vocabulary** (`polargraph-storage::vocab`) is a base IRI (default
+`urn:pg:vocab:`) and a prefix map, stored as properties of `urn:pg:vocab` in
+the system graph and swapped atomically in memory on every change (replicas
+reload it after each replicated batch). It changes at runtime only:
+
+| RPC | REST | Effect |
+|---|---|---|
+| `GetVocabulary` | `GET /vocabulary` | Base, prefixes, legacy-conversion status |
+| `SetVocabularyBase` | `PUT /vocabulary/base` `{base}` | Base for bare names resolved from now on (stored IRIs are never rewritten) |
+| `PutPrefix` | `POST /vocabulary/prefixes` `{name, namespace}` | Declare / re-point a prefix |
+| `RemovePrefix` | `DELETE /vocabulary/prefixes?name=` | Remove a prefix |
+| `ConvertLegacyData` | `POST /vocabulary/convert` `{dry_run?}` | One-time conversion of pre-vocabulary data |
+
+Mutations are service calls (no user id) on the primary; invalid names /
+IRIs are `INVALID_ARGUMENT`.
+
+**Name resolution.**
+
+- A **bare** predicate name (no `:`) is stored as `<base><name>` — at the
+  storage layer (`intern_predicate` / `predicate_id`), so every write and
+  read path agrees. Internal names (`__…` and the built-in access-control
+  predicates) stay verbatim. Prefixed names are never expanded by storage
+  (`cb:status` is a valid IRI in its own right).
+- **Cypher** (`compile_with_vocabulary`) expands `prefix:local` names for
+  relationships and properties and turns each label into the pattern
+  `(n, rdf:type, iri_to_node_id(vocab.expand(label)))`; `CREATE` / `MERGE`
+  write that relation (with a deterministic edge id) and record the class
+  IRI in the IRI dictionary. Names with `:` go in backticks. Result keys keep
+  the names as written. The plan cache is keyed by the vocabulary's
+  fingerprint, so a vocabulary change never serves a stale plan.
+- **Type names** — `NodeTypeFilter`, `Subscribe` `types`, `HAS_ACCESS_TYPE`,
+  registry domain / range — resolve with `vocab.expand`; the edge-type
+  registry finds a schema by its registered name or by the IRI it resolves
+  to.
+
+**Type index** (`polargraph-server::type_index`). `rdf:type` membership by
+class node. Each read first catches up with the change log
+(`changes_after`), recomputing membership for every subject a commit
+touched (all graphs, valid now), so a class introduced by any write path —
+`Insert`, `ApplyChanges`, Cypher, SPARQL Update, imports, or a replicated
+batch — is visible immediately. Below the change log's floor it rebuilds
+from a scan. Changes to `rdf:type` or the access-control predicates also
+rebuild the node-level and graph access caches.
+
+**Legacy conversion** (`polargraph-storage::legacy`). Data written before
+the vocabulary (bare predicates, `__type "X"` labels) is converted only when
+the operator calls `ConvertLegacyData`: bare intern entries are renamed to
+`<base><name>` (metadata only; if the IRI already existed, live quads are
+moved and the old entry becomes `__legacy__/<name>`), and live `__type`
+labels become `rdf:type` relations in the same graph with the same valid
+time (the label is closed). Chunked commits of 10 000, author
+`urn:pg:legacy-conversion`; idempotent and resumable; one run at a time.
+Until it runs, the server logs a startup warning and reports
+`legacy_conversion_pending` in `GetVocabulary`, `ShowStats` and `/health`.
 
 ## Read replicas
 
@@ -2014,7 +2078,7 @@ regardless of auth state so the UI can load and prompt for a key.
 | `GET` | `/api/node-types` | All registered node types with field definitions |
 | `GET` | `/api/edge-types` | All registered edge types |
 | `GET` | `/api/metrics` | Key metrics snapshot (vector spaces, WAL seq, etc.) |
-| `POST` | `/api/query` | Datalog query — body: `{"patterns":[{"s":"?x","p":"__type","o":"Person"}]}` |
+| `POST` | `/api/query` | Datalog query — body: `{"patterns":[{"s":"?x","p":"knows","o":"?y"}]}` |
 | `POST` | `/api/insert` | Insert a triple — UUID object → Relation, text → Property |
 | `GET` | `/api/search` | Triple scan — params: `q=`, `type=`, `limit=` |
 
@@ -2170,8 +2234,13 @@ GET /health
 
 **200 OK** — server is healthy:
 ```json
-{ "status": "ok", "mode": "primary", "triples": 12345 }
+{ "status": "ok", "mode": "primary", "triples": 12345,
+  "legacy_conversion_pending": false, "legacy_bare_predicates": 0,
+  "legacy_type_labels": 0 }
 ```
+
+The `legacy_*` fields report pre-vocabulary data awaiting
+`ConvertLegacyData` (see "Vocabulary and RDF names").
 
 **503 Service Unavailable** — replica is not connected to its primary:
 ```json
@@ -2555,7 +2624,7 @@ Cypher string
 
 ### MATCH and WHERE
 
-Node patterns `(a:Person)` become two `VarPattern`s: one binding `a` to any subject and one constraining `a :__type "Person"`. Relationship patterns `(a)-[:knows]->(b)` add a third pattern for the relation triple.
+A node label `(a:Person)` becomes the pattern `(a, rdf:type, <class>)`, the class IRI resolved through the vocabulary (`Person` → `<base>Person`; `` (a:`ex:Person`) `` through a prefix). Relationship patterns `(a)-[:knows]->(b)` add a pattern for the relation triple.
 
 `WHERE` equality predicates (`a.name = "Alice"`) compile to bound patterns `(a, "name", "Alice")`. Comparison predicates use post-filter evaluation. Text predicates (`CONTAINS`, `STARTS WITH`, `=~`) do not generate Datalog patterns; `apply_text_filters` post-filters the join's bindings by reading each candidate's text values. (They do not currently use the trigram index — see Full-text trigram search below.)
 
@@ -2576,7 +2645,7 @@ The `WITH` clause compiles to a sub-plan: run the left-hand query, apply any agg
 
 | WriteOp | Action |
 |---------|--------|
-| `CreateNode { var, labels, props }` | Allocates a new `NodeId`; inserts `__type` + property triples |
+| `CreateNode { var, labels, props }` | Allocates a new `NodeId`; inserts `rdf:type <class>` + property triples |
 | `CreateRelation { from_var, predicate, to_var, props }` | Inserts a relation triple |
 | `Merge { pattern }` | Runs a MATCH; if no results, executes CREATE |
 | `SetProperty { var, key, value }` | Writes a new property triple (MVCC supersedes the old one) |
@@ -2631,7 +2700,7 @@ confirmation step above keeps results correct.
 
 `evaluate_with_registry(pattern, snapshot, registry: &EdgeTypeRegistry)` is an augmented variant of `evaluate()` in `polargraph-query::eval`. Before issuing the storage scan, it consults the registry for the pattern's predicate:
 
-1. If the predicate has a registered `EdgeTypeDef` with a `domain` type, the evaluator prefixes the scan with a type filter: only subjects that have `__type = domain` are considered.
+1. If the predicate has a registered `EdgeTypeDef` with a `domain` type, the evaluator prefixes the scan with a type filter: only subjects that are `rdf:type` instances of the domain class are considered.
 2. If the predicate has a `range` type, the same filter is applied to the object variable.
 
 This prunes join branches early when the schema indicates only a subset of node types can participate in a predicate, avoiding unnecessary hexastore scans. The optimization is applied automatically by the gRPC handler when an `EdgeTypeRegistry` is present; no query syntax changes are required.
@@ -2852,8 +2921,10 @@ name) rather than a relation, so no sentinel node is needed for type grants.
 At startup the server scans all `MEMBER_OF`, `HAS_ACCESS`, and
 `HAS_ACCESS_TYPE` triples and builds an in-memory
 `HashMap<String, HashSet<NodeId>>` keyed by `user_id.to_string()`.
-This cache is invalidated and rebuilt after any `Insert` that touches the AC
-predicates or `__type` (which changes the nodes covered by type-level grants).
+This cache is rebuilt after any `Insert` that touches the AC predicates, and
+whenever the change-log-driven type index sees an `rdf:type` change (which
+changes the nodes covered by type-level grants). `HAS_ACCESS_TYPE` values are
+type names, resolved through the vocabulary.
 
 The cache contains the *expanded* node set: for each user, all nodes
 reachable via their group memberships (both direct and type-expanded grants)

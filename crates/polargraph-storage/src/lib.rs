@@ -23,6 +23,7 @@ pub mod graph_acl;
 pub mod graphs;
 pub mod hnsw;
 pub mod keys;
+pub mod legacy;
 pub mod migrate_v3;
 pub mod migrations;
 pub mod mvcc;
@@ -30,6 +31,7 @@ pub mod owl_rl;
 pub mod registry;
 pub mod sst_import;
 pub mod store;
+pub mod vocab;
 pub mod wal_stream;
 
 pub use backup::BackupManager;
@@ -38,6 +40,7 @@ pub use compaction::{CompactionManager, RetentionStats};
 pub use error::StorageError;
 pub use graph_acl::{GraphAccessIndex, GraphGrant, UserGraphAccess};
 pub use graphs::{close_at, GraphStats, SYSTEM_GRAPH_IRI};
+pub use legacy::{ConversionReport, LegacyStatus};
 pub use migrate_v3::MigrationReport;
 pub use migrations::{AppliedMigration, MigrationRunner, MigrationStats, MIGRATIONS};
 pub use mvcc::{ConflictError, Snapshot, Transaction, WriteMode};
@@ -51,4 +54,5 @@ pub use store::{
     EdgeAnnotation, EdgeAnnotationValue, GraphScope, StoreMode, TripleStore,
     DEFAULT_INLINE_VALUE_MAX_BYTES, STORAGE_FORMAT, TRIGRAM_MAX_TEXT_BYTES,
 };
+pub use vocab::{Vocabulary, DEFAULT_VOCAB_BASE};
 pub use wal_stream::{WalEntry, WalStreamer};

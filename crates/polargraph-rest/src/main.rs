@@ -7,7 +7,7 @@ use axum::{
     extract::{Query as QueryParams, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use clap::Parser;
@@ -5170,6 +5170,165 @@ struct GraphAccessParams {
     graph: String,
 }
 
+// ── Vocabulary (docs/design/cypher-rdf.md) ───────────────────────────────────
+
+fn vocabulary_json(v: proto::Vocabulary) -> serde_json::Value {
+    let prefixes: serde_json::Map<String, serde_json::Value> = v
+        .prefixes
+        .into_iter()
+        .map(|p| (p.name, serde_json::Value::String(p.namespace)))
+        .collect();
+    serde_json::json!({
+        "base": v.base,
+        "prefixes": prefixes,
+        "legacy": v.legacy.map(legacy_json),
+    })
+}
+
+fn legacy_json(l: proto::LegacyStatus) -> serde_json::Value {
+    serde_json::json!({
+        "conversion_pending": l.conversion_pending,
+        "bare_predicates": l.bare_predicates,
+        "type_labels": l.type_labels,
+        "pending_merges": l.pending_merges,
+    })
+}
+
+fn vocabulary_reply(r: Result<tonic::Response<proto::Vocabulary>, tonic::Status>) -> Response {
+    match r {
+        Ok(r) => Json(vocabulary_json(r.into_inner())).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+/// `GET /vocabulary` — base, prefixes and legacy-conversion status.
+async fn handle_get_vocabulary(State(state): State<Arc<AppState>>) -> Response {
+    vocabulary_reply(
+        state
+            .client
+            .clone()
+            .get_vocabulary(tonic::Request::new(proto::GetVocabularyRequest {}))
+            .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct VocabularyBaseBody {
+    base: String,
+}
+
+/// `PUT /vocabulary/base {base}` — set the base IRI for bare names.
+async fn handle_set_vocabulary_base(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<VocabularyBaseBody>,
+) -> Response {
+    let req = proto::SetVocabularyBaseRequest {
+        base: body.base,
+        user_id: String::new(),
+    };
+    vocabulary_reply(
+        state
+            .client
+            .clone()
+            .set_vocabulary_base(tonic::Request::new(req))
+            .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct PrefixBody {
+    name: String,
+    namespace: String,
+}
+
+/// `POST /vocabulary/prefixes {name, namespace}` — declare or re-point a prefix.
+async fn handle_put_prefix(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PrefixBody>,
+) -> Response {
+    let req = proto::PutPrefixRequest {
+        name: body.name,
+        namespace: body.namespace,
+        user_id: String::new(),
+    };
+    vocabulary_reply(
+        state
+            .client
+            .clone()
+            .put_prefix(tonic::Request::new(req))
+            .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct PrefixParams {
+    name: String,
+}
+
+/// `DELETE /vocabulary/prefixes?name=` — remove a prefix.
+async fn handle_remove_prefix(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<PrefixParams>,
+) -> Response {
+    let req = proto::RemovePrefixRequest {
+        name: params.name,
+        user_id: String::new(),
+    };
+    vocabulary_reply(
+        state
+            .client
+            .clone()
+            .remove_prefix(tonic::Request::new(req))
+            .await,
+    )
+}
+
+#[derive(Deserialize, Default)]
+struct ConvertBody {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// `POST /vocabulary/convert {dry_run?}` — one-time conversion of
+/// pre-vocabulary data (idempotent, resumable).
+async fn handle_convert_legacy(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<ConvertBody>>,
+) -> Response {
+    let req = proto::ConvertLegacyDataRequest {
+        dry_run: body.map(|Json(b)| b.dry_run).unwrap_or_default(),
+        user_id: String::new(),
+    };
+    match state
+        .client
+        .clone()
+        .convert_legacy_data(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            let r = r.into_inner();
+            let predicates: Vec<_> = r
+                .predicates
+                .into_iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "from": p.from, "to": p.to,
+                        "merged": p.merged, "quads_moved": p.quads_moved,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({
+                "dry_run": r.dry_run,
+                "predicates": predicates,
+                "labels_converted": r.labels_converted,
+                "legacy": r.legacy.map(legacy_json),
+            }))
+            .into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
 /// `POST /graphs/access {principal, graph, level}` — grant (caller from
 /// `X-User-Id` must be admin of the graph, unless it is a service call).
 async fn handle_grant_graph_access(
@@ -5582,6 +5741,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/subscribe", get(handle_subscribe))
         .route("/changes", post(handle_apply_changes))
         .route("/validate", post(handle_validate))
+        .route("/vocabulary", get(handle_get_vocabulary))
+        .route("/vocabulary/base", put(handle_set_vocabulary_base))
+        .route(
+            "/vocabulary/prefixes",
+            post(handle_put_prefix).delete(handle_remove_prefix),
+        )
+        .route("/vocabulary/convert", post(handle_convert_legacy))
         .route(
             "/graphs/access",
             get(handle_get_graph_access)

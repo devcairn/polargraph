@@ -224,7 +224,7 @@ fn extract_numeric_values(
         .iter()
         .filter_map(|b| b.get(var).copied())
         .filter_map(|node_id| {
-            snap.scan_by_subject_predicate(&node_id, prop)
+            snap.scan_by_subject_predicate(&node_id, &snap.store().vocabulary().expand(prop))
                 .ok()
                 .and_then(|triples| {
                     triples.into_iter().find_map(|t| match t {

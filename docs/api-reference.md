@@ -646,6 +646,20 @@ predicates excepted). Pending-transaction writes and rule-derived facts only mat
 
 ---
 
+### `compile_with_vocabulary` (`polargraph_query::cypher`)
+
+```rust
+pub fn compile_with_vocabulary(cypher: CypherQuery, vocab: &Vocabulary) -> CompiledQuery
+pub fn label_class(vocab: &Vocabulary, label: &str) -> (String, NodeId)
+```
+
+Compiles a parsed query with names resolved through the store's vocabulary:
+labels become `(n, rdf:type, <class>)` patterns, `prefix:local` names are
+expanded. `compile(cypher)` uses the default vocabulary. Prefixed or full-IRI
+names are written in backticks (`` (n:`ex:Widget`) ``).
+
+---
+
 ### `compile_cypher` (`polargraph_query::cypher`)
 
 ```rust
@@ -937,6 +951,36 @@ Returns server internals snapshot.
 | `oracle_ts` | Current MVCC oracle timestamp (µs since Unix epoch) |
 | `open_transaction_count` | Number of active wire transactions |
 | `triple_count` | Approximate triple count from `estimate-num-keys` on SPO CF |
+| `legacy_conversion_pending` | Pre-vocabulary data awaits `ConvertLegacyData` |
+| `legacy_bare_predicates` / `legacy_type_labels` | What remains to convert |
+
+---
+
+### Vocabulary RPCs
+
+See "Vocabulary and RDF names" in `docs/architecture.md` and
+`docs/upgrade-cypher-rdf.md`.
+
+```
+rpc GetVocabulary(GetVocabularyRequest) returns (Vocabulary)
+rpc SetVocabularyBase(SetVocabularyBaseRequest) returns (Vocabulary)   // {base}
+rpc PutPrefix(PutPrefixRequest) returns (Vocabulary)                   // {name, namespace}
+rpc RemovePrefix(RemovePrefixRequest) returns (Vocabulary)             // {name}
+rpc ConvertLegacyData(ConvertLegacyDataRequest) returns (ConvertLegacyDataResponse)  // {dry_run}
+```
+
+`Vocabulary { base, prefixes: [{name, namespace}], legacy: LegacyStatus }`;
+`LegacyStatus { conversion_pending, bare_predicates, type_labels,
+pending_merges }`. Mutations take an optional `user_id`: a user caller is
+`PERMISSION_DENIED` (service calls only); replicas are
+`FAILED_PRECONDITION`; an invalid prefix name, namespace or base is
+`INVALID_ARGUMENT`. `ConvertLegacyDataResponse { dry_run, predicates:
+[{from, to, merged, quads_moved}], labels_converted, legacy }`; a second
+concurrent conversion is `ABORTED`.
+
+REST: `GET /vocabulary`, `PUT /vocabulary/base`, `POST /vocabulary/prefixes`,
+`DELETE /vocabulary/prefixes?name=`, `POST /vocabulary/convert`
+(`{"dry_run": true}` optional).
 
 ---
 
@@ -1242,7 +1286,7 @@ rpc Subscribe(SubscribeRequest) returns (stream ChangeEvent)
 |---|---|
 | `graphs` | Graph IRIs to follow ("" = default graph); empty = every readable graph |
 | `predicates` | Only these predicates (graph events always pass) |
-| `types` | Only subjects whose current `__type` is one of these |
+| `types` | Only subjects whose current `rdf:type` is one of these classes (names resolved through the vocabulary) |
 | `resume_after_ts` | Deliver commits after this transaction time; 0 = from now. Older than the retained log → `OUT_OF_RANGE` |
 | `include_values` | Include property values |
 | `user_id` | Caller (or `x-polargraph-user-id`); graph access applies per event |

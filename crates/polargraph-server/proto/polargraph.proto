@@ -747,6 +747,11 @@ message ShowStatsResponse {
     uint64 query_cache_hits      = 8;
     uint64 query_cache_misses    = 9;
     uint32 query_cache_size      = 10;
+    /// Pre-vocabulary data still awaiting `ConvertLegacyData`
+    /// (docs/upgrade-cypher-rdf.md).
+    bool   legacy_conversion_pending = 11;
+    uint32 legacy_bare_predicates    = 12;
+    uint64 legacy_type_labels        = 13;
 }
 
 // ── CypherQuery ───────────────────────────────────────────────────────────────
@@ -1365,7 +1370,94 @@ message ResolveIrisResponse {
     repeated string iris = 1;
 }
 
+// ── Vocabulary ────────────────────────────────────────────────────────────────
+//
+// See docs/design/cypher-rdf.md. Bare names (no `:`) resolve under the
+// vocabulary base; declared prefixes expand `prefix:local` names in Cypher and
+// type filters. Changes apply at once (no restart). Mutations are service
+// calls (no user id) on the primary.
+
+message VocabularyPrefix {
+    string name = 1;
+    string namespace = 2;
+}
+
+message LegacyStatus {
+    /// Pre-vocabulary data remains; run ConvertLegacyData.
+    bool conversion_pending = 1;
+    /// Predicates still stored under a bare name.
+    repeated string bare_predicates = 2;
+    /// Live `__type` label properties.
+    uint64 type_labels = 3;
+    /// Bare predicates whose IRI already existed, with quads left to merge.
+    repeated string pending_merges = 4;
+}
+
+message Vocabulary {
+    string base = 1;
+    repeated VocabularyPrefix prefixes = 2;
+    LegacyStatus legacy = 3;
+}
+
+message GetVocabularyRequest {}
+
+message SetVocabularyBaseRequest {
+    /// Absolute IRI, e.g. `https://example.com/ns/`. Affects names resolved
+    /// from now on; stored IRIs are never rewritten.
+    string base = 1;
+    string user_id = 2;
+}
+
+message PutPrefixRequest {
+    string name = 1;
+    string namespace = 2;
+    string user_id = 3;
+}
+
+message RemovePrefixRequest {
+    string name = 1;
+    string user_id = 2;
+}
+
+message ConvertLegacyDataRequest {
+    /// Report what would change; change nothing.
+    bool dry_run = 1;
+    string user_id = 2;
+}
+
+message PredicateConversion {
+    /// The bare name.
+    string from = 1;
+    /// Its IRI under the vocabulary base.
+    string to = 2;
+    /// The IRI already existed: live quads were moved (count) and the bare
+    /// entry kept as `__legacy__/<name>`; otherwise a metadata-only rename.
+    bool merged = 3;
+    uint64 quads_moved = 4;
+}
+
+message ConvertLegacyDataResponse {
+    bool dry_run = 1;
+    repeated PredicateConversion predicates = 2;
+    /// `__type` labels converted to `rdf:type`.
+    uint64 labels_converted = 3;
+    /// Status after the run.
+    LegacyStatus legacy = 4;
+}
+
 service PolarGraphService {
+    /// The vocabulary base, prefixes and legacy-conversion status.
+    rpc GetVocabulary(GetVocabularyRequest) returns (Vocabulary);
+    /// Set the base IRI for bare names.
+    rpc SetVocabularyBase(SetVocabularyBaseRequest) returns (Vocabulary);
+    /// Declare or re-point a prefix.
+    rpc PutPrefix(PutPrefixRequest) returns (Vocabulary);
+    /// Remove a prefix (no-op if absent).
+    rpc RemovePrefix(RemovePrefixRequest) returns (Vocabulary);
+    /// One-time conversion of pre-vocabulary data: bare predicates → IRIs,
+    /// `__type` labels → `rdf:type`. Idempotent and resumable.
+    rpc ConvertLegacyData(ConvertLegacyDataRequest) returns (ConvertLegacyDataResponse);
+
     /// Insert one or more triples in a single atomic transaction.
     /// Returns ABORTED if a write-write conflict is detected.
     rpc Insert(InsertRequest) returns (InsertResponse);

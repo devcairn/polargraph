@@ -19,37 +19,40 @@ use crate::{
         ApplyChangesResponse, BackupInfo as ProtoBackupInfo, BatchInsertError,
         BatchInsertVectorsRequest, BatchInsertVectorsResponse, BeginTransactionRequest,
         BeginTransactionResponse, ChangeEvent, ChangeKind, ColumnFamilyInfo,
-        CommitTransactionRequest, CommitTransactionResponse, CopyGraphRequest, CopyGraphResponse,
-        CreateBackupRequest, CreateBackupResponse, CreateGraphRequest, CreateGraphResponse,
-        CypherBinding, CypherQueryRequest, CypherQueryResponse, CypherWriteRequest,
-        CypherWriteResponse, DeleteTriplesRequest, DeleteTriplesResponse, DropGraphRequest,
-        DropGraphResponse, ExplainResponse, ExportGraphChunk, ExportGraphRequest, ExportedQuad,
+        CommitTransactionRequest, CommitTransactionResponse, ConvertLegacyDataRequest,
+        ConvertLegacyDataResponse, CopyGraphRequest, CopyGraphResponse, CreateBackupRequest,
+        CreateBackupResponse, CreateGraphRequest, CreateGraphResponse, CypherBinding,
+        CypherQueryRequest, CypherQueryResponse, CypherWriteRequest, CypherWriteResponse,
+        DeleteTriplesRequest, DeleteTriplesResponse, DropGraphRequest, DropGraphResponse,
+        ExplainResponse, ExportGraphChunk, ExportGraphRequest, ExportedQuad,
         GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse, GetEdgeIdsByTripleRequest,
         GetEdgeIdsByTripleResponse, GetEdgeTypeRequest, GetEdgeTypeResponse, GetGraphAccessRequest,
         GetGraphAccessResponse, GetNodeTypeRequest, GetNodeTypeResponse, GetPropertyHistoryRequest,
         GetPropertyHistoryResponse, GetUserAccessRequest, GetUserAccessResponse,
-        GrantAccessRequest, GrantAccessResponse, GrantGraphAccessRequest, GrantGraphAccessResponse,
-        GraphAccessEntry, GraphInfo, GraphMetadata, GraphStatsRequest, GraphStatsResponse,
-        InsertRequest, InsertResponse, InsertVectorRequest, InsertVectorResponse,
-        ListApiKeysRequest, ListApiKeysResponse, ListBackupsRequest, ListBackupsResponse,
-        ListEdgeTypesRequest, ListEdgeTypesResponse, ListGraphsRequest, ListGraphsResponse,
-        ListNodeTypesRequest, ListNodeTypesResponse, ListPredicatesBetweenRequest,
-        ListPredicatesBetweenResponse, MigrateRequest, MigrateResponse, MigrationStatusRequest,
-        MigrationStatusResponse, MoveGraphRequest, OntologyViolation, PlanNode, PropertyVersion,
-        PurgeOldBackupsRequest, PurgeOldBackupsResponse, QueryRequest, QueryResponse,
-        QueryStreamChunk, ReachableRequest, ReachableResponse, RegisterEdgeTypeRequest,
-        RegisterEdgeTypeResponse, RegisterNodeTypeRequest, RegisterNodeTypeResponse,
+        GetVocabularyRequest, GrantAccessRequest, GrantAccessResponse, GrantGraphAccessRequest,
+        GrantGraphAccessResponse, GraphAccessEntry, GraphInfo, GraphMetadata, GraphStatsRequest,
+        GraphStatsResponse, InsertRequest, InsertResponse, InsertVectorRequest,
+        InsertVectorResponse, ListApiKeysRequest, ListApiKeysResponse, ListBackupsRequest,
+        ListBackupsResponse, ListEdgeTypesRequest, ListEdgeTypesResponse, ListGraphsRequest,
+        ListGraphsResponse, ListNodeTypesRequest, ListNodeTypesResponse,
+        ListPredicatesBetweenRequest, ListPredicatesBetweenResponse, MigrateRequest,
+        MigrateResponse, MigrationStatusRequest, MigrationStatusResponse, MoveGraphRequest,
+        OntologyViolation, PlanNode, PredicateConversion, PropertyVersion, PurgeOldBackupsRequest,
+        PurgeOldBackupsResponse, PutPrefixRequest, QueryRequest, QueryResponse, QueryStreamChunk,
+        ReachableRequest, ReachableResponse, RegisterEdgeTypeRequest, RegisterEdgeTypeResponse,
+        RegisterNodeTypeRequest, RegisterNodeTypeResponse, RemovePrefixRequest,
         ReplicaStatusRequest, ReplicaStatusResponse, ResolveIrisRequest, ResolveIrisResponse,
         RevokeAccessRequest, RevokeAccessResponse, RevokeApiKeyRequest, RevokeApiKeyResponse,
         RevokeGraphAccessRequest, RevokeGraphAccessResponse, RollbackTransactionRequest,
         RollbackTransactionResponse, RunMaterializationRequest, RunMaterializationResponse,
         RunRetentionRequest, RunRetentionResponse, ScoredBinding, SearchVectorFilteredRequest,
         SearchVectorFilteredResponse, SearchVectorInSetRequest, SearchVectorInSetResponse,
-        SearchVectorRequest, SearchVectorResponse, ShowIndexesRequest, ShowIndexesResponse,
-        ShowStatsRequest, ShowStatsResponse, StreamWalRequest, SubscribeRequest,
-        ValidateEdgeRequest, ValidateEdgeResponse, ValidateNodeRequest, ValidateNodeResponse,
-        ValidateOntologyRequest, ValidateOntologyResponse, VectorSearchResult,
-        VectorSeedQueryRequest, VectorSeedQueryResponse, VectorSpaceInfo, WalEntry,
+        SearchVectorRequest, SearchVectorResponse, SetVocabularyBaseRequest, ShowIndexesRequest,
+        ShowIndexesResponse, ShowStatsRequest, ShowStatsResponse, StreamWalRequest,
+        SubscribeRequest, ValidateEdgeRequest, ValidateEdgeResponse, ValidateNodeRequest,
+        ValidateNodeResponse, ValidateOntologyRequest, ValidateOntologyResponse,
+        VectorSearchResult, VectorSeedQueryRequest, VectorSeedQueryResponse, VectorSpaceInfo,
+        WalEntry,
     },
 };
 use dashmap::DashMap;
@@ -136,15 +139,9 @@ impl ReplicaState {
 
 // ── Server struct ─────────────────────────────────────────────────────────────
 
-/// Per-type node ID cache.
-///
-/// Key: `__type` value string (e.g. `"Person"`).
-/// Value: set of all NodeIds whose `__type` property equals that string.
-///
-/// Populated at startup from existing triples and updated incrementally on every
-/// `Insert` commit that contains a `__type` property triple. All clones of
-/// `PolarGraphServer` share the same underlying map via `Arc`.
-type TypeCache = Arc<RwLock<HashMap<String, HashSet<NodeId>>>>;
+/// `rdf:type` membership by class node, kept current from the change log
+/// (shared by all clones).
+type TypeCache = Arc<crate::type_index::TypeIndex>;
 
 /// Access cache for graph-native access control.
 ///
@@ -165,6 +162,14 @@ type GraphAccessState = Arc<RwLock<(Arc<polargraph_storage::GraphAccessIndex>, I
 
 /// How stale a replica's graph access index may get (grants arrive by WAL).
 const GRAPH_ACCESS_REFRESH: Duration = Duration::from_secs(5);
+
+/// How stale a replica's legacy-conversion status may get (the conversion
+/// runs on the primary).
+const LEGACY_STATUS_REFRESH: Duration = Duration::from_secs(60);
+
+/// Pre-vocabulary data still to convert (`ConvertLegacyData`), with when it
+/// was counted. Counting scans every `__type` label, so it is cached.
+type LegacyState = Arc<RwLock<(Arc<polargraph_storage::LegacyStatus>, Instant)>>;
 
 #[derive(Clone)]
 pub struct PolarGraphServer {
@@ -208,6 +213,10 @@ pub struct PolarGraphServer {
     query_cache_hits: Arc<std::sync::atomic::AtomicU64>,
     /// Number of cache misses since startup.
     query_cache_misses: Arc<std::sync::atomic::AtomicU64>,
+    /// Legacy-conversion status (`docs/upgrade-cypher-rdf.md`).
+    legacy: LegacyState,
+    /// Set while a `ConvertLegacyData` runs.
+    converting: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PolarGraphServer {
@@ -231,9 +240,9 @@ impl PolarGraphServer {
     ) -> Result<Self, StorageError> {
         let registry = NodeTypeRegistry::new(store.clone())?;
         let edge_registry = EdgeTypeRegistry::new(store.clone())?;
-        let type_cache_map = Self::build_type_cache(&store)?;
-        let access_cache_map = Self::build_access_cache(&store, &type_cache_map)?;
-        let type_cache = Arc::new(RwLock::new(type_cache_map));
+        let type_cache = Arc::new(crate::type_index::TypeIndex::build(store.clone())?);
+        let store_legacy = store.legacy_status()?;
+        let access_cache_map = Self::build_access_cache(&store, &type_cache)?;
         let access_cache = Arc::new(RwLock::new(access_cache_map));
         let graph_access = Arc::new(RwLock::new((
             Arc::new(polargraph_storage::GraphAccessIndex::build(&store)?),
@@ -262,6 +271,8 @@ impl PolarGraphServer {
             query_cache_size: 1000,
             query_cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             query_cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            legacy: Arc::new(RwLock::new((Arc::new(store_legacy), Instant::now()))),
+            converting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -349,9 +360,9 @@ impl PolarGraphServer {
     ) -> Result<(Self, Arc<ReplicaState>), StorageError> {
         let registry = NodeTypeRegistry::new(store.clone())?;
         let edge_registry = EdgeTypeRegistry::new(store.clone())?;
-        let type_cache_map = Self::build_type_cache(&store)?;
-        let access_cache_map = Self::build_access_cache(&store, &type_cache_map)?;
-        let type_cache = Arc::new(RwLock::new(type_cache_map));
+        let type_cache = Arc::new(crate::type_index::TypeIndex::build(store.clone())?);
+        let store_legacy = store.legacy_status()?;
+        let access_cache_map = Self::build_access_cache(&store, &type_cache)?;
         let access_cache = Arc::new(RwLock::new(access_cache_map));
         let graph_access = Arc::new(RwLock::new((
             Arc::new(polargraph_storage::GraphAccessIndex::build(&store)?),
@@ -378,6 +389,8 @@ impl PolarGraphServer {
             query_cache_size: 1000,
             query_cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             query_cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            legacy: Arc::new(RwLock::new((Arc::new(store_legacy), Instant::now()))),
+            converting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         Ok((server, replica_state))
     }
@@ -446,26 +459,107 @@ impl PolarGraphServer {
         &self.store
     }
 
-    /// Scan existing `__type` triples and build the initial cache.
-    /// Called once at startup; O(N) in the number of typed nodes.
-    fn build_type_cache(
-        store: &TripleStore,
-    ) -> Result<HashMap<String, HashSet<NodeId>>, StorageError> {
-        let snapshot = store.snapshot(store.begin().read_ts);
-        let triples = snapshot.scan_by_predicate("__type")?;
-        let mut cache: HashMap<String, HashSet<NodeId>> = HashMap::new();
-        for triple in triples {
-            if let Triple::Property {
-                subject,
-                value: Value::Text(type_name),
-                ..
-            } = triple
-            {
-                cache.entry(type_name).or_default().insert(subject);
+    /// Pre-vocabulary data still awaiting `ConvertLegacyData`. Counted at
+    /// startup and after each conversion (on a replica, at most every
+    /// [`LEGACY_STATUS_REFRESH`]).
+    pub fn legacy_status(&self) -> Arc<polargraph_storage::LegacyStatus> {
+        if self.store.is_replica()
+            && self.legacy.read().unwrap().1.elapsed() > LEGACY_STATUS_REFRESH
+        {
+            self.refresh_legacy_status();
+        }
+        Arc::clone(&self.legacy.read().unwrap().0)
+    }
+
+    fn refresh_legacy_status(&self) {
+        match self.store.legacy_status() {
+            Ok(status) => *self.legacy.write().unwrap() = (Arc::new(status), Instant::now()),
+            Err(e) => warn!("failed to count legacy data: {e}"),
+        }
+    }
+
+    /// Log a warning while pre-vocabulary data is unconverted (startup).
+    pub fn warn_if_legacy_pending(&self) {
+        let status = self.legacy_status();
+        if status.pending() {
+            warn!(
+                bare_predicates = status.bare_predicates.len(),
+                type_labels = status.type_labels,
+                pending_merges = status.pending_merges.len(),
+                "legacy data awaits conversion: bare predicate names and __type labels are \
+                 not reachable by bare name until it runs. Set the vocabulary base \
+                 (SetVocabularyBase), then run ConvertLegacyData (REST POST \
+                 /vocabulary/convert) — see docs/upgrade-cypher-rdf.md"
+            );
+        }
+    }
+
+    fn vocabulary_proto(&self) -> crate::proto::Vocabulary {
+        let vocab = self.store.vocabulary();
+        crate::proto::Vocabulary {
+            base: vocab.base.clone(),
+            prefixes: vocab
+                .prefixes
+                .iter()
+                .map(|(name, namespace)| crate::proto::VocabularyPrefix {
+                    name: name.clone(),
+                    namespace: namespace.clone(),
+                })
+                .collect(),
+            legacy: Some(legacy_to_proto(&self.legacy_status())),
+        }
+    }
+
+    /// A compiled Cypher plan (pre-parameter-substitution), from the plan
+    /// cache when enabled. Plans resolve names through the vocabulary, so the
+    /// cache key includes its fingerprint: a vocabulary change (local or
+    /// replicated) never serves a stale plan.
+    #[allow(clippy::result_large_err)]
+    fn compiled_cypher(
+        &self,
+        cypher: &str,
+    ) -> Result<polargraph_query::cypher::CompiledQuery, Status> {
+        let vocab = self.store.vocabulary();
+        let compile = || {
+            let parsed = polargraph_query::cypher::parse(cypher)
+                .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
+            Ok::<_, Status>(polargraph_query::cypher::compile_with_vocabulary(
+                parsed, &vocab,
+            ))
+        };
+        if self.query_cache_size == 0 {
+            self.query_cache_misses.fetch_add(1, Ordering::Relaxed);
+            metrics::counter!("polargraph_query_cache_misses_total").increment(1);
+            return compile();
+        }
+        let key = format!("{:016x}\u{0}{cypher}", vocab.fingerprint());
+        if let Some(cached) = self.query_plan_cache.get(&key) {
+            self.query_cache_hits.fetch_add(1, Ordering::Relaxed);
+            metrics::counter!("polargraph_query_cache_hits_total").increment(1);
+            return Ok(cached.as_ref().clone());
+        }
+        self.query_cache_misses.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!("polargraph_query_cache_misses_total").increment(1);
+        let plan = compile()?;
+        // Evict an arbitrary entry when full (simple LRU-like drop).
+        if self.query_plan_cache.len() >= self.query_cache_size {
+            if let Some(entry) = self.query_plan_cache.iter().next().map(|e| e.key().clone()) {
+                self.query_plan_cache.remove(&entry);
             }
         }
-        info!(types = cache.len(), "type cache built");
-        Ok(cache)
+        self.query_plan_cache.insert(key, Arc::new(plan.clone()));
+        Ok(plan)
+    }
+
+    /// Checks shared by the vocabulary mutations.
+    #[allow(clippy::result_large_err)]
+    fn vocabulary_change_allowed(
+        &self,
+        user_id: &str,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<(), Status> {
+        self.check_not_replica()?;
+        require_service(&self.caller_access(&resolve_user_id(user_id, &meta_user_id(metadata))))
     }
 
     /// Build the access cache from scratch by scanning MEMBER_OF and HAS_ACCESS
@@ -478,7 +572,7 @@ impl PolarGraphServer {
     /// 4. For each user, union direct grants and type-expanded grants across all their groups.
     fn build_access_cache(
         store: &TripleStore,
-        type_cache: &HashMap<String, HashSet<NodeId>>,
+        type_cache: &crate::type_index::TypeIndex,
     ) -> Result<HashMap<String, HashSet<NodeId>>, StorageError> {
         let end_of_time = polargraph_core::temporal::Timestamp::END_OF_TIME;
 
@@ -540,11 +634,7 @@ impl PolarGraphServer {
             // Type-expanded nodes for this group.
             let mut type_nodes: HashSet<NodeId> = HashSet::new();
             if let Some(type_names) = group_to_types.get(group_id) {
-                for type_name in type_names {
-                    if let Some(nodes) = type_cache.get(type_name) {
-                        type_nodes.extend(nodes.iter().copied());
-                    }
-                }
+                type_nodes.extend(type_cache.instances_of(&class_nodes(store, type_names)));
             }
 
             // Merge into each user's access set.
@@ -665,9 +755,7 @@ impl PolarGraphServer {
             {
                 true
             }
-            Triple::Property { predicate, .. }
-                if predicate.0 == BUILTIN_HAS_ACCESS_TYPE_PRED || predicate.0 == "__type" =>
-            {
+            Triple::Property { predicate, .. } if predicate.0 == BUILTIN_HAS_ACCESS_TYPE_PRED => {
                 true
             }
             _ => false,
@@ -676,18 +764,18 @@ impl PolarGraphServer {
         if !needs_rebuild {
             return;
         }
+        self.rebuild_access_cache();
+    }
 
-        // Rebuild the full access cache using the current type cache snapshot.
-        let type_cache_snapshot: HashMap<String, HashSet<NodeId>> =
-            { self.type_cache.read().unwrap().clone() };
-
-        match Self::build_access_cache(&self.store, &type_cache_snapshot) {
+    /// Rebuild the node-level access cache from the store and type index.
+    fn rebuild_access_cache(&self) {
+        match Self::build_access_cache(&self.store, &self.type_cache) {
             Ok(new_cache) => {
                 *self.access_cache.write().unwrap() = new_cache;
-                debug!("access cache rebuilt after insert");
+                debug!("access cache rebuilt");
             }
             Err(e) => {
-                warn!("failed to rebuild access cache after insert: {e}");
+                warn!("failed to rebuild access cache: {e}");
             }
         }
     }
@@ -698,7 +786,32 @@ impl PolarGraphServer {
         if user_id.is_empty() {
             return None;
         }
+        self.sync_types();
         self.access_cache.read().unwrap().get(user_id).cloned()
+    }
+
+    /// Catch the type index up with the change log, rebuilding the access
+    /// caches that depend on what changed.
+    fn sync_types(&self) {
+        match self.type_cache.sync() {
+            Ok(outcome) => {
+                if outcome.graph_access {
+                    self.rebuild_graph_access();
+                }
+                if outcome.types || outcome.node_access {
+                    self.rebuild_access_cache();
+                }
+            }
+            Err(e) => warn!("failed to sync the type index: {e}"),
+        }
+    }
+
+    /// Current instances of the named types (names resolve through the
+    /// vocabulary: bare → base, `prefix:local`, or a full IRI).
+    pub fn instances_of_types(&self, names: &[String]) -> HashSet<NodeId> {
+        self.sync_types();
+        self.type_cache
+            .instances_of(&class_nodes(&self.store, names))
     }
 
     /// Compute a query deadline from `query_timeout_ms`. Returns `None` when
@@ -787,33 +900,15 @@ impl PolarGraphServer {
             Ok(())
         }
     }
+}
 
-    /// Update the cache for any `__type` property triples in a just-committed batch.
-    /// Called after every successful `Insert` commit; acquires the write lock only
-    /// when the batch actually contains a `__type` triple.
-    fn update_type_cache(&self, triples: &[Triple]) {
-        let updates: Vec<(NodeId, String)> = triples
-            .iter()
-            .filter_map(|t| match t {
-                Triple::Property {
-                    subject,
-                    predicate,
-                    value: Value::Text(type_name),
-                    ..
-                } if predicate.0 == "__type" => Some((*subject, type_name.clone())),
-                _ => None,
-            })
-            .collect();
-
-        if updates.is_empty() {
-            return;
-        }
-
-        let mut cache = self.type_cache.write().unwrap();
-        for (subject, type_name) in updates {
-            cache.entry(type_name).or_default().insert(subject);
-        }
-    }
+/// Class nodes for type names, resolved through the current vocabulary.
+fn class_nodes(store: &TripleStore, names: &[String]) -> Vec<NodeId> {
+    let vocab = store.vocabulary();
+    names
+        .iter()
+        .map(|n| polargraph_core::term::iri_to_node_id(&vocab.expand(n)))
+        .collect()
 }
 
 // ── Access-control helpers ────────────────────────────────────────────────────
@@ -907,16 +1002,8 @@ impl PolarGraphServer {
             ..Default::default()
         };
 
-        let types: Option<HashSet<NodeId>> = (!filter.types.is_empty()).then(|| {
-            let cache = self.type_cache.read().unwrap();
-            filter
-                .types
-                .iter()
-                .filter_map(|t| cache.get(t))
-                .flatten()
-                .copied()
-                .collect()
-        });
+        let types: Option<HashSet<NodeId>> =
+            (!filter.types.is_empty()).then(|| self.instances_of_types(&filter.types));
 
         let mut out = Vec::new();
         for (g, triple) in &record.quads {
@@ -1092,6 +1179,118 @@ fn filter_bindings_full(
 
 #[tonic::async_trait]
 impl PolarGraphService for PolarGraphServer {
+    // ── Vocabulary (docs/design/cypher-rdf.md) ────────────────────────────────
+
+    async fn get_vocabulary(
+        &self,
+        _request: Request<GetVocabularyRequest>,
+    ) -> Result<Response<crate::proto::Vocabulary>, Status> {
+        Ok(Response::new(self.vocabulary_proto()))
+    }
+
+    async fn set_vocabulary_base(
+        &self,
+        request: Request<SetVocabularyBaseRequest>,
+    ) -> Result<Response<crate::proto::Vocabulary>, Status> {
+        let (metadata, _, req) = request.into_parts();
+        self.vocabulary_change_allowed(&req.user_id, &metadata)?;
+        self.store
+            .set_vocabulary_base(&req.base)
+            .map_err(vocab_err_to_status)?;
+        info!(base = %req.base, "vocabulary base set");
+        Ok(Response::new(self.vocabulary_proto()))
+    }
+
+    async fn put_prefix(
+        &self,
+        request: Request<PutPrefixRequest>,
+    ) -> Result<Response<crate::proto::Vocabulary>, Status> {
+        let (metadata, _, req) = request.into_parts();
+        self.vocabulary_change_allowed(&req.user_id, &metadata)?;
+        self.store
+            .put_prefix(&req.name, &req.namespace)
+            .map_err(vocab_err_to_status)?;
+        info!(prefix = %req.name, namespace = %req.namespace, "vocabulary prefix set");
+        Ok(Response::new(self.vocabulary_proto()))
+    }
+
+    async fn remove_prefix(
+        &self,
+        request: Request<RemovePrefixRequest>,
+    ) -> Result<Response<crate::proto::Vocabulary>, Status> {
+        let (metadata, _, req) = request.into_parts();
+        self.vocabulary_change_allowed(&req.user_id, &metadata)?;
+        if self
+            .store
+            .remove_prefix(&req.name)
+            .map_err(vocab_err_to_status)?
+        {
+            info!(prefix = %req.name, "vocabulary prefix removed");
+        }
+        Ok(Response::new(self.vocabulary_proto()))
+    }
+
+    async fn convert_legacy_data(
+        &self,
+        request: Request<ConvertLegacyDataRequest>,
+    ) -> Result<Response<ConvertLegacyDataResponse>, Status> {
+        let (metadata, _, req) = request.into_parts();
+        self.vocabulary_change_allowed(&req.user_id, &metadata)?;
+        if self.converting.swap(true, Ordering::SeqCst) {
+            return Err(Status::aborted("a legacy conversion is already running"));
+        }
+        let store = self.store.clone();
+        let dry_run = req.dry_run;
+        let result = tokio::task::spawn_blocking(move || store.convert_legacy(dry_run)).await;
+        self.converting.store(false, Ordering::SeqCst);
+        let report = result
+            .map_err(|e| Status::internal(format!("conversion task failed: {e}")))?
+            .map_err(storage_err_to_status)?;
+        if !dry_run {
+            self.refresh_legacy_status();
+            self.sync_types();
+            self.rebuild_access_cache();
+            info!(
+                renamed = report.renamed.len(),
+                merged = report.merged.len(),
+                labels = report.labels_converted,
+                "legacy data converted"
+            );
+        }
+        let predicates = report
+            .renamed
+            .iter()
+            .map(|(from, to)| PredicateConversion {
+                from: from.clone(),
+                to: to.clone(),
+                merged: false,
+                quads_moved: 0,
+            })
+            .chain(
+                report
+                    .merged
+                    .iter()
+                    .map(|(from, to, moved)| PredicateConversion {
+                        from: from.clone(),
+                        to: to.clone(),
+                        merged: true,
+                        quads_moved: *moved,
+                    }),
+            )
+            .collect();
+        let legacy = if dry_run {
+            self.legacy_status()
+        } else {
+            Arc::clone(&self.legacy.read().unwrap().0)
+        };
+        Ok(Response::new(ConvertLegacyDataResponse {
+            dry_run,
+            predicates,
+            labels_converted: report.labels_converted,
+            legacy: Some(legacy_to_proto(&legacy)),
+        }))
+    }
+
     type StreamWalStream = ReceiverStream<Result<WalEntry, Status>>;
     type QueryStreamStream = ReceiverStream<Result<QueryStreamChunk, Status>>;
     type CypherQueryStreamStream = ReceiverStream<Result<QueryStreamChunk, Status>>;
@@ -1161,9 +1360,10 @@ impl PolarGraphService for PolarGraphServer {
                 continue;
             }
             let info = graph_info(&self.store, g, iri).map_err(storage_err_to_status)?;
+            let vocab = self.store.vocabulary();
             let has = |(p, v): &(String, Value)| {
                 info.metadata.iter().any(|m| {
-                    m.predicate == *p
+                    m.predicate == vocab.canonical_predicate(p).as_ref()
                         && m.value
                             .as_ref()
                             .and_then(|pv| convert::value_from_proto(pv).ok())
@@ -1478,7 +1678,6 @@ impl PolarGraphService for PolarGraphServer {
         let commit_ts = tx.commit().map_err(storage_err_to_status)?;
 
         let added: Vec<Triple> = adds.into_iter().map(|(t, _, _)| t).collect();
-        self.update_type_cache(&added);
         self.update_access_cache_if_needed(&added);
         metrics::gauge!("polargraph_triples_total").increment(added.len() as f64);
 
@@ -1631,8 +1830,13 @@ impl PolarGraphService for PolarGraphServer {
                     })
                     .collect()
             }),
-            predicates: (!req.predicates.is_empty())
-                .then(|| req.predicates.iter().cloned().collect()),
+            predicates: (!req.predicates.is_empty()).then(|| {
+                let vocab = self.store.vocabulary();
+                req.predicates
+                    .iter()
+                    .map(|p| vocab.canonical_predicate(p).into_owned())
+                    .collect()
+            }),
             types: req.types.clone(),
             include_values: req.include_values,
         };
@@ -1889,8 +2093,6 @@ impl PolarGraphService for PolarGraphServer {
         }
         let commit_ts = tx.commit().map_err(storage_err_to_status)?;
 
-        // Incrementally update the type cache for any __type triples.
-        self.update_type_cache(&all_triples);
         // Rebuild access cache if any access-control triples were inserted.
         self.update_access_cache_if_needed(&all_triples);
 
@@ -2160,10 +2362,7 @@ impl PolarGraphService for PolarGraphServer {
             Some(Filter::NodeTypeFilter(f)) => {
                 // Clone the allowed set out from under the read lock so we don't
                 // hold it across the (potentially slow) HNSW search.
-                let type_allowed: HashSet<NodeId> = {
-                    let cache = self.type_cache.read().unwrap();
-                    cache.get(&f.type_name).cloned().unwrap_or_default()
-                };
+                let type_allowed = self.instances_of_types(std::slice::from_ref(&f.type_name));
 
                 debug!(
                     "search_vector_filtered(NodeType={}): {} candidates in cache",
@@ -2799,10 +2998,7 @@ impl PolarGraphService for PolarGraphServer {
         // Step 1: ANN search with optional pre-filter.
         let ann_hits: Vec<(NodeId, f32)> = match &req.filter {
             Some(SeedFilter::NodeTypeFilter(f)) => {
-                let allowed: HashSet<NodeId> = {
-                    let cache = self.type_cache.read().unwrap();
-                    cache.get(&f.type_name).cloned().unwrap_or_default()
-                };
+                let allowed = self.instances_of_types(std::slice::from_ref(&f.type_name));
                 self.store
                     .search_vector_ef(space, &req.query_vector, ef, ef)
                     .into_iter()
@@ -3198,37 +3394,7 @@ impl PolarGraphService for PolarGraphServer {
         let params = Self::deserialize_params(&req.params)?;
 
         // Look up or compile the query plan (with caching when enabled).
-        let compiled: polargraph_query::cypher::CompiledQuery = if self.query_cache_size > 0 {
-            if let Some(cached) = self.query_plan_cache.get(&req.cypher) {
-                self.query_cache_hits.fetch_add(1, Ordering::Relaxed);
-                metrics::counter!("polargraph_query_cache_hits_total").increment(1);
-                cached.as_ref().clone()
-            } else {
-                self.query_cache_misses.fetch_add(1, Ordering::Relaxed);
-                metrics::counter!("polargraph_query_cache_misses_total").increment(1);
-                let parsed = polargraph_query::cypher::parse(&req.cypher)
-                    .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
-                let plan = polargraph_query::cypher::compile(parsed);
-                // Evict oldest entry if cache is full (simple LRU-like drop).
-                if self.query_plan_cache.len() >= self.query_cache_size {
-                    if let Some(entry) =
-                        self.query_plan_cache.iter().next().map(|e| e.key().clone())
-                    {
-                        self.query_plan_cache.remove(&entry);
-                    }
-                }
-                self.query_plan_cache
-                    .insert(req.cypher.clone(), Arc::new(plan.clone()));
-                plan
-            }
-        } else {
-            // Cache disabled — compile fresh each time.
-            self.query_cache_misses.fetch_add(1, Ordering::Relaxed);
-            metrics::counter!("polargraph_query_cache_misses_total").increment(1);
-            let parsed = polargraph_query::cypher::parse(&req.cypher)
-                .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
-            polargraph_query::cypher::compile(parsed)
-        };
+        let compiled = self.compiled_cypher(&req.cypher)?;
 
         // Substitute named parameters into the plan.
         let compiled = compiled
@@ -3408,10 +3574,13 @@ impl PolarGraphService for PolarGraphServer {
                     .map(|(k, v)| (k.clone(), convert::value_to_proto(v)))
                     .collect();
                 // Resolve property projections (RETURN n.prop) via snapshot lookup.
+                let vocab = self.store.vocabulary();
                 for (var, prop) in &compiled.prop_projections {
                     if let Some(&node_id) = row.group_keys.get(var.as_str()) {
                         let key = format!("{}.{}", var, prop);
-                        if let Ok(triples) = snapshot.scan_by_subject_predicate(&node_id, prop) {
+                        if let Ok(triples) =
+                            snapshot.scan_by_subject_predicate(&node_id, &vocab.expand(prop))
+                        {
                             if let Some(value) = triples.into_iter().find_map(|t| match t {
                                 Triple::Property { value, .. } => Some(value),
                                 _ => None,
@@ -3426,9 +3595,11 @@ impl PolarGraphService for PolarGraphServer {
                     if let Some(&node_id) = row.group_keys.get(var.as_str()) {
                         let edge_id = polargraph_core::id::EdgeId(node_id.0);
                         let key = format!("{}.{}", var, prop);
-                        if let Ok(Some(ann)) =
-                            self.store.get_edge_annotation(edge_id, prop, snapshot.ts)
-                        {
+                        if let Ok(Some(ann)) = self.store.get_edge_annotation(
+                            edge_id,
+                            &vocab.expand(prop),
+                            snapshot.ts,
+                        ) {
                             if let polargraph_storage::EdgeAnnotationValue::Scalar(v) = ann.value {
                                 values.insert(key, convert::value_to_proto(&v));
                             }
@@ -3623,33 +3794,6 @@ impl PolarGraphService for PolarGraphServer {
             commit_ts.0
         );
 
-        // Update the type cache for any newly created typed nodes.
-        // We re-scan because the write result doesn't carry Triple objects.
-        if !result.created_ids.is_empty() {
-            let post_snap = self.store.snapshot(commit_ts);
-            let mut updates: Vec<(NodeId, String)> = Vec::new();
-            for node_id in &result.created_ids {
-                if let Ok(triples) = post_snap.scan_by_subject_predicate(node_id, "__type") {
-                    for t in triples {
-                        if let Triple::Property {
-                            subject,
-                            value: Value::Text(type_name),
-                            ..
-                        } = t
-                        {
-                            updates.push((subject, type_name));
-                        }
-                    }
-                }
-            }
-            if !updates.is_empty() {
-                let mut cache = self.type_cache.write().unwrap();
-                for (subject, type_name) in updates {
-                    cache.entry(type_name).or_default().insert(subject);
-                }
-            }
-        }
-
         metrics::gauge!("polargraph_triples_total").increment(result.triples_written as f64);
 
         Ok(Response::new(CypherWriteResponse {
@@ -3795,35 +3939,7 @@ impl PolarGraphService for PolarGraphServer {
 
         let params = Self::deserialize_params(&req.params)?;
 
-        let compiled: polargraph_query::cypher::CompiledQuery = if self.query_cache_size > 0 {
-            if let Some(cached) = self.query_plan_cache.get(&req.cypher) {
-                self.query_cache_hits.fetch_add(1, Ordering::Relaxed);
-                metrics::counter!("polargraph_query_cache_hits_total").increment(1);
-                cached.as_ref().clone()
-            } else {
-                self.query_cache_misses.fetch_add(1, Ordering::Relaxed);
-                metrics::counter!("polargraph_query_cache_misses_total").increment(1);
-                let parsed = polargraph_query::cypher::parse(&req.cypher)
-                    .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
-                let plan = polargraph_query::cypher::compile(parsed);
-                if self.query_plan_cache.len() >= self.query_cache_size {
-                    if let Some(entry) =
-                        self.query_plan_cache.iter().next().map(|e| e.key().clone())
-                    {
-                        self.query_plan_cache.remove(&entry);
-                    }
-                }
-                self.query_plan_cache
-                    .insert(req.cypher.clone(), Arc::new(plan.clone()));
-                plan
-            }
-        } else {
-            self.query_cache_misses.fetch_add(1, Ordering::Relaxed);
-            metrics::counter!("polargraph_query_cache_misses_total").increment(1);
-            let parsed = polargraph_query::cypher::parse(&req.cypher)
-                .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
-            polargraph_query::cypher::compile(parsed)
-        };
+        let compiled = self.compiled_cypher(&req.cypher)?;
 
         let compiled = compiled
             .substitute_params(&params)
@@ -4040,6 +4156,7 @@ impl PolarGraphService for PolarGraphServer {
         } else {
             "primary"
         };
+        let legacy = self.legacy_status();
         Ok(Response::new(ShowStatsResponse {
             live_sst_files: self.store.db_live_sst_files(),
             total_sst_size_bytes: self.store.db_total_sst_size_bytes(),
@@ -4051,6 +4168,9 @@ impl PolarGraphService for PolarGraphServer {
             query_cache_hits: self.query_cache_hits.load(Ordering::Relaxed),
             query_cache_misses: self.query_cache_misses.load(Ordering::Relaxed),
             query_cache_size: self.query_plan_cache.len() as u32,
+            legacy_conversion_pending: legacy.pending(),
+            legacy_bare_predicates: legacy.bare_predicates.len() as u32,
+            legacy_type_labels: legacy.type_labels,
         }))
     }
 
@@ -4463,8 +4583,7 @@ impl PolarGraphService for PolarGraphServer {
         }
 
         // Rebuild access cache since an access triple changed.
-        let type_cache_snapshot = self.type_cache.read().unwrap().clone();
-        match Self::build_access_cache(&self.store, &type_cache_snapshot) {
+        match Self::build_access_cache(&self.store, &self.type_cache) {
             Ok(new_cache) => {
                 *self.access_cache.write().unwrap() = new_cache;
             }
@@ -4925,6 +5044,23 @@ fn graph_info(
             })
             .collect(),
     })
+}
+
+fn legacy_to_proto(status: &polargraph_storage::LegacyStatus) -> crate::proto::LegacyStatus {
+    crate::proto::LegacyStatus {
+        conversion_pending: status.pending(),
+        bare_predicates: status.bare_predicates.clone(),
+        type_labels: status.type_labels,
+        pending_merges: status.pending_merges.clone(),
+    }
+}
+
+/// Vocabulary input errors are the caller's (`INVALID_ARGUMENT`).
+fn vocab_err_to_status(err: StorageError) -> Status {
+    match err {
+        StorageError::Validation(msg) => Status::invalid_argument(msg),
+        other => storage_err_to_status(other),
+    }
 }
 
 fn storage_err_to_status(err: StorageError) -> Status {
