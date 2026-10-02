@@ -351,6 +351,77 @@ def test_query_value_bindings(base_url: str):
     assert results[0].get("@values", {}).get("t") == "Dune", f"expected the title value: {data}"
 
 
+def sparql_select(base_url: str, query: str):
+    status, data = http_get(base_url + "/sparql?" + urllib.parse.urlencode({"query": query}))
+    assert status == 200, f"sparql failed with status {status}: {data}"
+    return data["results"]["bindings"]
+
+
+def sparql_update(base_url: str, update: str):
+    req = urllib.request.Request(
+        base_url + "/sparql/update", data=update.encode(),
+        headers={"Content-Type": "application/sparql-update"},
+    )
+    with urllib.request.urlopen(req) as resp:
+        return resp.status, json.loads(resp.read())
+
+
+def test_sparql_literal_results(base_url: str):
+    """SPARQL returns literals: FILTER on values, ORDER BY, GROUP BY + SUM, ?p."""
+    ns = f"http://e2e.example/{uuid.uuid4().hex[:8]}/"
+    books = [("Dune", 1965, 412), ("Emma", 1815, 474), ("Ubik", 1969, 202)]
+    triples = []
+    for title, year, pages in books:
+        b = new_id()
+        triples += [
+            {"subject": b, "predicate": ns + "title", "value": title},
+            {"subject": b, "predicate": ns + "year", "value": year},
+            {"subject": b, "predicate": ns + "pages", "value": pages},
+        ]
+    status, data = http_post(base_url + "/changes", {"adds": [{"triples": triples}]})
+    assert status == 200, f"/changes failed with status {status}: {data}"
+
+    rows = sparql_select(base_url,
+        f"SELECT ?t ?y WHERE {{ ?b <{ns}title> ?t ; <{ns}year> ?y FILTER(?y > 1900) }} ORDER BY DESC(?y)")
+    assert [r["t"]["value"] for r in rows] == ["Ubik", "Dune"], f"filter / order: {rows}"
+    assert rows[0]["y"]["datatype"] == "http://www.w3.org/2001/XMLSchema#integer", rows
+
+    rows = sparql_select(base_url, f"SELECT (SUM(?p) AS ?total) WHERE {{ ?b <{ns}pages> ?p }}")
+    assert rows[0]["total"]["value"] == "1088", f"sum: {rows}"
+
+    rows = sparql_select(base_url,
+        f"SELECT ?p WHERE {{ ?b <{ns}title> \"Dune\" ; ?p ?o }} ORDER BY ?p")
+    assert [r["p"]["value"] for r in rows] == [ns + "pages", ns + "title", ns + "year"], rows
+
+
+def test_sparql_update_with_value_variables(base_url: str):
+    """DELETE WHERE { <n> ?p ?o } closes every quad of n; INSERT copies a value."""
+    ns = f"http://e2e.example/{uuid.uuid4().hex[:8]}/"
+    a, b = new_id(), new_id()
+    status, data = http_post(base_url + "/changes", {"adds": [{"triples": [
+        {"subject": a, "predicate": ns + "name", "value": "Ada"},
+        {"subject": a, "predicate": ns + "born", "value": 1815},
+        {"subject": a, "predicate": ns + "knows", "object": b},
+        {"subject": b, "predicate": ns + "name", "value": "Bob"},
+    ]}]})
+    assert status == 200, f"/changes failed: {status} {data}"
+
+    # Copy Ada's name to a new predicate via a value variable.
+    status, data = sparql_update(base_url,
+        f"INSERT {{ ?s <{ns}label> ?n }} WHERE {{ ?s <{ns}name> \"Ada\" ; <{ns}name> ?n }}")
+    assert status == 200 and data["inserted"] == 1, f"insert: {data}"
+    rows = sparql_select(base_url, f"SELECT ?l WHERE {{ ?s <{ns}label> ?l }}")
+    assert [r["l"]["value"] for r in rows] == ["Ada"], rows
+
+    status, data = sparql_update(base_url, f"DELETE WHERE {{ <urn:uuid:{a}> ?p ?o }}")
+    assert status == 200 and data["failed"] == 0, f"delete: {data}"
+    assert data["deleted"] == 4, f"name, born, knows and label closed: {data}"
+    rows = sparql_select(base_url, f"SELECT ?p ?o WHERE {{ <urn:uuid:{a}> ?p ?o }}")
+    assert rows == [], f"nothing left: {rows}"
+    rows = sparql_select(base_url, f"SELECT ?n WHERE {{ <urn:uuid:{b}> <{ns}name> ?n }}")
+    assert [r["n"]["value"] for r in rows] == ["Bob"], f"other node untouched: {rows}"
+
+
 TESTS = [
     test_health,
     test_insert_relation,
@@ -368,6 +439,8 @@ TESTS = [
     test_cypher_write_deprecated,
     test_changes_replace_cypher_writes,
     test_query_value_bindings,
+    test_sparql_literal_results,
+    test_sparql_update_with_value_variables,
 ]
 
 

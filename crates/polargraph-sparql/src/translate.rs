@@ -602,14 +602,16 @@ fn translate_triple_pattern(
     let subj = translate_term_pattern(&tp.subject)?;
     let obj = translate_term_pattern(&tp.object)?;
 
-    let predicate = match &tp.predicate {
-        NamedNodePattern::NamedNode(n) => Some(n.as_str().to_string()),
-        NamedNodePattern::Variable(_) => None,
+    // A variable predicate binds the matched predicate's IRI.
+    let (predicate, predicate_var) = match &tp.predicate {
+        NamedNodePattern::NamedNode(n) => (Some(n.as_str().to_string()), None),
+        NamedNodePattern::Variable(v) => (None, Some(v.as_str().to_string())),
     };
 
     Ok(VarPattern {
         subject: subj,
         predicate,
+        predicate_var,
         object: obj,
         ..Default::default()
     })
