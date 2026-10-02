@@ -40,8 +40,19 @@ export interface QueryOptions {
   txId?: string;
 }
 
-/** One satisfying variable binding — maps variable names to node UUID strings. */
-export type QueryResult = Record<string, string>;
+/** A language-tagged or typed RDF literal (JSON-LD value object). */
+export type LiteralValue =
+  | { "@value": string; "@language": string }
+  | { "@value": string; "@type": string };
+
+/** A property value bound to a query variable. */
+export type BoundValue = string | number | boolean | null | number[] | LiteralValue;
+
+/**
+ * One satisfying variable binding: node variables map to UUID strings,
+ * variables bound to property values (e.g. `?n` in `?p name ?n`) to the value.
+ */
+export type QueryResult = Record<string, BoundValue>;
 
 // ── Cypher ────────────────────────────────────────────────────────────────────
 
@@ -69,7 +80,7 @@ export interface CypherOptions {
  * One result row from a Cypher read query.
  * Node variables map to UUID strings; aggregate variables map to scalar values.
  */
-export type CypherRow = Record<string, string | number | boolean | null | number[]>;
+export type CypherRow = Record<string, BoundValue>;
 
 /** Result from a `cypherWrite()` call. */
 export interface WriteResult {

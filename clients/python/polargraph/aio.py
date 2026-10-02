@@ -131,7 +131,7 @@ class AsyncPolarGraphClient:
         )
         async for chunk in self._stub.QueryStream(req, metadata=self._metadata):
             for result in chunk.results:
-                yield {k: _str_node_id(v) for k, v in result.vars.items()}
+                yield _binding_to_dict(result)
 
     # ── Cypher ───────────────────────────────────────────────────────────────
 

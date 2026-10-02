@@ -87,10 +87,20 @@ func decodeValue(v *pb.Value) interface{} {
 			return []float32{}
 		}
 		return x.VecVal.Values
+	case *pb.Value_LangText:
+		return LangText{Text: x.LangText.GetText(), Lang: x.LangText.GetLang()}
+	case *pb.Value_Typed:
+		return TypedLiteral{Lexical: x.Typed.GetLexical(), Datatype: x.Typed.GetDatatype()}
 	default:
 		return nil
 	}
 }
+
+// LangText is a language-tagged string literal ("Hei"@no).
+type LangText struct{ Text, Lang string }
+
+// TypedLiteral is an RDF literal with a datatype IRI.
+type TypedLiteral struct{ Lexical, Datatype string }
 
 // patternProto converts a Pattern to a proto VarPattern.
 func patternProto(p Pattern) *pb.VarPattern {

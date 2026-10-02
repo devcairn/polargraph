@@ -69,7 +69,7 @@ async function main() {
   )) {
     reachCount++;
     if (reachCount <= 5) {
-      console.log(`  [${reachCount}] x=${row.x?.slice(0, 8)}…  y=${row.y?.slice(0, 8)}…`);
+      console.log(`  [${reachCount}] x=${String(row.x).slice(0, 8)}…  y=${String(row.y).slice(0, 8)}…`);
     }
   }
   console.log(`  ... (${reachCount} reachability pairs total)\n`);

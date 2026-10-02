@@ -28,6 +28,7 @@ import {
 } from "./proto/polargraph.js";
 
 import type {
+  BoundValue,
   Change,
   ChangeResult,
   ChangeSet,
@@ -92,7 +93,19 @@ function encodeValue(v: unknown): Value {
   throw new TypeError(`Cannot encode value of type ${typeof v}`);
 }
 
-function decodeValue(v: Value): string | number | boolean | null | number[] {
+/** A query row: node variables as UUID strings, value variables decoded. */
+function queryRow(vars: { [k: string]: NodeId }, values: { [k: string]: Value }): QueryResult {
+  const row: QueryResult = {};
+  for (const [k, v] of Object.entries(vars)) {
+    row[k] = nodeIdString(v);
+  }
+  for (const [k, v] of Object.entries(values)) {
+    row[k] = decodeValue(v);
+  }
+  return row;
+}
+
+function decodeValue(v: Value): BoundValue {
   if (v.nullVal !== undefined) return null;
   if (v.boolVal !== undefined) return v.boolVal;
   if (v.intVal !== undefined) return v.intVal;
@@ -100,6 +113,8 @@ function decodeValue(v: Value): string | number | boolean | null | number[] {
   if (v.textVal !== undefined) return v.textVal;
   if (v.blobVal !== undefined) return `<blob:${v.blobVal.length}B>`;
   if (v.vecVal !== undefined) return v.vecVal.values;
+  if (v.langText !== undefined) return { "@value": v.langText.text, "@language": v.langText.lang };
+  if (v.typed !== undefined) return { "@value": v.typed.lexical, "@type": v.typed.datatype };
   return null;
 }
 
@@ -369,11 +384,7 @@ export class PolarGraphClient {
     });
     const resp = await this._unary(this._grpc.query.bind(this._grpc), req);
     return resp.bindings.map((b) => {
-      const row: QueryResult = {};
-      for (const [k, v] of Object.entries(b.vars)) {
-        row[k] = nodeIdString(v);
-      }
-      return row;
+      return queryRow(b.vars, b.values);
     });
   }
 
@@ -556,11 +567,7 @@ export class PolarGraphClient {
     const stream = this._grpc.queryStream(req, this._meta);
     for await (const chunk of streamToAsyncIterable<QueryStreamChunk>(stream)) {
       for (const result of chunk.results) {
-        const row: QueryResult = {};
-        for (const [k, v] of Object.entries(result.vars)) {
-          row[k] = nodeIdString(v);
-        }
-        yield row;
+        yield queryRow(result.vars, result.values);
       }
     }
   }

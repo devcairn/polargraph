@@ -155,7 +155,31 @@ type DatalogRule struct {
 
 // Query executes a conjunctive pattern query and returns binding maps.
 // Each map entry maps variable name (without '?') to node-ID string.
+// Variables bound to property values are left out — use QueryRows.
 func (c *Client) Query(ctx context.Context, req QueryRequest) ([]map[string]string, error) {
+	rows, err := c.QueryRows(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.Nodes
+	}
+	return out, nil
+}
+
+// Row is one query solution: variables bound to nodes (UUID strings) and
+// variables bound to property values (e.g. ?n in "?p name ?n"). A variable
+// is in one map or the other.
+type Row struct {
+	Nodes  map[string]string
+	Values map[string]interface{}
+}
+
+// QueryRows executes a conjunctive pattern query and returns node and value
+// bindings. Values decode as bool, int64, float64, string, []byte,
+// []float32, LangText or TypedLiteral.
+func (c *Client) QueryRows(ctx context.Context, req QueryRequest) ([]Row, error) {
 	pbPatterns := make([]*pb.VarPattern, len(req.Patterns))
 	for i, p := range req.Patterns {
 		pbPatterns[i] = patternProto(p)
@@ -173,11 +197,14 @@ func (c *Client) Query(ctx context.Context, req QueryRequest) ([]map[string]stri
 	if err != nil {
 		return nil, err
 	}
-	out := make([]map[string]string, len(resp.Bindings))
+	out := make([]Row, len(resp.Bindings))
 	for i, b := range resp.Bindings {
-		row := make(map[string]string, len(b.Vars))
+		row := Row{Nodes: make(map[string]string, len(b.Vars)), Values: make(map[string]interface{}, len(b.Values))}
 		for k, v := range b.Vars {
-			row[k] = uuidString(v)
+			row.Nodes[k] = uuidString(v)
+		}
+		for k, v := range b.Values {
+			row.Values[k] = decodeValue(v)
 		}
 		out[i] = row
 	}

@@ -123,7 +123,8 @@ fmt.Printf("committed %d triples at ts=%d\n", result.TriplesWritten, result.Comm
 |--------|-------------|
 | `InsertNode(ctx, nodeID, typeName, props, opts...)` | Insert a node typed `rdf:type <typeName>` (bare name, `prefix:local` or IRI, resolved by the server's vocabulary) and properties |
 | `InsertEdge(ctx, subject, predicate, object, props, opts...)` | Insert a relation triple |
-| `Query(ctx, QueryRequest) ([]Bindings, error)` | Conjunctive pattern query |
+| `Query(ctx, QueryRequest) ([]Bindings, error)` | Conjunctive pattern query (node variables only) |
+| `QueryRows(ctx, QueryRequest) ([]Row, error)` | Same, with variables bound to property values (`?n` in `?p name ?n`) in `Row.Values` |
 | `Cypher(ctx, query, opts...) ([]CypherRow, error)` | Cypher read query |
 | `CypherWrite(ctx, query, opts...) (WriteResult, error)` | **Deprecated** (removed in the next server release) — use `ApplyChanges` |
 | `ApplyChanges(ctx, ChangeSet) (*ChangeResult, error)` | Atomic changeset: adds per graph (`Change{Subject, Predicate, Object \| ObjectIRI \| Value, Mode}`), exact `Retractions`, `ReadTS`, `Strict` |

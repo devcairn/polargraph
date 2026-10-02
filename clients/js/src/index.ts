@@ -1,5 +1,7 @@
 export { PolarGraphClient, createClient, RDF_TYPE } from "./client.js";
 export type {
+  BoundValue,
+  LiteralValue,
   Change,
   ChangeResult,
   ChangeSet,
