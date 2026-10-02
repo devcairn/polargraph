@@ -1867,7 +1867,11 @@ type Binding struct {
 	Vars  map[string]*NodeId     `protobuf:"bytes,1,rep,name=vars,proto3" json:"vars,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// / Predicate strings bound via `VarPattern.predicate_var`, keyed by
 	// / variable name.
-	Predicates    map[string]string `protobuf:"bytes,2,rep,name=predicates,proto3" json:"predicates,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Predicates map[string]string `protobuf:"bytes,2,rep,name=predicates,proto3" json:"predicates,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// / Variables bound to property values (literals), keyed by variable name
+	// / — e.g. `?n` in `?p name ?n`. A variable is in `vars` or `values`,
+	// / never both. Vectors don't bind. See docs/design/value-bindings.md.
+	Values        map[string]*Value `protobuf:"bytes,3,rep,name=values,proto3" json:"values,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1912,6 +1916,13 @@ func (x *Binding) GetVars() map[string]*NodeId {
 func (x *Binding) GetPredicates() map[string]string {
 	if x != nil {
 		return x.Predicates
+	}
+	return nil
+}
+
+func (x *Binding) GetValues() map[string]*Value {
+	if x != nil {
+		return x.Values
 	}
 	return nil
 }
@@ -1964,8 +1975,10 @@ func (x *QueryResponse) GetBindings() []*Binding {
 // / provided as a distinct message so streaming and non-streaming RPCs can evolve
 // / independently.
 type QueryResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Vars          map[string]*NodeId     `protobuf:"bytes,1,rep,name=vars,proto3" json:"vars,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Vars  map[string]*NodeId     `protobuf:"bytes,1,rep,name=vars,proto3" json:"vars,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// / Variables bound to property values — as `Binding.values`.
+	Values        map[string]*Value `protobuf:"bytes,2,rep,name=values,proto3" json:"values,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2003,6 +2016,13 @@ func (*QueryResult) Descriptor() ([]byte, []int) {
 func (x *QueryResult) GetVars() map[string]*NodeId {
 	if x != nil {
 		return x.Vars
+	}
+	return nil
+}
+
+func (x *QueryResult) GetValues() map[string]*Value {
+	if x != nil {
+		return x.Values
 	}
 	return nil
 }
@@ -10697,25 +10717,33 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x06graphs\x18\t \x03(\tR\x06graphs\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x96\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa3\x03\n" +
 	"\aBinding\x124\n" +
 	"\x04vars\x18\x01 \x03(\v2 .polargraph.v1.Binding.VarsEntryR\x04vars\x12F\n" +
 	"\n" +
 	"predicates\x18\x02 \x03(\v2&.polargraph.v1.Binding.PredicatesEntryR\n" +
-	"predicates\x1aN\n" +
+	"predicates\x12:\n" +
+	"\x06values\x18\x03 \x03(\v2\".polargraph.v1.Binding.ValuesEntryR\x06values\x1aN\n" +
 	"\tVarsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12+\n" +
 	"\x05value\x18\x02 \x01(\v2\x15.polargraph.v1.NodeIdR\x05value:\x028\x01\x1a=\n" +
 	"\x0fPredicatesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"C\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aO\n" +
+	"\vValuesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12*\n" +
+	"\x05value\x18\x02 \x01(\v2\x14.polargraph.v1.ValueR\x05value:\x028\x01\"C\n" +
 	"\rQueryResponse\x122\n" +
-	"\bbindings\x18\x01 \x03(\v2\x16.polargraph.v1.BindingR\bbindings\"\x97\x01\n" +
+	"\bbindings\x18\x01 \x03(\v2\x16.polargraph.v1.BindingR\bbindings\"\xa8\x02\n" +
 	"\vQueryResult\x128\n" +
-	"\x04vars\x18\x01 \x03(\v2$.polargraph.v1.QueryResult.VarsEntryR\x04vars\x1aN\n" +
+	"\x04vars\x18\x01 \x03(\v2$.polargraph.v1.QueryResult.VarsEntryR\x04vars\x12>\n" +
+	"\x06values\x18\x02 \x03(\v2&.polargraph.v1.QueryResult.ValuesEntryR\x06values\x1aN\n" +
 	"\tVarsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12+\n" +
-	"\x05value\x18\x02 \x01(\v2\x15.polargraph.v1.NodeIdR\x05value:\x028\x01\"}\n" +
+	"\x05value\x18\x02 \x01(\v2\x15.polargraph.v1.NodeIdR\x05value:\x028\x01\x1aO\n" +
+	"\vValuesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12*\n" +
+	"\x05value\x18\x02 \x01(\v2\x14.polargraph.v1.ValueR\x05value:\x028\x01\"}\n" +
 	"\x10QueryStreamChunk\x124\n" +
 	"\aresults\x18\x01 \x03(\v2\x1a.polargraph.v1.QueryResultR\aresults\x12\x1f\n" +
 	"\vchunk_index\x18\x02 \x01(\x04R\n" +
@@ -11402,7 +11430,7 @@ func file_polargraph_proto_rawDescGZIP() []byte {
 }
 
 var file_polargraph_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_polargraph_proto_msgTypes = make([]protoimpl.MessageInfo, 184)
+var file_polargraph_proto_msgTypes = make([]protoimpl.MessageInfo, 186)
 var file_polargraph_proto_goTypes = []any{
 	(PropertyWriteMode)(0),                // 0: polargraph.v1.PropertyWriteMode
 	(ChangeKind)(0),                       // 1: polargraph.v1.ChangeKind
@@ -11582,14 +11610,16 @@ var file_polargraph_proto_goTypes = []any{
 	nil,                                   // 175: polargraph.v1.QueryRequest.ParamsEntry
 	nil,                                   // 176: polargraph.v1.Binding.VarsEntry
 	nil,                                   // 177: polargraph.v1.Binding.PredicatesEntry
-	nil,                                   // 178: polargraph.v1.QueryResult.VarsEntry
-	nil,                                   // 179: polargraph.v1.ValidateNodeRequest.PropertiesEntry
-	nil,                                   // 180: polargraph.v1.ValidateEdgeRequest.PropertiesEntry
-	nil,                                   // 181: polargraph.v1.ScoredBinding.VarsEntry
-	nil,                                   // 182: polargraph.v1.VectorSeedQueryRequest.ParamsEntry
-	nil,                                   // 183: polargraph.v1.CypherQueryRequest.ParamsEntry
-	nil,                                   // 184: polargraph.v1.CypherBinding.NodesEntry
-	nil,                                   // 185: polargraph.v1.CypherBinding.ValuesEntry
+	nil,                                   // 178: polargraph.v1.Binding.ValuesEntry
+	nil,                                   // 179: polargraph.v1.QueryResult.VarsEntry
+	nil,                                   // 180: polargraph.v1.QueryResult.ValuesEntry
+	nil,                                   // 181: polargraph.v1.ValidateNodeRequest.PropertiesEntry
+	nil,                                   // 182: polargraph.v1.ValidateEdgeRequest.PropertiesEntry
+	nil,                                   // 183: polargraph.v1.ScoredBinding.VarsEntry
+	nil,                                   // 184: polargraph.v1.VectorSeedQueryRequest.ParamsEntry
+	nil,                                   // 185: polargraph.v1.CypherQueryRequest.ParamsEntry
+	nil,                                   // 186: polargraph.v1.CypherBinding.NodesEntry
+	nil,                                   // 187: polargraph.v1.CypherBinding.ValuesEntry
 }
 var file_polargraph_proto_depIdxs = []int32{
 	6,   // 0: polargraph.v1.Value.vec_val:type_name -> polargraph.v1.FloatArray
@@ -11620,231 +11650,235 @@ var file_polargraph_proto_depIdxs = []int32{
 	175, // 25: polargraph.v1.QueryRequest.params:type_name -> polargraph.v1.QueryRequest.ParamsEntry
 	176, // 26: polargraph.v1.Binding.vars:type_name -> polargraph.v1.Binding.VarsEntry
 	177, // 27: polargraph.v1.Binding.predicates:type_name -> polargraph.v1.Binding.PredicatesEntry
-	24,  // 28: polargraph.v1.QueryResponse.bindings:type_name -> polargraph.v1.Binding
-	178, // 29: polargraph.v1.QueryResult.vars:type_name -> polargraph.v1.QueryResult.VarsEntry
-	26,  // 30: polargraph.v1.QueryStreamChunk.results:type_name -> polargraph.v1.QueryResult
-	2,   // 31: polargraph.v1.ReachableRequest.start:type_name -> polargraph.v1.NodeId
-	2,   // 32: polargraph.v1.ReachableResponse.node_ids:type_name -> polargraph.v1.NodeId
-	2,   // 33: polargraph.v1.InsertVectorRequest.node_id:type_name -> polargraph.v1.NodeId
-	2,   // 34: polargraph.v1.VectorSearchResult.node_id:type_name -> polargraph.v1.NodeId
-	33,  // 35: polargraph.v1.SearchVectorResponse.results:type_name -> polargraph.v1.VectorSearchResult
-	2,   // 36: polargraph.v1.ReachabilityFilter.from_node:type_name -> polargraph.v1.NodeId
-	35,  // 37: polargraph.v1.SearchVectorFilteredRequest.node_type_filter:type_name -> polargraph.v1.NodeTypeFilter
-	36,  // 38: polargraph.v1.SearchVectorFilteredRequest.reachability_filter:type_name -> polargraph.v1.ReachabilityFilter
-	33,  // 39: polargraph.v1.SearchVectorFilteredResponse.results:type_name -> polargraph.v1.VectorSearchResult
-	2,   // 40: polargraph.v1.SearchVectorInSetRequest.node_ids:type_name -> polargraph.v1.NodeId
-	33,  // 41: polargraph.v1.SearchVectorInSetResponse.results:type_name -> polargraph.v1.VectorSearchResult
-	2,   // 42: polargraph.v1.VectorItem.node_id:type_name -> polargraph.v1.NodeId
-	41,  // 43: polargraph.v1.BatchInsertVectorsRequest.items:type_name -> polargraph.v1.VectorItem
-	42,  // 44: polargraph.v1.BatchInsertVectorsResponse.errors:type_name -> polargraph.v1.BatchInsertError
-	45,  // 45: polargraph.v1.NodeTypeDef.fields:type_name -> polargraph.v1.FieldDef
-	46,  // 46: polargraph.v1.NodeTypeDef.vector_space:type_name -> polargraph.v1.VectorSpaceDef
-	47,  // 47: polargraph.v1.RegisterNodeTypeRequest.definition:type_name -> polargraph.v1.NodeTypeDef
-	47,  // 48: polargraph.v1.GetNodeTypeResponse.definition:type_name -> polargraph.v1.NodeTypeDef
-	47,  // 49: polargraph.v1.ListNodeTypesResponse.definitions:type_name -> polargraph.v1.NodeTypeDef
-	179, // 50: polargraph.v1.ValidateNodeRequest.properties:type_name -> polargraph.v1.ValidateNodeRequest.PropertiesEntry
-	45,  // 51: polargraph.v1.EdgeTypeDef.fields:type_name -> polargraph.v1.FieldDef
-	56,  // 52: polargraph.v1.RegisterEdgeTypeRequest.definition:type_name -> polargraph.v1.EdgeTypeDef
-	56,  // 53: polargraph.v1.GetEdgeTypeResponse.definition:type_name -> polargraph.v1.EdgeTypeDef
-	56,  // 54: polargraph.v1.ListEdgeTypesResponse.definitions:type_name -> polargraph.v1.EdgeTypeDef
-	180, // 55: polargraph.v1.ValidateEdgeRequest.properties:type_name -> polargraph.v1.ValidateEdgeRequest.PropertiesEntry
-	66,  // 56: polargraph.v1.ValidateOntologyResponse.violations:type_name -> polargraph.v1.OntologyViolation
-	181, // 57: polargraph.v1.ScoredBinding.vars:type_name -> polargraph.v1.ScoredBinding.VarsEntry
-	12,  // 58: polargraph.v1.VectorSeedQueryRequest.patterns:type_name -> polargraph.v1.VarPattern
-	35,  // 59: polargraph.v1.VectorSeedQueryRequest.node_type_filter:type_name -> polargraph.v1.NodeTypeFilter
-	36,  // 60: polargraph.v1.VectorSeedQueryRequest.reachability_filter:type_name -> polargraph.v1.ReachabilityFilter
-	182, // 61: polargraph.v1.VectorSeedQueryRequest.params:type_name -> polargraph.v1.VectorSeedQueryRequest.ParamsEntry
-	70,  // 62: polargraph.v1.VectorSeedQueryResponse.bindings:type_name -> polargraph.v1.ScoredBinding
-	73,  // 63: polargraph.v1.ListBackupsResponse.backups:type_name -> polargraph.v1.BackupInfo
-	90,  // 64: polargraph.v1.MigrationStatusResponse.applied:type_name -> polargraph.v1.AppliedMigrationInfo
-	92,  // 65: polargraph.v1.ShowIndexesResponse.column_families:type_name -> polargraph.v1.ColumnFamilyInfo
-	93,  // 66: polargraph.v1.ShowIndexesResponse.vector_spaces:type_name -> polargraph.v1.VectorSpaceInfo
-	183, // 67: polargraph.v1.CypherQueryRequest.params:type_name -> polargraph.v1.CypherQueryRequest.ParamsEntry
-	184, // 68: polargraph.v1.CypherBinding.nodes:type_name -> polargraph.v1.CypherBinding.NodesEntry
-	185, // 69: polargraph.v1.CypherBinding.values:type_name -> polargraph.v1.CypherBinding.ValuesEntry
-	98,  // 70: polargraph.v1.CypherQueryResponse.rows:type_name -> polargraph.v1.CypherBinding
-	103, // 71: polargraph.v1.ExplainResponse.nodes:type_name -> polargraph.v1.PlanNode
-	103, // 72: polargraph.v1.PlanNode.children:type_name -> polargraph.v1.PlanNode
-	125, // 73: polargraph.v1.GetPropertyHistoryResponse.versions:type_name -> polargraph.v1.PropertyVersion
-	3,   // 74: polargraph.v1.DeleteTriplesRequest.value:type_name -> polargraph.v1.Value
-	13,  // 75: polargraph.v1.DeleteTriplesRequest.graph:type_name -> polargraph.v1.GraphTerm
-	3,   // 76: polargraph.v1.GraphMetadata.value:type_name -> polargraph.v1.Value
-	131, // 77: polargraph.v1.GraphInfo.metadata:type_name -> polargraph.v1.GraphMetadata
-	131, // 78: polargraph.v1.CreateGraphRequest.metadata:type_name -> polargraph.v1.GraphMetadata
-	132, // 79: polargraph.v1.CreateGraphResponse.graph:type_name -> polargraph.v1.GraphInfo
-	131, // 80: polargraph.v1.ListGraphsRequest.filter:type_name -> polargraph.v1.GraphMetadata
-	132, // 81: polargraph.v1.ListGraphsResponse.graphs:type_name -> polargraph.v1.GraphInfo
-	10,  // 82: polargraph.v1.GraphTriples.triples:type_name -> polargraph.v1.Triple
-	2,   // 83: polargraph.v1.QuadRef.subject:type_name -> polargraph.v1.NodeId
-	2,   // 84: polargraph.v1.QuadRef.node:type_name -> polargraph.v1.NodeId
-	3,   // 85: polargraph.v1.QuadRef.value:type_name -> polargraph.v1.Value
-	144, // 86: polargraph.v1.ApplyChangesRequest.adds:type_name -> polargraph.v1.GraphTriples
-	145, // 87: polargraph.v1.ApplyChangesRequest.retractions:type_name -> polargraph.v1.QuadRef
-	144, // 88: polargraph.v1.ValidateShapesRequest.overlay_adds:type_name -> polargraph.v1.GraphTriples
-	145, // 89: polargraph.v1.ValidateShapesRequest.overlay_retractions:type_name -> polargraph.v1.QuadRef
-	3,   // 90: polargraph.v1.ValidationResult.focus_literal:type_name -> polargraph.v1.Value
-	3,   // 91: polargraph.v1.ValidationResult.value_literal:type_name -> polargraph.v1.Value
-	149, // 92: polargraph.v1.ValidateShapesResponse.results:type_name -> polargraph.v1.ValidationResult
-	1,   // 93: polargraph.v1.ChangeEvent.kind:type_name -> polargraph.v1.ChangeKind
-	10,  // 94: polargraph.v1.ChangeEvent.quad:type_name -> polargraph.v1.Triple
-	158, // 95: polargraph.v1.GetGraphAccessResponse.graphs:type_name -> polargraph.v1.GraphAccessEntry
-	2,   // 96: polargraph.v1.ExportedQuad.subject:type_name -> polargraph.v1.NodeId
-	2,   // 97: polargraph.v1.ExportedQuad.node:type_name -> polargraph.v1.NodeId
-	3,   // 98: polargraph.v1.ExportedQuad.value:type_name -> polargraph.v1.Value
-	161, // 99: polargraph.v1.ExportGraphChunk.quads:type_name -> polargraph.v1.ExportedQuad
-	2,   // 100: polargraph.v1.ResolveIrisRequest.nodes:type_name -> polargraph.v1.NodeId
-	165, // 101: polargraph.v1.Vocabulary.prefixes:type_name -> polargraph.v1.VocabularyPrefix
-	166, // 102: polargraph.v1.Vocabulary.legacy:type_name -> polargraph.v1.LegacyStatus
-	173, // 103: polargraph.v1.ConvertLegacyDataResponse.predicates:type_name -> polargraph.v1.PredicateConversion
-	166, // 104: polargraph.v1.ConvertLegacyDataResponse.legacy:type_name -> polargraph.v1.LegacyStatus
-	2,   // 105: polargraph.v1.Binding.VarsEntry.value:type_name -> polargraph.v1.NodeId
-	2,   // 106: polargraph.v1.QueryResult.VarsEntry.value:type_name -> polargraph.v1.NodeId
-	3,   // 107: polargraph.v1.ValidateNodeRequest.PropertiesEntry.value:type_name -> polargraph.v1.Value
-	3,   // 108: polargraph.v1.ValidateEdgeRequest.PropertiesEntry.value:type_name -> polargraph.v1.Value
-	2,   // 109: polargraph.v1.ScoredBinding.VarsEntry.value:type_name -> polargraph.v1.NodeId
-	2,   // 110: polargraph.v1.CypherBinding.NodesEntry.value:type_name -> polargraph.v1.NodeId
-	3,   // 111: polargraph.v1.CypherBinding.ValuesEntry.value:type_name -> polargraph.v1.Value
-	168, // 112: polargraph.v1.PolarGraphService.GetVocabulary:input_type -> polargraph.v1.GetVocabularyRequest
-	169, // 113: polargraph.v1.PolarGraphService.SetVocabularyBase:input_type -> polargraph.v1.SetVocabularyBaseRequest
-	170, // 114: polargraph.v1.PolarGraphService.PutPrefix:input_type -> polargraph.v1.PutPrefixRequest
-	171, // 115: polargraph.v1.PolarGraphService.RemovePrefix:input_type -> polargraph.v1.RemovePrefixRequest
-	172, // 116: polargraph.v1.PolarGraphService.ConvertLegacyData:input_type -> polargraph.v1.ConvertLegacyDataRequest
-	21,  // 117: polargraph.v1.PolarGraphService.Insert:input_type -> polargraph.v1.InsertRequest
-	163, // 118: polargraph.v1.PolarGraphService.ResolveIris:input_type -> polargraph.v1.ResolveIrisRequest
-	133, // 119: polargraph.v1.PolarGraphService.CreateGraph:input_type -> polargraph.v1.CreateGraphRequest
-	135, // 120: polargraph.v1.PolarGraphService.ListGraphs:input_type -> polargraph.v1.ListGraphsRequest
-	137, // 121: polargraph.v1.PolarGraphService.GraphStats:input_type -> polargraph.v1.GraphStatsRequest
-	139, // 122: polargraph.v1.PolarGraphService.CopyGraph:input_type -> polargraph.v1.CopyGraphRequest
-	141, // 123: polargraph.v1.PolarGraphService.MoveGraph:input_type -> polargraph.v1.MoveGraphRequest
-	142, // 124: polargraph.v1.PolarGraphService.DropGraph:input_type -> polargraph.v1.DropGraphRequest
-	160, // 125: polargraph.v1.PolarGraphService.ExportGraph:input_type -> polargraph.v1.ExportGraphRequest
-	146, // 126: polargraph.v1.PolarGraphService.ApplyChanges:input_type -> polargraph.v1.ApplyChangesRequest
-	148, // 127: polargraph.v1.PolarGraphService.ValidateShapes:input_type -> polargraph.v1.ValidateShapesRequest
-	151, // 128: polargraph.v1.PolarGraphService.Subscribe:input_type -> polargraph.v1.SubscribeRequest
-	153, // 129: polargraph.v1.PolarGraphService.GrantGraphAccess:input_type -> polargraph.v1.GrantGraphAccessRequest
-	155, // 130: polargraph.v1.PolarGraphService.RevokeGraphAccess:input_type -> polargraph.v1.RevokeGraphAccessRequest
-	157, // 131: polargraph.v1.PolarGraphService.GetGraphAccess:input_type -> polargraph.v1.GetGraphAccessRequest
-	23,  // 132: polargraph.v1.PolarGraphService.Query:input_type -> polargraph.v1.QueryRequest
-	30,  // 133: polargraph.v1.PolarGraphService.InsertVector:input_type -> polargraph.v1.InsertVectorRequest
-	32,  // 134: polargraph.v1.PolarGraphService.SearchVector:input_type -> polargraph.v1.SearchVectorRequest
-	28,  // 135: polargraph.v1.PolarGraphService.Reachable:input_type -> polargraph.v1.ReachableRequest
-	48,  // 136: polargraph.v1.PolarGraphService.RegisterNodeType:input_type -> polargraph.v1.RegisterNodeTypeRequest
-	50,  // 137: polargraph.v1.PolarGraphService.GetNodeType:input_type -> polargraph.v1.GetNodeTypeRequest
-	52,  // 138: polargraph.v1.PolarGraphService.ListNodeTypes:input_type -> polargraph.v1.ListNodeTypesRequest
-	54,  // 139: polargraph.v1.PolarGraphService.ValidateNode:input_type -> polargraph.v1.ValidateNodeRequest
-	57,  // 140: polargraph.v1.PolarGraphService.RegisterEdgeType:input_type -> polargraph.v1.RegisterEdgeTypeRequest
-	59,  // 141: polargraph.v1.PolarGraphService.GetEdgeType:input_type -> polargraph.v1.GetEdgeTypeRequest
-	61,  // 142: polargraph.v1.PolarGraphService.ListEdgeTypes:input_type -> polargraph.v1.ListEdgeTypesRequest
-	63,  // 143: polargraph.v1.PolarGraphService.ValidateEdge:input_type -> polargraph.v1.ValidateEdgeRequest
-	68,  // 144: polargraph.v1.PolarGraphService.ListPredicatesBetween:input_type -> polargraph.v1.ListPredicatesBetweenRequest
-	65,  // 145: polargraph.v1.PolarGraphService.ValidateOntology:input_type -> polargraph.v1.ValidateOntologyRequest
-	37,  // 146: polargraph.v1.PolarGraphService.SearchVectorFiltered:input_type -> polargraph.v1.SearchVectorFilteredRequest
-	39,  // 147: polargraph.v1.PolarGraphService.SearchVectorInSet:input_type -> polargraph.v1.SearchVectorInSetRequest
-	43,  // 148: polargraph.v1.PolarGraphService.BatchInsertVectors:input_type -> polargraph.v1.BatchInsertVectorsRequest
-	71,  // 149: polargraph.v1.PolarGraphService.VectorSeedQuery:input_type -> polargraph.v1.VectorSeedQueryRequest
-	74,  // 150: polargraph.v1.PolarGraphService.CreateBackup:input_type -> polargraph.v1.CreateBackupRequest
-	76,  // 151: polargraph.v1.PolarGraphService.ListBackups:input_type -> polargraph.v1.ListBackupsRequest
-	78,  // 152: polargraph.v1.PolarGraphService.PurgeOldBackups:input_type -> polargraph.v1.PurgeOldBackupsRequest
-	80,  // 153: polargraph.v1.PolarGraphService.RunRetention:input_type -> polargraph.v1.RunRetentionRequest
-	84,  // 154: polargraph.v1.PolarGraphService.ReplicaStatus:input_type -> polargraph.v1.ReplicaStatusRequest
-	82,  // 155: polargraph.v1.PolarGraphService.StreamWal:input_type -> polargraph.v1.StreamWalRequest
-	23,  // 156: polargraph.v1.PolarGraphService.ExplainQuery:input_type -> polargraph.v1.QueryRequest
-	86,  // 157: polargraph.v1.PolarGraphService.MigrateSchema:input_type -> polargraph.v1.MigrateRequest
-	88,  // 158: polargraph.v1.PolarGraphService.MigrationStatus:input_type -> polargraph.v1.MigrationStatusRequest
-	97,  // 159: polargraph.v1.PolarGraphService.CypherQuery:input_type -> polargraph.v1.CypherQueryRequest
-	100, // 160: polargraph.v1.PolarGraphService.CypherWrite:input_type -> polargraph.v1.CypherWriteRequest
-	23,  // 161: polargraph.v1.PolarGraphService.QueryStream:input_type -> polargraph.v1.QueryRequest
-	97,  // 162: polargraph.v1.PolarGraphService.CypherQueryStream:input_type -> polargraph.v1.CypherQueryRequest
-	91,  // 163: polargraph.v1.PolarGraphService.ShowIndexes:input_type -> polargraph.v1.ShowIndexesRequest
-	95,  // 164: polargraph.v1.PolarGraphService.ShowStats:input_type -> polargraph.v1.ShowStatsRequest
-	104, // 165: polargraph.v1.PolarGraphService.BeginTransaction:input_type -> polargraph.v1.BeginTransactionRequest
-	106, // 166: polargraph.v1.PolarGraphService.CommitTransaction:input_type -> polargraph.v1.CommitTransactionRequest
-	108, // 167: polargraph.v1.PolarGraphService.RollbackTransaction:input_type -> polargraph.v1.RollbackTransactionRequest
-	17,  // 168: polargraph.v1.PolarGraphService.GetEdgeAnnotations:input_type -> polargraph.v1.GetEdgeAnnotationsRequest
-	19,  // 169: polargraph.v1.PolarGraphService.GetEdgeIdsByTriple:input_type -> polargraph.v1.GetEdgeIdsByTripleRequest
-	110, // 170: polargraph.v1.PolarGraphService.AddApiKey:input_type -> polargraph.v1.AddApiKeyRequest
-	112, // 171: polargraph.v1.PolarGraphService.RevokeApiKey:input_type -> polargraph.v1.RevokeApiKeyRequest
-	114, // 172: polargraph.v1.PolarGraphService.ListApiKeys:input_type -> polargraph.v1.ListApiKeysRequest
-	116, // 173: polargraph.v1.PolarGraphService.GrantAccess:input_type -> polargraph.v1.GrantAccessRequest
-	118, // 174: polargraph.v1.PolarGraphService.RevokeAccess:input_type -> polargraph.v1.RevokeAccessRequest
-	120, // 175: polargraph.v1.PolarGraphService.AddUserToGroup:input_type -> polargraph.v1.AddUserToGroupRequest
-	122, // 176: polargraph.v1.PolarGraphService.GetUserAccess:input_type -> polargraph.v1.GetUserAccessRequest
-	124, // 177: polargraph.v1.PolarGraphService.GetPropertyHistory:input_type -> polargraph.v1.GetPropertyHistoryRequest
-	127, // 178: polargraph.v1.PolarGraphService.DeleteTriples:input_type -> polargraph.v1.DeleteTriplesRequest
-	129, // 179: polargraph.v1.PolarGraphService.RunMaterialization:input_type -> polargraph.v1.RunMaterializationRequest
-	167, // 180: polargraph.v1.PolarGraphService.GetVocabulary:output_type -> polargraph.v1.Vocabulary
-	167, // 181: polargraph.v1.PolarGraphService.SetVocabularyBase:output_type -> polargraph.v1.Vocabulary
-	167, // 182: polargraph.v1.PolarGraphService.PutPrefix:output_type -> polargraph.v1.Vocabulary
-	167, // 183: polargraph.v1.PolarGraphService.RemovePrefix:output_type -> polargraph.v1.Vocabulary
-	174, // 184: polargraph.v1.PolarGraphService.ConvertLegacyData:output_type -> polargraph.v1.ConvertLegacyDataResponse
-	22,  // 185: polargraph.v1.PolarGraphService.Insert:output_type -> polargraph.v1.InsertResponse
-	164, // 186: polargraph.v1.PolarGraphService.ResolveIris:output_type -> polargraph.v1.ResolveIrisResponse
-	134, // 187: polargraph.v1.PolarGraphService.CreateGraph:output_type -> polargraph.v1.CreateGraphResponse
-	136, // 188: polargraph.v1.PolarGraphService.ListGraphs:output_type -> polargraph.v1.ListGraphsResponse
-	138, // 189: polargraph.v1.PolarGraphService.GraphStats:output_type -> polargraph.v1.GraphStatsResponse
-	140, // 190: polargraph.v1.PolarGraphService.CopyGraph:output_type -> polargraph.v1.CopyGraphResponse
-	140, // 191: polargraph.v1.PolarGraphService.MoveGraph:output_type -> polargraph.v1.CopyGraphResponse
-	143, // 192: polargraph.v1.PolarGraphService.DropGraph:output_type -> polargraph.v1.DropGraphResponse
-	162, // 193: polargraph.v1.PolarGraphService.ExportGraph:output_type -> polargraph.v1.ExportGraphChunk
-	147, // 194: polargraph.v1.PolarGraphService.ApplyChanges:output_type -> polargraph.v1.ApplyChangesResponse
-	150, // 195: polargraph.v1.PolarGraphService.ValidateShapes:output_type -> polargraph.v1.ValidateShapesResponse
-	152, // 196: polargraph.v1.PolarGraphService.Subscribe:output_type -> polargraph.v1.ChangeEvent
-	154, // 197: polargraph.v1.PolarGraphService.GrantGraphAccess:output_type -> polargraph.v1.GrantGraphAccessResponse
-	156, // 198: polargraph.v1.PolarGraphService.RevokeGraphAccess:output_type -> polargraph.v1.RevokeGraphAccessResponse
-	159, // 199: polargraph.v1.PolarGraphService.GetGraphAccess:output_type -> polargraph.v1.GetGraphAccessResponse
-	25,  // 200: polargraph.v1.PolarGraphService.Query:output_type -> polargraph.v1.QueryResponse
-	31,  // 201: polargraph.v1.PolarGraphService.InsertVector:output_type -> polargraph.v1.InsertVectorResponse
-	34,  // 202: polargraph.v1.PolarGraphService.SearchVector:output_type -> polargraph.v1.SearchVectorResponse
-	29,  // 203: polargraph.v1.PolarGraphService.Reachable:output_type -> polargraph.v1.ReachableResponse
-	49,  // 204: polargraph.v1.PolarGraphService.RegisterNodeType:output_type -> polargraph.v1.RegisterNodeTypeResponse
-	51,  // 205: polargraph.v1.PolarGraphService.GetNodeType:output_type -> polargraph.v1.GetNodeTypeResponse
-	53,  // 206: polargraph.v1.PolarGraphService.ListNodeTypes:output_type -> polargraph.v1.ListNodeTypesResponse
-	55,  // 207: polargraph.v1.PolarGraphService.ValidateNode:output_type -> polargraph.v1.ValidateNodeResponse
-	58,  // 208: polargraph.v1.PolarGraphService.RegisterEdgeType:output_type -> polargraph.v1.RegisterEdgeTypeResponse
-	60,  // 209: polargraph.v1.PolarGraphService.GetEdgeType:output_type -> polargraph.v1.GetEdgeTypeResponse
-	62,  // 210: polargraph.v1.PolarGraphService.ListEdgeTypes:output_type -> polargraph.v1.ListEdgeTypesResponse
-	64,  // 211: polargraph.v1.PolarGraphService.ValidateEdge:output_type -> polargraph.v1.ValidateEdgeResponse
-	69,  // 212: polargraph.v1.PolarGraphService.ListPredicatesBetween:output_type -> polargraph.v1.ListPredicatesBetweenResponse
-	67,  // 213: polargraph.v1.PolarGraphService.ValidateOntology:output_type -> polargraph.v1.ValidateOntologyResponse
-	38,  // 214: polargraph.v1.PolarGraphService.SearchVectorFiltered:output_type -> polargraph.v1.SearchVectorFilteredResponse
-	40,  // 215: polargraph.v1.PolarGraphService.SearchVectorInSet:output_type -> polargraph.v1.SearchVectorInSetResponse
-	44,  // 216: polargraph.v1.PolarGraphService.BatchInsertVectors:output_type -> polargraph.v1.BatchInsertVectorsResponse
-	72,  // 217: polargraph.v1.PolarGraphService.VectorSeedQuery:output_type -> polargraph.v1.VectorSeedQueryResponse
-	75,  // 218: polargraph.v1.PolarGraphService.CreateBackup:output_type -> polargraph.v1.CreateBackupResponse
-	77,  // 219: polargraph.v1.PolarGraphService.ListBackups:output_type -> polargraph.v1.ListBackupsResponse
-	79,  // 220: polargraph.v1.PolarGraphService.PurgeOldBackups:output_type -> polargraph.v1.PurgeOldBackupsResponse
-	81,  // 221: polargraph.v1.PolarGraphService.RunRetention:output_type -> polargraph.v1.RunRetentionResponse
-	85,  // 222: polargraph.v1.PolarGraphService.ReplicaStatus:output_type -> polargraph.v1.ReplicaStatusResponse
-	83,  // 223: polargraph.v1.PolarGraphService.StreamWal:output_type -> polargraph.v1.WalEntry
-	102, // 224: polargraph.v1.PolarGraphService.ExplainQuery:output_type -> polargraph.v1.ExplainResponse
-	87,  // 225: polargraph.v1.PolarGraphService.MigrateSchema:output_type -> polargraph.v1.MigrateResponse
-	89,  // 226: polargraph.v1.PolarGraphService.MigrationStatus:output_type -> polargraph.v1.MigrationStatusResponse
-	99,  // 227: polargraph.v1.PolarGraphService.CypherQuery:output_type -> polargraph.v1.CypherQueryResponse
-	101, // 228: polargraph.v1.PolarGraphService.CypherWrite:output_type -> polargraph.v1.CypherWriteResponse
-	27,  // 229: polargraph.v1.PolarGraphService.QueryStream:output_type -> polargraph.v1.QueryStreamChunk
-	27,  // 230: polargraph.v1.PolarGraphService.CypherQueryStream:output_type -> polargraph.v1.QueryStreamChunk
-	94,  // 231: polargraph.v1.PolarGraphService.ShowIndexes:output_type -> polargraph.v1.ShowIndexesResponse
-	96,  // 232: polargraph.v1.PolarGraphService.ShowStats:output_type -> polargraph.v1.ShowStatsResponse
-	105, // 233: polargraph.v1.PolarGraphService.BeginTransaction:output_type -> polargraph.v1.BeginTransactionResponse
-	107, // 234: polargraph.v1.PolarGraphService.CommitTransaction:output_type -> polargraph.v1.CommitTransactionResponse
-	109, // 235: polargraph.v1.PolarGraphService.RollbackTransaction:output_type -> polargraph.v1.RollbackTransactionResponse
-	18,  // 236: polargraph.v1.PolarGraphService.GetEdgeAnnotations:output_type -> polargraph.v1.GetEdgeAnnotationsResponse
-	20,  // 237: polargraph.v1.PolarGraphService.GetEdgeIdsByTriple:output_type -> polargraph.v1.GetEdgeIdsByTripleResponse
-	111, // 238: polargraph.v1.PolarGraphService.AddApiKey:output_type -> polargraph.v1.AddApiKeyResponse
-	113, // 239: polargraph.v1.PolarGraphService.RevokeApiKey:output_type -> polargraph.v1.RevokeApiKeyResponse
-	115, // 240: polargraph.v1.PolarGraphService.ListApiKeys:output_type -> polargraph.v1.ListApiKeysResponse
-	117, // 241: polargraph.v1.PolarGraphService.GrantAccess:output_type -> polargraph.v1.GrantAccessResponse
-	119, // 242: polargraph.v1.PolarGraphService.RevokeAccess:output_type -> polargraph.v1.RevokeAccessResponse
-	121, // 243: polargraph.v1.PolarGraphService.AddUserToGroup:output_type -> polargraph.v1.AddUserToGroupResponse
-	123, // 244: polargraph.v1.PolarGraphService.GetUserAccess:output_type -> polargraph.v1.GetUserAccessResponse
-	126, // 245: polargraph.v1.PolarGraphService.GetPropertyHistory:output_type -> polargraph.v1.GetPropertyHistoryResponse
-	128, // 246: polargraph.v1.PolarGraphService.DeleteTriples:output_type -> polargraph.v1.DeleteTriplesResponse
-	130, // 247: polargraph.v1.PolarGraphService.RunMaterialization:output_type -> polargraph.v1.RunMaterializationResponse
-	180, // [180:248] is the sub-list for method output_type
-	112, // [112:180] is the sub-list for method input_type
-	112, // [112:112] is the sub-list for extension type_name
-	112, // [112:112] is the sub-list for extension extendee
-	0,   // [0:112] is the sub-list for field type_name
+	178, // 28: polargraph.v1.Binding.values:type_name -> polargraph.v1.Binding.ValuesEntry
+	24,  // 29: polargraph.v1.QueryResponse.bindings:type_name -> polargraph.v1.Binding
+	179, // 30: polargraph.v1.QueryResult.vars:type_name -> polargraph.v1.QueryResult.VarsEntry
+	180, // 31: polargraph.v1.QueryResult.values:type_name -> polargraph.v1.QueryResult.ValuesEntry
+	26,  // 32: polargraph.v1.QueryStreamChunk.results:type_name -> polargraph.v1.QueryResult
+	2,   // 33: polargraph.v1.ReachableRequest.start:type_name -> polargraph.v1.NodeId
+	2,   // 34: polargraph.v1.ReachableResponse.node_ids:type_name -> polargraph.v1.NodeId
+	2,   // 35: polargraph.v1.InsertVectorRequest.node_id:type_name -> polargraph.v1.NodeId
+	2,   // 36: polargraph.v1.VectorSearchResult.node_id:type_name -> polargraph.v1.NodeId
+	33,  // 37: polargraph.v1.SearchVectorResponse.results:type_name -> polargraph.v1.VectorSearchResult
+	2,   // 38: polargraph.v1.ReachabilityFilter.from_node:type_name -> polargraph.v1.NodeId
+	35,  // 39: polargraph.v1.SearchVectorFilteredRequest.node_type_filter:type_name -> polargraph.v1.NodeTypeFilter
+	36,  // 40: polargraph.v1.SearchVectorFilteredRequest.reachability_filter:type_name -> polargraph.v1.ReachabilityFilter
+	33,  // 41: polargraph.v1.SearchVectorFilteredResponse.results:type_name -> polargraph.v1.VectorSearchResult
+	2,   // 42: polargraph.v1.SearchVectorInSetRequest.node_ids:type_name -> polargraph.v1.NodeId
+	33,  // 43: polargraph.v1.SearchVectorInSetResponse.results:type_name -> polargraph.v1.VectorSearchResult
+	2,   // 44: polargraph.v1.VectorItem.node_id:type_name -> polargraph.v1.NodeId
+	41,  // 45: polargraph.v1.BatchInsertVectorsRequest.items:type_name -> polargraph.v1.VectorItem
+	42,  // 46: polargraph.v1.BatchInsertVectorsResponse.errors:type_name -> polargraph.v1.BatchInsertError
+	45,  // 47: polargraph.v1.NodeTypeDef.fields:type_name -> polargraph.v1.FieldDef
+	46,  // 48: polargraph.v1.NodeTypeDef.vector_space:type_name -> polargraph.v1.VectorSpaceDef
+	47,  // 49: polargraph.v1.RegisterNodeTypeRequest.definition:type_name -> polargraph.v1.NodeTypeDef
+	47,  // 50: polargraph.v1.GetNodeTypeResponse.definition:type_name -> polargraph.v1.NodeTypeDef
+	47,  // 51: polargraph.v1.ListNodeTypesResponse.definitions:type_name -> polargraph.v1.NodeTypeDef
+	181, // 52: polargraph.v1.ValidateNodeRequest.properties:type_name -> polargraph.v1.ValidateNodeRequest.PropertiesEntry
+	45,  // 53: polargraph.v1.EdgeTypeDef.fields:type_name -> polargraph.v1.FieldDef
+	56,  // 54: polargraph.v1.RegisterEdgeTypeRequest.definition:type_name -> polargraph.v1.EdgeTypeDef
+	56,  // 55: polargraph.v1.GetEdgeTypeResponse.definition:type_name -> polargraph.v1.EdgeTypeDef
+	56,  // 56: polargraph.v1.ListEdgeTypesResponse.definitions:type_name -> polargraph.v1.EdgeTypeDef
+	182, // 57: polargraph.v1.ValidateEdgeRequest.properties:type_name -> polargraph.v1.ValidateEdgeRequest.PropertiesEntry
+	66,  // 58: polargraph.v1.ValidateOntologyResponse.violations:type_name -> polargraph.v1.OntologyViolation
+	183, // 59: polargraph.v1.ScoredBinding.vars:type_name -> polargraph.v1.ScoredBinding.VarsEntry
+	12,  // 60: polargraph.v1.VectorSeedQueryRequest.patterns:type_name -> polargraph.v1.VarPattern
+	35,  // 61: polargraph.v1.VectorSeedQueryRequest.node_type_filter:type_name -> polargraph.v1.NodeTypeFilter
+	36,  // 62: polargraph.v1.VectorSeedQueryRequest.reachability_filter:type_name -> polargraph.v1.ReachabilityFilter
+	184, // 63: polargraph.v1.VectorSeedQueryRequest.params:type_name -> polargraph.v1.VectorSeedQueryRequest.ParamsEntry
+	70,  // 64: polargraph.v1.VectorSeedQueryResponse.bindings:type_name -> polargraph.v1.ScoredBinding
+	73,  // 65: polargraph.v1.ListBackupsResponse.backups:type_name -> polargraph.v1.BackupInfo
+	90,  // 66: polargraph.v1.MigrationStatusResponse.applied:type_name -> polargraph.v1.AppliedMigrationInfo
+	92,  // 67: polargraph.v1.ShowIndexesResponse.column_families:type_name -> polargraph.v1.ColumnFamilyInfo
+	93,  // 68: polargraph.v1.ShowIndexesResponse.vector_spaces:type_name -> polargraph.v1.VectorSpaceInfo
+	185, // 69: polargraph.v1.CypherQueryRequest.params:type_name -> polargraph.v1.CypherQueryRequest.ParamsEntry
+	186, // 70: polargraph.v1.CypherBinding.nodes:type_name -> polargraph.v1.CypherBinding.NodesEntry
+	187, // 71: polargraph.v1.CypherBinding.values:type_name -> polargraph.v1.CypherBinding.ValuesEntry
+	98,  // 72: polargraph.v1.CypherQueryResponse.rows:type_name -> polargraph.v1.CypherBinding
+	103, // 73: polargraph.v1.ExplainResponse.nodes:type_name -> polargraph.v1.PlanNode
+	103, // 74: polargraph.v1.PlanNode.children:type_name -> polargraph.v1.PlanNode
+	125, // 75: polargraph.v1.GetPropertyHistoryResponse.versions:type_name -> polargraph.v1.PropertyVersion
+	3,   // 76: polargraph.v1.DeleteTriplesRequest.value:type_name -> polargraph.v1.Value
+	13,  // 77: polargraph.v1.DeleteTriplesRequest.graph:type_name -> polargraph.v1.GraphTerm
+	3,   // 78: polargraph.v1.GraphMetadata.value:type_name -> polargraph.v1.Value
+	131, // 79: polargraph.v1.GraphInfo.metadata:type_name -> polargraph.v1.GraphMetadata
+	131, // 80: polargraph.v1.CreateGraphRequest.metadata:type_name -> polargraph.v1.GraphMetadata
+	132, // 81: polargraph.v1.CreateGraphResponse.graph:type_name -> polargraph.v1.GraphInfo
+	131, // 82: polargraph.v1.ListGraphsRequest.filter:type_name -> polargraph.v1.GraphMetadata
+	132, // 83: polargraph.v1.ListGraphsResponse.graphs:type_name -> polargraph.v1.GraphInfo
+	10,  // 84: polargraph.v1.GraphTriples.triples:type_name -> polargraph.v1.Triple
+	2,   // 85: polargraph.v1.QuadRef.subject:type_name -> polargraph.v1.NodeId
+	2,   // 86: polargraph.v1.QuadRef.node:type_name -> polargraph.v1.NodeId
+	3,   // 87: polargraph.v1.QuadRef.value:type_name -> polargraph.v1.Value
+	144, // 88: polargraph.v1.ApplyChangesRequest.adds:type_name -> polargraph.v1.GraphTriples
+	145, // 89: polargraph.v1.ApplyChangesRequest.retractions:type_name -> polargraph.v1.QuadRef
+	144, // 90: polargraph.v1.ValidateShapesRequest.overlay_adds:type_name -> polargraph.v1.GraphTriples
+	145, // 91: polargraph.v1.ValidateShapesRequest.overlay_retractions:type_name -> polargraph.v1.QuadRef
+	3,   // 92: polargraph.v1.ValidationResult.focus_literal:type_name -> polargraph.v1.Value
+	3,   // 93: polargraph.v1.ValidationResult.value_literal:type_name -> polargraph.v1.Value
+	149, // 94: polargraph.v1.ValidateShapesResponse.results:type_name -> polargraph.v1.ValidationResult
+	1,   // 95: polargraph.v1.ChangeEvent.kind:type_name -> polargraph.v1.ChangeKind
+	10,  // 96: polargraph.v1.ChangeEvent.quad:type_name -> polargraph.v1.Triple
+	158, // 97: polargraph.v1.GetGraphAccessResponse.graphs:type_name -> polargraph.v1.GraphAccessEntry
+	2,   // 98: polargraph.v1.ExportedQuad.subject:type_name -> polargraph.v1.NodeId
+	2,   // 99: polargraph.v1.ExportedQuad.node:type_name -> polargraph.v1.NodeId
+	3,   // 100: polargraph.v1.ExportedQuad.value:type_name -> polargraph.v1.Value
+	161, // 101: polargraph.v1.ExportGraphChunk.quads:type_name -> polargraph.v1.ExportedQuad
+	2,   // 102: polargraph.v1.ResolveIrisRequest.nodes:type_name -> polargraph.v1.NodeId
+	165, // 103: polargraph.v1.Vocabulary.prefixes:type_name -> polargraph.v1.VocabularyPrefix
+	166, // 104: polargraph.v1.Vocabulary.legacy:type_name -> polargraph.v1.LegacyStatus
+	173, // 105: polargraph.v1.ConvertLegacyDataResponse.predicates:type_name -> polargraph.v1.PredicateConversion
+	166, // 106: polargraph.v1.ConvertLegacyDataResponse.legacy:type_name -> polargraph.v1.LegacyStatus
+	2,   // 107: polargraph.v1.Binding.VarsEntry.value:type_name -> polargraph.v1.NodeId
+	3,   // 108: polargraph.v1.Binding.ValuesEntry.value:type_name -> polargraph.v1.Value
+	2,   // 109: polargraph.v1.QueryResult.VarsEntry.value:type_name -> polargraph.v1.NodeId
+	3,   // 110: polargraph.v1.QueryResult.ValuesEntry.value:type_name -> polargraph.v1.Value
+	3,   // 111: polargraph.v1.ValidateNodeRequest.PropertiesEntry.value:type_name -> polargraph.v1.Value
+	3,   // 112: polargraph.v1.ValidateEdgeRequest.PropertiesEntry.value:type_name -> polargraph.v1.Value
+	2,   // 113: polargraph.v1.ScoredBinding.VarsEntry.value:type_name -> polargraph.v1.NodeId
+	2,   // 114: polargraph.v1.CypherBinding.NodesEntry.value:type_name -> polargraph.v1.NodeId
+	3,   // 115: polargraph.v1.CypherBinding.ValuesEntry.value:type_name -> polargraph.v1.Value
+	168, // 116: polargraph.v1.PolarGraphService.GetVocabulary:input_type -> polargraph.v1.GetVocabularyRequest
+	169, // 117: polargraph.v1.PolarGraphService.SetVocabularyBase:input_type -> polargraph.v1.SetVocabularyBaseRequest
+	170, // 118: polargraph.v1.PolarGraphService.PutPrefix:input_type -> polargraph.v1.PutPrefixRequest
+	171, // 119: polargraph.v1.PolarGraphService.RemovePrefix:input_type -> polargraph.v1.RemovePrefixRequest
+	172, // 120: polargraph.v1.PolarGraphService.ConvertLegacyData:input_type -> polargraph.v1.ConvertLegacyDataRequest
+	21,  // 121: polargraph.v1.PolarGraphService.Insert:input_type -> polargraph.v1.InsertRequest
+	163, // 122: polargraph.v1.PolarGraphService.ResolveIris:input_type -> polargraph.v1.ResolveIrisRequest
+	133, // 123: polargraph.v1.PolarGraphService.CreateGraph:input_type -> polargraph.v1.CreateGraphRequest
+	135, // 124: polargraph.v1.PolarGraphService.ListGraphs:input_type -> polargraph.v1.ListGraphsRequest
+	137, // 125: polargraph.v1.PolarGraphService.GraphStats:input_type -> polargraph.v1.GraphStatsRequest
+	139, // 126: polargraph.v1.PolarGraphService.CopyGraph:input_type -> polargraph.v1.CopyGraphRequest
+	141, // 127: polargraph.v1.PolarGraphService.MoveGraph:input_type -> polargraph.v1.MoveGraphRequest
+	142, // 128: polargraph.v1.PolarGraphService.DropGraph:input_type -> polargraph.v1.DropGraphRequest
+	160, // 129: polargraph.v1.PolarGraphService.ExportGraph:input_type -> polargraph.v1.ExportGraphRequest
+	146, // 130: polargraph.v1.PolarGraphService.ApplyChanges:input_type -> polargraph.v1.ApplyChangesRequest
+	148, // 131: polargraph.v1.PolarGraphService.ValidateShapes:input_type -> polargraph.v1.ValidateShapesRequest
+	151, // 132: polargraph.v1.PolarGraphService.Subscribe:input_type -> polargraph.v1.SubscribeRequest
+	153, // 133: polargraph.v1.PolarGraphService.GrantGraphAccess:input_type -> polargraph.v1.GrantGraphAccessRequest
+	155, // 134: polargraph.v1.PolarGraphService.RevokeGraphAccess:input_type -> polargraph.v1.RevokeGraphAccessRequest
+	157, // 135: polargraph.v1.PolarGraphService.GetGraphAccess:input_type -> polargraph.v1.GetGraphAccessRequest
+	23,  // 136: polargraph.v1.PolarGraphService.Query:input_type -> polargraph.v1.QueryRequest
+	30,  // 137: polargraph.v1.PolarGraphService.InsertVector:input_type -> polargraph.v1.InsertVectorRequest
+	32,  // 138: polargraph.v1.PolarGraphService.SearchVector:input_type -> polargraph.v1.SearchVectorRequest
+	28,  // 139: polargraph.v1.PolarGraphService.Reachable:input_type -> polargraph.v1.ReachableRequest
+	48,  // 140: polargraph.v1.PolarGraphService.RegisterNodeType:input_type -> polargraph.v1.RegisterNodeTypeRequest
+	50,  // 141: polargraph.v1.PolarGraphService.GetNodeType:input_type -> polargraph.v1.GetNodeTypeRequest
+	52,  // 142: polargraph.v1.PolarGraphService.ListNodeTypes:input_type -> polargraph.v1.ListNodeTypesRequest
+	54,  // 143: polargraph.v1.PolarGraphService.ValidateNode:input_type -> polargraph.v1.ValidateNodeRequest
+	57,  // 144: polargraph.v1.PolarGraphService.RegisterEdgeType:input_type -> polargraph.v1.RegisterEdgeTypeRequest
+	59,  // 145: polargraph.v1.PolarGraphService.GetEdgeType:input_type -> polargraph.v1.GetEdgeTypeRequest
+	61,  // 146: polargraph.v1.PolarGraphService.ListEdgeTypes:input_type -> polargraph.v1.ListEdgeTypesRequest
+	63,  // 147: polargraph.v1.PolarGraphService.ValidateEdge:input_type -> polargraph.v1.ValidateEdgeRequest
+	68,  // 148: polargraph.v1.PolarGraphService.ListPredicatesBetween:input_type -> polargraph.v1.ListPredicatesBetweenRequest
+	65,  // 149: polargraph.v1.PolarGraphService.ValidateOntology:input_type -> polargraph.v1.ValidateOntologyRequest
+	37,  // 150: polargraph.v1.PolarGraphService.SearchVectorFiltered:input_type -> polargraph.v1.SearchVectorFilteredRequest
+	39,  // 151: polargraph.v1.PolarGraphService.SearchVectorInSet:input_type -> polargraph.v1.SearchVectorInSetRequest
+	43,  // 152: polargraph.v1.PolarGraphService.BatchInsertVectors:input_type -> polargraph.v1.BatchInsertVectorsRequest
+	71,  // 153: polargraph.v1.PolarGraphService.VectorSeedQuery:input_type -> polargraph.v1.VectorSeedQueryRequest
+	74,  // 154: polargraph.v1.PolarGraphService.CreateBackup:input_type -> polargraph.v1.CreateBackupRequest
+	76,  // 155: polargraph.v1.PolarGraphService.ListBackups:input_type -> polargraph.v1.ListBackupsRequest
+	78,  // 156: polargraph.v1.PolarGraphService.PurgeOldBackups:input_type -> polargraph.v1.PurgeOldBackupsRequest
+	80,  // 157: polargraph.v1.PolarGraphService.RunRetention:input_type -> polargraph.v1.RunRetentionRequest
+	84,  // 158: polargraph.v1.PolarGraphService.ReplicaStatus:input_type -> polargraph.v1.ReplicaStatusRequest
+	82,  // 159: polargraph.v1.PolarGraphService.StreamWal:input_type -> polargraph.v1.StreamWalRequest
+	23,  // 160: polargraph.v1.PolarGraphService.ExplainQuery:input_type -> polargraph.v1.QueryRequest
+	86,  // 161: polargraph.v1.PolarGraphService.MigrateSchema:input_type -> polargraph.v1.MigrateRequest
+	88,  // 162: polargraph.v1.PolarGraphService.MigrationStatus:input_type -> polargraph.v1.MigrationStatusRequest
+	97,  // 163: polargraph.v1.PolarGraphService.CypherQuery:input_type -> polargraph.v1.CypherQueryRequest
+	100, // 164: polargraph.v1.PolarGraphService.CypherWrite:input_type -> polargraph.v1.CypherWriteRequest
+	23,  // 165: polargraph.v1.PolarGraphService.QueryStream:input_type -> polargraph.v1.QueryRequest
+	97,  // 166: polargraph.v1.PolarGraphService.CypherQueryStream:input_type -> polargraph.v1.CypherQueryRequest
+	91,  // 167: polargraph.v1.PolarGraphService.ShowIndexes:input_type -> polargraph.v1.ShowIndexesRequest
+	95,  // 168: polargraph.v1.PolarGraphService.ShowStats:input_type -> polargraph.v1.ShowStatsRequest
+	104, // 169: polargraph.v1.PolarGraphService.BeginTransaction:input_type -> polargraph.v1.BeginTransactionRequest
+	106, // 170: polargraph.v1.PolarGraphService.CommitTransaction:input_type -> polargraph.v1.CommitTransactionRequest
+	108, // 171: polargraph.v1.PolarGraphService.RollbackTransaction:input_type -> polargraph.v1.RollbackTransactionRequest
+	17,  // 172: polargraph.v1.PolarGraphService.GetEdgeAnnotations:input_type -> polargraph.v1.GetEdgeAnnotationsRequest
+	19,  // 173: polargraph.v1.PolarGraphService.GetEdgeIdsByTriple:input_type -> polargraph.v1.GetEdgeIdsByTripleRequest
+	110, // 174: polargraph.v1.PolarGraphService.AddApiKey:input_type -> polargraph.v1.AddApiKeyRequest
+	112, // 175: polargraph.v1.PolarGraphService.RevokeApiKey:input_type -> polargraph.v1.RevokeApiKeyRequest
+	114, // 176: polargraph.v1.PolarGraphService.ListApiKeys:input_type -> polargraph.v1.ListApiKeysRequest
+	116, // 177: polargraph.v1.PolarGraphService.GrantAccess:input_type -> polargraph.v1.GrantAccessRequest
+	118, // 178: polargraph.v1.PolarGraphService.RevokeAccess:input_type -> polargraph.v1.RevokeAccessRequest
+	120, // 179: polargraph.v1.PolarGraphService.AddUserToGroup:input_type -> polargraph.v1.AddUserToGroupRequest
+	122, // 180: polargraph.v1.PolarGraphService.GetUserAccess:input_type -> polargraph.v1.GetUserAccessRequest
+	124, // 181: polargraph.v1.PolarGraphService.GetPropertyHistory:input_type -> polargraph.v1.GetPropertyHistoryRequest
+	127, // 182: polargraph.v1.PolarGraphService.DeleteTriples:input_type -> polargraph.v1.DeleteTriplesRequest
+	129, // 183: polargraph.v1.PolarGraphService.RunMaterialization:input_type -> polargraph.v1.RunMaterializationRequest
+	167, // 184: polargraph.v1.PolarGraphService.GetVocabulary:output_type -> polargraph.v1.Vocabulary
+	167, // 185: polargraph.v1.PolarGraphService.SetVocabularyBase:output_type -> polargraph.v1.Vocabulary
+	167, // 186: polargraph.v1.PolarGraphService.PutPrefix:output_type -> polargraph.v1.Vocabulary
+	167, // 187: polargraph.v1.PolarGraphService.RemovePrefix:output_type -> polargraph.v1.Vocabulary
+	174, // 188: polargraph.v1.PolarGraphService.ConvertLegacyData:output_type -> polargraph.v1.ConvertLegacyDataResponse
+	22,  // 189: polargraph.v1.PolarGraphService.Insert:output_type -> polargraph.v1.InsertResponse
+	164, // 190: polargraph.v1.PolarGraphService.ResolveIris:output_type -> polargraph.v1.ResolveIrisResponse
+	134, // 191: polargraph.v1.PolarGraphService.CreateGraph:output_type -> polargraph.v1.CreateGraphResponse
+	136, // 192: polargraph.v1.PolarGraphService.ListGraphs:output_type -> polargraph.v1.ListGraphsResponse
+	138, // 193: polargraph.v1.PolarGraphService.GraphStats:output_type -> polargraph.v1.GraphStatsResponse
+	140, // 194: polargraph.v1.PolarGraphService.CopyGraph:output_type -> polargraph.v1.CopyGraphResponse
+	140, // 195: polargraph.v1.PolarGraphService.MoveGraph:output_type -> polargraph.v1.CopyGraphResponse
+	143, // 196: polargraph.v1.PolarGraphService.DropGraph:output_type -> polargraph.v1.DropGraphResponse
+	162, // 197: polargraph.v1.PolarGraphService.ExportGraph:output_type -> polargraph.v1.ExportGraphChunk
+	147, // 198: polargraph.v1.PolarGraphService.ApplyChanges:output_type -> polargraph.v1.ApplyChangesResponse
+	150, // 199: polargraph.v1.PolarGraphService.ValidateShapes:output_type -> polargraph.v1.ValidateShapesResponse
+	152, // 200: polargraph.v1.PolarGraphService.Subscribe:output_type -> polargraph.v1.ChangeEvent
+	154, // 201: polargraph.v1.PolarGraphService.GrantGraphAccess:output_type -> polargraph.v1.GrantGraphAccessResponse
+	156, // 202: polargraph.v1.PolarGraphService.RevokeGraphAccess:output_type -> polargraph.v1.RevokeGraphAccessResponse
+	159, // 203: polargraph.v1.PolarGraphService.GetGraphAccess:output_type -> polargraph.v1.GetGraphAccessResponse
+	25,  // 204: polargraph.v1.PolarGraphService.Query:output_type -> polargraph.v1.QueryResponse
+	31,  // 205: polargraph.v1.PolarGraphService.InsertVector:output_type -> polargraph.v1.InsertVectorResponse
+	34,  // 206: polargraph.v1.PolarGraphService.SearchVector:output_type -> polargraph.v1.SearchVectorResponse
+	29,  // 207: polargraph.v1.PolarGraphService.Reachable:output_type -> polargraph.v1.ReachableResponse
+	49,  // 208: polargraph.v1.PolarGraphService.RegisterNodeType:output_type -> polargraph.v1.RegisterNodeTypeResponse
+	51,  // 209: polargraph.v1.PolarGraphService.GetNodeType:output_type -> polargraph.v1.GetNodeTypeResponse
+	53,  // 210: polargraph.v1.PolarGraphService.ListNodeTypes:output_type -> polargraph.v1.ListNodeTypesResponse
+	55,  // 211: polargraph.v1.PolarGraphService.ValidateNode:output_type -> polargraph.v1.ValidateNodeResponse
+	58,  // 212: polargraph.v1.PolarGraphService.RegisterEdgeType:output_type -> polargraph.v1.RegisterEdgeTypeResponse
+	60,  // 213: polargraph.v1.PolarGraphService.GetEdgeType:output_type -> polargraph.v1.GetEdgeTypeResponse
+	62,  // 214: polargraph.v1.PolarGraphService.ListEdgeTypes:output_type -> polargraph.v1.ListEdgeTypesResponse
+	64,  // 215: polargraph.v1.PolarGraphService.ValidateEdge:output_type -> polargraph.v1.ValidateEdgeResponse
+	69,  // 216: polargraph.v1.PolarGraphService.ListPredicatesBetween:output_type -> polargraph.v1.ListPredicatesBetweenResponse
+	67,  // 217: polargraph.v1.PolarGraphService.ValidateOntology:output_type -> polargraph.v1.ValidateOntologyResponse
+	38,  // 218: polargraph.v1.PolarGraphService.SearchVectorFiltered:output_type -> polargraph.v1.SearchVectorFilteredResponse
+	40,  // 219: polargraph.v1.PolarGraphService.SearchVectorInSet:output_type -> polargraph.v1.SearchVectorInSetResponse
+	44,  // 220: polargraph.v1.PolarGraphService.BatchInsertVectors:output_type -> polargraph.v1.BatchInsertVectorsResponse
+	72,  // 221: polargraph.v1.PolarGraphService.VectorSeedQuery:output_type -> polargraph.v1.VectorSeedQueryResponse
+	75,  // 222: polargraph.v1.PolarGraphService.CreateBackup:output_type -> polargraph.v1.CreateBackupResponse
+	77,  // 223: polargraph.v1.PolarGraphService.ListBackups:output_type -> polargraph.v1.ListBackupsResponse
+	79,  // 224: polargraph.v1.PolarGraphService.PurgeOldBackups:output_type -> polargraph.v1.PurgeOldBackupsResponse
+	81,  // 225: polargraph.v1.PolarGraphService.RunRetention:output_type -> polargraph.v1.RunRetentionResponse
+	85,  // 226: polargraph.v1.PolarGraphService.ReplicaStatus:output_type -> polargraph.v1.ReplicaStatusResponse
+	83,  // 227: polargraph.v1.PolarGraphService.StreamWal:output_type -> polargraph.v1.WalEntry
+	102, // 228: polargraph.v1.PolarGraphService.ExplainQuery:output_type -> polargraph.v1.ExplainResponse
+	87,  // 229: polargraph.v1.PolarGraphService.MigrateSchema:output_type -> polargraph.v1.MigrateResponse
+	89,  // 230: polargraph.v1.PolarGraphService.MigrationStatus:output_type -> polargraph.v1.MigrationStatusResponse
+	99,  // 231: polargraph.v1.PolarGraphService.CypherQuery:output_type -> polargraph.v1.CypherQueryResponse
+	101, // 232: polargraph.v1.PolarGraphService.CypherWrite:output_type -> polargraph.v1.CypherWriteResponse
+	27,  // 233: polargraph.v1.PolarGraphService.QueryStream:output_type -> polargraph.v1.QueryStreamChunk
+	27,  // 234: polargraph.v1.PolarGraphService.CypherQueryStream:output_type -> polargraph.v1.QueryStreamChunk
+	94,  // 235: polargraph.v1.PolarGraphService.ShowIndexes:output_type -> polargraph.v1.ShowIndexesResponse
+	96,  // 236: polargraph.v1.PolarGraphService.ShowStats:output_type -> polargraph.v1.ShowStatsResponse
+	105, // 237: polargraph.v1.PolarGraphService.BeginTransaction:output_type -> polargraph.v1.BeginTransactionResponse
+	107, // 238: polargraph.v1.PolarGraphService.CommitTransaction:output_type -> polargraph.v1.CommitTransactionResponse
+	109, // 239: polargraph.v1.PolarGraphService.RollbackTransaction:output_type -> polargraph.v1.RollbackTransactionResponse
+	18,  // 240: polargraph.v1.PolarGraphService.GetEdgeAnnotations:output_type -> polargraph.v1.GetEdgeAnnotationsResponse
+	20,  // 241: polargraph.v1.PolarGraphService.GetEdgeIdsByTriple:output_type -> polargraph.v1.GetEdgeIdsByTripleResponse
+	111, // 242: polargraph.v1.PolarGraphService.AddApiKey:output_type -> polargraph.v1.AddApiKeyResponse
+	113, // 243: polargraph.v1.PolarGraphService.RevokeApiKey:output_type -> polargraph.v1.RevokeApiKeyResponse
+	115, // 244: polargraph.v1.PolarGraphService.ListApiKeys:output_type -> polargraph.v1.ListApiKeysResponse
+	117, // 245: polargraph.v1.PolarGraphService.GrantAccess:output_type -> polargraph.v1.GrantAccessResponse
+	119, // 246: polargraph.v1.PolarGraphService.RevokeAccess:output_type -> polargraph.v1.RevokeAccessResponse
+	121, // 247: polargraph.v1.PolarGraphService.AddUserToGroup:output_type -> polargraph.v1.AddUserToGroupResponse
+	123, // 248: polargraph.v1.PolarGraphService.GetUserAccess:output_type -> polargraph.v1.GetUserAccessResponse
+	126, // 249: polargraph.v1.PolarGraphService.GetPropertyHistory:output_type -> polargraph.v1.GetPropertyHistoryResponse
+	128, // 250: polargraph.v1.PolarGraphService.DeleteTriples:output_type -> polargraph.v1.DeleteTriplesResponse
+	130, // 251: polargraph.v1.PolarGraphService.RunMaterialization:output_type -> polargraph.v1.RunMaterializationResponse
+	184, // [184:252] is the sub-list for method output_type
+	116, // [116:184] is the sub-list for method input_type
+	116, // [116:116] is the sub-list for extension type_name
+	116, // [116:116] is the sub-list for extension extendee
+	0,   // [0:116] is the sub-list for field type_name
 }
 
 func init() { file_polargraph_proto_init() }
@@ -11912,7 +11946,7 @@ func file_polargraph_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_polargraph_proto_rawDesc), len(file_polargraph_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   184,
+			NumMessages:   186,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

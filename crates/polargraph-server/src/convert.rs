@@ -373,29 +373,41 @@ pub fn binding_to_proto(bindings: &Bindings) -> proto::Binding {
             .map(|(k, &v)| (k.clone(), node_id_to_proto(v)))
             .collect(),
         predicates: std::collections::HashMap::new(),
+        values: std::collections::HashMap::new(),
     }
 }
 
-pub fn binding_to_proto_full(
-    bindings: &Bindings,
-    pred_bindings: &polargraph_query::datalog::PredBindings,
-) -> proto::Binding {
+/// A full solution: node, predicate and value bindings.
+pub fn binding_to_proto_full(sol: &polargraph_query::datalog::Solution) -> proto::Binding {
     proto::Binding {
-        vars: bindings
+        vars: sol
+            .nodes
             .iter()
             .map(|(k, &v)| (k.clone(), node_id_to_proto(v)))
             .collect(),
-        predicates: pred_bindings.clone(),
+        predicates: sol.preds.clone(),
+        values: values_to_proto(&sol.values),
     }
 }
 
-pub fn binding_to_query_result(bindings: &Bindings) -> proto::QueryResult {
+pub fn binding_to_query_result(sol: &polargraph_query::datalog::Solution) -> proto::QueryResult {
     proto::QueryResult {
-        vars: bindings
+        vars: sol
+            .nodes
             .iter()
             .map(|(k, &v)| (k.clone(), node_id_to_proto(v)))
             .collect(),
+        values: values_to_proto(&sol.values),
     }
+}
+
+fn values_to_proto(
+    values: &polargraph_query::datalog::ValueBindings,
+) -> std::collections::HashMap<String, proto::Value> {
+    values
+        .iter()
+        .map(|(k, v)| (k.clone(), value_to_proto(v)))
+        .collect()
 }
 
 // ── CypherBinding ─────────────────────────────────────────────────────────────

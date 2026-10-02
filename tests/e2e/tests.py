@@ -334,6 +334,23 @@ def test_changes_replace_cypher_writes(base_url: str):
     assert status == 200 and data.get("retracted") == 1, f"retraction failed: {status} {data}"
 
 
+def test_query_value_bindings(base_url: str):
+    """/query binds a variable to a property value and returns it in @values."""
+    node = new_id()
+    pred = f"title_{uuid.uuid4().hex[:8]}"
+    status, data = http_post(base_url + "/changes", {"adds": [{"triples": [
+        {"subject": node, "predicate": pred, "value": "Dune"},
+    ]}]})
+    assert status == 200, f"/changes failed with status {status}: {data}"
+
+    status, data = http_post(base_url + "/query", {"patterns": [f"?b :{pred} ?t"]})
+    assert status == 200, f"query failed with status {status}: {data}"
+    results = data.get("results", [])
+    assert len(results) == 1, f"expected one row: {data}"
+    assert results[0].get("b") == node, f"expected the subject node: {data}"
+    assert results[0].get("@values", {}).get("t") == "Dune", f"expected the title value: {data}"
+
+
 TESTS = [
     test_health,
     test_insert_relation,
@@ -350,6 +367,7 @@ TESTS = [
     test_vocabulary_runtime_types,
     test_cypher_write_deprecated,
     test_changes_replace_cypher_writes,
+    test_query_value_bindings,
 ]
 
 

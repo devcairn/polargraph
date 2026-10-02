@@ -427,6 +427,35 @@ fn node_id_to_uuid_string(nid: &proto::NodeId) -> String {
     }
 }
 
+/// Query rows whose variables are all nodes. Paths that don't read value
+/// bindings yet use this to keep their results as before value bindings
+/// (docs/design/value-bindings.md); a row with a value binding is one the
+/// engine used to drop.
+fn node_rows(bindings: Vec<proto::Binding>) -> impl Iterator<Item = proto::Binding> {
+    bindings.into_iter().filter(|b| b.values.is_empty())
+}
+
+/// One `/query` row: node variables as UUID strings, plus — when any
+/// variable is bound to a property value — `"@values": {var: value}` (the
+/// JSON value encoding of `/insert`; `@` can't occur in a variable name).
+fn query_row_json(
+    vars: std::collections::HashMap<String, proto::NodeId>,
+    values: std::collections::HashMap<String, proto::Value>,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    for (k, v) in vars {
+        obj.insert(k, serde_json::Value::String(node_id_to_uuid_string(&v)));
+    }
+    if !values.is_empty() {
+        let values: serde_json::Map<String, serde_json::Value> = values
+            .iter()
+            .map(|(k, v)| (k.clone(), proto_value_to_json(v)))
+            .collect();
+        obj.insert("@values".into(), serde_json::Value::Object(values));
+    }
+    serde_json::Value::Object(obj)
+}
+
 fn proto_value_to_json(v: &proto::Value) -> serde_json::Value {
     use proto::value::Kind;
     match &v.kind {
@@ -566,13 +595,7 @@ async fn handle_query(
     let results: Vec<serde_json::Value> = resp
         .bindings
         .into_iter()
-        .map(|b| {
-            let mut obj = serde_json::Map::new();
-            for (k, v) in b.vars {
-                obj.insert(k, serde_json::Value::String(node_id_to_uuid_string(&v)));
-            }
-            serde_json::Value::Object(obj)
-        })
+        .map(|b| query_row_json(b.vars, b.values))
         .collect();
 
     Json(serde_json::json!({ "results": results })).into_response()
@@ -727,9 +750,7 @@ async fn handle_triples(
         Err(e) => return grpc_error(e),
     };
 
-    let triples: Vec<TripleJson> = resp
-        .bindings
-        .into_iter()
+    let triples: Vec<TripleJson> = node_rows(resp.bindings)
         .map(|b| TripleJson {
             subject: params.subject.clone().unwrap_or_else(|| {
                 b.vars
@@ -1042,12 +1063,9 @@ async fn ndjson_streaming_response(
             match grpc_stream.message().await {
                 Ok(Some(chunk)) => {
                     for result in chunk.results {
-                        let mut obj = serde_json::Map::new();
-                        for (k, v) in result.vars {
-                            obj.insert(k, serde_json::Value::String(node_id_to_uuid_string(&v)));
-                        }
-                        let mut line = serde_json::to_string(&serde_json::Value::Object(obj))
-                            .unwrap_or_else(|_| "{}".to_string());
+                        let row = query_row_json(result.vars, result.values);
+                        let mut line =
+                            serde_json::to_string(&row).unwrap_or_else(|_| "{}".to_string());
                         line.push('\n');
                         if body_tx.send_data(bytes::Bytes::from(line)).await.is_err() {
                             return;
@@ -2596,9 +2614,7 @@ async fn execute_sparql_query(
         };
 
         // Convert proto bindings → SparqlBindings.
-        let mut branch_bindings: Vec<SparqlBindings> = resp
-            .bindings
-            .into_iter()
+        let mut branch_bindings: Vec<SparqlBindings> = node_rows(resp.bindings)
             .filter_map(|pb| {
                 let mut b: SparqlBindings = std::collections::HashMap::new();
                 for (k, v) in pb.vars {
@@ -2634,9 +2650,7 @@ async fn execute_sparql_query(
                     continue;
                 }
             };
-            let right: Vec<SparqlBindings> = opt_resp
-                .bindings
-                .into_iter()
+            let right: Vec<SparqlBindings> = node_rows(opt_resp.bindings)
                 .filter_map(|pb| {
                     let mut b: SparqlBindings = std::collections::HashMap::new();
                     for (k, v) in pb.vars {
@@ -2918,9 +2932,7 @@ async fn execute_sparql_construct(
             Err(e) => return grpc_error(e),
         };
 
-        let branch_bindings: Vec<polargraph_sparql::SparqlBindings> = resp
-            .bindings
-            .into_iter()
+        let branch_bindings: Vec<polargraph_sparql::SparqlBindings> = node_rows(resp.bindings)
             .filter(|pb| {
                 // FROM NAMED: graph variables must name one of the graphs.
                 let Some(named) = &named_nodes else {
@@ -2990,7 +3002,7 @@ async fn execute_sparql_construct(
             };
             let mut client = state.client.clone();
             if let Ok(resp) = client.query(tonic::Request::new(req)).await {
-                for pb in resp.into_inner().bindings {
+                for pb in node_rows(resp.into_inner().bindings) {
                     if let Some(obj_val) = pb.vars.get("_o") {
                         if obj_val.bytes.len() == 16 {
                             if let Ok(arr) = obj_val.bytes[..16].try_into() {
@@ -3338,7 +3350,7 @@ async fn handle_sparql_update(
                     };
                     let mut client = state.client.clone();
                     if let Ok(resp) = client.query(tonic::Request::new(req)).await {
-                        for pb in resp.into_inner().bindings {
+                        for pb in node_rows(resp.into_inner().bindings) {
                             let mut b: polargraph_sparql::SparqlBindings =
                                 std::collections::HashMap::new();
                             for (k, v) in pb.vars {
@@ -4475,7 +4487,7 @@ async fn export_jsonld_for(
                 ..Default::default()
             };
             if let Ok(resp) = client.query(tonic::Request::new(req)).await {
-                for pb in resp.into_inner().bindings {
+                for pb in node_rows(resp.into_inner().bindings) {
                     if let Some(obj_val) = pb.vars.get("_o") {
                         if obj_val.bytes.len() == 16 {
                             if let Ok(arr) = obj_val.bytes[..16].try_into() {
@@ -4518,7 +4530,7 @@ async fn export_jsonld_for(
                     ..Default::default()
                 };
                 if let Ok(resp) = client.query(tonic::Request::new(rel_req)).await {
-                    for pb in resp.into_inner().bindings {
+                    for pb in node_rows(resp.into_inner().bindings) {
                         if let Some(obj_val) = pb.vars.get("_o") {
                             if obj_val.bytes.len() == 16 {
                                 if let Ok(arr) = obj_val.bytes[..16].try_into() {
@@ -4550,7 +4562,7 @@ async fn export_jsonld_for(
                                 ..Default::default()
                             };
                             if let Ok(resp) = client.query(tonic::Request::new(prop_req)).await {
-                                for pb in resp.into_inner().bindings {
+                                for pb in node_rows(resp.into_inner().bindings) {
                                     // Node bindings only — property values come via
                                     // annotation steps (not in scope here).
                                     if let Some(obj_val) = pb.vars.get("v") {
@@ -4715,7 +4727,7 @@ async fn handle_export_subgraph(
                     ..Default::default()
                 };
                 if let Ok(resp) = client.query(tonic::Request::new(req)).await {
-                    for pb in resp.into_inner().bindings {
+                    for pb in node_rows(resp.into_inner().bindings) {
                         if let Some(obj_val) = pb.vars.get("_o") {
                             if obj_val.bytes.len() == 16 {
                                 if let Ok(arr) = obj_val.bytes[..16].try_into() {
@@ -5807,6 +5819,27 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn query_rows_carry_value_bindings_under_at_values() {
+        let node = proto::NodeId {
+            bytes: Uuid::nil().as_bytes().to_vec(),
+        };
+        let vars = std::collections::HashMap::from([("b".to_string(), node)]);
+        let values = std::collections::HashMap::from([(
+            "t".to_string(),
+            proto::Value {
+                kind: Some(proto::value::Kind::TextVal("Dune".into())),
+            },
+        )]);
+        let row = query_row_json(vars.clone(), values);
+        assert_eq!(row["b"], Uuid::nil().to_string());
+        assert_eq!(row["@values"]["t"], "Dune");
+        // No value bindings: the row shape is unchanged.
+        let row = query_row_json(vars, Default::default());
+        assert!(row.get("@values").is_none());
+    }
+
     use super::*;
 
     #[test]

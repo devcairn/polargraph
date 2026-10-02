@@ -58,11 +58,22 @@ def _decode_value(v: pb.Value) -> Any:
         return v.blob_val
     if kind == "vec_val":
         return list(v.vec_val.values)
+    # Language-tagged and typed RDF literals, as JSON-LD value objects (the
+    # REST encoding) so the tag / datatype survives.
+    if kind == "lang_text":
+        return {"@value": v.lang_text.text, "@language": v.lang_text.lang}
+    if kind == "typed":
+        return {"@value": v.typed.lexical, "@type": v.typed.datatype}
     return None
 
 
-def _binding_to_dict(b: pb.Binding) -> dict:
-    return {k: _str_node_id(v) for k, v in b.vars.items()}
+def _binding_to_dict(b: "pb.Binding | pb.QueryResult") -> dict:
+    """A query row: node variables as UUID strings, variables bound to
+    property values as Python values (a variable is one or the other)."""
+    row: dict = {k: _str_node_id(v) for k, v in b.vars.items()}
+    for k, v in b.values.items():
+        row[k] = _decode_value(v)
+    return row
 
 
 def _cypher_binding_to_dict(b: pb.CypherBinding) -> dict:
@@ -323,7 +334,7 @@ class PolarGraphClient:
         )
         for chunk in self._stub.QueryStream(req, metadata=self._metadata):
             for result in chunk.results:
-                yield {k: _str_node_id(v) for k, v in result.vars.items()}
+                yield _binding_to_dict(result)
 
     # ── Cypher ───────────────────────────────────────────────────────────────
 

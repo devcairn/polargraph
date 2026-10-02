@@ -443,6 +443,12 @@ export interface Binding {
    * / variable name.
    */
   predicates: { [key: string]: string };
+  /**
+   * / Variables bound to property values (literals), keyed by variable name
+   * / — e.g. `?n` in `?p name ?n`. A variable is in `vars` or `values`,
+   * / never both. Vectors don't bind. See docs/design/value-bindings.md.
+   */
+  values: { [key: string]: Value };
 }
 
 export interface Binding_VarsEntry {
@@ -453,6 +459,11 @@ export interface Binding_VarsEntry {
 export interface Binding_PredicatesEntry {
   key: string;
   value: string;
+}
+
+export interface Binding_ValuesEntry {
+  key: string;
+  value?: Value | undefined;
 }
 
 export interface QueryResponse {
@@ -466,11 +477,18 @@ export interface QueryResponse {
  */
 export interface QueryResult {
   vars: { [key: string]: NodeId };
+  /** / Variables bound to property values — as `Binding.values`. */
+  values: { [key: string]: Value };
 }
 
 export interface QueryResult_VarsEntry {
   key: string;
   value?: NodeId | undefined;
+}
+
+export interface QueryResult_ValuesEntry {
+  key: string;
+  value?: Value | undefined;
 }
 
 /**
@@ -4197,7 +4215,7 @@ export const QueryRequest_ParamsEntry: MessageFns<QueryRequest_ParamsEntry> = {
 };
 
 function createBaseBinding(): Binding {
-  return { vars: {}, predicates: {} };
+  return { vars: {}, predicates: {}, values: {} };
 }
 
 export const Binding: MessageFns<Binding> = {
@@ -4207,6 +4225,9 @@ export const Binding: MessageFns<Binding> = {
     });
     globalThis.Object.entries(message.predicates).forEach(([key, value]: [string, string]) => {
       Binding_PredicatesEntry.encode({ key: key as any, value }, writer.uint32(18).fork()).join();
+    });
+    globalThis.Object.entries(message.values).forEach(([key, value]: [string, Value]) => {
+      Binding_ValuesEntry.encode({ key: key as any, value }, writer.uint32(26).fork()).join();
     });
     return writer;
   },
@@ -4240,6 +4261,17 @@ export const Binding: MessageFns<Binding> = {
           }
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          const entry3 = Binding_ValuesEntry.decode(reader, reader.uint32());
+          if (entry3.value !== undefined) {
+            message.values[entry3.key] = entry3.value;
+          }
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4269,6 +4301,15 @@ export const Binding: MessageFns<Binding> = {
           {},
         )
         : {},
+      values: isObject(object.values)
+        ? (globalThis.Object.entries(object.values) as [string, any][]).reduce(
+          (acc: { [key: string]: Value }, [key, value]: [string, any]) => {
+            acc[key] = Value.fromJSON(value);
+            return acc;
+          },
+          {},
+        )
+        : {},
     };
   },
 
@@ -4289,6 +4330,15 @@ export const Binding: MessageFns<Binding> = {
         obj.predicates = {};
         entries.forEach(([k, v]) => {
           obj.predicates[k] = v;
+        });
+      }
+    }
+    if (message.values) {
+      const entries = globalThis.Object.entries(message.values) as [string, Value][];
+      if (entries.length > 0) {
+        obj.values = {};
+        entries.forEach(([k, v]) => {
+          obj.values[k] = Value.toJSON(v);
         });
       }
     }
@@ -4313,6 +4363,15 @@ export const Binding: MessageFns<Binding> = {
       (acc: { [key: string]: string }, [key, value]: [string, string]) => {
         if (value !== undefined) {
           acc[key] = globalThis.String(value);
+        }
+        return acc;
+      },
+      {},
+    );
+    message.values = (globalThis.Object.entries(object.values ?? {}) as [string, Value][]).reduce(
+      (acc: { [key: string]: Value }, [key, value]: [string, Value]) => {
+        if (value !== undefined) {
+          acc[key] = Value.fromPartial(value);
         }
         return acc;
       },
@@ -4476,6 +4535,82 @@ export const Binding_PredicatesEntry: MessageFns<Binding_PredicatesEntry> = {
   },
 };
 
+function createBaseBinding_ValuesEntry(): Binding_ValuesEntry {
+  return { key: "", value: undefined };
+}
+
+export const Binding_ValuesEntry: MessageFns<Binding_ValuesEntry> = {
+  encode(message: Binding_ValuesEntry, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.key !== "") {
+      writer.uint32(10).string(message.key);
+    }
+    if (message.value !== undefined) {
+      Value.encode(message.value, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Binding_ValuesEntry {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBinding_ValuesEntry();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = Value.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): Binding_ValuesEntry {
+    return {
+      key: isSet(object.key) ? globalThis.String(object.key) : "",
+      value: isSet(object.value) ? Value.fromJSON(object.value) : undefined,
+    };
+  },
+
+  toJSON(message: Binding_ValuesEntry): unknown {
+    const obj: any = {};
+    if (message.key !== "") {
+      obj.key = message.key;
+    }
+    if (message.value !== undefined) {
+      obj.value = Value.toJSON(message.value);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<Binding_ValuesEntry>, I>>(base?: I): Binding_ValuesEntry {
+    return Binding_ValuesEntry.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<Binding_ValuesEntry>, I>>(object: I): Binding_ValuesEntry {
+    const message = createBaseBinding_ValuesEntry();
+    message.key = object.key ?? "";
+    message.value = (object.value !== undefined && object.value !== null) ? Value.fromPartial(object.value) : undefined;
+    return message;
+  },
+};
+
 function createBaseQueryResponse(): QueryResponse {
   return { bindings: [] };
 }
@@ -4537,13 +4672,16 @@ export const QueryResponse: MessageFns<QueryResponse> = {
 };
 
 function createBaseQueryResult(): QueryResult {
-  return { vars: {} };
+  return { vars: {}, values: {} };
 }
 
 export const QueryResult: MessageFns<QueryResult> = {
   encode(message: QueryResult, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     globalThis.Object.entries(message.vars).forEach(([key, value]: [string, NodeId]) => {
       QueryResult_VarsEntry.encode({ key: key as any, value }, writer.uint32(10).fork()).join();
+    });
+    globalThis.Object.entries(message.values).forEach(([key, value]: [string, Value]) => {
+      QueryResult_ValuesEntry.encode({ key: key as any, value }, writer.uint32(18).fork()).join();
     });
     return writer;
   },
@@ -4563,6 +4701,17 @@ export const QueryResult: MessageFns<QueryResult> = {
           const entry1 = QueryResult_VarsEntry.decode(reader, reader.uint32());
           if (entry1.value !== undefined) {
             message.vars[entry1.key] = entry1.value;
+          }
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          const entry2 = QueryResult_ValuesEntry.decode(reader, reader.uint32());
+          if (entry2.value !== undefined) {
+            message.values[entry2.key] = entry2.value;
           }
           continue;
         }
@@ -4586,6 +4735,15 @@ export const QueryResult: MessageFns<QueryResult> = {
           {},
         )
         : {},
+      values: isObject(object.values)
+        ? (globalThis.Object.entries(object.values) as [string, any][]).reduce(
+          (acc: { [key: string]: Value }, [key, value]: [string, any]) => {
+            acc[key] = Value.fromJSON(value);
+            return acc;
+          },
+          {},
+        )
+        : {},
     };
   },
 
@@ -4597,6 +4755,15 @@ export const QueryResult: MessageFns<QueryResult> = {
         obj.vars = {};
         entries.forEach(([k, v]) => {
           obj.vars[k] = NodeId.toJSON(v);
+        });
+      }
+    }
+    if (message.values) {
+      const entries = globalThis.Object.entries(message.values) as [string, Value][];
+      if (entries.length > 0) {
+        obj.values = {};
+        entries.forEach(([k, v]) => {
+          obj.values[k] = Value.toJSON(v);
         });
       }
     }
@@ -4612,6 +4779,15 @@ export const QueryResult: MessageFns<QueryResult> = {
       (acc: { [key: string]: NodeId }, [key, value]: [string, NodeId]) => {
         if (value !== undefined) {
           acc[key] = NodeId.fromPartial(value);
+        }
+        return acc;
+      },
+      {},
+    );
+    message.values = (globalThis.Object.entries(object.values ?? {}) as [string, Value][]).reduce(
+      (acc: { [key: string]: Value }, [key, value]: [string, Value]) => {
+        if (value !== undefined) {
+          acc[key] = Value.fromPartial(value);
         }
         return acc;
       },
@@ -4695,6 +4871,82 @@ export const QueryResult_VarsEntry: MessageFns<QueryResult_VarsEntry> = {
     message.value = (object.value !== undefined && object.value !== null)
       ? NodeId.fromPartial(object.value)
       : undefined;
+    return message;
+  },
+};
+
+function createBaseQueryResult_ValuesEntry(): QueryResult_ValuesEntry {
+  return { key: "", value: undefined };
+}
+
+export const QueryResult_ValuesEntry: MessageFns<QueryResult_ValuesEntry> = {
+  encode(message: QueryResult_ValuesEntry, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.key !== "") {
+      writer.uint32(10).string(message.key);
+    }
+    if (message.value !== undefined) {
+      Value.encode(message.value, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): QueryResult_ValuesEntry {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseQueryResult_ValuesEntry();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = Value.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): QueryResult_ValuesEntry {
+    return {
+      key: isSet(object.key) ? globalThis.String(object.key) : "",
+      value: isSet(object.value) ? Value.fromJSON(object.value) : undefined,
+    };
+  },
+
+  toJSON(message: QueryResult_ValuesEntry): unknown {
+    const obj: any = {};
+    if (message.key !== "") {
+      obj.key = message.key;
+    }
+    if (message.value !== undefined) {
+      obj.value = Value.toJSON(message.value);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<QueryResult_ValuesEntry>, I>>(base?: I): QueryResult_ValuesEntry {
+    return QueryResult_ValuesEntry.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<QueryResult_ValuesEntry>, I>>(object: I): QueryResult_ValuesEntry {
+    const message = createBaseQueryResult_ValuesEntry();
+    message.key = object.key ?? "";
+    message.value = (object.value !== undefined && object.value !== null) ? Value.fromPartial(object.value) : undefined;
     return message;
   },
 };

@@ -37,8 +37,11 @@
 //!
 //! # Limitations (current phase)
 //!
-//! - Object variables only bind to `NodeId`s (relation triples). Property
-//!   triples match subject variables but their scalar value is not bindable.
+//! - The node-only entry points (`execute_query`, `execute_query_seeded`,
+//!   `execute_query_hybrid`, …) bind object variables to nodes only, as
+//!   Cypher and rule heads expect. The `*_full` variants also bind object
+//!   variables to property **values** ([`Solution::values`];
+//!   `docs/design/value-bindings.md`).
 //! - No negation, no aggregation.
 
 use crate::{
@@ -103,7 +106,7 @@ impl Term {
 /// When set alongside a `None` predicate, the evaluator enumerates predicates
 /// via a PSO or SPO scan and binds each one into [`PredBindings`].
 /// When a predicate variable was bound in an earlier pattern and appears again
-/// here with `predicate = None`, `substitute_with_preds` fills in the concrete
+/// here with `predicate = None`, `substitute` fills in the concrete
 /// predicate before dispatching to storage.
 #[derive(Debug, Clone)]
 pub struct VarPattern {
@@ -203,6 +206,28 @@ pub type Bindings = HashMap<String, NodeId>;
 /// concrete predicate in a later pattern (OWL 2 RL / SPARQL BGP use case).
 pub type PredBindings = HashMap<String, String>;
 
+/// A map from variable name to the property value it is bound to
+/// (`docs/design/value-bindings.md`). A variable is bound in at most one of
+/// [`Bindings`] and `ValueBindings`.
+pub type ValueBindings = HashMap<String, Value>;
+
+/// One solution of a query: node, predicate and value bindings.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Solution {
+    pub nodes: Bindings,
+    pub preds: PredBindings,
+    pub values: ValueBindings,
+}
+
+impl Solution {
+    fn from_nodes(nodes: Bindings) -> Self {
+        Self {
+            nodes,
+            ..Default::default()
+        }
+    }
+}
+
 /// A conjunctive query: an ordered list of patterns, all of which must be
 /// satisfied simultaneously (logical AND / natural join).
 #[derive(Debug, Clone, Default)]
@@ -227,31 +252,35 @@ impl Query {
 /// the storage evaluator can execute.
 ///
 /// Unbound variables become `None` (wildcard) — the storage layer returns all
-/// candidates; `extend_full` then filters and binds them.
+/// candidates; `extend_full` then filters and binds them. A variable bound to
+/// a value becomes that value's object slot (a value-index lookup), as a
+/// literal would.
 ///
-/// When `predicate_var` names a variable already present in `pred_bindings`,
-/// the bound predicate string is used as the concrete predicate, enabling
+/// When `predicate_var` names a variable already bound as a predicate, the
+/// bound predicate string is used as the concrete predicate, enabling
 /// predicate variables to act as predicates in subsequent patterns.
-fn substitute_with_preds(
-    vp: &VarPattern,
-    bindings: &Bindings,
-    pred_bindings: &PredBindings,
-) -> Pattern {
+fn substitute(vp: &VarPattern, sol: &Solution) -> Pattern {
     Pattern {
-        subject: resolve_term(&vp.subject, bindings),
+        subject: resolve_term(&vp.subject, sol),
         predicate: vp.predicate.clone().or_else(|| {
             vp.predicate_var
                 .as_ref()
-                .and_then(|v| pred_bindings.get(v).cloned())
+                .and_then(|v| sol.preds.get(v).cloned())
         }),
-        object: resolve_term(&vp.object, bindings),
+        object: resolve_term(&vp.object, sol),
     }
 }
 
-fn resolve_term(term: &Term, bindings: &Bindings) -> Option<NodeId> {
+fn resolve_term(term: &Term, sol: &Solution) -> Option<NodeId> {
     match term {
         Term::Bound(id) => Some(*id),
-        Term::Var(name) => bindings.get(name).copied(),
+        Term::Var(name) => match sol.nodes.get(name) {
+            Some(id) => Some(*id),
+            None => sol
+                .values
+                .get(name)
+                .map(polargraph_storage::keys::value_object),
+        },
         Term::Any => None,
         // Params should be substituted before evaluation; treat as wildcard.
         Term::Param(_) => None,
@@ -262,32 +291,35 @@ fn resolve_term(term: &Term, bindings: &Bindings) -> Option<NodeId> {
     }
 }
 
-/// Try to extend `bindings` and `pred_bindings` with the variable assignments
-/// implied by matching `triple` against `vp`.
+/// Whether a property value can be bound to a variable: every value except
+/// vectors (embeddings, not RDF literals — design note decision D).
+fn bindable(value: &Value) -> bool {
+    !matches!(value, Value::Vector(_))
+}
+
+/// Try to extend `sol` with the variable assignments implied by matching
+/// `triple` against `vp`. With `bind_values`, an object variable meeting a
+/// property binds its value; otherwise such a match is dropped.
 ///
 /// Returns `None` if the triple conflicts with an already-bound variable.
 ///
 /// Predicate variable binding: when `vp.predicate_var` is `Some(name)`, the
-/// matched triple's predicate string is bound to `name` in `PredBindings`.
-/// Conflicts (same variable already bound to a different predicate) discard
-/// this solution.
+/// matched triple's predicate string is bound to `name`. Conflicts (same
+/// variable already bound to a different predicate) discard this solution.
 fn extend_full(
     triple: &Triple,
     vp: &VarPattern,
-    bindings: &Bindings,
-    pred_bindings: &PredBindings,
-) -> Option<(Bindings, PredBindings)> {
-    let mut node_out = bindings.clone();
-    let mut pred_out = pred_bindings.clone();
+    sol: &Solution,
+    bind_values: bool,
+) -> Option<Solution> {
+    let mut out = sol.clone();
 
-    // Bind / check subject slot.
-    if let Some(updated) = bind_term(&vp.subject, triple.subject(), &node_out) {
-        node_out = updated;
-    } else {
+    // Bind / check subject slot (a value is never a subject).
+    if !bind_node(&vp.subject, triple.subject(), &mut out) {
         return None;
     }
 
-    // Bind / check object slot — only Relation triples have a NodeId object.
+    // Bind / check object slot.
     match &vp.object {
         Term::Any | Term::Param(_) => {} // nothing to bind
         Term::Bound(_) => {}             // substitution already handled this
@@ -295,31 +327,33 @@ fn extend_full(
             Triple::Property { value, .. } if value == expected => {}
             _ => return None,
         },
-        Term::Var(_) => {
-            match triple {
-                Triple::Relation { object, .. } => {
-                    if let Some(updated) = bind_term(&vp.object, *object, &node_out) {
-                        node_out = updated;
-                    } else {
-                        return None;
-                    }
-                }
-                Triple::Property { .. }
-                | Triple::EdgeProperty { .. }
-                | Triple::EdgeRelation { .. } => {
-                    // Object variable can't bind to a scalar/annotation value — skip.
+        Term::Var(name) => match triple {
+            Triple::Relation { object, .. } => {
+                if !bind_node(&vp.object, *object, &mut out) {
                     return None;
                 }
             }
-        }
+            Triple::Property { value, .. } if bind_values && bindable(value) => {
+                if out.nodes.contains_key(name) {
+                    return None; // a node never equals a literal
+                }
+                match out.values.get(name) {
+                    // RDF term equality (decision B).
+                    Some(existing) if existing != value => return None,
+                    Some(_) => {}
+                    None => {
+                        out.values.insert(name.clone(), value.clone());
+                    }
+                }
+            }
+            // Node-only evaluation, a vector, or an annotation: no binding.
+            _ => return None,
+        },
     }
 
     // Bind edge variable if requested (only applicable to Relation triples).
     if let (Some(ev), Triple::Relation { edge_id, .. }) = (&vp.edge_var, triple) {
-        let as_node = NodeId(edge_id.0);
-        if let Some(updated) = bind_term(&Term::Var(ev.clone()), as_node, &node_out) {
-            node_out = updated;
-        } else {
+        if !bind_node(&Term::Var(ev.clone()), NodeId(edge_id.0), &mut out) {
             return None;
         }
     }
@@ -327,16 +361,16 @@ fn extend_full(
     // Bind predicate variable.
     if let Some(pv) = &vp.predicate_var {
         let pred_str = triple.predicate().0.clone();
-        if let Some(existing) = pred_out.get(pv) {
+        if let Some(existing) = out.preds.get(pv) {
             if *existing != pred_str {
                 return None; // predicate variable conflict
             }
         } else {
-            pred_out.insert(pv.clone(), pred_str);
+            out.preds.insert(pv.clone(), pred_str);
         }
     }
 
-    Some((node_out, pred_out))
+    Some(out)
 }
 
 /// Scope every unscoped (`Union`) pattern — rule bodies included — to
@@ -356,18 +390,11 @@ pub fn scope_to_graph(patterns: &mut [VarPattern], rules: &mut [Rule], graph: &G
     }
 }
 
-/// Attempt to bind `term` to `value` within `bindings`.
-///
-/// - `Bound`: already substituted; returns unchanged bindings (storage
-///   already filtered on the value).
-/// - `Var(name)`: if already bound, check for equality; if unbound, add it.
-/// - `Any`: nothing to do.
-///
-/// Returns `None` on conflict.
-/// The storage scope for a pattern's graph term under `bindings`, or `None`
+/// The storage scope for a pattern's graph term under `sol`, or `None`
 /// for [`GraphTerm::Union`] (the ungraphed fast path). A graph variable bound
-/// to a node that isn't a named graph yields an empty `Set` (no matches).
-fn graph_scope(term: &GraphTerm, bindings: &Bindings, snapshot: &Snapshot) -> Option<GraphScope> {
+/// to a node that isn't a named graph — or to a value — yields an empty `Set`
+/// (no matches).
+fn graph_scope(term: &GraphTerm, sol: &Solution, snapshot: &Snapshot) -> Option<GraphScope> {
     Some(match term {
         GraphTerm::Union => return None,
         GraphTerm::Default => GraphScope::One(GraphId::DEFAULT),
@@ -377,11 +404,12 @@ fn graph_scope(term: &GraphTerm, bindings: &Bindings, snapshot: &Snapshot) -> Op
             None => GraphScope::Set(vec![]),
         },
         GraphTerm::Set(gs) => GraphScope::set(gs.clone()),
-        GraphTerm::Var(name) => match bindings.get(name) {
+        GraphTerm::Var(name) => match sol.nodes.get(name) {
             Some(node) => match snapshot.store().graph_for_node(node) {
                 Some(g) => GraphScope::One(g),
                 None => GraphScope::Set(vec![]),
             },
+            None if sol.values.contains_key(name) => GraphScope::Set(vec![]),
             None => GraphScope::Named,
         },
     })
@@ -393,15 +421,15 @@ fn graph_scope(term: &GraphTerm, bindings: &Bindings, snapshot: &Snapshot) -> Op
 fn match_pattern(
     vp: &VarPattern,
     pattern: &Pattern,
-    bindings: &Bindings,
-    pred_bindings: &PredBindings,
+    sol: &Solution,
+    bind_values: bool,
     snapshot: &Snapshot,
     ungraphed: impl FnOnce(&Pattern) -> Result<Vec<Triple>, StorageError>,
-) -> Result<Vec<(Bindings, PredBindings)>, StorageError> {
-    let Some(scope) = graph_scope(&vp.graph, bindings, snapshot) else {
+) -> Result<Vec<Solution>, StorageError> {
+    let Some(scope) = graph_scope(&vp.graph, sol, snapshot) else {
         return Ok(ungraphed(pattern)?
             .iter()
-            .filter_map(|t| extend_full(t, vp, bindings, pred_bindings))
+            .filter_map(|t| extend_full(t, vp, sol, bind_values))
             .collect());
     };
     let quads = snapshot.scan_scoped(
@@ -412,42 +440,39 @@ fn match_pattern(
     )?;
     let mut out = Vec::with_capacity(quads.len());
     for (g, triple) in quads {
-        let Some((mut b, pb)) = extend_full(&triple, vp, bindings, pred_bindings) else {
+        let Some(mut next) = extend_full(&triple, vp, sol, bind_values) else {
             continue;
         };
         if let GraphTerm::Var(name) = &vp.graph {
             let Some(node) = snapshot.store().graph_node(g) else {
                 continue; // default graph: not a named graph
             };
-            match b.get(name) {
-                Some(existing) if *existing != node => continue,
-                Some(_) => {}
-                None => {
-                    b.insert(name.clone(), node);
-                }
+            if !bind_node(&Term::Var(name.clone()), node, &mut next) {
+                continue;
             }
         }
-        out.push((b, pb));
+        out.push(next);
     }
     Ok(out)
 }
 
-fn bind_term(term: &Term, value: NodeId, bindings: &Bindings) -> Option<Bindings> {
+/// Bind `term` to the node `value` in `sol`: `Var` binds or checks equality
+/// (and fails when the variable holds a value); `Any` / `Bound` / `Param`
+/// match; a literal never equals a node. Returns whether it matched.
+fn bind_node(term: &Term, value: NodeId, sol: &mut Solution) -> bool {
     match term {
-        Term::Any | Term::Bound(_) | Term::Param(_) => Some(bindings.clone()),
-        // A node slot can never equal a literal.
-        Term::Literal(_) => None,
+        Term::Any | Term::Bound(_) | Term::Param(_) => true,
+        Term::Literal(_) => false,
         Term::Var(name) => {
-            if let Some(&existing) = bindings.get(name) {
-                if existing == value {
-                    Some(bindings.clone())
-                } else {
-                    None // conflict
+            if sol.values.contains_key(name) {
+                return false;
+            }
+            match sol.nodes.get(name) {
+                Some(existing) => *existing == value,
+                None => {
+                    sol.nodes.insert(name.clone(), value);
+                    true
                 }
-            } else {
-                let mut out = bindings.clone();
-                out.insert(name.clone(), value);
-                Some(out)
             }
         }
     }
@@ -455,15 +480,17 @@ fn bind_term(term: &Term, value: NodeId, bindings: &Bindings) -> Option<Bindings
 
 // ── Evaluator ─────────────────────────────────────────────────────────────────
 
-/// Inner evaluation loop that tracks `(Bindings, PredBindings)` pairs through
-/// every pattern so predicate variables are threaded correctly across joins.
-fn evaluate_seeded_inner(
+/// Evaluate `query`'s patterns left to right from `initial`, scanning each
+/// pattern with `scan` (storage, storage + pending writes, or storage +
+/// derived facts). `bind_values` lets object variables bind property values.
+fn evaluate_solutions(
     query: &Query,
     snapshot: &Snapshot,
-    initial: Vec<(Bindings, PredBindings)>,
+    initial: Vec<Solution>,
     deadline: Option<Instant>,
-    registry: Option<&EdgeTypeRegistry>,
-) -> Result<Vec<(Bindings, PredBindings)>, QueryError> {
+    bind_values: bool,
+    scan: impl Fn(&Pattern) -> Result<Vec<Triple>, StorageError>,
+) -> Result<Vec<Solution>, QueryError> {
     if initial.is_empty() {
         return Ok(vec![]);
     }
@@ -480,8 +507,12 @@ fn evaluate_seeded_inner(
         if let Some(hops) = vp.max_hops {
             // Bounded transitive: BFS up to `hops` steps. Predicate must be fixed.
             if let Some(pred) = &vp.predicate {
-                for (bindings, pred_bindings) in solutions {
-                    let start = resolve_term(&vp.subject, &bindings);
+                for sol in solutions {
+                    // A value can't start or end a path.
+                    let start = match &vp.subject {
+                        Term::Var(name) if sol.values.contains_key(name) => continue,
+                        t => resolve_term(t, &sol),
+                    };
 
                     // Collect starting nodes: use the bound subject directly, or
                     // enumerate all subjects with outgoing `pred` edges when unbound.
@@ -502,57 +533,38 @@ fn evaluate_seeded_inner(
 
                     for start_id in starts {
                         // Bind the subject variable (if any) to the starting node.
-                        let mut base = bindings.clone();
-                        if let Term::Var(sv) = &vp.subject {
-                            if let Some(&existing) = base.get(sv.as_str()) {
-                                if existing != start_id {
-                                    continue;
-                                }
-                            } else {
-                                base.insert(sv.clone(), start_id);
-                            }
+                        let mut base = sol.clone();
+                        if !bind_node(&vp.subject, start_id, &mut base) {
+                            continue;
                         }
 
                         let reachable =
                             reachable_from_hops(start_id, pred, snapshot, hops, deadline)?;
                         for target in reachable {
-                            match &vp.object {
-                                Term::Any | Term::Param(_) => {
-                                    next.push((base.clone(), pred_bindings.clone()))
-                                }
-                                Term::Bound(id) => {
-                                    if *id == target {
-                                        next.push((base.clone(), pred_bindings.clone()));
-                                    }
-                                }
-                                Term::Var(name) => {
-                                    if let Some(&existing) = base.get(name.as_str()) {
-                                        if existing == target {
-                                            next.push((base.clone(), pred_bindings.clone()));
-                                        }
-                                    } else {
-                                        let mut b = base.clone();
-                                        b.insert(name.clone(), target);
-                                        next.push((b, pred_bindings.clone()));
-                                    }
-                                }
+                            let mut b = base.clone();
+                            let matched = match &vp.object {
+                                Term::Bound(id) => *id == target,
                                 // Path traversal only reaches nodes.
-                                Term::Literal(_) => {}
+                                Term::Literal(_) => false,
+                                t => bind_node(t, target, &mut b),
+                            };
+                            if matched {
+                                next.push(b);
                             }
                         }
                     }
                 }
             }
         } else {
-            for (bindings, pred_bindings) in solutions {
-                let pattern = substitute_with_preds(vp, &bindings, &pred_bindings);
+            for sol in solutions {
+                let pattern = substitute(vp, &sol);
                 next.extend(match_pattern(
                     vp,
                     &pattern,
-                    &bindings,
-                    &pred_bindings,
+                    &sol,
+                    bind_values,
                     snapshot,
-                    |p| evaluate_with_registry(p, snapshot, registry),
+                    &scan,
                 )?);
             }
         }
@@ -567,6 +579,10 @@ fn evaluate_seeded_inner(
     Ok(solutions)
 }
 
+fn nodes_only(solutions: Vec<Solution>) -> Vec<Bindings> {
+    solutions.into_iter().map(|s| s.nodes).collect()
+}
+
 /// Evaluate a conjunctive query against a snapshot, starting from a given set
 /// of initial bindings instead of a single empty binding.
 ///
@@ -574,6 +590,7 @@ fn evaluate_seeded_inner(
 /// evaluated in order, joining against every element; only solutions that
 /// satisfy all patterns survive. An empty `initial` returns immediately with
 /// an empty result. An empty `query.patterns` returns `initial` unchanged.
+/// Object variables bind nodes only.
 ///
 /// When `registry` is `Some`, each pattern evaluation consults the
 /// `EdgeTypeRegistry` and short-circuits when the bound subject or object does
@@ -586,42 +603,38 @@ pub fn execute_query_seeded(
     deadline: Option<Instant>,
     registry: Option<&EdgeTypeRegistry>,
 ) -> Result<Vec<Bindings>, QueryError> {
-    let seeds = initial
-        .into_iter()
-        .map(|b| (b, PredBindings::new()))
-        .collect();
-    Ok(
-        evaluate_seeded_inner(query, snapshot, seeds, deadline, registry)?
-            .into_iter()
-            .map(|(b, _pb)| b)
-            .collect(),
-    )
+    let seeds = initial.into_iter().map(Solution::from_nodes).collect();
+    Ok(nodes_only(evaluate_solutions(
+        query,
+        snapshot,
+        seeds,
+        deadline,
+        false,
+        |p| evaluate_with_registry(p, snapshot, registry),
+    )?))
 }
 
-/// Like [`execute_query_seeded`] but also returns predicate variable bindings.
-///
-/// Use this when the query contains patterns with `predicate_var` set and the
-/// caller needs to inspect which predicate string was bound (e.g. for OWL 2 RL
-/// rule application or SPARQL-style `?s ?p ?o` projection).
+/// Like [`execute_query_seeded`] but returns full [`Solution`]s: predicate
+/// bindings, and object variables bound to property values.
 pub fn execute_query_seeded_full(
     query: &Query,
     snapshot: &Snapshot,
     initial: Vec<Bindings>,
     deadline: Option<Instant>,
     registry: Option<&EdgeTypeRegistry>,
-) -> Result<Vec<(Bindings, PredBindings)>, QueryError> {
-    let seeds = initial
-        .into_iter()
-        .map(|b| (b, PredBindings::new()))
-        .collect();
-    evaluate_seeded_inner(query, snapshot, seeds, deadline, registry)
+) -> Result<Vec<Solution>, QueryError> {
+    let seeds = initial.into_iter().map(Solution::from_nodes).collect();
+    evaluate_solutions(query, snapshot, seeds, deadline, true, |p| {
+        evaluate_with_registry(p, snapshot, registry)
+    })
 }
 
 /// Evaluate a conjunctive query against a snapshot.
 ///
 /// Returns all binding sets that satisfy every pattern in the query.
 /// An empty query returns a single empty binding (vacuously satisfied).
-/// A query with unsatisfiable patterns returns an empty vec.
+/// A query with unsatisfiable patterns returns an empty vec. Object
+/// variables bind nodes only — see [`execute_query_full`] for values.
 ///
 /// Pass `registry: Some(reg)` to enable schema-aware pruning (see
 /// [`execute_query_seeded`]). Pass `None` to preserve the existing behaviour.
@@ -634,17 +647,15 @@ pub fn execute_query(
     execute_query_seeded(query, snapshot, vec![HashMap::new()], deadline, registry)
 }
 
-/// Like [`execute_query`] but also returns predicate variable bindings.
-///
-/// Each result is a `(Bindings, PredBindings)` pair. `PredBindings` maps
-/// predicate variable names to the predicate strings that were bound during
-/// evaluation — see [`VarPattern::predicate_var`].
+/// Like [`execute_query`] but returns full [`Solution`]s: predicate variable
+/// bindings (see [`VarPattern::predicate_var`]) and object variables bound
+/// to property values ([`Solution::values`]).
 pub fn execute_query_full(
     query: &Query,
     snapshot: &Snapshot,
     deadline: Option<Instant>,
     registry: Option<&EdgeTypeRegistry>,
-) -> Result<Vec<(Bindings, PredBindings)>, QueryError> {
+) -> Result<Vec<Solution>, QueryError> {
     execute_query_seeded_full(query, snapshot, vec![HashMap::new()], deadline, registry)
 }
 
@@ -661,54 +672,35 @@ pub fn execute_query_with_pending(
     deadline: Option<Instant>,
     registry: Option<&EdgeTypeRegistry>,
 ) -> Result<Vec<Bindings>, QueryError> {
-    Ok(
-        execute_query_with_pending_full(query, snapshot, pending, deadline, registry)?
-            .into_iter()
-            .map(|(b, _pb)| b)
-            .collect(),
-    )
+    // Pending writes are overlaid on Union patterns only; they carry no
+    // graph in the overlay.
+    Ok(nodes_only(evaluate_solutions(
+        query,
+        snapshot,
+        vec![Solution::default()],
+        deadline,
+        false,
+        |p| evaluate_with_overlay(p, snapshot, pending, registry),
+    )?))
 }
 
-/// Like [`execute_query_with_pending`] but also returns predicate variable
-/// bindings — see [`execute_query_full`].
+/// Like [`execute_query_with_pending`] but returns full [`Solution`]s — see
+/// [`execute_query_full`].
 pub fn execute_query_with_pending_full(
     query: &Query,
     snapshot: &Snapshot,
     pending: &[Triple],
     deadline: Option<Instant>,
     registry: Option<&EdgeTypeRegistry>,
-) -> Result<Vec<(Bindings, PredBindings)>, QueryError> {
-    let mut solutions: Vec<(Bindings, PredBindings)> = vec![(HashMap::new(), PredBindings::new())];
-
-    for vp in &query.patterns {
-        if deadline.map(|d| Instant::now() > d).unwrap_or(false) {
-            return Err(QueryError::Timeout);
-        }
-
-        let mut next = Vec::new();
-
-        for (bindings, pred_bindings) in solutions {
-            // Pending writes are overlaid on Union patterns only; they carry
-            // no graph in the overlay.
-            let pattern = substitute_with_preds(vp, &bindings, &pred_bindings);
-            next.extend(match_pattern(
-                vp,
-                &pattern,
-                &bindings,
-                &pred_bindings,
-                snapshot,
-                |p| evaluate_with_overlay(p, snapshot, pending, registry),
-            )?);
-        }
-
-        solutions = next;
-
-        if solutions.is_empty() {
-            return Ok(vec![]);
-        }
-    }
-
-    Ok(solutions)
+) -> Result<Vec<Solution>, QueryError> {
+    evaluate_solutions(
+        query,
+        snapshot,
+        vec![Solution::default()],
+        deadline,
+        true,
+        |p| evaluate_with_overlay(p, snapshot, pending, registry),
+    )
 }
 
 // ── Recursive Datalog ─────────────────────────────────────────────────────────
@@ -827,13 +819,15 @@ pub fn execute_recursive(
             let body_query = Query {
                 patterns: rule.body.clone(),
             };
-            let solutions = execute_query_hybrid(&body_query, snapshot, &derived, deadline)?;
+            // Bodies may bind values; heads relate nodes (decision E), so a
+            // row whose head variable holds a value derives nothing.
+            let solutions = execute_query_hybrid_full(&body_query, snapshot, &derived, deadline)?;
 
             // Extract head variable bindings to produce new derived facts.
             let entry = derived.entry(rule.head_predicate.clone()).or_default();
-            for bindings in solutions {
-                let s = bindings.get(&rule.head_subject_var).copied();
-                let o = bindings.get(&rule.head_object_var).copied();
+            for sol in solutions {
+                let s = sol.nodes.get(&rule.head_subject_var).copied();
+                let o = sol.nodes.get(&rule.head_object_var).copied();
                 if let (Some(s), Some(o)) = (s, o) {
                     if entry.insert((s, o)) {
                         added_any = true;
@@ -965,57 +959,40 @@ pub fn reachable_from(
 
 /// Run a conjunctive query where patterns whose predicate is a key in `derived`
 /// are evaluated against the in-memory derived set rather than storage.
+/// Object variables bind nodes only.
 pub fn execute_query_hybrid(
     query: &Query,
     snapshot: &Snapshot,
     derived: &DerivedFacts,
     deadline: Option<Instant>,
 ) -> Result<Vec<Bindings>, QueryError> {
-    Ok(
-        execute_query_hybrid_full(query, snapshot, derived, deadline)?
-            .into_iter()
-            .map(|(b, _pb)| b)
-            .collect(),
-    )
+    // Derived (rule) facts have no graph: they only match Union patterns.
+    Ok(nodes_only(evaluate_solutions(
+        query,
+        snapshot,
+        vec![Solution::default()],
+        deadline,
+        false,
+        |p| evaluate_hybrid(p, snapshot, derived),
+    )?))
 }
 
-/// Like [`execute_query_hybrid`] but also returns predicate variable bindings
-/// — see [`execute_query_full`].
+/// Like [`execute_query_hybrid`] but returns full [`Solution`]s — see
+/// [`execute_query_full`].
 pub fn execute_query_hybrid_full(
     query: &Query,
     snapshot: &Snapshot,
     derived: &DerivedFacts,
     deadline: Option<Instant>,
-) -> Result<Vec<(Bindings, PredBindings)>, QueryError> {
-    let mut solutions: Vec<(Bindings, PredBindings)> = vec![(HashMap::new(), PredBindings::new())];
-
-    for vp in &query.patterns {
-        if deadline.map(|d| Instant::now() > d).unwrap_or(false) {
-            return Err(QueryError::Timeout);
-        }
-
-        let mut next = Vec::new();
-
-        for (bindings, pred_bindings) in solutions {
-            // Derived (rule) facts have no graph: they only match Union patterns.
-            let pattern = substitute_with_preds(vp, &bindings, &pred_bindings);
-            next.extend(match_pattern(
-                vp,
-                &pattern,
-                &bindings,
-                &pred_bindings,
-                snapshot,
-                |p| evaluate_hybrid(p, snapshot, derived),
-            )?);
-        }
-
-        solutions = next;
-        if solutions.is_empty() {
-            return Ok(vec![]);
-        }
-    }
-
-    Ok(solutions)
+) -> Result<Vec<Solution>, QueryError> {
+    evaluate_solutions(
+        query,
+        snapshot,
+        vec![Solution::default()],
+        deadline,
+        true,
+        |p| evaluate_hybrid(p, snapshot, derived),
+    )
 }
 
 /// Evaluate a single concrete `Pattern` against storage **or** `derived` facts.
@@ -2090,7 +2067,7 @@ mod tests {
 
         let preds: std::collections::HashSet<String> = results
             .iter()
-            .map(|(_nb, pb)| pb.get("p").cloned().unwrap())
+            .map(|sol| sol.preds.get("p").cloned().unwrap())
             .collect();
         assert!(
             preds.contains("urn:pg:vocab:knows"),
@@ -2104,7 +2081,7 @@ mod tests {
         // Each binding should also have the object variable set.
         let objects: std::collections::HashSet<NodeId> = results
             .iter()
-            .map(|(nb, _pb)| nb.get("o").copied().unwrap())
+            .map(|sol| sol.nodes.get("o").copied().unwrap())
             .collect();
         assert!(objects.contains(&bob));
         assert!(objects.contains(&acme));
@@ -2132,7 +2109,7 @@ mod tests {
 
         let preds: std::collections::HashSet<String> = results
             .iter()
-            .map(|(_nb, pb)| pb.get("p").cloned().unwrap())
+            .map(|sol| sol.preds.get("p").cloned().unwrap())
             .collect();
         assert!(preds.contains("urn:pg:vocab:knows"));
         assert!(preds.contains("urn:pg:vocab:manages"));
@@ -2176,7 +2153,7 @@ mod tests {
 
         // Only alice→bob satisfies Pattern 2 (bob knows dave); alice→carol does not.
         assert_eq!(results.len(), 1, "only the knows→knows chain joins");
-        let (nb, pb) = &results[0];
+        let (nb, pb) = (&results[0].nodes, &results[0].preds);
         assert_eq!(nb.get("o").copied(), Some(bob));
         assert_eq!(nb.get("x").copied(), Some(dave));
         assert_eq!(pb.get("p").map(String::as_str), Some("urn:pg:vocab:knows"));
@@ -2206,7 +2183,7 @@ mod tests {
 
         let results = execute_query_full(&q, &snap, None, None).unwrap();
         assert_eq!(results.len(), 1, "only the self-loop satisfies x == x");
-        let (nb, pb) = &results[0];
+        let (nb, pb) = (&results[0].nodes, &results[0].preds);
         assert_eq!(nb.get("x").copied(), Some(a));
         assert_eq!(pb.get("p").map(String::as_str), Some("urn:pg:vocab:self"));
     }
@@ -2214,7 +2191,7 @@ mod tests {
     #[test]
     fn predicate_var_substituted_as_predicate_in_later_pattern() {
         // Bind ?p in pattern 1, then use ?p as the predicate in pattern 2.
-        // This exercises the substitute_with_preds path.
+        // This exercises the predicate-variable substitution path.
         let (store, _dir) = open();
         let alice = NodeId::new();
         let bob = NodeId::new();
@@ -2251,8 +2228,169 @@ mod tests {
             1,
             "only the knows chain satisfies both patterns"
         );
-        let (nb, pb) = &results[0];
+        let (nb, pb) = (&results[0].nodes, &results[0].preds);
         assert_eq!(nb.get("x").copied(), Some(carol));
         assert_eq!(pb.get("p").map(String::as_str), Some("urn:pg:vocab:knows"));
+    }
+
+    // ── value bindings (docs/design/value-bindings.md) ────────────────────────
+
+    fn vp(s: Term, p: &str, o: Term) -> VarPattern {
+        VarPattern::new().subject(s).predicate(p).object(o)
+    }
+
+    #[test]
+    fn full_query_binds_property_values() {
+        let (store, _d) = open();
+        let (alice, bob) = (NodeId::new(), NodeId::new());
+        let snap = commit(
+            &store,
+            vec![
+                prop(alice, "name", "Alice"),
+                prop(bob, "name", "Bob"),
+                rel(alice, "knows", bob),
+            ],
+        );
+        let q = Query::new()
+            .pattern(vp(var("a"), "knows", var("b")))
+            .pattern(vp(var("b"), "name", var("n")));
+        let rows = execute_query_full(&q, &snap, None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].nodes.get("a"), Some(&alice));
+        assert_eq!(rows[0].values.get("n"), Some(&Value::Text("Bob".into())));
+        assert!(
+            !rows[0].nodes.contains_key("n"),
+            "a variable is a node or a value"
+        );
+
+        // The node-only API keeps its semantics: the property match is dropped.
+        let q = Query::new().pattern(vp(var("p"), "name", var("n")));
+        assert!(execute_query(&q, &snap, None, None).unwrap().is_empty());
+        assert_eq!(execute_query_full(&q, &snap, None, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn value_variables_join_by_rdf_term_equality() {
+        let (store, _d) = open();
+        let (a, b, c, d) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
+        let snap = commit(
+            &store,
+            vec![
+                prop(a, "age", 30i64),
+                prop(b, "age", 30i64),
+                prop(c, "age", 30.0f64), // a different term (decision B)
+                prop(d, "age", 31i64),
+            ],
+        );
+        let q = Query::new()
+            .pattern(vp(bound(a), "age", var("x")))
+            .pattern(vp(var("other"), "age", var("x")));
+        let rows = execute_query_full(&q, &snap, None, None).unwrap();
+        let mut others: Vec<NodeId> = rows.iter().map(|r| r.nodes["other"]).collect();
+        others.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+        assert_eq!(others, expected);
+    }
+
+    #[test]
+    fn a_value_never_joins_a_node_or_acts_as_subject() {
+        let (store, _d) = open();
+        let (a, b) = (NodeId::new(), NodeId::new());
+        let snap = commit(
+            &store,
+            vec![
+                prop(a, "label", "x"),
+                rel(a, "link", b),
+                prop(b, "name", "B"),
+            ],
+        );
+        // ?o is a value in the first pattern, so it can't be a link target.
+        let q = Query::new()
+            .pattern(vp(bound(a), "label", var("o")))
+            .pattern(vp(bound(a), "link", var("o")));
+        assert!(execute_query_full(&q, &snap, None, None)
+            .unwrap()
+            .is_empty());
+        // ... nor a subject.
+        let q = Query::new()
+            .pattern(vp(bound(a), "label", var("o")))
+            .pattern(vp(var("o"), "name", Term::Any));
+        assert!(execute_query_full(&q, &snap, None, None)
+            .unwrap()
+            .is_empty());
+        // A node-bound variable doesn't match a property value either.
+        let q = Query::new()
+            .pattern(vp(bound(a), "link", var("o")))
+            .pattern(vp(bound(a), "label", var("o")));
+        assert!(execute_query_full(&q, &snap, None, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn vectors_do_not_bind_and_language_and_typed_literals_do() {
+        let (store, _d) = open();
+        let a = NodeId::new();
+        let snap = commit(
+            &store,
+            vec![
+                prop(a, "emb", Value::Vector(vec![0.1, 0.2])),
+                prop(
+                    a,
+                    "title",
+                    Value::LangText {
+                        text: "Bonjour".into(),
+                        lang: "fr".into(),
+                    },
+                ),
+                prop(
+                    a,
+                    "born",
+                    Value::Typed {
+                        lexical: "1990-01-01".into(),
+                        datatype: "http://www.w3.org/2001/XMLSchema#date".into(),
+                    },
+                ),
+            ],
+        );
+        let q = Query::new().pattern(
+            VarPattern::new()
+                .subject(bound(a))
+                .predicate_var("p")
+                .object(var("o")),
+        );
+        let rows = execute_query_full(&q, &snap, None, None).unwrap();
+        let mut preds: Vec<&str> = rows.iter().map(|r| r.preds["p"].as_str()).collect();
+        preds.sort();
+        assert_eq!(preds, ["urn:pg:vocab:born", "urn:pg:vocab:title"]);
+        assert!(rows.iter().all(|r| r.values.contains_key("o")));
+    }
+
+    #[test]
+    fn rule_bodies_bind_values_and_heads_stay_nodes() {
+        let (store, _d) = open();
+        let (a, b, c) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let snap = commit(
+            &store,
+            vec![
+                prop(a, "city", "Oslo"),
+                prop(b, "city", "Oslo"),
+                prop(c, "city", "Rome"),
+                rel(a, "knows", b),
+            ],
+        );
+        // sameCity(x, y) :- x city ?c, y city ?c — joins on a value.
+        let same_city = Rule::new("sameCity", "x", "y").with_body(vec![
+            vp(var("x"), "city", var("c")),
+            vp(var("y"), "city", var("c")),
+        ]);
+        // A head variable that holds a value derives nothing (decision E).
+        let city_of = Rule::new("cityOf", "x", "c").with_body(vec![vp(var("x"), "city", var("c"))]);
+        let derived = execute_recursive(&[], &[same_city, city_of], &snap, None).unwrap();
+        let pairs = &derived["sameCity"];
+        assert!(pairs.contains(&(a, b)) && pairs.contains(&(b, a)));
+        assert!(!pairs.contains(&(a, c)));
+        assert!(derived.get("cityOf").map_or(true, |s| s.is_empty()));
     }
 }

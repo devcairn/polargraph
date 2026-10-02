@@ -577,6 +577,21 @@ the matching `Triple` values.
 This is a nested-loop join. Performance scales with selectivity of earlier
 patterns, so patterns with more bound slots should be placed first.
 
+**Value bindings** (`docs/design/value-bindings.md`). A solution is a
+`Solution { nodes, preds, values }`. The `*_full` evaluators
+(`execute_query_full`, `…_seeded_full`, `…_hybrid_full`,
+`…_with_pending_full`) — used by the `Query` / `QueryStream` RPCs — bind an
+object variable that meets a property to its value (`ValueBindings`); one
+that meets a relation binds the node. A variable is a node or a value, never
+both: a node never equals a literal, and a value is never a subject, a graph
+or a path endpoint. A value bound earlier is substituted like a literal, so
+a later pattern reads the value index (`posg`). Values join by RDF term
+equality (`Value` equality: `1` ≠ `1.0`, `"a"` ≠ `"a"@en`); vectors don't
+bind. The node-only entry points (`execute_query`, `…_seeded`, `…_hybrid`)
+keep the old semantics — a property met by an object variable drops the row
+— which Cypher relies on. Rule bodies are evaluated with values; a row whose
+head variable holds a value derives nothing (heads relate nodes).
+
 ### Recursive rules (`polargraph_query::datalog`)
 
 `execute_recursive(seed, rules, snapshot)` runs a semi-naïve fixpoint over

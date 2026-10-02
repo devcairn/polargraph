@@ -112,7 +112,7 @@ Transactions expire after 5 minutes of inactivity. Handle `NOT_FOUND` errors on 
 |--------|-------------|
 | `insert_node(node_id, type_name, **props)` | Insert a node typed `rdf:type <type_name>` (bare name, `prefix:local` or IRI, resolved by the server's vocabulary) and properties |
 | `insert_edge(subject, predicate, object, **props)` | Insert a relation triple |
-| `query(patterns, rules=None, limit=None, as_of_tx_time=None, as_of_valid_time=None, tx_id=None)` | Conjunctive pattern query |
+| `query(patterns, rules=None, limit=None, as_of_tx_time=None, as_of_valid_time=None, tx_id=None)` | Conjunctive pattern query; rows map node variables to UUID strings and variables bound to property values (`?n` in `?p name ?n`) to the value |
 | `cypher(query, vector=None, ef=None, limit=None, tx_id=None)` | Cypher read query |
 | `cypher_write(query)` | **Deprecated** (removed in the next server release; emits `DeprecationWarning`) — use `apply_changes` |
 | `apply_changes(adds=None, retractions=None, read_ts=0, strict=False, iris=None)` | Atomic changeset: adds per graph (`{"subject", "predicate", "object" \| "object_iri" \| "value", "mode"?}`) and exact retractions |

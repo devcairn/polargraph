@@ -119,7 +119,7 @@ const client = new PolarGraphClient("db.example.com", 50051, {
 |--------|---------|-------------|
 | `insertNode(nodeId, typeName, props?)` | `Promise<void>` | Insert a node typed `rdf:type <typeName>` (bare name, `prefix:local` or IRI, resolved by the server's vocabulary) and optional properties |
 | `insertEdge(subject, predicate, object, props?)` | `Promise<void>` | Insert directed relation triple |
-| `query(patterns, options?)` | `Promise<QueryResult[]>` | Conjunctive pattern query |
+| `query(patterns, options?)` | `Promise<QueryResult[]>` | Conjunctive pattern query; rows map node variables to UUID strings and variables bound to property values (`?n` in `?p name ?n`) to the value (`BoundValue`) |
 | `cypher(query, options?)` | `Promise<CypherRow[]>` | Cypher read query |
 | `cypherWrite(query, txId?)` | `Promise<WriteResult>` | **Deprecated** (removed in the next server release) — use `applyChanges` |
 | `applyChanges(changeSet)` | `Promise<ChangeResult>` | Atomic changeset: `adds` per graph (`{subject, predicate, object \| objectIri \| value, mode?}`), exact `retractions`, `readTs`, `strict` |
