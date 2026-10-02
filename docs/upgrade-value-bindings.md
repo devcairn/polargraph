@@ -68,6 +68,9 @@ SPARQL now returns literals, and several results change:
   quad of `n` (it skipped variable predicates).
 - **Output** — literal results carry `datatype` / `xml:lang` in JSON; CSV
   quotes fields containing commas, quotes or line breaks.
+- **New `FILTER` functions** — comparisons between variables (`?a < ?b`)
+  and over `STR` / `LANG` / `DATATYPE`; `CONTAINS`, `STRSTARTS`, `STRENDS`,
+  `LANGMATCHES`, `REGEX`. Queries using them were rejected before (HTTP 501).
 
 ## Upgrade
 

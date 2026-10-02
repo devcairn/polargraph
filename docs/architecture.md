@@ -3153,7 +3153,9 @@ strings < other typed literals — which `MIN` / `MAX` share. Aggregates:
 `COUNT` and an all-integer `SUM` are integers, other `SUM`s and `AVG`
 doubles (`AVG` isn't `xsd:decimal`: decimals aren't stored); `MIN` / `MAX`
 return the original value; an empty group leaves `MIN` / `MAX` / `SAMPLE`
-unbound and a non-numeric input leaves `SUM` / `AVG` unbound.
+unbound and a non-numeric input leaves `SUM` / `AVG` unbound. `STR` of a
+node renders its IRI; the REST gateway resolves IRIs for a branch's rows
+only when one of its filters reads IRI text.
 
 ### HTTP endpoints
 
@@ -3176,7 +3178,7 @@ Content negotiation via `Accept` header: `application/sparql-results+json`
 | BGP (Basic Graph Patterns) | Translated to `VarPattern` lists |
 | UNION | Each branch translated independently; results merged |
 | OPTIONAL / LEFT JOIN | Implemented in `polargraph_sparql::execute::left_join()` |
-| FILTER | BOUND, `=` / `!=` (value semantics), comparison (`>`, `<`, `>=`, `<=`, a literal on either side), `sameTerm`, NOT, AND, OR (three-valued, errors drop rows), `isIRI()`, `isLiteral()` |
+| FILTER | BOUND, `=` / `!=` (value semantics), comparisons (`>`, `<`, `>=`, `<=`) between variables, literals, IRIs and `STR()` / `LANG()` / `DATATYPE()`, `sameTerm`, NOT, AND, OR (three-valued, errors drop rows), `isIRI()`, `isLiteral()`, `CONTAINS` / `STRSTARTS` / `STRENDS` (string literals with compatible language tags), `LANGMATCHES` (RFC 4647 basic filtering), `REGEX` (flags `s m i x q`; invalid pattern → error). Not yet: arithmetic, other string / date / hash functions, `IN`, `IF`, `COALESCE`, `EXISTS` |
 | Property paths: simple | Named node paths translated to a single `VarPattern` |
 | Property paths: sequence | `a/b` — translated to two patterns with an intermediate variable |
 | Property paths: `+`, `*`, `?` | `+` and `*` compile to recursive Datalog rules; `?` treated as single-hop |
