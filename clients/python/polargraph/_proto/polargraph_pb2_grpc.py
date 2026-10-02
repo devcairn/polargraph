@@ -34,6 +34,16 @@ class PolarGraphServiceStub:
         Args:
             channel: A grpc.Channel.
         """
+        self.IncrementCounters = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/IncrementCounters',
+                request_serializer=polargraph__pb2.IncrementCountersRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.IncrementCountersResponse.FromString,
+                _registered_method=True)
+        self.GetCounters = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/GetCounters',
+                request_serializer=polargraph__pb2.GetCountersRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.GetCountersResponse.FromString,
+                _registered_method=True)
         self.GetVocabulary = channel.unary_unary(
                 '/polargraph.v1.PolarGraphService/GetVocabulary',
                 request_serializer=polargraph__pb2.GetVocabularyRequest.SerializeToString,
@@ -378,6 +388,20 @@ class PolarGraphServiceStub:
 
 class PolarGraphServiceServicer:
     """Missing associated documentation comment in .proto file."""
+
+    def IncrementCounters(self, request, context):
+        """/ Add to counters (service calls, primary only).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetCounters(self, request, context):
+        """/ Read counters (service calls).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
 
     def GetVocabulary(self, request, context):
         """/ The vocabulary base, prefixes and legacy-conversion status.
@@ -933,6 +957,16 @@ class PolarGraphServiceServicer:
 
 def add_PolarGraphServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
+            'IncrementCounters': grpc.unary_unary_rpc_method_handler(
+                    servicer.IncrementCounters,
+                    request_deserializer=polargraph__pb2.IncrementCountersRequest.FromString,
+                    response_serializer=polargraph__pb2.IncrementCountersResponse.SerializeToString,
+            ),
+            'GetCounters': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCounters,
+                    request_deserializer=polargraph__pb2.GetCountersRequest.FromString,
+                    response_serializer=polargraph__pb2.GetCountersResponse.SerializeToString,
+            ),
             'GetVocabulary': grpc.unary_unary_rpc_method_handler(
                     servicer.GetVocabulary,
                     request_deserializer=polargraph__pb2.GetVocabularyRequest.FromString,
@@ -1283,6 +1317,60 @@ def add_PolarGraphServiceServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class PolarGraphService:
     """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def IncrementCounters(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/IncrementCounters',
+            polargraph__pb2.IncrementCountersRequest.SerializeToString,
+            polargraph__pb2.IncrementCountersResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetCounters(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/GetCounters',
+            polargraph__pb2.GetCountersRequest.SerializeToString,
+            polargraph__pb2.GetCountersResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
 
     @staticmethod
     def GetVocabulary(request,

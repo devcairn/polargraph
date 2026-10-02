@@ -428,6 +428,11 @@ export interface QueryRequest {
    * / in (like SPARQL FROM). Empty = every graph.
    */
   graphs: string[];
+  /**
+   * / Leave out inferred facts (the `urn:pg:inferred:*` graphs written by
+   * / OWL RL inference); by default they are included.
+   */
+  excludeInferred: boolean;
 }
 
 export interface QueryRequest_ParamsEntry {
@@ -632,6 +637,12 @@ export interface VectorSpaceDef {
    * / no effect — the space retains the mode it was created with.
    */
   storageMode: string;
+  /**
+   * / "" (full precision) or "int8": int8 codes in RAM, full vectors on disk
+   * / (mmap), search re-ranked with the exact vectors; ~4× less vector RAM.
+   * / Setting it on an existing space quantizes it on its next insert.
+   */
+  quantization: string;
 }
 
 /** / A named node type schema. */
@@ -1043,6 +1054,11 @@ export interface CypherQueryRequest {
    * / nothing). Empty = every graph. A `USE GRAPH` clause takes precedence.
    */
   graphs: string[];
+  /**
+   * / Leave out inferred facts (the `urn:pg:inferred:*` graphs written by
+   * / OWL RL inference); by default they are included.
+   */
+  excludeInferred: boolean;
 }
 
 export interface CypherQueryRequest_ParamsEntry {
@@ -1313,20 +1329,24 @@ export interface DeleteTriplesResponse {
 /** / Request to run OWL 2 RL forward-chaining materialization. */
 export interface RunMaterializationRequest {
   /**
-   * / When true (default), clear the DRV column family before re-materializing.
-   * / When false, perform an incremental run starting from current DRV state.
+   * / Ignored (kept for compatibility): a run always recomputes the closure
+   * / and diffs it against the inferred graphs.
    */
   clearFirst: boolean;
 }
 
 /** / Statistics from a materialization run. */
 export interface RunMaterializationResponse {
-  /** / Number of new derived triples inserted across all fixpoint iterations. */
+  /** / Inferred facts asserted by this run (same as `asserted`). */
   rulesFired: number;
-  /** / Total unique derived triples now in the DRV CF (approximate). */
+  /** / Live inferred facts after the run. */
   derivedTriples: number;
-  /** / Number of fixpoint iterations performed before convergence. */
+  /** / 1 when the run changed anything, else 0 (kept for compatibility). */
   iterations: number;
+  /** / Inferred facts asserted. */
+  asserted: number;
+  /** / Inferred facts closed (no longer derivable). */
+  closed: number;
 }
 
 /**
@@ -1498,6 +1518,11 @@ export interface ValidateShapesRequest {
   userId: string;
   /** / With an overlay, only nodes it touches are validated unless this is set. */
   allFocusNodes: boolean;
+  /**
+   * / Leave out inferred facts (the `urn:pg:inferred:*` graphs written by
+   * / OWL RL inference); by default they are included.
+   */
+  excludeInferred: boolean;
 }
 
 export interface ValidationResult {
@@ -1727,6 +1752,33 @@ export interface ConvertLegacyDataResponse {
   labelsConverted: number;
   /** / Status after the run. */
   legacy?: LegacyStatus | undefined;
+}
+
+export interface CounterIncrement {
+  node?: NodeId | undefined;
+  delta: number;
+}
+
+export interface IncrementCountersRequest {
+  namespace: string;
+  /** / At most 10 000. */
+  increments: CounterIncrement[];
+  userId: string;
+}
+
+export interface IncrementCountersResponse {
+}
+
+export interface GetCountersRequest {
+  namespace: string;
+  /** / At most 10 000. */
+  nodes: NodeId[];
+  userId: string;
+}
+
+export interface GetCountersResponse {
+  /** / One value per requested node, in request order (0 if never counted). */
+  values: number[];
 }
 
 function createBaseNodeId(): NodeId {
@@ -3902,6 +3954,7 @@ function createBaseQueryRequest(): QueryRequest {
     userId: "",
     params: {},
     graphs: [],
+    excludeInferred: false,
   };
 }
 
@@ -3933,6 +3986,9 @@ export const QueryRequest: MessageFns<QueryRequest> = {
     });
     for (const v of message.graphs) {
       writer.uint32(74).string(v!);
+    }
+    if (message.excludeInferred !== false) {
+      writer.uint32(80).bool(message.excludeInferred);
     }
     return writer;
   },
@@ -4019,6 +4075,14 @@ export const QueryRequest: MessageFns<QueryRequest> = {
           message.graphs.push(reader.string());
           continue;
         }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.excludeInferred = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4071,6 +4135,11 @@ export const QueryRequest: MessageFns<QueryRequest> = {
       graphs: globalThis.Array.isArray(object?.graphs)
         ? object.graphs.map((e: any) => globalThis.String(e))
         : [],
+      excludeInferred: isSet(object.excludeInferred)
+        ? globalThis.Boolean(object.excludeInferred)
+        : isSet(object.exclude_inferred)
+        ? globalThis.Boolean(object.exclude_inferred)
+        : false,
     };
   },
 
@@ -4109,6 +4178,9 @@ export const QueryRequest: MessageFns<QueryRequest> = {
     if (message.graphs?.length) {
       obj.graphs = message.graphs;
     }
+    if (message.excludeInferred !== false) {
+      obj.excludeInferred = message.excludeInferred;
+    }
     return obj;
   },
 
@@ -4134,6 +4206,7 @@ export const QueryRequest: MessageFns<QueryRequest> = {
       {},
     );
     message.graphs = object.graphs?.map((e) => e) || [];
+    message.excludeInferred = object.excludeInferred ?? false;
     return message;
   },
 };
@@ -6649,7 +6722,7 @@ export const FieldDef: MessageFns<FieldDef> = {
 };
 
 function createBaseVectorSpaceDef(): VectorSpaceDef {
-  return { spaceName: "", dimensions: 0, embeddingModel: "", storageMode: "" };
+  return { spaceName: "", dimensions: 0, embeddingModel: "", storageMode: "", quantization: "" };
 }
 
 export const VectorSpaceDef: MessageFns<VectorSpaceDef> = {
@@ -6665,6 +6738,9 @@ export const VectorSpaceDef: MessageFns<VectorSpaceDef> = {
     }
     if (message.storageMode !== "") {
       writer.uint32(34).string(message.storageMode);
+    }
+    if (message.quantization !== "") {
+      writer.uint32(42).string(message.quantization);
     }
     return writer;
   },
@@ -6708,6 +6784,14 @@ export const VectorSpaceDef: MessageFns<VectorSpaceDef> = {
           message.storageMode = reader.string();
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.quantization = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6735,6 +6819,7 @@ export const VectorSpaceDef: MessageFns<VectorSpaceDef> = {
         : isSet(object.storage_mode)
         ? globalThis.String(object.storage_mode)
         : "",
+      quantization: isSet(object.quantization) ? globalThis.String(object.quantization) : "",
     };
   },
 
@@ -6752,6 +6837,9 @@ export const VectorSpaceDef: MessageFns<VectorSpaceDef> = {
     if (message.storageMode !== "") {
       obj.storageMode = message.storageMode;
     }
+    if (message.quantization !== "") {
+      obj.quantization = message.quantization;
+    }
     return obj;
   },
 
@@ -6764,6 +6852,7 @@ export const VectorSpaceDef: MessageFns<VectorSpaceDef> = {
     message.dimensions = object.dimensions ?? 0;
     message.embeddingModel = object.embeddingModel ?? "";
     message.storageMode = object.storageMode ?? "";
+    message.quantization = object.quantization ?? "";
     return message;
   },
 };
@@ -11443,6 +11532,7 @@ function createBaseCypherQueryRequest(): CypherQueryRequest {
     userId: "",
     params: {},
     graphs: [],
+    excludeInferred: false,
   };
 }
 
@@ -11476,6 +11566,9 @@ export const CypherQueryRequest: MessageFns<CypherQueryRequest> = {
     });
     for (const v of message.graphs) {
       writer.uint32(74).string(v!);
+    }
+    if (message.excludeInferred !== false) {
+      writer.uint32(80).bool(message.excludeInferred);
     }
     return writer;
   },
@@ -11572,6 +11665,14 @@ export const CypherQueryRequest: MessageFns<CypherQueryRequest> = {
           message.graphs.push(reader.string());
           continue;
         }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.excludeInferred = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11618,6 +11719,11 @@ export const CypherQueryRequest: MessageFns<CypherQueryRequest> = {
       graphs: globalThis.Array.isArray(object?.graphs)
         ? object.graphs.map((e: any) => globalThis.String(e))
         : [],
+      excludeInferred: isSet(object.excludeInferred)
+        ? globalThis.Boolean(object.excludeInferred)
+        : isSet(object.exclude_inferred)
+        ? globalThis.Boolean(object.exclude_inferred)
+        : false,
     };
   },
 
@@ -11656,6 +11762,9 @@ export const CypherQueryRequest: MessageFns<CypherQueryRequest> = {
     if (message.graphs?.length) {
       obj.graphs = message.graphs;
     }
+    if (message.excludeInferred !== false) {
+      obj.excludeInferred = message.excludeInferred;
+    }
     return obj;
   },
 
@@ -11681,6 +11790,7 @@ export const CypherQueryRequest: MessageFns<CypherQueryRequest> = {
       {},
     );
     message.graphs = object.graphs?.map((e) => e) || [];
+    message.excludeInferred = object.excludeInferred ?? false;
     return message;
   },
 };
@@ -14370,7 +14480,7 @@ export const RunMaterializationRequest: MessageFns<RunMaterializationRequest> = 
 };
 
 function createBaseRunMaterializationResponse(): RunMaterializationResponse {
-  return { rulesFired: 0, derivedTriples: 0, iterations: 0 };
+  return { rulesFired: 0, derivedTriples: 0, iterations: 0, asserted: 0, closed: 0 };
 }
 
 export const RunMaterializationResponse: MessageFns<RunMaterializationResponse> = {
@@ -14383,6 +14493,12 @@ export const RunMaterializationResponse: MessageFns<RunMaterializationResponse> 
     }
     if (message.iterations !== 0) {
       writer.uint32(24).uint32(message.iterations);
+    }
+    if (message.asserted !== 0) {
+      writer.uint32(32).uint64(message.asserted);
+    }
+    if (message.closed !== 0) {
+      writer.uint32(40).uint64(message.closed);
     }
     return writer;
   },
@@ -14418,6 +14534,22 @@ export const RunMaterializationResponse: MessageFns<RunMaterializationResponse> 
           message.iterations = reader.uint32();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.asserted = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.closed = longToNumber(reader.uint64());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -14440,6 +14572,8 @@ export const RunMaterializationResponse: MessageFns<RunMaterializationResponse> 
         ? globalThis.Number(object.derived_triples)
         : 0,
       iterations: isSet(object.iterations) ? globalThis.Number(object.iterations) : 0,
+      asserted: isSet(object.asserted) ? globalThis.Number(object.asserted) : 0,
+      closed: isSet(object.closed) ? globalThis.Number(object.closed) : 0,
     };
   },
 
@@ -14454,6 +14588,12 @@ export const RunMaterializationResponse: MessageFns<RunMaterializationResponse> 
     if (message.iterations !== 0) {
       obj.iterations = Math.round(message.iterations);
     }
+    if (message.asserted !== 0) {
+      obj.asserted = Math.round(message.asserted);
+    }
+    if (message.closed !== 0) {
+      obj.closed = Math.round(message.closed);
+    }
     return obj;
   },
 
@@ -14465,6 +14605,8 @@ export const RunMaterializationResponse: MessageFns<RunMaterializationResponse> 
     message.rulesFired = object.rulesFired ?? 0;
     message.derivedTriples = object.derivedTriples ?? 0;
     message.iterations = object.iterations ?? 0;
+    message.asserted = object.asserted ?? 0;
+    message.closed = object.closed ?? 0;
     return message;
   },
 };
@@ -16006,6 +16148,7 @@ function createBaseValidateShapesRequest(): ValidateShapesRequest {
     readTs: 0,
     userId: "",
     allFocusNodes: false,
+    excludeInferred: false,
   };
 }
 
@@ -16031,6 +16174,9 @@ export const ValidateShapesRequest: MessageFns<ValidateShapesRequest> = {
     }
     if (message.allFocusNodes !== false) {
       writer.uint32(56).bool(message.allFocusNodes);
+    }
+    if (message.excludeInferred !== false) {
+      writer.uint32(64).bool(message.excludeInferred);
     }
     return writer;
   },
@@ -16098,6 +16244,14 @@ export const ValidateShapesRequest: MessageFns<ValidateShapesRequest> = {
           message.allFocusNodes = reader.bool();
           continue;
         }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.excludeInferred = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -16144,6 +16298,11 @@ export const ValidateShapesRequest: MessageFns<ValidateShapesRequest> = {
         : isSet(object.all_focus_nodes)
         ? globalThis.Boolean(object.all_focus_nodes)
         : false,
+      excludeInferred: isSet(object.excludeInferred)
+        ? globalThis.Boolean(object.excludeInferred)
+        : isSet(object.exclude_inferred)
+        ? globalThis.Boolean(object.exclude_inferred)
+        : false,
     };
   },
 
@@ -16170,6 +16329,9 @@ export const ValidateShapesRequest: MessageFns<ValidateShapesRequest> = {
     if (message.allFocusNodes !== false) {
       obj.allFocusNodes = message.allFocusNodes;
     }
+    if (message.excludeInferred !== false) {
+      obj.excludeInferred = message.excludeInferred;
+    }
     return obj;
   },
 
@@ -16185,6 +16347,7 @@ export const ValidateShapesRequest: MessageFns<ValidateShapesRequest> = {
     message.readTs = object.readTs ?? 0;
     message.userId = object.userId ?? "";
     message.allFocusNodes = object.allFocusNodes ?? false;
+    message.excludeInferred = object.excludeInferred ?? false;
     return message;
   },
 };
@@ -18655,8 +18818,415 @@ export const ConvertLegacyDataResponse: MessageFns<ConvertLegacyDataResponse> = 
   },
 };
 
+function createBaseCounterIncrement(): CounterIncrement {
+  return { node: undefined, delta: 0 };
+}
+
+export const CounterIncrement: MessageFns<CounterIncrement> = {
+  encode(message: CounterIncrement, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.node !== undefined) {
+      NodeId.encode(message.node, writer.uint32(10).fork()).join();
+    }
+    if (message.delta !== 0) {
+      writer.uint32(16).int64(message.delta);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CounterIncrement {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCounterIncrement();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.node = NodeId.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.delta = longToNumber(reader.int64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CounterIncrement {
+    return {
+      node: isSet(object.node) ? NodeId.fromJSON(object.node) : undefined,
+      delta: isSet(object.delta) ? globalThis.Number(object.delta) : 0,
+    };
+  },
+
+  toJSON(message: CounterIncrement): unknown {
+    const obj: any = {};
+    if (message.node !== undefined) {
+      obj.node = NodeId.toJSON(message.node);
+    }
+    if (message.delta !== 0) {
+      obj.delta = Math.round(message.delta);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CounterIncrement>, I>>(base?: I): CounterIncrement {
+    return CounterIncrement.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CounterIncrement>, I>>(object: I): CounterIncrement {
+    const message = createBaseCounterIncrement();
+    message.node = (object.node !== undefined && object.node !== null) ? NodeId.fromPartial(object.node) : undefined;
+    message.delta = object.delta ?? 0;
+    return message;
+  },
+};
+
+function createBaseIncrementCountersRequest(): IncrementCountersRequest {
+  return { namespace: "", increments: [], userId: "" };
+}
+
+export const IncrementCountersRequest: MessageFns<IncrementCountersRequest> = {
+  encode(message: IncrementCountersRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.namespace !== "") {
+      writer.uint32(10).string(message.namespace);
+    }
+    for (const v of message.increments) {
+      CounterIncrement.encode(v!, writer.uint32(18).fork()).join();
+    }
+    if (message.userId !== "") {
+      writer.uint32(26).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): IncrementCountersRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseIncrementCountersRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.namespace = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.increments.push(CounterIncrement.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): IncrementCountersRequest {
+    return {
+      namespace: isSet(object.namespace) ? globalThis.String(object.namespace) : "",
+      increments: globalThis.Array.isArray(object?.increments)
+        ? object.increments.map((e: any) => CounterIncrement.fromJSON(e))
+        : [],
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: IncrementCountersRequest): unknown {
+    const obj: any = {};
+    if (message.namespace !== "") {
+      obj.namespace = message.namespace;
+    }
+    if (message.increments?.length) {
+      obj.increments = message.increments.map((e) => CounterIncrement.toJSON(e));
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<IncrementCountersRequest>, I>>(base?: I): IncrementCountersRequest {
+    return IncrementCountersRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<IncrementCountersRequest>, I>>(object: I): IncrementCountersRequest {
+    const message = createBaseIncrementCountersRequest();
+    message.namespace = object.namespace ?? "";
+    message.increments = object.increments?.map((e) => CounterIncrement.fromPartial(e)) || [];
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseIncrementCountersResponse(): IncrementCountersResponse {
+  return {};
+}
+
+export const IncrementCountersResponse: MessageFns<IncrementCountersResponse> = {
+  encode(_: IncrementCountersResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): IncrementCountersResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseIncrementCountersResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): IncrementCountersResponse {
+    return {};
+  },
+
+  toJSON(_: IncrementCountersResponse): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<IncrementCountersResponse>, I>>(base?: I): IncrementCountersResponse {
+    return IncrementCountersResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<IncrementCountersResponse>, I>>(_: I): IncrementCountersResponse {
+    const message = createBaseIncrementCountersResponse();
+    return message;
+  },
+};
+
+function createBaseGetCountersRequest(): GetCountersRequest {
+  return { namespace: "", nodes: [], userId: "" };
+}
+
+export const GetCountersRequest: MessageFns<GetCountersRequest> = {
+  encode(message: GetCountersRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.namespace !== "") {
+      writer.uint32(10).string(message.namespace);
+    }
+    for (const v of message.nodes) {
+      NodeId.encode(v!, writer.uint32(18).fork()).join();
+    }
+    if (message.userId !== "") {
+      writer.uint32(26).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetCountersRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetCountersRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.namespace = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.nodes.push(NodeId.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GetCountersRequest {
+    return {
+      namespace: isSet(object.namespace) ? globalThis.String(object.namespace) : "",
+      nodes: globalThis.Array.isArray(object?.nodes) ? object.nodes.map((e: any) => NodeId.fromJSON(e)) : [],
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: GetCountersRequest): unknown {
+    const obj: any = {};
+    if (message.namespace !== "") {
+      obj.namespace = message.namespace;
+    }
+    if (message.nodes?.length) {
+      obj.nodes = message.nodes.map((e) => NodeId.toJSON(e));
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetCountersRequest>, I>>(base?: I): GetCountersRequest {
+    return GetCountersRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetCountersRequest>, I>>(object: I): GetCountersRequest {
+    const message = createBaseGetCountersRequest();
+    message.namespace = object.namespace ?? "";
+    message.nodes = object.nodes?.map((e) => NodeId.fromPartial(e)) || [];
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseGetCountersResponse(): GetCountersResponse {
+  return { values: [] };
+}
+
+export const GetCountersResponse: MessageFns<GetCountersResponse> = {
+  encode(message: GetCountersResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    writer.uint32(10).fork();
+    for (const v of message.values) {
+      writer.int64(v);
+    }
+    writer.join();
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetCountersResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetCountersResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag === 8) {
+            message.values.push(longToNumber(reader.int64()));
+
+            continue;
+          }
+
+          if (tag === 10) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.values.push(longToNumber(reader.int64()));
+            }
+
+            continue;
+          }
+
+          break;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GetCountersResponse {
+    return {
+      values: globalThis.Array.isArray(object?.values) ? object.values.map((e: any) => globalThis.Number(e)) : [],
+    };
+  },
+
+  toJSON(message: GetCountersResponse): unknown {
+    const obj: any = {};
+    if (message.values?.length) {
+      obj.values = message.values.map((e) => Math.round(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetCountersResponse>, I>>(base?: I): GetCountersResponse {
+    return GetCountersResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetCountersResponse>, I>>(object: I): GetCountersResponse {
+    const message = createBaseGetCountersResponse();
+    message.values = object.values?.map((e) => e) || [];
+    return message;
+  },
+};
+
 export type PolarGraphServiceService = typeof PolarGraphServiceService;
 export const PolarGraphServiceService = {
+  /** / Add to counters (service calls, primary only). */
+  incrementCounters: {
+    path: "/polargraph.v1.PolarGraphService/IncrementCounters" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: IncrementCountersRequest): Buffer =>
+      Buffer.from(IncrementCountersRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): IncrementCountersRequest => IncrementCountersRequest.decode(value),
+    responseSerialize: (value: IncrementCountersResponse): Buffer =>
+      Buffer.from(IncrementCountersResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): IncrementCountersResponse => IncrementCountersResponse.decode(value),
+  },
+  /** / Read counters (service calls). */
+  getCounters: {
+    path: "/polargraph.v1.PolarGraphService/GetCounters" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: GetCountersRequest): Buffer => Buffer.from(GetCountersRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): GetCountersRequest => GetCountersRequest.decode(value),
+    responseSerialize: (value: GetCountersResponse): Buffer => Buffer.from(GetCountersResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): GetCountersResponse => GetCountersResponse.decode(value),
+  },
   /** / The vocabulary base, prefixes and legacy-conversion status. */
   getVocabulary: {
     path: "/polargraph.v1.PolarGraphService/GetVocabulary" as const,
@@ -19550,6 +20120,10 @@ export const PolarGraphServiceService = {
 } as const;
 
 export interface PolarGraphServiceServer extends UntypedServiceImplementation {
+  /** / Add to counters (service calls, primary only). */
+  incrementCounters: handleUnaryCall<IncrementCountersRequest, IncrementCountersResponse>;
+  /** / Read counters (service calls). */
+  getCounters: handleUnaryCall<GetCountersRequest, GetCountersResponse>;
   /** / The vocabulary base, prefixes and legacy-conversion status. */
   getVocabulary: handleUnaryCall<GetVocabularyRequest, Vocabulary>;
   /** / Set the base IRI for bare names. */
@@ -19838,6 +20412,38 @@ export interface PolarGraphServiceServer extends UntypedServiceImplementation {
 }
 
 export interface PolarGraphServiceClient extends Client {
+  /** / Add to counters (service calls, primary only). */
+  incrementCounters(
+    request: IncrementCountersRequest,
+    callback: (error: ServiceError | null, response: IncrementCountersResponse) => void,
+  ): ClientUnaryCall;
+  incrementCounters(
+    request: IncrementCountersRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: IncrementCountersResponse) => void,
+  ): ClientUnaryCall;
+  incrementCounters(
+    request: IncrementCountersRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: IncrementCountersResponse) => void,
+  ): ClientUnaryCall;
+  /** / Read counters (service calls). */
+  getCounters(
+    request: GetCountersRequest,
+    callback: (error: ServiceError | null, response: GetCountersResponse) => void,
+  ): ClientUnaryCall;
+  getCounters(
+    request: GetCountersRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: GetCountersResponse) => void,
+  ): ClientUnaryCall;
+  getCounters(
+    request: GetCountersRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: GetCountersResponse) => void,
+  ): ClientUnaryCall;
   /** / The vocabulary base, prefixes and legacy-conversion status. */
   getVocabulary(
     request: GetVocabularyRequest,

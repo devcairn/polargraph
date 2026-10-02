@@ -132,7 +132,7 @@ RocksDB-backed persistence. Owns the quad-index layout (storage format v3,
 | `mvcc` | `TimestampOracle`, `Transaction` (`insert`, `insert_in`, `bind_iri`), `WriteMode` (`Auto`/`Replace`/`Add`), `Snapshot`, `ConflictError` |
 | `keys` | `Order` (8 quad orders: encode/decode/prefix), `QuadKey`, `KeyPrefix`, `value_object`, ancillary keys; `keys::v2` read-only legacy layouts |
 | `codec` | Value serialization (discriminant + temporal + payload); `PropertyRef` and blob payloads; `valid_time`, `with_vt_end` |
-| `cf` | Column family names (`spog sopg psog posg ospg opsg gspo gpos meta hnsw trig epag epog peag drvg iri blob chg`); `cf::v2` legacy names |
+| `cf` | Column family names (`spog sopg psog posg ospg opsg gspo gpos meta hnsw trig epag epog peag drvg iri blob chg sts`); `cf::v2` legacy names |
 | `changes` | Change log for `Subscribe`: `chg` CF entry per commit (author, `GraphOp`s, quad versions); `changes_after`, `changes_floor`, `prune_changes`, `commit_watch` |
 | `migrate_v3` | `migrate`, `open_for_migration`, `MigrationReport` — offline v2 → v3 storage migration |
 | `graph_acl` | Graph-level access control: `grant_graph_access` / `revoke_graph_access` / `graph_grants` (grants in the system graph), `GraphAccessIndex` → `UserGraphAccess` (roaring bitmaps per level); enforced via `Snapshot::with_readable_graphs` inside scans |
@@ -140,14 +140,15 @@ RocksDB-backed persistence. Owns the quad-index layout (storage format v3,
 | `legacy` | `legacy_status` / `convert_legacy(dry_run)` — operator-triggered conversion of pre-vocabulary data (bare predicates → IRIs, `__type` → `rdf:type`); `LegacyStatus`, `ConversionReport`, `RDF_TYPE` |
 | `graphs` | Named-graph management on `TripleStore`: `create_graph`, graph metadata (system graph `urn:pg:graph:meta`), `graph_stats`, bitemporal `drop_graph`, `copy_graph` / `move_graph` (chunked, `urn:pg:copyInProgress` flag) |
 | `error` | `StorageError` |
-| `hnsw` | `HnswIndex` — pure-Rust HNSW, named-space key helpers, serialize/deserialize, mmap storage |
+| `hnsw` | `HnswIndex` — pure-Rust HNSW, named-space key helpers, serialize/deserialize, mmap storage, int8 codes (`SpaceOptions`, `Codes`) with exact re-ranking |
 | `registry` | `NodeTypeRegistry`, `EdgeTypeRegistry`, `ValidationError` |
 | `sst_import` | `SstImporter`, `ImportStats` — bulk import (Add-only; `add_triple_in` for a named graph) via SST ingestion into all 8 orders |
 | `compaction` | `CompactionManager`, `RetentionStats` — history-pruning retention over the 8 orders, RocksDB compaction, blob sweep |
 | `backup` | `BackupManager` — incremental RocksDB `BackupEngine` wrapper |
 | `migrations` | `MigrationRunner`, `Migration`, `AppliedMigration` — versioned schema migrations |
 | `wal_stream` | `WalStreamer`, `WalEntry` — WAL streaming for replication |
-| `owl_rl` | `materialize()` — OWL 2 RL forward-chaining engine, 12 rules, `drvg` CF |
+| `owl_rl` | OWL 2 RL inference into `urn:pg:inferred:*` graphs: `materialize()` (closure + diff), `infer_changes()` (DRed from the change log), `InferredGraphs`, 12 rules |
+| `counters` | `increment_counters` / `get_counters` — `sts` CF with an add merge operator |
 
 `TripleStore` is `Clone` (Arc-backed). Prefer passing it by clone rather
 than wrapping it again in Arc.
@@ -220,7 +221,8 @@ See `polargraph.example.toml` in the repo root for a fully-commented example.
 | `--retention-schedule` | `POLARGRAPH_RETENTION_SCHEDULE` | `false` | Enable background periodic retention task |
 | `--default-vector-ef N` | `POLARGRAPH_DEFAULT_VECTOR_EF` | `50` | Default HNSW exploration factor for vector searches |
 | `--query-cache-size N` | `POLARGRAPH_QUERY_CACHE_SIZE` | `1000` | Max Cypher query plans to cache |
-| `--auto-materialize` | `POLARGRAPH_AUTO_MATERIALIZE` | `false` | Run OWL 2 RL materialization at startup |
+| `--auto-materialize` | `POLARGRAPH_AUTO_MATERIALIZE` | `false` | Run OWL 2 RL inference at startup (implies `--inference`) |
+| `--inference` | `POLARGRAPH_INFERENCE` | `false` | Keep the inferred graphs current from the change log (DRed, ~1 s) |
 | `--inline-value-max-bytes N` | `POLARGRAPH_INLINE_VALUE_MAX_BYTES` | `256` | Property payloads above this are stored once in the `blob` CF |
 | `--change-retention-secs N` | `POLARGRAPH_CHANGE_RETENTION_SECS` | `604800` | Change-feed history kept for `Subscribe` resume (pruned hourly on the primary); 0 = forever |
 
@@ -268,7 +270,8 @@ Endpoints include: `POST /query`, `POST /query/stream`, `POST /insert`, `GET /tr
 `POST /access/grant`, `POST /access/revoke`, `POST /access/add-user`, `GET /access/user/:id`,
 `POST` / `DELETE` / `GET /graphs/access` (graph grants; `X-User-Id` is forwarded on every endpoint),
 `GET /subscribe` (change feed as Server-Sent Events), `POST /changes` (atomic changeset), `POST /validate` (SHACL),
-`GET /vocabulary`, `PUT /vocabulary/base`, `POST` / `DELETE /vocabulary/prefixes`, `POST /vocabulary/convert`
+`GET /vocabulary`, `PUT /vocabulary/base`, `POST` / `DELETE /vocabulary/prefixes`, `POST /vocabulary/convert`,
+`POST` / `GET /counters`
 (`POST /cypher/write` is deprecated — use `POST /changes` / `POST /sparql/update`),
 `POST /graphs`, `GET /graphs`, `DELETE /graphs?iri=`, `GET /graphs/stats`, `POST /graphs/copy`,
 `POST /graphs/move`, `GET /graphs/export`, `POST /import/rdf` (incl. N-Quads/TriG, `?graph=`),
@@ -333,8 +336,8 @@ value discriminant byte.
 
 ### Column families
 
-Storage format v3 (`__storage__/format = 3` in META) uses 18 column
-families (`chg` added by the change feed, created automatically on open). Every quad version is written atomically to all 8 quad orders via
+Storage format v3 (`__storage__/format = 3` in META) uses 19 column
+families (`chg` and `sts` created automatically on open). Every quad version is written atomically to all 8 quad orders via
 one `WriteBatch` (`TripleStore::stage_writes`):
 
 | CF | Purpose |
@@ -344,7 +347,8 @@ one `WriteBatch` (`TripleStore::stage_writes`):
 | `meta` | Predicate + graph intern tables, timestamp oracle, storage format, schema-migration version |
 | `hnsw` | HNSW vector index nodes and entry points (per named space) |
 | `trig` | Trigram index `[trigram:3][pred:4][g:4][subject:16]` (text ≤ 512 bytes) |
-| `drvg` | OWL 2 RL derived facts (`spog` layout) |
+| `drvg` | Legacy OWL 2 RL derived facts (retired in step 9) |
+| `sts` | Counters `[namespace][0x00][node:16]` → `i64` (merge operator, unversioned) |
 | `epag` / `peag` | Edge property annotations `[edge:16][pred:4][g:4][tt:8]` / predicate-first |
 | `epog` | Edge relation annotations `[edge:16][pred:4][obj:16][g:4][tt:8]` |
 | `iri` | IRI dictionary `[node_id:16]` → IRI (`Transaction::bind_iri`, `iri_of`, `iris_of`) |
@@ -511,6 +515,7 @@ entries were superseded by storage format v3 (last entries below).
 - [x] Cypher over RDF, PR 2 (plan step 8.5) — Cypher writes deprecated: `CypherWrite` / `POST /cypher/write` still run for one release with a `warning` header (REST `Deprecation` / `Warning`), a first-call log warning and `polargraph_deprecated_rpc_total{rpc}`; `RelationTriple.object_iri` (object by IRI / `prefix:local` / bare name, resolved through the vocabulary) on `Insert` / `ApplyChanges` / overlays, REST `/changes` sends non-UUID add objects that way; SDKs (Python 0.2.0, Go, JS 0.2.0) regenerated, `insert_node` writes `rdf:type`, new `apply_changes` + vocabulary methods, Cypher write methods deprecated. Removal waits on literal-valued query variables or a subject-retraction option (`docs/upgrade-cypher-rdf.md`)
 - [x] Value bindings, PR 1 (plan step 8.6; `docs/design/value-bindings.md`, release note `docs/upgrade-value-bindings.md`) — `Solution { nodes, preds, values }` / `ValueBindings` in `polargraph-query::datalog`; `*_full` evaluators bind object variables to property values (RDF term equality, value-index lookups, vectors excluded), node-only entry points unchanged (Cypher); rule bodies may bind values; proto `Binding.values` / `QueryResult.values` on `Query` / `QueryStream`; REST `/query` rows `@values`; UI shows values; SDK rows decode values (Go `QueryRows`). SPARQL keeps node-only rows (`node_rows`) until PR 2
 - [x] Value bindings, PR 2 — SPARQL: literal results (`SparqlValue::LangLiteral` / `TypedLiteral` / `Iri`), `polargraph_sparql::values` (`sparql_eq` / `sparql_cmp` with numeric promotion and type errors, `order_cmp`, `term_key`), three-valued `FILTER` (`eval_filter`), `sameTerm`, `ORDER BY` (`order_bindings`), aggregates per SPARQL 1.1 (MIN / MAX by order, unbound on empty / non-numeric), predicate variables bind, DESCRIBE includes values, UPDATE templates with value / predicate variables (`DELETE WHERE { <n> ?p ?o }`); FILTER expressions (`FilterExpr`, `SparqlFilter::Compare`): variable-to-variable comparisons, `STR` / `LANG` / `DATATYPE`, `CONTAINS` / `STRSTARTS` / `STRENDS`, `LANGMATCHES`, `REGEX`
+- [x] Step 9 (`docs/design/step9-inference-vectors-stats.md`, release note `docs/upgrade-step9.md`) — 9a: OWL 2 RL writes queryable inferred graphs (`urn:pg:inferred:<g>`, service-only `urn:pg:inferred:cross`), ACL inherited from the source graph, `exclude_inferred` opt-out, recompute-and-diff `materialize()`, canonical IRI hashing (RDF-loaded schema now fires), `drvg` retired; 9b: `--inference` background DRed (`infer_changes`) from the change log; 9c: int8 vector quantization (`VectorSpaceDef.quantization`, exact re-ranking); 9d: counters (`sts` CF, `IncrementCounters` / `GetCounters`, REST `/counters`)
 
 ## Adding a new predicate
 
