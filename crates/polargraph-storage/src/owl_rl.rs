@@ -730,6 +730,11 @@ fn live_inferred(
     Ok(out)
 }
 
+/// The last commit inference has covered (`None` before the first run).
+pub fn inference_applied(store: &TripleStore) -> Result<Option<Timestamp>, StorageError> {
+    get_applied(store)
+}
+
 /// The last commit incremental inference covered.
 fn get_applied(store: &TripleStore) -> Result<Option<Timestamp>, StorageError> {
     let meta = store.cf_handle(crate::cf::META)?;
@@ -872,10 +877,14 @@ pub fn infer_changes(store: &TripleStore) -> Result<Option<MaterializationStats>
             break;
         }
     }
-    if records.is_empty() {
+    let to = cursor;
+    // Only inference's own commits since the last run: nothing to do.
+    if records.iter().all(|r| r.author == INFERENCE_AUTHOR) {
+        if !records.is_empty() {
+            put_applied(store, to)?;
+        }
         return Ok(None);
     }
-    let to = cursor;
 
     let mut graphs = InferredGraphs::load(store);
     let mut asserted: Vec<Fact> = Vec::new();

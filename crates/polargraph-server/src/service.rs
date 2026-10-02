@@ -408,6 +408,48 @@ impl PolarGraphServer {
     /// Any transaction whose `last_used` is older than `idle_timeout_ms` is
     /// removed from the map (effectively rolling it back). Stops when `token`
     /// is cancelled.
+    /// Keep the inferred graphs current (step 9b): every second, apply the
+    /// commits logged since the last run (DRed; a full recompute after a
+    /// schema change or when the log was pruned past the resume point).
+    /// Primary only.
+    pub fn spawn_inference_task(&self, token: CancellationToken) {
+        if self.store.is_replica() {
+            return;
+        }
+        let server = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
+                let store = server.store.clone();
+                match tokio::task::spawn_blocking(move || owl_rl::infer_changes(&store)).await {
+                    Ok(Ok(Some(stats))) => {
+                        metrics::counter!("polargraph_inference_batches_total").increment(1);
+                        metrics::counter!("polargraph_inference_asserted_total")
+                            .increment(stats.asserted);
+                        metrics::counter!("polargraph_inference_closed_total")
+                            .increment(stats.closed);
+                        if stats.asserted + stats.closed > 0 {
+                            server.after_inference(&stats);
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(e)) => warn!("incremental inference failed: {e}"),
+                    Err(e) => warn!("incremental inference task panicked: {e}"),
+                }
+                if let Ok(Some(applied)) = owl_rl::inference_applied(&server.store) {
+                    let lag_us = server.store.oracle_ts().saturating_sub(applied.0).max(0);
+                    metrics::gauge!("polargraph_inference_lag_seconds").set(lag_us as f64 / 1e6);
+                }
+            }
+            info!("inference task stopped");
+        });
+    }
+
     pub fn spawn_tx_ttl_task(&self, token: CancellationToken, idle_timeout_ms: u64) {
         if idle_timeout_ms == 0 {
             return;

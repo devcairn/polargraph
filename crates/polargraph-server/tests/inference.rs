@@ -131,3 +131,33 @@ async fn inferred_graphs_are_written_by_inference_only() {
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
+
+#[tokio::test]
+async fn the_inference_task_keeps_inferred_graphs_current() {
+    let (svc, _dir) = setup().await;
+    let token = tokio_util::sync::CancellationToken::new();
+    svc.spawn_inference_task(token.clone());
+    // A new subclass instance, with no explicit materialization call.
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![rel("http://ex/felix", RDF_TYPE, "urn:pg:vocab:Cat")],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    let mut seen = 0;
+    for _ in 0..50 {
+        seen = svc
+            .query(Request::new(animals(false)))
+            .await
+            .unwrap()
+            .into_inner()
+            .bindings
+            .len();
+        if seen == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    token.cancel();
+    assert_eq!(seen, 2, "tom and felix are animals within a few seconds");
+}

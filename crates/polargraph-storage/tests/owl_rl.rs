@@ -326,3 +326,154 @@ fn inferred_graphs_inherit_readers_of_their_source() {
     let inferred_g2 = store.graph_id("urn:pg:inferred:urn:g2");
     assert!(inferred_g2.map_or(true, |g| !readable.contains(g.0)));
 }
+
+// ── DRed (9b) ─────────────────────────────────────────────────────────────────
+
+mod dred {
+    use super::*;
+
+    const TRANS: &str = "http://ex/partOf";
+
+    fn setup() -> (TripleStore, TempDir) {
+        let (store, d) = open_store();
+        rel(&store, "", TRANS, RDF_TYPE, OWL_TRANSITIVE_PROP);
+        rel(
+            &store,
+            "",
+            "http://ex/Cat",
+            RDFS_SUBCLASS_OF,
+            "http://ex/Animal",
+        );
+        owl_rl::materialize(&store, true).unwrap();
+        (store, d)
+    }
+
+    #[test]
+    fn nothing_pending_is_a_no_op() {
+        let (store, _d) = setup();
+        assert!(owl_rl::infer_changes(&store).unwrap().is_none());
+    }
+
+    #[test]
+    fn additions_are_inferred_incrementally() {
+        let (store, _d) = setup();
+        rel(&store, "", "http://ex/tom", RDF_TYPE, "http://ex/Cat");
+        rel(&store, "", "http://ex/a", TRANS, "http://ex/b");
+        rel(&store, "", "http://ex/b", TRANS, "http://ex/c");
+        let stats = owl_rl::infer_changes(&store).unwrap().unwrap();
+        assert!(!stats.full, "incremental, not a recompute");
+        assert_eq!(stats.asserted, 2);
+        assert!(inferred(
+            &store,
+            DEFAULT_INFERRED,
+            "http://ex/tom",
+            RDF_TYPE,
+            "http://ex/Animal"
+        ));
+        assert!(inferred(
+            &store,
+            DEFAULT_INFERRED,
+            "http://ex/a",
+            TRANS,
+            "http://ex/c"
+        ));
+        // Its own commits are not re-processed.
+        assert!(owl_rl::infer_changes(&store).unwrap().is_none());
+    }
+
+    #[test]
+    fn deletions_over_delete_then_re_derive() {
+        let (store, _d) = setup();
+        // a → b → c → d, plus a shortcut a → c.
+        for (s, o) in [("a", "b"), ("b", "c"), ("c", "d"), ("a", "c")] {
+            rel(
+                &store,
+                "",
+                &format!("http://ex/{s}"),
+                TRANS,
+                &format!("http://ex/{o}"),
+            );
+        }
+        owl_rl::infer_changes(&store).unwrap();
+        let has = |s: &str, o: &str| {
+            inferred(
+                &store,
+                DEFAULT_INFERRED,
+                &format!("http://ex/{s}"),
+                TRANS,
+                &format!("http://ex/{o}"),
+            )
+        };
+        assert!(has("a", "d") && has("b", "d"));
+
+        // Remove b → c: b → d loses its only support; a → d keeps a → c → d.
+        retract(&store, "", "http://ex/b", TRANS, "http://ex/c");
+        let stats = owl_rl::infer_changes(&store).unwrap().unwrap();
+        assert!(!stats.full);
+        assert!(!has("b", "d"), "over-deleted and not re-derived");
+        assert!(has("a", "d"), "re-derived through the shortcut");
+        // a → c was base (not inferred); nothing to close for it.
+        assert_eq!(stats.closed, 1);
+
+        // The result matches a full recompute.
+        let full = owl_rl::materialize(&store, true).unwrap();
+        assert_eq!((full.asserted, full.closed), (0, 0));
+    }
+
+    #[test]
+    fn a_schema_change_recomputes() {
+        let (store, _d) = setup();
+        rel(&store, "", "http://ex/tom", RDF_TYPE, "http://ex/Cat");
+        owl_rl::infer_changes(&store).unwrap();
+        rel(
+            &store,
+            "",
+            "http://ex/Animal",
+            RDFS_SUBCLASS_OF,
+            "http://ex/Thing",
+        );
+        let stats = owl_rl::infer_changes(&store).unwrap().unwrap();
+        assert!(stats.full, "schema changed: full recompute-and-diff");
+        assert!(inferred(
+            &store,
+            DEFAULT_INFERRED,
+            "http://ex/tom",
+            RDF_TYPE,
+            "http://ex/Thing"
+        ));
+        retract(
+            &store,
+            "",
+            "http://ex/Cat",
+            RDFS_SUBCLASS_OF,
+            "http://ex/Animal",
+        );
+        let stats = owl_rl::infer_changes(&store).unwrap().unwrap();
+        assert!(stats.full);
+        assert!(!inferred(
+            &store,
+            DEFAULT_INFERRED,
+            "http://ex/tom",
+            RDF_TYPE,
+            "http://ex/Animal"
+        ));
+    }
+
+    #[test]
+    fn a_pruned_change_log_falls_back_to_a_recompute() {
+        let (store, _d) = setup();
+        rel(&store, "", "http://ex/tom", RDF_TYPE, "http://ex/Cat");
+        store
+            .prune_changes(Timestamp(store.oracle_ts() + 1))
+            .unwrap();
+        let stats = owl_rl::infer_changes(&store).unwrap().unwrap();
+        assert!(stats.full);
+        assert!(inferred(
+            &store,
+            DEFAULT_INFERRED,
+            "http://ex/tom",
+            RDF_TYPE,
+            "http://ex/Animal"
+        ));
+    }
+}
