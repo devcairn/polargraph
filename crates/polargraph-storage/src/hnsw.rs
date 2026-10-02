@@ -22,6 +22,17 @@
 //!   stores an empty vector; distance computations read directly from the mapped
 //!   region without copying.
 //!
+//! # int8 quantization (step 9c)
+//!
+//! A space created with [`SpaceOptions::int8`] keeps each vector as `i8`
+//! codes (`scale = max|x| / 127`, one scale per vector) plus the codes'
+//! norm in RAM, and its full `f32` vectors in the mmap `.vecs` file. Graph
+//! traversal (insert and search) uses cosine on the codes — the per-vector
+//! scale cancels out of cosine — and search re-ranks its `max(ef, k)`
+//! candidates with the exact `f32` vectors, so returned scores are exact.
+//! Codes persist under `<space>/q/<id>`; the marker `<space>/__q` records
+//! that the space is quantized. ~4× less vector RAM than memory mode.
+//!
 //! # Persistence
 //!
 //! Graph topology (max_layer, neighbor lists) is mirrored to a RocksDB column
@@ -35,7 +46,7 @@
 //! - `b"n/" + node_id_bytes` (18 bytes) → serialised `HnswNode`
 
 use memmap2::MmapMut;
-use polargraph_core::id::NodeId;
+use polargraph_core::{id::NodeId, schema::StorageMode};
 use std::{
     cmp::{self, Ordering},
     collections::{BinaryHeap, HashMap, HashSet},
@@ -285,8 +296,85 @@ pub struct HnswNode {
     pub(crate) neighbors: Vec<Vec<NodeId>>,
 }
 
+/// How a space stores vectors: [`StorageMode`] plus optional int8 codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpaceOptions {
+    pub mode: StorageMode,
+    /// int8 quantization (implies mmap for the full vectors).
+    pub int8: bool,
+}
+
+impl From<StorageMode> for SpaceOptions {
+    fn from(mode: StorageMode) -> Self {
+        Self { mode, int8: false }
+    }
+}
+
+/// A vector's int8 codes and their Euclidean norm.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Codes {
+    pub codes: Vec<i8>,
+    pub norm: f32,
+}
+
+impl Codes {
+    /// Quantize `v` with its own scale (`max|x| / 127`).
+    pub fn quantize(v: &[f32]) -> Self {
+        let max = v.iter().fold(0f32, |m, x| m.max(x.abs()));
+        let codes: Vec<i8> = if max == 0.0 {
+            vec![0; v.len()]
+        } else {
+            v.iter()
+                .map(|x| (x / max * 127.0).round().clamp(-127.0, 127.0) as i8)
+                .collect()
+        };
+        let norm = (codes
+            .iter()
+            .map(|c| (*c as i32 * *c as i32) as i64)
+            .sum::<i64>() as f32)
+            .sqrt();
+        Self { codes, norm }
+    }
+
+    /// Cosine distance between two code vectors.
+    pub fn distance(&self, other: &Codes) -> f32 {
+        if self.codes.len() != other.codes.len() || self.norm == 0.0 || other.norm == 0.0 {
+            return 1.0;
+        }
+        let dot: i32 = self
+            .codes
+            .iter()
+            .zip(&other.codes)
+            .map(|(a, b)| *a as i32 * *b as i32)
+            .sum();
+        1.0 - dot as f32 / (self.norm * other.norm)
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.codes.iter().map(|c| *c as u8).collect()
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Self {
+        let codes: Vec<i8> = b.iter().map(|x| *x as i8).collect();
+        let norm = (codes
+            .iter()
+            .map(|c| (*c as i32 * *c as i32) as i64)
+            .sum::<i64>() as f32)
+            .sqrt();
+        Self { codes, norm }
+    }
+}
+
+/// A query as the index compares it: exact, or as int8 codes.
+enum Probe<'a> {
+    Exact(&'a [f32]),
+    Int8(Codes),
+}
+
 pub struct HnswIndex {
     pub(crate) nodes: HashMap<NodeId, HnswNode>,
+    /// int8 codes by node (`Some` ⇒ quantized space).
+    pub(crate) int8: Option<HashMap<NodeId, Codes>>,
     pub(crate) entry_point: Option<NodeId>,
     pub(crate) global_max_layer: usize,
     m: usize,
@@ -322,7 +410,54 @@ impl HnswIndex {
             rng: 0x9e3779b97f4a7c15,
             mmap_path: None,
             mmap_state: None,
+            int8: None,
         }
+    }
+
+    /// Whether the space keeps int8 codes.
+    pub fn is_int8(&self) -> bool {
+        self.int8.is_some()
+    }
+
+    /// The codes of `id`, for persisting.
+    pub fn codes_of(&self, id: NodeId) -> Option<&Codes> {
+        self.int8.as_ref()?.get(&id)
+    }
+
+    /// A node's full vector (memory or mmap).
+    pub fn vector_of(&self, id: NodeId) -> Vec<f32> {
+        self.get_vector_owned(id)
+    }
+
+    /// Load persisted codes.
+    pub fn load_codes(&mut self, id: NodeId, codes: Codes) {
+        self.int8.get_or_insert_with(HashMap::new).insert(id, codes);
+    }
+
+    /// Make this index quantized: full vectors move to the mmap file at
+    /// `path` (if they are in memory), and every node gets codes. Returns
+    /// the nodes whose records changed (to persist).
+    pub fn enable_int8(&mut self, path: PathBuf) -> Result<Vec<NodeId>, StorageError> {
+        let ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+        let mut changed = Vec::new();
+        if self.mmap_state.is_none() {
+            if let Some(first) = ids.iter().find_map(|id| self.nodes.get(id)) {
+                let mut ms = MmapState::create(path.clone(), first.vector.len())?;
+                for id in &ids {
+                    let v = std::mem::take(&mut self.nodes.get_mut(id).unwrap().vector);
+                    ms.append(*id, &v)?;
+                }
+                self.mmap_state = Some(ms);
+                changed.extend(ids.iter().copied());
+            }
+            self.mmap_path = Some(path);
+        }
+        let mut codes = HashMap::with_capacity(ids.len());
+        for id in &ids {
+            codes.insert(*id, Codes::quantize(&self.get_vector_owned(*id)));
+        }
+        self.int8 = Some(codes);
+        Ok(changed)
     }
 
     /// Create a new mmap-backed HNSW index. The `.vecs` file at `path` is
@@ -420,6 +555,10 @@ impl HnswIndex {
             }
         }
 
+        if let Some(codes) = &mut self.int8 {
+            codes.insert(id, Codes::quantize(&vector));
+        }
+        let probe = self.probe(&vector);
         let level = self.random_level();
         let mut modified: Vec<NodeId> = Vec::new();
 
@@ -449,11 +588,11 @@ impl HnswIndex {
         let ep = self.entry_point.unwrap();
 
         // ── Phase 1: greedy descent from top layer to level+1 ─────────────────
-        let mut ep_dist = self.dist_to(ep, &vector);
+        let mut ep_dist = self.dist(ep, &probe);
         let mut cur_ep = ep;
 
         for lc in (level + 1..=self.global_max_layer).rev() {
-            let w = self.search_layer(&vector, cur_ep, 1, lc);
+            let w = self.search_layer(&probe, cur_ep, 1, lc);
             if let Some(Far(d, nearest)) = w.into_sorted_vec().into_iter().next() {
                 if d < ep_dist {
                     ep_dist = d;
@@ -473,7 +612,7 @@ impl HnswIndex {
         );
 
         for lc in (0..=cmp::min(level, self.global_max_layer)).rev() {
-            let w = self.search_layer(&vector, cur_ep, self.ef_construction, lc);
+            let w = self.search_layer(&probe, cur_ep, self.ef_construction, lc);
 
             let w_sorted = w.into_sorted_vec();
             if let Some(Far(d, nearest)) = w_sorted.first() {
@@ -517,7 +656,8 @@ impl HnswIndex {
                 if let Some(candidates) = prune_candidates {
                     // All &mut borrows are released here; we can call &self methods.
                     let nv = self.get_vector_owned(neighbor_id);
-                    let pruned = self.select_neighbors_by_dist(&nv, &candidates, m_max);
+                    let nprobe = self.probe(&nv);
+                    let pruned = self.select_neighbors_by_dist(&nprobe, &candidates, m_max);
                     if let Some(n) = self.nodes.get_mut(&neighbor_id) {
                         n.neighbors[lc] = pruned;
                     }
@@ -576,12 +716,13 @@ impl HnswIndex {
             ef
         };
 
+        let probe = self.probe(query);
         let mut cur_ep = ep;
-        let mut cur_dist = self.dist_to(ep, query);
+        let mut cur_dist = self.dist(ep, &probe);
 
         // Descend to layer 1.
         for lc in (1..=self.global_max_layer).rev() {
-            let w = self.search_layer(query, cur_ep, 1, lc);
+            let w = self.search_layer(&probe, cur_ep, 1, lc);
             if let Some(Far(d, nearest)) = w.into_sorted_vec().into_iter().next() {
                 if d < cur_dist {
                     cur_dist = d;
@@ -591,8 +732,18 @@ impl HnswIndex {
         }
 
         // Search layer 0 with full ef.
-        let w = self.search_layer(query, cur_ep, cmp::max(ef, k), 0);
+        let w = self.search_layer(&probe, cur_ep, cmp::max(ef, k), 0);
 
+        if self.is_int8() {
+            // Re-rank the candidates with the exact vectors.
+            let mut exact: Vec<(NodeId, f32)> = w
+                .into_iter()
+                .map(|Far(_, id)| (id, 1.0 - self.dist_to(id, query)))
+                .collect();
+            exact.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(cmp::Ordering::Equal));
+            exact.truncate(k);
+            return exact;
+        }
         w.into_sorted_vec()
             .into_iter()
             .take(k)
@@ -618,7 +769,27 @@ impl HnswIndex {
 
     // ── private helpers ───────────────────────────────────────────────────────
 
-    /// Cosine distance from stored-or-mapped node `id` to `query`.
+    /// How this index compares `query`: as int8 codes in a quantized space.
+    fn probe<'a>(&self, query: &'a [f32]) -> Probe<'a> {
+        if self.is_int8() {
+            Probe::Int8(Codes::quantize(query))
+        } else {
+            Probe::Exact(query)
+        }
+    }
+
+    /// Distance from node `id` to `probe` (codes when quantized).
+    fn dist(&self, id: NodeId, probe: &Probe) -> f32 {
+        match probe {
+            Probe::Exact(q) => self.dist_to(id, q),
+            Probe::Int8(q) => match self.codes_of(id) {
+                Some(c) => c.distance(q),
+                None => f32::INFINITY,
+            },
+        }
+    }
+
+    /// Exact cosine distance from stored-or-mapped node `id` to `query`.
     fn dist_to(&self, id: NodeId, query: &[f32]) -> f32 {
         let vec: &[f32] = if let Some(ms) = &self.mmap_state {
             match ms.get_slice(id) {
@@ -653,7 +824,7 @@ impl HnswIndex {
     /// HNSW greedy beam search at a single layer.
     fn search_layer(
         &self,
-        query: &[f32],
+        query: &Probe,
         entry: NodeId,
         ef: usize,
         layer: usize,
@@ -662,7 +833,7 @@ impl HnswIndex {
         let mut candidates: BinaryHeap<Near> = BinaryHeap::new();
         let mut found: BinaryHeap<Far> = BinaryHeap::new();
 
-        let d_entry = self.dist_to(entry, query);
+        let d_entry = self.dist(entry, query);
         visited.insert(entry);
         candidates.push(Near(d_entry, entry));
         found.push(Far(d_entry, entry));
@@ -683,7 +854,7 @@ impl HnswIndex {
                     continue;
                 }
                 visited.insert(e);
-                let d_e = self.dist_to(e, query);
+                let d_e = self.dist(e, query);
                 let d_worst = found.peek().map(|Far(d, _)| *d).unwrap_or(f32::INFINITY);
                 if d_e < d_worst || found.len() < ef {
                     candidates.push(Near(d_e, e));
@@ -701,13 +872,13 @@ impl HnswIndex {
     /// Select the `m` nearest neighbors from a candidate list by distance to `query`.
     fn select_neighbors_by_dist(
         &self,
-        query: &[f32],
+        query: &Probe,
         candidates: &[NodeId],
         m: usize,
     ) -> Vec<NodeId> {
         let mut scored: Vec<(f32, NodeId)> = candidates
             .iter()
-            .map(|&id| (self.dist_to(id, query), id))
+            .map(|&id| (self.dist(id, query), id))
             .collect();
         scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
         scored.into_iter().take(m).map(|(_, id)| id).collect()
@@ -768,6 +939,27 @@ pub fn node_key_for_space(space: &str, id: NodeId) -> Vec<u8> {
 pub fn node_prefix_for_space(space: &str) -> Vec<u8> {
     let mut k = space.as_bytes().to_vec();
     k.extend_from_slice(NODE_INFIX);
+    k
+}
+
+/// RocksDB key for a node's int8 codes: `<space>/q/<16_id_bytes>`.
+pub fn codes_key_for_space(space: &str, id: NodeId) -> Vec<u8> {
+    let mut k = codes_prefix_for_space(space);
+    k.extend_from_slice(id.as_bytes());
+    k
+}
+
+/// Prefix of a space's int8 codes: `<space>/q/`.
+pub fn codes_prefix_for_space(space: &str) -> Vec<u8> {
+    let mut k = space.as_bytes().to_vec();
+    k.extend_from_slice(b"/q/");
+    k
+}
+
+/// Marker key: the space is int8-quantized.
+pub fn int8_marker_key(space: &str) -> Vec<u8> {
+    let mut k = space.as_bytes().to_vec();
+    k.extend_from_slice(b"/__q");
     k
 }
 

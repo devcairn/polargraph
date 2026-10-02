@@ -439,6 +439,10 @@ message VectorSpaceDef {
     /// higher cold-query latency. Changing the mode after first insert has
     /// no effect — the space retains the mode it was created with.
     string storage_mode    = 4;
+    /// "" (full precision) or "int8": int8 codes in RAM, full vectors on disk
+    /// (mmap), search re-ranked with the exact vectors; ~4× less vector RAM.
+    /// Setting it on an existing space quantizes it on its next insert.
+    string quantization    = 5;
 }
 
 /// A named node type schema.

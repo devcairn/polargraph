@@ -834,6 +834,17 @@ impl PolarGraphServer {
         }
     }
 
+    /// How a vector space stores vectors, from its registered definition.
+    fn space_options(&self, space: &str) -> polargraph_storage::hnsw::SpaceOptions {
+        match self.registry.get_space_def(space) {
+            Some(vs) => polargraph_storage::hnsw::SpaceOptions {
+                mode: vs.storage_mode,
+                int8: vs.is_int8(),
+            },
+            None => StorageMode::Memory.into(),
+        }
+    }
+
     /// Checks shared by the vocabulary mutations.
     #[allow(clippy::result_large_err)]
     fn vocabulary_change_allowed(
@@ -2572,11 +2583,7 @@ impl PolarGraphService for PolarGraphServer {
             }
         }
 
-        let mode = self
-            .registry
-            .get_space_def(space)
-            .map(|vs| vs.storage_mode)
-            .unwrap_or(StorageMode::Memory);
+        let mode = self.space_options(space);
 
         debug!(
             "insert_vector: space={} node={} dim={} mode={:?}",
@@ -2854,11 +2861,7 @@ impl PolarGraphService for PolarGraphServer {
             }));
         }
 
-        let mode = self
-            .registry
-            .get_space_def(&space)
-            .map(|vs| vs.storage_mode)
-            .unwrap_or(StorageMode::Memory);
+        let mode = self.space_options(&space);
 
         debug!(
             "batch_insert_vectors: space={} count={} mode={:?}",

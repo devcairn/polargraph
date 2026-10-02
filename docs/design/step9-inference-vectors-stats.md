@@ -108,9 +108,18 @@ Decision F: per-space opt-in, `VectorSpaceDef.quantization = "int8"`.
 - Codes persist alongside graph topology in the `hnsw` CF; ~4× less vector
   RAM (384-dim: 1,536 → 388 bytes per vector).
 - Existing spaces stay f32. Re-registering a space with `quantization`
-  rebuilds its codes online (`RebuildVectorSpace` / on next open). PQ later.
-- Recall measured in `polargraph-bench` (recall@10 vs f32, budget ≥ 0.97 at
-  default `ef`).
+  converts it on its next insert (full vectors move to the `.vecs` file,
+  every node gets codes). PQ later.
+- Recall checked in `tests/vector_int8.rs`: recall@10 vs brute-force exact
+  cosine ≥ 0.97 (measured 1.0 on 2,000 × 64-dim random vectors, `ef` 100),
+  with exact returned scores.
+
+**As built (9c).** `SpaceOptions { mode, int8 }` (from `StorageMode` for
+existing callers) on `insert_vector` / `batch_insert_vectors`; codes under
+`<space>/q/<id>`, marker `<space>/__q`; missing codes are recomputed on
+open. Traversal compares int8 codes (integer dot product over the codes'
+norms — per-vector scales cancel in cosine); `search` re-ranks its
+`max(ef, k)` candidates exactly; `search_in_set` is exact.
 
 ## 9d — `STATS` CF: counters
 

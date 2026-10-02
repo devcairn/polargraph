@@ -36,7 +36,7 @@ use crate::{
     cf,
     codec::{self, DecodedValue},
     error::StorageError,
-    hnsw::{self, HnswIndex, MmapState},
+    hnsw::{self, HnswIndex, MmapState, SpaceOptions},
     keys::{self, Order, PredId, QuadKey},
     mvcc::{Snapshot, TimestampOracle, Transaction, WriteMode, META_ORACLE_CTR},
 };
@@ -701,6 +701,36 @@ impl TripleStore {
                 idx.load_node(id, node_vector, max_layer, neighbors);
             }
 
+            // int8 spaces: load codes; recompute any that are missing.
+            if db
+                .get_cf(&hnsw_cf, hnsw::int8_marker_key(&space))?
+                .is_some()
+            {
+                let prefix = hnsw::codes_prefix_for_space(&space);
+                let iter =
+                    db.iterator_cf(&hnsw_cf, IteratorMode::From(&prefix, Direction::Forward));
+                for item in iter {
+                    let (key, value) = item?;
+                    if !key.starts_with(&prefix) || key.len() != prefix.len() + 16 {
+                        break;
+                    }
+                    let id = NodeId(uuid::Uuid::from_bytes(
+                        key[prefix.len()..].try_into().unwrap(),
+                    ));
+                    idx.load_codes(id, hnsw::Codes::from_bytes(&value));
+                }
+                let missing: Vec<NodeId> = idx
+                    .nodes
+                    .keys()
+                    .filter(|id| idx.codes_of(**id).is_none())
+                    .copied()
+                    .collect();
+                for id in missing {
+                    let v = idx.vector_of(id);
+                    idx.load_codes(id, hnsw::Codes::quantize(&v));
+                }
+            }
+
             spaces.insert(space, idx);
         }
 
@@ -770,29 +800,24 @@ impl TripleStore {
         space: &str,
         node_id: NodeId,
         vector: Vec<f32>,
-        mode: StorageMode,
+        opts: impl Into<SpaceOptions>,
     ) -> Result<(), StorageError> {
         if self.is_replica() {
             return Err(Self::read_only_err());
         }
-        let mut spaces = self.inner.hnsw_spaces.write().unwrap();
-        let idx = spaces
-            .entry(space.to_string())
-            .or_insert_with(|| match mode {
-                StorageMode::Mmap => {
-                    let path = self
-                        .inner
-                        .data_dir
-                        .join("vectors")
-                        .join(format!("{space}.vecs"));
-                    HnswIndex::new_mmap(path)
-                }
-                StorageMode::Memory => HnswIndex::new(),
-            });
-        let modified = idx.insert(node_id, vector);
-
+        let opts = opts.into();
         let hnsw_cf = self.cf_handle(cf::HNSW)?;
         let mut batch = WriteBatch::default();
+        let mut spaces = self.inner.hnsw_spaces.write().unwrap();
+        let idx = self.space_index(&mut spaces, space, opts, &mut batch)?;
+        let modified = idx.insert(node_id, vector);
+        if let Some(codes) = idx.codes_of(node_id) {
+            batch.put_cf(
+                &hnsw_cf,
+                hnsw::codes_key_for_space(space, node_id),
+                codes.to_bytes(),
+            );
+        }
 
         for id in &modified {
             let serialized = idx.serialize_node_for(*id);
@@ -813,6 +838,56 @@ impl TripleStore {
 
         self.inner.db.write(batch)?;
         Ok(())
+    }
+
+    /// The index of `space`, created with `opts` if new. A space that `opts`
+    /// asks to quantize but isn't yet is converted here (full vectors move to
+    /// its `.vecs` file, every node gets codes); the changed records go into
+    /// `batch`.
+    fn space_index<'a>(
+        &self,
+        spaces: &'a mut HashMap<String, HnswIndex>,
+        space: &str,
+        opts: SpaceOptions,
+        batch: &mut WriteBatch,
+    ) -> Result<&'a mut HnswIndex, StorageError> {
+        let hnsw_cf = self.cf_handle(cf::HNSW)?;
+        let path = self
+            .inner
+            .data_dir
+            .join("vectors")
+            .join(format!("{space}.vecs"));
+        let idx = spaces.entry(space.to_string()).or_insert_with(|| {
+            if opts.int8 || opts.mode == StorageMode::Mmap {
+                HnswIndex::new_mmap(path.clone())
+            } else {
+                HnswIndex::new()
+            }
+        });
+        if opts.int8 && !idx.is_int8() {
+            if !idx.is_empty() {
+                info!(space, nodes = idx.len(), "quantizing vector space to int8");
+            }
+            for id in idx.enable_int8(path)? {
+                batch.put_cf(
+                    &hnsw_cf,
+                    hnsw::node_key_for_space(space, id),
+                    idx.serialize_node_for(id),
+                );
+            }
+            let ids: Vec<NodeId> = idx.nodes.keys().copied().collect();
+            for id in ids {
+                if let Some(codes) = idx.codes_of(id) {
+                    batch.put_cf(
+                        &hnsw_cf,
+                        hnsw::codes_key_for_space(space, id),
+                        codes.to_bytes(),
+                    );
+                }
+            }
+            batch.put_cf(&hnsw_cf, hnsw::int8_marker_key(space), b"int8");
+        }
+        Ok(idx)
     }
 
     /// Return the number of named HNSW vector spaces in this store.
@@ -875,8 +950,9 @@ impl TripleStore {
         &self,
         space: &str,
         items: &[(NodeId, Vec<f32>)],
-        mode: StorageMode,
+        opts: impl Into<SpaceOptions>,
     ) -> (usize, Vec<(usize, StorageError)>) {
+        let opts = opts.into();
         if self.is_replica() {
             return (0, vec![(0, Self::read_only_err())]);
         }
@@ -886,26 +962,23 @@ impl TripleStore {
         };
 
         let mut spaces = self.inner.hnsw_spaces.write().unwrap();
-        let idx = spaces
-            .entry(space.to_string())
-            .or_insert_with(|| match mode {
-                StorageMode::Mmap => {
-                    let path = self
-                        .inner
-                        .data_dir
-                        .join("vectors")
-                        .join(format!("{space}.vecs"));
-                    HnswIndex::new_mmap(path)
-                }
-                StorageMode::Memory => HnswIndex::new(),
-            });
-
         let mut batch = WriteBatch::default();
+        let idx = match self.space_index(&mut spaces, space, opts, &mut batch) {
+            Ok(idx) => idx,
+            Err(e) => return (0, vec![(0, e)]),
+        };
         let mut inserted = 0usize;
         let mut errors: Vec<(usize, StorageError)> = Vec::new();
 
         for (node_id, vector) in items.iter() {
             let modified = idx.insert(*node_id, vector.clone());
+            if let Some(codes) = idx.codes_of(*node_id) {
+                batch.put_cf(
+                    &hnsw_cf,
+                    hnsw::codes_key_for_space(space, *node_id),
+                    codes.to_bytes(),
+                );
+            }
             for id in &modified {
                 let serialized = idx.serialize_node_for(*id);
                 if !serialized.is_empty() {

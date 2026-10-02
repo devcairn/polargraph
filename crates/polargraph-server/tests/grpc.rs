@@ -1426,6 +1426,7 @@ async fn register_node_type_with_vector_space_round_trips() {
             dimensions: 4,
             embedding_model: "my-model".into(),
             storage_mode: String::new(),
+            quantization: Default::default(),
         }),
     };
 
@@ -1468,6 +1469,7 @@ async fn insert_vector_dimension_mismatch_rejected() {
                     dimensions: 3,
                     embedding_model: String::new(),
                     storage_mode: String::new(),
+                    quantization: Default::default(),
                 }),
             }),
         },
@@ -1550,6 +1552,7 @@ async fn batch_insert_vectors_rejects_dimension_mismatch() {
                     dimensions: 3,
                     embedding_model: String::new(),
                     storage_mode: String::new(),
+                    quantization: Default::default(),
                 }),
             }),
         },
@@ -1934,6 +1937,7 @@ async fn mmap_storage_mode_insert_and_search() {
                     dimensions: 3,
                     embedding_model: String::new(),
                     storage_mode: "mmap".into(),
+                    quantization: Default::default(),
                 }),
             }),
         },
@@ -1993,6 +1997,7 @@ async fn mmap_storage_mode_round_trips_in_node_type() {
                     dimensions: 8,
                     embedding_model: String::new(),
                     storage_mode: "mmap".into(),
+                    quantization: Default::default(),
                 }),
             }),
         },
@@ -4313,6 +4318,7 @@ async fn cypher_vector_near_query() {
                 dimensions: 3,
                 embedding_model: String::new(),
                 storage_mode: "memory".into(),
+                quantization: Default::default(),
             }),
         }),
     }))
@@ -5118,6 +5124,7 @@ async fn show_indexes_reflects_registered_vector_space() {
                 dimensions: 3,
                 embedding_model: String::new(),
                 storage_mode: String::new(),
+                quantization: Default::default(),
             }),
         }),
     }))
