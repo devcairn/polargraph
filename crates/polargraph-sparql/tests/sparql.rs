@@ -1452,3 +1452,422 @@ fn filter_is_blank_applied_to_mixed_rows_returns_empty() {
         "isBlank is always false — no rows expected"
     );
 }
+
+// ── Value bindings (docs/design/value-bindings.md, PR 2) ──────────────────────
+
+mod value_semantics {
+    use super::*;
+    use polargraph_sparql::{execute::eval_filter, execute::order_bindings, SparqlOrder};
+
+    fn names() -> IriNames {
+        IriNames::new(Default::default(), false)
+    }
+    fn int(n: i64) -> SparqlValue {
+        SparqlValue::LiteralInt(n)
+    }
+    fn lit(s: &str) -> SparqlValue {
+        SparqlValue::Literal(s.into())
+    }
+    fn lang(t: &str, l: &str) -> SparqlValue {
+        SparqlValue::LangLiteral {
+            text: t.into(),
+            lang: l.into(),
+        }
+    }
+    fn gt(var: &str, n: i64) -> SparqlFilter {
+        SparqlFilter::GreaterThan(var.into(), SparqlLiteral::Int(n))
+    }
+
+    #[test]
+    fn filter_errors_drop_rows_and_propagate() {
+        let unbound = bind_map(&[]);
+        let a_string = bind_map(&[("x", lit("a"))]);
+        let five = bind_map(&[("x", int(5))]);
+        // An error (unbound / incomparable) is neither true nor false.
+        assert_eq!(eval_filter(&unbound, &gt("x", 3), &names()), None);
+        assert_eq!(eval_filter(&a_string, &gt("x", 3), &names()), None);
+        // `!` keeps the error: previously !(error) kept the row.
+        let not = SparqlFilter::Not(Box::new(gt("x", 3)));
+        assert!(!apply_sparql_filter(&unbound, &not));
+        assert!(!apply_sparql_filter(&a_string, &not));
+        // `||` with one true side is true; `&&` with one false side is false.
+        let or = SparqlFilter::Or(
+            Box::new(gt("x", 3)),
+            Box::new(SparqlFilter::Bound("y".into())),
+        );
+        assert_eq!(eval_filter(&a_string, &or, &names()), None);
+        assert_eq!(eval_filter(&five, &or, &names()), Some(true));
+        let and = SparqlFilter::And(Box::new(gt("x", 9)), Box::new(gt("z", 0)));
+        assert_eq!(eval_filter(&five, &and, &names()), Some(false));
+        // != between incomparable types is an error, so the row is dropped.
+        let ne = SparqlFilter::NotEqualLiteral("x".into(), SparqlLiteral::Int(1));
+        assert!(!apply_sparql_filter(&a_string, &ne));
+    }
+
+    #[test]
+    fn filter_comparisons_use_value_semantics() {
+        let row = bind_map(&[("x", int(1)), ("y", SparqlValue::LiteralFloat(1.0))]);
+        assert!(apply_sparql_filter(
+            &row,
+            &SparqlFilter::VarEq("x".into(), "y".into())
+        ));
+        assert!(!apply_sparql_filter(
+            &row,
+            &SparqlFilter::SameTerm("x".into(), "y".into())
+        ));
+        let tagged = bind_map(&[("t", lang("Hei", "NO"))]);
+        let eq = SparqlFilter::EqualLiteral(
+            "t".into(),
+            SparqlLiteral::Lang {
+                text: "Hei".into(),
+                lang: "no".into(),
+            },
+        );
+        assert!(apply_sparql_filter(&tagged, &eq));
+        // < on language-tagged strings is an error.
+        let lt = SparqlFilter::LessThan("t".into(), SparqlLiteral::Str("z".into()));
+        assert_eq!(eval_filter(&tagged, &lt, &names()), None);
+    }
+
+    #[test]
+    fn aggregates_follow_sparql() {
+        let rows = vec![
+            bind_map(&[("g", lit("a")), ("v", int(3))]),
+            bind_map(&[("g", lit("a")), ("v", SparqlValue::LiteralFloat(1.5))]),
+            bind_map(&[("g", lit("a")), ("v", int(10))]),
+            bind_map(&[("g", lit("b")), ("v", lit("not a number"))]),
+            bind_map(&[("g", lit("c"))]),
+        ];
+        let spec = |alias: &str, func| SparqlAggregateSpec {
+            alias: alias.into(),
+            func,
+        };
+        let out = execute_sparql_aggregations(
+            rows,
+            &["g".into()],
+            &[
+                spec("min", SparqlAggFunc::Min("v".into())),
+                spec("max", SparqlAggFunc::Max("v".into())),
+                spec("sum", SparqlAggFunc::Sum("v".into())),
+                spec("avg", SparqlAggFunc::Avg("v".into())),
+            ],
+            None,
+            &names(),
+        );
+        let group = |g: &str| out.iter().find(|r| r["g"] == lit(g)).unwrap();
+        let a = group("a");
+        // MIN / MAX return the original value (was the int + float sum).
+        assert_eq!(a["min"], SparqlValue::LiteralFloat(1.5));
+        assert_eq!(a["max"], int(10));
+        assert_eq!(a["sum"], SparqlValue::LiteralFloat(14.5));
+        // Non-numeric input: SUM / AVG unbound; MIN / MAX still defined.
+        let b = group("b");
+        assert!(!b.contains_key("sum") && !b.contains_key("avg"));
+        assert_eq!(b["min"], lit("not a number"));
+        // Empty group: MIN / MAX unbound, SUM and AVG 0.
+        let c = group("c");
+        assert!(!c.contains_key("min") && !c.contains_key("max"));
+        assert_eq!(c["sum"], int(0));
+        assert_eq!(c["avg"], int(0));
+    }
+
+    #[test]
+    fn integer_sums_stay_integers_and_groups_use_term_identity() {
+        let rows = vec![
+            bind_map(&[("g", int(1)), ("v", int(2))]),
+            bind_map(&[("g", int(1)), ("v", int(3))]),
+            bind_map(&[("g", SparqlValue::LiteralFloat(1.0)), ("v", int(4))]),
+        ];
+        let out = execute_sparql_aggregations(
+            rows,
+            &["g".into()],
+            &[SparqlAggregateSpec {
+                alias: "s".into(),
+                func: SparqlAggFunc::Sum("v".into()),
+            }],
+            None,
+            &names(),
+        );
+        assert_eq!(out.len(), 2, "1 and 1.0 are different groups");
+        assert_eq!(out[0]["s"], int(5));
+    }
+
+    #[test]
+    fn order_by_sorts_mixed_values_deterministically() {
+        let n = node("01890000-0000-7000-8000-000000000001");
+        let mut rows = vec![
+            bind_map(&[("v", lit("b"))]),
+            bind_map(&[("v", int(10))]),
+            bind_map(&[]),
+            bind_map(&[("v", lang("a", "en"))]),
+            bind_map(&[("v", SparqlValue::LiteralFloat(2.5))]),
+            bind_map(&[("v", SparqlValue::Uri(n))]),
+            bind_map(&[("v", SparqlValue::LiteralBool(true))]),
+            bind_map(&[("v", lit("a"))]),
+        ];
+        let asc = [SparqlOrder {
+            var: "v".into(),
+            descending: false,
+        }];
+        order_bindings(&mut rows, &asc, &names());
+        let got: Vec<Option<SparqlValue>> = rows.iter().map(|r| r.get("v").cloned()).collect();
+        assert_eq!(
+            got,
+            vec![
+                None,
+                Some(SparqlValue::Uri(n)),
+                Some(SparqlValue::LiteralFloat(2.5)),
+                Some(int(10)),
+                Some(SparqlValue::LiteralBool(true)),
+                Some(lit("a")),
+                Some(lit("b")),
+                Some(lang("a", "en")),
+            ]
+        );
+        let desc = [SparqlOrder {
+            var: "v".into(),
+            descending: true,
+        }];
+        order_bindings(&mut rows, &desc, &names());
+        assert_eq!(rows[0].get("v"), Some(&lang("a", "en")));
+        assert!(rows.last().unwrap().get("v").is_none());
+    }
+
+    #[test]
+    fn order_by_translates_and_non_variable_keys_are_rejected() {
+        let q = spargebra::Query::parse(
+            "SELECT ?s ?n WHERE { ?s <http://ex/n> ?n } ORDER BY DESC(?n) ?s",
+            None,
+        )
+        .unwrap();
+        let t = translate_query(&q).unwrap();
+        assert_eq!(
+            t.order_by,
+            vec![
+                SparqlOrder {
+                    var: "n".into(),
+                    descending: true
+                },
+                SparqlOrder {
+                    var: "s".into(),
+                    descending: false
+                },
+            ]
+        );
+        let q = spargebra::Query::parse(
+            "SELECT ?s WHERE { ?s <http://ex/n> ?n } ORDER BY STRLEN(?n)",
+            None,
+        )
+        .unwrap();
+        assert!(translate_query(&q).is_err(), "no silent ignoring");
+    }
+
+    #[test]
+    fn literal_results_serialize_with_datatype_and_language() {
+        let row = bind_map(&[
+            ("t", lang("Hei", "no")),
+            (
+                "d",
+                SparqlValue::TypedLiteral {
+                    lexical: "2020-01-01".into(),
+                    datatype: "http://www.w3.org/2001/XMLSchema#date".into(),
+                },
+            ),
+            ("p", SparqlValue::Iri("http://ex/p".into())),
+            ("c", lit("a,b")),
+        ]);
+        let vars: Vec<String> = ["t", "d", "p", "c"].iter().map(|s| s.to_string()).collect();
+        let json: serde_json::Value =
+            serde_json::from_str(&serialize_json(&vars, &[row.clone()], &names())).unwrap();
+        let b = &json["results"]["bindings"][0];
+        assert_eq!(b["t"]["xml:lang"], "no");
+        assert_eq!(b["d"]["datatype"], "http://www.w3.org/2001/XMLSchema#date");
+        assert_eq!(
+            b["p"],
+            serde_json::json!({"type": "uri", "value": "http://ex/p"})
+        );
+        let csv = serialize_csv(&vars, &[row], &names());
+        assert!(csv.lines().nth(1).unwrap().ends_with(",\"a,b\""), "{csv}");
+    }
+}
+
+#[test]
+fn a_variable_predicate_binds_the_predicate() {
+    let q = spargebra::Query::parse("SELECT ?p WHERE { <http://ex/a> ?p ?o }", None).unwrap();
+    let t = translate_query(&q).unwrap();
+    let vp = &t.branches[0].patterns[0];
+    assert_eq!(vp.predicate, None);
+    assert_eq!(vp.predicate_var.as_deref(), Some("p"));
+}
+
+mod filter_expressions {
+    use super::*;
+    use polargraph_sparql::execute::eval_filter;
+
+    fn names() -> IriNames {
+        IriNames::new(Default::default(), false)
+    }
+
+    /// The translated FILTER of `SELECT * WHERE { ?s ?p ?o FILTER(<expr>) }`.
+    fn filter(expr: &str) -> SparqlFilter {
+        let q = spargebra::Query::parse(
+            &format!("SELECT * WHERE {{ ?s ?p ?o FILTER({expr}) }}"),
+            None,
+        )
+        .unwrap();
+        let t = translate_query(&q).unwrap();
+        t.branches[0].filters[0].clone()
+    }
+
+    #[test]
+    fn variables_compare_with_each_other() {
+        let row = bind_map(&[
+            ("a", SparqlValue::LiteralInt(2)),
+            ("b", SparqlValue::LiteralFloat(2.5)),
+        ]);
+        assert_eq!(eval_filter(&row, &filter("?a < ?b"), &names()), Some(true));
+        assert_eq!(
+            eval_filter(&row, &filter("?a >= ?b"), &names()),
+            Some(false)
+        );
+        assert_eq!(eval_filter(&row, &filter("?a != ?b"), &names()), Some(true));
+        // Unbound → error.
+        assert_eq!(eval_filter(&row, &filter("?a < ?c"), &names()), None);
+    }
+
+    #[test]
+    fn lang_and_datatype() {
+        let row = bind_map(&[
+            (
+                "t",
+                SparqlValue::LangLiteral {
+                    text: "Hei".into(),
+                    lang: "no".into(),
+                },
+            ),
+            ("n", SparqlValue::LiteralInt(3)),
+            ("s", SparqlValue::Literal("x".into())),
+            ("u", SparqlValue::Iri("http://ex/u".into())),
+        ]);
+        let ev = |e: &str| eval_filter(&row, &filter(e), &names());
+        assert_eq!(ev(r#"LANG(?t) = "no""#), Some(true));
+        assert_eq!(ev(r#"LANG(?s) = """#), Some(true));
+        assert_eq!(
+            ev("DATATYPE(?n) = <http://www.w3.org/2001/XMLSchema#integer>"),
+            Some(true)
+        );
+        assert_eq!(
+            ev("DATATYPE(?s) = <http://www.w3.org/2001/XMLSchema#string>"),
+            Some(true)
+        );
+        assert_eq!(
+            ev("DATATYPE(?t) = <http://www.w3.org/1999/02/22-rdf-syntax-ns#langString>"),
+            Some(true)
+        );
+        // LANG / DATATYPE of an IRI is an error.
+        assert_eq!(ev(r#"LANG(?u) = """#), None);
+        assert_eq!(ev("DATATYPE(?u) = <http://ex/x>"), None);
+    }
+
+    #[test]
+    fn str_of_a_node_uses_its_iri() {
+        let n = node("01890000-0000-7000-8000-000000000002");
+        let names = IriNames::new(
+            std::iter::once((n, "http://ex/alice".to_string())).collect(),
+            false,
+        );
+        let row = bind_map(&[
+            ("x", SparqlValue::Uri(n)),
+            ("v", SparqlValue::LiteralInt(7)),
+        ]);
+        let f = filter(r#"STR(?x) = "http://ex/alice""#);
+        assert!(f.uses_iri_text());
+        assert_eq!(eval_filter(&row, &f, &names), Some(true));
+        assert_eq!(
+            eval_filter(
+                &row,
+                &filter(r#"STR(?v) = "7""#),
+                &IriNames::new(Default::default(), false)
+            ),
+            Some(true)
+        );
+        assert!(!filter("?v > 3").uses_iri_text());
+    }
+
+    #[test]
+    fn string_tests_and_language_compatibility() {
+        let row = bind_map(&[
+            ("s", SparqlValue::Literal("Dune Messiah".into())),
+            (
+                "t",
+                SparqlValue::LangLiteral {
+                    text: "Bonjour".into(),
+                    lang: "fr".into(),
+                },
+            ),
+            ("n", SparqlValue::LiteralInt(12)),
+        ]);
+        let ev = |e: &str| eval_filter(&row, &filter(e), &names());
+        assert_eq!(ev(r#"CONTAINS(?s, "Mess")"#), Some(true));
+        assert_eq!(ev(r#"STRSTARTS(?s, "Dune")"#), Some(true));
+        assert_eq!(ev(r#"STRENDS(?s, "Dune")"#), Some(false));
+        // A tagged first argument with an untagged or same-tag second.
+        assert_eq!(ev(r#"STRSTARTS(?t, "Bon")"#), Some(true));
+        assert_eq!(ev(r#"STRSTARTS(?t, "Bon"@fr)"#), Some(true));
+        assert_eq!(ev(r#"STRSTARTS(?t, "Bon"@en)"#), None, "incompatible tags");
+        assert_eq!(
+            ev(r#"STRSTARTS(?s, "Dune"@en)"#),
+            None,
+            "tagged second, untagged first"
+        );
+        // Non-strings are an error; STR() makes them strings.
+        assert_eq!(ev(r#"STRSTARTS(?n, "1")"#), None);
+        assert_eq!(ev(r#"STRSTARTS(STR(?n), "1")"#), Some(true));
+    }
+
+    #[test]
+    fn langmatches_follows_basic_filtering() {
+        let row = bind_map(&[(
+            "t",
+            SparqlValue::LangLiteral {
+                text: "colour".into(),
+                lang: "en-GB".into(),
+            },
+        )]);
+        let ev = |e: &str| eval_filter(&row, &filter(e), &names());
+        assert_eq!(ev(r#"LANGMATCHES(LANG(?t), "en")"#), Some(true));
+        assert_eq!(ev(r#"LANGMATCHES(LANG(?t), "EN-gb")"#), Some(true));
+        assert_eq!(ev(r#"LANGMATCHES(LANG(?t), "e")"#), Some(false));
+        assert_eq!(ev(r#"LANGMATCHES(LANG(?t), "*")"#), Some(true));
+        let untagged = bind_map(&[("t", SparqlValue::Literal("x".into()))]);
+        assert_eq!(
+            eval_filter(
+                &untagged,
+                &filter(r#"LANGMATCHES(LANG(?t), "*")"#),
+                &names()
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn regex_with_flags() {
+        let row = bind_map(&[
+            ("s", SparqlValue::Literal("Hello World".into())),
+            ("n", SparqlValue::LiteralInt(1)),
+        ]);
+        let ev = |e: &str| eval_filter(&row, &filter(e), &names());
+        assert_eq!(ev(r#"REGEX(?s, "^hello")"#), Some(false));
+        assert_eq!(ev(r#"REGEX(?s, "^hello", "i")"#), Some(true));
+        assert_eq!(ev(r#"REGEX(?s, "o W")"#), Some(true));
+        assert_eq!(
+            ev(r#"REGEX(?s, ".", "q")"#),
+            Some(false),
+            "q quotes the pattern"
+        );
+        assert_eq!(ev(r#"REGEX(?s, "(")"#), None, "invalid pattern");
+        assert_eq!(ev(r#"REGEX(?s, "a", "z")"#), None, "invalid flag");
+        assert_eq!(ev(r#"REGEX(?n, "1")"#), None, "not a string");
+        assert_eq!(ev(r#"!REGEX(?s, "xyz")"#), Some(true));
+    }
+}

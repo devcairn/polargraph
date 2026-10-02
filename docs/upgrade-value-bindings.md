@@ -36,10 +36,41 @@ rows whose variable is in `vars` (gRPC) / not in `@values` (REST), or put
 the object in a node-only position (a variable that is also a subject of a
 later pattern can only be a node).
 
-Not affected: Cypher (relationship patterns still match relations only),
-Datalog rules (a rule-body row whose head variable holds a value derives
-nothing, as before), and SPARQL, which keeps its current results until the
-SPARQL step adds literal results, `ORDER BY` and value-aware updates.
+Not affected: Cypher (relationship patterns still match relations only)
+and Datalog rules (a rule-body row whose head variable holds a value
+derives nothing, as before).
+
+### SPARQL
+
+SPARQL now returns literals, and several results change:
+
+- **Object variables bind values** — `SELECT ?n WHERE { ?p :name ?n }`
+  returns the names; `?s ?p ?o` returns property rows as well as relations;
+  `DESCRIBE` includes property values.
+- **Predicate variables bind** — `?p` in `?s ?p ?o` is now in results (it
+  was never bound).
+- **`ORDER BY` is applied** (it was silently ignored). Only variables are
+  supported as keys; other expressions are rejected (HTTP 501) instead of
+  ignored.
+- **`FILTER` errors drop rows** — an unbound variable or an incomparable
+  comparison is an error, and `!error` is still an error. Before,
+  `FILTER(!(?x > 3))` kept rows where `?x` was unbound or a string. `!=`
+  between different non-numeric types (`"a" != 1`) is an error too.
+- **`=` compares values** — `?a = ?b` is true for `1` and `1.0` (it used
+  to require the same term); `sameTerm(?a, ?b)` still tests identity.
+- **Aggregates** — `MIN` / `MAX` return the actual least / greatest value
+  (mixed integers and doubles used to return their sum); `MIN` / `MAX` /
+  `SAMPLE` of an empty group are unbound (were `0` / `""`); `SUM` / `AVG`
+  over a non-numeric value are unbound (non-numbers were skipped); `AVG` of
+  an empty group is `0`.
+- **Updates** — `DELETE` / `INSERT ... WHERE` templates use value and
+  predicate variables, so `DELETE WHERE { <n> ?p ?o }` closes every live
+  quad of `n` (it skipped variable predicates).
+- **Output** — literal results carry `datatype` / `xml:lang` in JSON; CSV
+  quotes fields containing commas, quotes or line breaks.
+- **New `FILTER` functions** — comparisons between variables (`?a < ?b`)
+  and over `STR` / `LANG` / `DATATYPE`; `CONTAINS`, `STRSTARTS`, `STRENDS`,
+  `LANGMATCHES`, `REGEX`. Queries using them were rejected before (HTTP 501).
 
 ## Upgrade
 

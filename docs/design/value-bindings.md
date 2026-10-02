@@ -116,6 +116,24 @@ Removing Cypher writes (a later release): every Cypher write then has a
 one-call replacement — `ApplyChanges` for known quads, SPARQL Update for
 pattern-based ones, including `DELETE WHERE { <n> ?p ?o }`.
 
+### 2.6 SPARQL value semantics (PR 2, as built)
+
+Open questions 1–7 (2026-10-02) taken as recommended — SPARQL 1.1 where it
+defines the answer: three-valued `FILTER`; numeric promotion with exact
+integer comparison; language-tagged strings equal by text + tag and not
+ordered by `<`; `ORDER BY` total order unbound < IRIs < numbers < booleans
+< strings < language-tagged < other typed (ours where the spec leaves it
+open); aggregates per §18.5 with `AVG` as a double (documented deviation:
+no `xsd:decimal`); `GROUP BY` and update templates by term identity.
+Found while building: a variable predicate was translated to a wildcard, so
+`?p` never bound and `DELETE WHERE { <n> ?p ?o }` deleted nothing — fixed.
+Dates / times compare by lexical form (timezones as written). Question 8
+approved (Mark, 2026-10-02): variable-to-variable comparisons, `STR`,
+`LANG`, `LANGMATCHES`, `DATATYPE`, `REGEX`, `CONTAINS`, `STRSTARTS`,
+`STRENDS` — SPARQL 1.1 semantics (string arguments with compatible language
+tags, RFC 4647 basic filtering, XPath regex flags). Arithmetic and the
+other built-ins are left for later.
+
 ## 3. Decisions needed
 
 | # | Question | Recommendation |

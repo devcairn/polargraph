@@ -14,12 +14,16 @@ use serde_json::{json, Map, Value};
 
 /// A typed value in a SPARQL binding row.
 ///
-/// Extends the core `NodeId` type to cover literal values returned by
-/// SPARQL-star annotation lookups and aggregation functions.
+/// A node, or a literal: a property value bound to a variable
+/// (`docs/design/value-bindings.md`), an annotation value or an aggregate.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SparqlValue {
-    /// A graph node referenced by its UUID (serialized as `urn:uuid:<uuid>`).
+    /// A graph node referenced by its UUID (serialized as its IRI from the
+    /// dictionary, else `urn:uuid:<uuid>`).
     Uri(NodeId),
+    /// An IRI known by its string — a bound predicate variable. The same
+    /// term as `Uri(iri_to_node_id(iri))`.
+    Iri(String),
     /// A plain string literal.
     Literal(String),
     /// An integer literal (xsd:integer).
@@ -28,6 +32,10 @@ pub enum SparqlValue {
     LiteralFloat(f64),
     /// A boolean literal (xsd:boolean).
     LiteralBool(bool),
+    /// A language-tagged string (rdf:langString).
+    LangLiteral { text: String, lang: String },
+    /// Any other typed literal: lexical form + datatype IRI.
+    TypedLiteral { lexical: String, datatype: String },
 }
 
 /// A single row of SPARQL result bindings.
@@ -99,10 +107,8 @@ pub fn serialize_csv(vars: &[String], bindings: &[SparqlBindings], names: &IriNa
                     Some(label) => format!("_:{label}"),
                     None => names.iri(id),
                 },
-                Some(SparqlValue::Literal(s)) => s.clone(),
-                Some(SparqlValue::LiteralInt(n)) => n.to_string(),
-                Some(SparqlValue::LiteralFloat(f)) => f.to_string(),
-                Some(SparqlValue::LiteralBool(b)) => b.to_string(),
+                Some(SparqlValue::Iri(iri)) => iri.clone(),
+                Some(literal) => csv_field(&literal.lexical().unwrap_or_default()),
                 None => String::new(),
             })
             .collect();
@@ -114,12 +120,22 @@ pub fn serialize_csv(vars: &[String], bindings: &[SparqlBindings], names: &IriNa
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// A CSV field, quoted when it contains a comma, quote or line break (RFC 4180).
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
 fn sparql_value_to_json(val: &SparqlValue, names: &IriNames) -> Value {
     match val {
         SparqlValue::Uri(id) => match names.bnode_label(id) {
             Some(label) => json!({ "type": "bnode", "value": label }),
             None => json!({ "type": "uri", "value": names.iri(id) }),
         },
+        SparqlValue::Iri(iri) => json!({ "type": "uri", "value": iri }),
         SparqlValue::Literal(s) => json!({
             "type": "literal",
             "value": s
@@ -138,6 +154,16 @@ fn sparql_value_to_json(val: &SparqlValue, names: &IriNames) -> Value {
             "type": "literal",
             "value": b.to_string(),
             "datatype": "http://www.w3.org/2001/XMLSchema#boolean"
+        }),
+        SparqlValue::LangLiteral { text, lang } => json!({
+            "type": "literal",
+            "value": text,
+            "xml:lang": lang
+        }),
+        SparqlValue::TypedLiteral { lexical, datatype } => json!({
+            "type": "literal",
+            "value": lexical,
+            "datatype": datatype
         }),
     }
 }
