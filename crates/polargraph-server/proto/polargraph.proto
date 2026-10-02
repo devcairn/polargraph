@@ -275,6 +275,10 @@ message Binding {
     /// Predicate strings bound via `VarPattern.predicate_var`, keyed by
     /// variable name.
     map<string, string> predicates = 2;
+    /// Variables bound to property values (literals), keyed by variable name
+    /// — e.g. `?n` in `?p name ?n`. A variable is in `vars` or `values`,
+    /// never both. Vectors don't bind. See docs/design/value-bindings.md.
+    map<string, Value> values = 3;
 }
 
 message QueryResponse {
@@ -286,6 +290,8 @@ message QueryResponse {
 /// independently.
 message QueryResult {
     map<string, NodeId> vars = 1;
+    /// Variables bound to property values — as `Binding.values`.
+    map<string, Value> values = 2;
 }
 
 /// A chunk of results delivered by a streaming query RPC.

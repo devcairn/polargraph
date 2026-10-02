@@ -483,7 +483,7 @@ async fn api_query(
                 .bindings
                 .into_iter()
                 .map(|b| {
-                    let map: serde_json::Map<String, serde_json::Value> = b
+                    let mut map: serde_json::Map<String, serde_json::Value> = b
                         .vars
                         .into_iter()
                         .map(|(k, v)| {
@@ -493,6 +493,11 @@ async fn api_query(
                             (k, serde_json::Value::String(uuid.to_string()))
                         })
                         .collect();
+                    // Variables bound to property values (a variable is a
+                    // node or a value, never both).
+                    for (k, v) in b.values {
+                        map.insert(k, ui_value_json(&v));
+                    }
                     serde_json::Value::Object(map)
                 })
                 .collect();
@@ -1040,4 +1045,20 @@ async fn api_keys_revoke(
     drop(keys);
 
     Json(serde_json::json!({"found": found, "total": total})).into_response()
+}
+
+/// A property value for the UI's result table.
+fn ui_value_json(v: &ProtoValue) -> serde_json::Value {
+    match &v.kind {
+        Some(ValueKind::TextVal(s)) => serde_json::Value::String(s.clone()),
+        Some(ValueKind::IntVal(i)) => serde_json::json!(i),
+        Some(ValueKind::FloatVal(f)) => serde_json::json!(f),
+        Some(ValueKind::BoolVal(b)) => serde_json::Value::Bool(*b),
+        Some(ValueKind::LangText(l)) => serde_json::Value::String(format!("{}@{}", l.text, l.lang)),
+        Some(ValueKind::Typed(t)) => {
+            serde_json::Value::String(format!("{}^^<{}>", t.lexical, t.datatype))
+        }
+        Some(ValueKind::NullVal(_)) | None => serde_json::Value::Null,
+        Some(other) => serde_json::Value::String(format!("{other:?}")),
+    }
 }

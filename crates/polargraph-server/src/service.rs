@@ -68,7 +68,7 @@ use polargraph_core::{
 use polargraph_query::datalog::{
     execute_query, execute_query_full, execute_query_hybrid, execute_query_hybrid_full,
     execute_query_seeded, execute_query_with_pending_full, execute_recursive, reachable_from,
-    reachable_from_hops, Bindings, DerivedFacts, PredBindings, Query, QueryError,
+    reachable_from_hops, Bindings, DerivedFacts, Query, QueryError, Solution,
 };
 use polargraph_query::explain::explain_query;
 use polargraph_storage::owl_rl;
@@ -1370,17 +1370,17 @@ fn filter_bindings(results: Vec<Bindings>, allowed: Option<&HashSet<NodeId>>) ->
     }
 }
 
-/// Like [`filter_bindings`] but for `(Bindings, PredBindings)` pairs, filtering
-/// on the `Bindings` half only.
+/// Like [`filter_bindings`] but for full solutions, filtering on the node
+/// bindings (a value's subject was already checked by the scan).
 fn filter_bindings_full(
-    results: Vec<(Bindings, PredBindings)>,
+    results: Vec<Solution>,
     allowed: Option<&HashSet<NodeId>>,
-) -> Vec<(Bindings, PredBindings)> {
+) -> Vec<Solution> {
     match allowed {
         None => results,
         Some(set) => results
             .into_iter()
-            .filter(|(b, _)| b.values().all(|id| set.contains(id)))
+            .filter(|s| s.nodes.values().all(|id| set.contains(id)))
             .collect(),
     }
 }
@@ -2436,10 +2436,7 @@ impl PolarGraphService for PolarGraphServer {
         // Apply access-control filter when a user_id is set.
         let allowed = self.get_access_filter(&user_id);
         let results = filter_bindings_full(results, allowed.as_ref());
-        let bindings = results
-            .iter()
-            .map(|(b, pb)| convert::binding_to_proto_full(b, pb))
-            .collect();
+        let bindings = results.iter().map(convert::binding_to_proto_full).collect();
 
         Ok(Response::new(QueryResponse { bindings }))
     }
@@ -3965,7 +3962,7 @@ impl PolarGraphService for PolarGraphServer {
 
         let t0 = Instant::now();
         let results = if rules.is_empty() {
-            execute_query(
+            execute_query_full(
                 &query,
                 &snapshot,
                 self.make_deadline(),
@@ -3976,7 +3973,7 @@ impl PolarGraphService for PolarGraphServer {
             let derived: DerivedFacts =
                 execute_recursive(&[], &rules, &snapshot, self.make_deadline())
                     .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
-            execute_query_hybrid(&query, &snapshot, &derived, self.make_deadline())
+            execute_query_hybrid_full(&query, &snapshot, &derived, self.make_deadline())
                 .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?
         };
         self.check_slow_query(
@@ -4169,6 +4166,13 @@ impl PolarGraphService for PolarGraphServer {
 
         let (tx, rx) = mpsc::channel::<Result<QueryStreamChunk, Status>>(4);
         tokio::spawn(async move {
+            let projected = projected
+                .into_iter()
+                .map(|nodes| Solution {
+                    nodes,
+                    ..Default::default()
+                })
+                .collect();
             send_result_chunks(projected, tx).await;
         });
 
@@ -4999,7 +5003,7 @@ impl PolarGraphService for PolarGraphServer {
 /// Split `results` into chunks of `STREAM_CHUNK_SIZE` and send each as a
 /// `QueryStreamChunk` on `tx`. The last chunk has `done = true`.
 async fn send_result_chunks(
-    results: Vec<polargraph_query::datalog::Bindings>,
+    results: Vec<Solution>,
     tx: mpsc::Sender<Result<QueryStreamChunk, Status>>,
 ) {
     if results.is_empty() {

@@ -1,7 +1,7 @@
 # Value bindings — query variables that hold literals — design note
 
-Status: **proposal**, decisions below need approval (Mark chose this route,
-"option 1", 2026-10-02, over a subject-retraction option on `ApplyChanges`).
+Status: decisions A–G **approved as recommended** (Mark, 2026-10-02; A: a
+separate value map). Building as the two PRs in G on `db/value-bindings`.
 
 ## 1. The gap
 
@@ -53,9 +53,11 @@ pub type ValueBindings = HashMap<String, Value>;    // new
   index, not a scan.
 - A value variable in subject position, as a graph, or as a path endpoint
   (`max_hops`) matches nothing (literals aren't subjects or graphs).
-- Rule heads stay node-to-node (derived facts are relations): a rule whose
-  head object variable is bound only to values is rejected with
-  `INVALID_ARGUMENT`. Rule bodies may use value variables.
+- Rule heads stay node-to-node (derived facts are relations). Rule bodies
+  may use value variables; a body solution whose head variable holds a
+  value derives nothing. (As built: the proposal said `INVALID_ARGUMENT`,
+  but Cypher's `[:p*]` closure rules would then fail whenever some node also
+  has a `p` property; skipping keeps today's behaviour.)
 - The pending-write overlay (wire transactions), timeouts and the graph ACL
   (value rows pass the node filter; their subject was already checked by the
   scan) apply unchanged.
@@ -113,7 +115,7 @@ pattern-based ones, including `DELETE WHERE { <n> ?p ?o }`.
 | B | Join equality | **RDF term equality**: two values join only if they are the same term — `Int(1)` ≠ `Float(1.0)`, `"a"` ≠ `"a"@en`, typed literals compare lexical form + datatype. This is what SPARQL joins use, and it's exactly the value index's hash. `FILTER(?a = ?b)` gets value semantics (numeric `1 = 1.0` true), as SPARQL specifies — today it compares strictly. |
 | C | Wire format | **Additive** `values` maps on `Binding` and `QueryResult`, a `values` object in REST rows. No breaking change. |
 | D | Which values bind | **All property values except vectors** (`Value::Vector` is an embedding, not an RDF literal; it can be large and SPARQL has no form for it). A pattern meeting a vector property skips it, documented. Out-of-line values bind in full. |
-| E | Rules | Heads stay node-to-node; a head object variable bound only to values → `INVALID_ARGUMENT`. Value variables allowed in bodies. |
+| E | Rules | Heads stay node-to-node; value variables allowed in bodies (as built: a solution whose head variable holds a value derives nothing — see 2.1). |
 | F | Scope of this step | Engine + `Query` / `QueryStream` RPCs + REST + SPARQL (results, FILTER / GROUP BY / aggregates seeing values, `ORDER BY`, Update templates) + SDK decoding. Cypher unchanged (2.4). |
 | G | Delivery | **Two PRs**: (1) engine, proto, `Query` / `QueryStream`, REST `/query`, SDK decoding; (2) SPARQL — literal results, `ORDER BY`, Update with value variables, tests from the W3C-style cases we already run. Cypher-write removal stays a separate, later step. |
 
