@@ -187,6 +187,8 @@ struct Inner {
     mode: StoreMode,
     /// Latest commit (or replicated batch) time, for change-feed subscribers.
     commits: tokio::sync::watch::Sender<Timestamp>,
+    /// The vocabulary (base IRI + prefixes), swapped on change.
+    pub(crate) vocabulary: RwLock<Arc<crate::vocab::Vocabulary>>,
 }
 
 // META key for persisting the last replicated WAL sequence number.
@@ -378,9 +380,11 @@ impl TripleStore {
                 hnsw_spaces: RwLock::new(hnsw_spaces),
                 data_dir: path.to_path_buf(),
                 commits: tokio::sync::watch::channel(Timestamp(oracle_ts)).0,
+                vocabulary: RwLock::new(Arc::new(crate::vocab::Vocabulary::default())),
                 mode,
             }),
         };
+        store.reload_vocabulary()?;
         if !store.is_replica() {
             store.init_changes_floor()?;
         }
@@ -391,6 +395,11 @@ impl TripleStore {
     /// replicated batch is applied). Used by `Subscribe` to wake up.
     pub fn commit_watch(&self) -> tokio::sync::watch::Receiver<Timestamp> {
         self.inner.commits.subscribe()
+    }
+
+    /// The vocabulary slot (read / swapped by `crate::vocab`).
+    pub(crate) fn vocab_cell(&self) -> &RwLock<Arc<crate::vocab::Vocabulary>> {
+        &self.inner.vocabulary
     }
 
     pub(crate) fn notify_commit(&self, ts: Timestamp) {
@@ -510,6 +519,8 @@ impl TripleStore {
             .oracle
             .advance_to(polargraph_core::temporal::Timestamp(oracle_ts));
         self.notify_commit(polargraph_core::temporal::Timestamp(oracle_ts));
+        // The batch may have changed the vocabulary.
+        self.reload_vocabulary()?;
 
         Ok(())
     }

@@ -30,6 +30,7 @@ pub mod owl_rl;
 pub mod registry;
 pub mod sst_import;
 pub mod store;
+pub mod vocab;
 pub mod wal_stream;
 
 pub use backup::BackupManager;
@@ -51,4 +52,5 @@ pub use store::{
     EdgeAnnotation, EdgeAnnotationValue, GraphScope, StoreMode, TripleStore,
     DEFAULT_INLINE_VALUE_MAX_BYTES, STORAGE_FORMAT, TRIGRAM_MAX_TEXT_BYTES,
 };
+pub use vocab::{Vocabulary, DEFAULT_VOCAB_BASE};
 pub use wal_stream::{WalEntry, WalStreamer};
