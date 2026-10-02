@@ -40,7 +40,7 @@ pub use translate::{
     translate_construct, translate_pattern_pub, translate_query, Branch, CmpOp, ConstructTemplate,
     ConstructTranslation, EdgeAnnotationObjectStep, EdgeAnnotationStep, FilterExpr, SparqlAggFunc,
     SparqlAggregateSpec, SparqlDataset, SparqlFilter, SparqlLiteral, SparqlOrder,
-    SparqlTranslation,
+    SparqlTranslation, StringTest,
 };
 pub use values::{order_cmp, sparql_cmp, sparql_eq, term_key};
 

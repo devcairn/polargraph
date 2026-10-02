@@ -422,6 +422,32 @@ def test_sparql_update_with_value_variables(base_url: str):
     assert [r["n"]["value"] for r in rows] == ["Bob"], f"other node untouched: {rows}"
 
 
+def test_sparql_filter_functions(base_url: str):
+    """STRSTARTS / LANG / REGEX / ?a < ?b / STR of a node over REST."""
+    ns = f"http://e2e.example/{uuid.uuid4().hex[:8]}/"
+    a, b = new_id(), new_id()
+    status, data = http_post(base_url + "/changes", {"adds": [{"triples": [
+        {"subject": a, "predicate": ns + "title", "value": {"@value": "Bonjour", "@language": "fr"}},
+        {"subject": a, "predicate": ns + "min", "value": 3},
+        {"subject": a, "predicate": ns + "max", "value": 9},
+        {"subject": b, "predicate": ns + "title", "value": "Hello"},
+        {"subject": b, "predicate": ns + "min", "value": 5},
+        {"subject": b, "predicate": ns + "max", "value": 2},
+    ]}]})
+    assert status == 200, f"/changes failed: {status} {data}"
+
+    def titles(where_filter):
+        rows = sparql_select(base_url,
+            f"SELECT ?t WHERE {{ ?s <{ns}title> ?t ; <{ns}min> ?lo ; <{ns}max> ?hi FILTER({where_filter}) }}")
+        return sorted(r["t"]["value"] for r in rows)
+
+    assert titles('STRSTARTS(?t, "Bon")') == ["Bonjour"]
+    assert titles('LANG(?t) = "fr"') == ["Bonjour"]
+    assert titles('REGEX(?t, "^hel", "i")') == ["Hello"]
+    assert titles("?lo < ?hi") == ["Bonjour"]
+    assert titles(f'STR(?s) = "urn:uuid:{b}"') == ["Hello"]
+
+
 TESTS = [
     test_health,
     test_insert_relation,
@@ -441,6 +467,7 @@ TESTS = [
     test_query_value_bindings,
     test_sparql_literal_results,
     test_sparql_update_with_value_variables,
+    test_sparql_filter_functions,
 ]
 
 

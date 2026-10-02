@@ -1898,6 +1898,7 @@ dependencies = [
  "http 0.2.12",
  "polargraph-core",
  "polargraph-query",
+ "regex",
  "rio_api",
  "rio_turtle",
  "serde",

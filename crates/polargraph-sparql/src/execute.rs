@@ -15,7 +15,10 @@ use std::{cmp::Ordering, collections::HashMap};
 use crate::{
     names::IriNames,
     response::{SparqlBindings, SparqlValue},
-    translate::{CmpOp, FilterExpr, SparqlAggFunc, SparqlAggregateSpec, SparqlFilter, SparqlOrder},
+    translate::{
+        CmpOp, FilterExpr, SparqlAggFunc, SparqlAggregateSpec, SparqlFilter, SparqlOrder,
+        StringTest,
+    },
     values::{numeric, order_cmp, sparql_cmp, sparql_eq, term_key, Num, XSD},
 };
 
@@ -348,7 +351,123 @@ pub fn eval_filter(
                 CmpOp::Ge => sparql_cmp(&l, &r).map(Ordering::is_ge),
             }
         }
+        SparqlFilter::StringTest { test, arg, part } => {
+            let (text, part) = compatible_strings(
+                &eval_expr(binding, arg, names)?,
+                &eval_expr(binding, part, names)?,
+            )?;
+            Some(match test {
+                StringTest::Contains => text.contains(part.as_str()),
+                StringTest::StrStarts => text.starts_with(part.as_str()),
+                StringTest::StrEnds => text.ends_with(part.as_str()),
+            })
+        }
+        SparqlFilter::LangMatches(tag, range) => {
+            let tag = simple_literal(&eval_expr(binding, tag, names)?)?;
+            let range = simple_literal(&eval_expr(binding, range, names)?)?;
+            Some(lang_matches(&tag, &range))
+        }
+        SparqlFilter::Regex {
+            text,
+            pattern,
+            flags,
+        } => {
+            let (text, _) = string_literal(&eval_expr(binding, text, names)?)?;
+            let pattern = simple_literal(&eval_expr(binding, pattern, names)?)?;
+            let flags = match flags {
+                Some(f) => simple_literal(&eval_expr(binding, f, names)?)?,
+                None => String::new(),
+            };
+            regex_match(&text, &pattern, &flags)
+        }
     }
+}
+
+/// A string literal's text and language tag (simple, `xsd:string` or
+/// language-tagged); `None` for anything else.
+fn string_literal(v: &SparqlValue) -> Option<(String, Option<String>)> {
+    match v {
+        SparqlValue::Literal(s) => Some((s.clone(), None)),
+        SparqlValue::LangLiteral { text, lang } => Some((text.clone(), Some(lang.clone()))),
+        _ => None,
+    }
+}
+
+/// A simple literal's text (no language tag).
+fn simple_literal(v: &SparqlValue) -> Option<String> {
+    match v {
+        SparqlValue::Literal(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// The two arguments of `CONTAINS` / `STRSTARTS` / `STRENDS`: string
+/// literals whose tags are compatible — the second untagged, or tagged the
+/// same as the first (SPARQL 1.1 §17.4.3.1.1); otherwise an error.
+fn compatible_strings(a: &SparqlValue, b: &SparqlValue) -> Option<(String, String)> {
+    let (text, lang_a) = string_literal(a)?;
+    let (part, lang_b) = string_literal(b)?;
+    match (lang_a, lang_b) {
+        (_, None) => Some((text, part)),
+        (Some(x), Some(y)) if x.eq_ignore_ascii_case(&y) => Some((text, part)),
+        _ => None,
+    }
+}
+
+/// `LANGMATCHES`: basic filtering of RFC 4647 — `*` matches any tag, else
+/// the range equals the tag or is a prefix of it at a `-` boundary,
+/// case-insensitively.
+fn lang_matches(tag: &str, range: &str) -> bool {
+    if range == "*" {
+        return !tag.is_empty();
+    }
+    let (tag, range) = (tag.to_ascii_lowercase(), range.to_ascii_lowercase());
+    !range.is_empty() && (tag == range || tag.starts_with(&format!("{range}-")))
+}
+
+/// `REGEX(text, pattern, flags)` with XPath flags `s`, `m`, `i`, `x`, `q`;
+/// an invalid pattern or flag is an error. Compiled patterns are cached per
+/// thread.
+fn regex_match(text: &str, pattern: &str, flags: &str) -> Option<bool> {
+    use std::cell::RefCell;
+    thread_local! {
+        static CACHE: RefCell<HashMap<(String, String), Option<regex::Regex>>> =
+            RefCell::new(HashMap::new());
+    }
+    let compile = || {
+        let mut quoted = false;
+        let mut builder = regex::RegexBuilder::new(pattern);
+        for f in flags.chars() {
+            match f {
+                's' => builder.dot_matches_new_line(true),
+                'm' => builder.multi_line(true),
+                'i' => builder.case_insensitive(true),
+                'x' => builder.ignore_whitespace(true),
+                'q' => {
+                    quoted = true;
+                    &mut builder
+                }
+                _ => return None,
+            };
+        }
+        if quoted {
+            let mut q = regex::RegexBuilder::new(&regex::escape(pattern));
+            q.case_insensitive(flags.contains('i'));
+            return q.build().ok();
+        }
+        builder.build().ok()
+    };
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() > 256 {
+            cache.clear();
+        }
+        cache
+            .entry((pattern.to_string(), flags.to_string()))
+            .or_insert_with(compile)
+            .as_ref()
+            .map(|re| re.is_match(text))
+    })
 }
 
 const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";

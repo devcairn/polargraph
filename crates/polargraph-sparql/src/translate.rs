@@ -184,6 +184,14 @@ pub enum FilterExpr {
     Datatype(Box<FilterExpr>),
 }
 
+/// A string test built-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringTest {
+    Contains,
+    StrStarts,
+    StrEnds,
+}
+
 /// A comparison operator (`!=` is `Not(Eq)`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmpOp {
@@ -231,6 +239,20 @@ pub enum SparqlFilter {
         left: FilterExpr,
         right: FilterExpr,
     },
+    /// `CONTAINS(a, b)`, `STRSTARTS(a, b)`, `STRENDS(a, b)`.
+    StringTest {
+        test: StringTest,
+        arg: FilterExpr,
+        part: FilterExpr,
+    },
+    /// `LANGMATCHES(tag, range)`.
+    LangMatches(FilterExpr, FilterExpr),
+    /// `REGEX(text, pattern [, flags])`.
+    Regex {
+        text: FilterExpr,
+        pattern: FilterExpr,
+        flags: Option<FilterExpr>,
+    },
 }
 
 impl FilterExpr {
@@ -247,8 +269,23 @@ impl SparqlFilter {
     /// Whether evaluating this filter needs IRI text (`STR` of a node).
     pub fn uses_iri_text(&self) -> bool {
         match self {
-            SparqlFilter::Compare { left, right, .. } => {
+            SparqlFilter::Compare { left, right, .. }
+            | SparqlFilter::StringTest {
+                arg: left,
+                part: right,
+                ..
+            }
+            | SparqlFilter::LangMatches(left, right) => {
                 left.uses_iri_text() || right.uses_iri_text()
+            }
+            SparqlFilter::Regex {
+                text,
+                pattern,
+                flags,
+            } => {
+                text.uses_iri_text()
+                    || pattern.uses_iri_text()
+                    || flags.as_ref().is_some_and(FilterExpr::uses_iri_text)
             }
             SparqlFilter::Not(f) => f.uses_iri_text(),
             SparqlFilter::And(a, b) | SparqlFilter::Or(a, b) => {
@@ -866,6 +903,44 @@ pub(crate) fn translate_filter(expr: &Expression) -> Result<SparqlFilter, Sparql
                         "isBlank with non-variable argument not supported".to_string(),
                     ))
                 }
+                Function::Contains | Function::StrStarts | Function::StrEnds => {
+                    let [arg, part] = args.as_slice() else {
+                        return Err(SparqlError::Unsupported(
+                            "string test expects two arguments".to_string(),
+                        ));
+                    };
+                    let test = match func {
+                        Function::Contains => StringTest::Contains,
+                        Function::StrStarts => StringTest::StrStarts,
+                        _ => StringTest::StrEnds,
+                    };
+                    Ok(SparqlFilter::StringTest {
+                        test,
+                        arg: translate_expr(arg)?,
+                        part: translate_expr(part)?,
+                    })
+                }
+                Function::LangMatches => {
+                    let [tag, range] = args.as_slice() else {
+                        return Err(SparqlError::Unsupported(
+                            "LANGMATCHES expects two arguments".to_string(),
+                        ));
+                    };
+                    Ok(SparqlFilter::LangMatches(
+                        translate_expr(tag)?,
+                        translate_expr(range)?,
+                    ))
+                }
+                Function::Regex => match args.as_slice() {
+                    [text, pattern] | [text, pattern, _] => Ok(SparqlFilter::Regex {
+                        text: translate_expr(text)?,
+                        pattern: translate_expr(pattern)?,
+                        flags: args.get(2).map(translate_expr).transpose()?,
+                    }),
+                    _ => Err(SparqlError::Unsupported(
+                        "REGEX expects two or three arguments".to_string(),
+                    )),
+                },
                 _ => Err(SparqlError::Unsupported(format!(
                     "filter function {:?} not supported",
                     func

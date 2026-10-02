@@ -17,6 +17,7 @@ polargraph-query = { path = "../polargraph-query" }
 thiserror        = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
+regex            = { workspace = true }
 uuid             = { workspace = true }
 xxhash-rust      = { workspace = true }
 rio_api          = { workspace = true }

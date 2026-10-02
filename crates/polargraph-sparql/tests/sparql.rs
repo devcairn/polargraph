@@ -1793,4 +1793,81 @@ mod filter_expressions {
         );
         assert!(!filter("?v > 3").uses_iri_text());
     }
+
+    #[test]
+    fn string_tests_and_language_compatibility() {
+        let row = bind_map(&[
+            ("s", SparqlValue::Literal("Dune Messiah".into())),
+            (
+                "t",
+                SparqlValue::LangLiteral {
+                    text: "Bonjour".into(),
+                    lang: "fr".into(),
+                },
+            ),
+            ("n", SparqlValue::LiteralInt(12)),
+        ]);
+        let ev = |e: &str| eval_filter(&row, &filter(e), &names());
+        assert_eq!(ev(r#"CONTAINS(?s, "Mess")"#), Some(true));
+        assert_eq!(ev(r#"STRSTARTS(?s, "Dune")"#), Some(true));
+        assert_eq!(ev(r#"STRENDS(?s, "Dune")"#), Some(false));
+        // A tagged first argument with an untagged or same-tag second.
+        assert_eq!(ev(r#"STRSTARTS(?t, "Bon")"#), Some(true));
+        assert_eq!(ev(r#"STRSTARTS(?t, "Bon"@fr)"#), Some(true));
+        assert_eq!(ev(r#"STRSTARTS(?t, "Bon"@en)"#), None, "incompatible tags");
+        assert_eq!(
+            ev(r#"STRSTARTS(?s, "Dune"@en)"#),
+            None,
+            "tagged second, untagged first"
+        );
+        // Non-strings are an error; STR() makes them strings.
+        assert_eq!(ev(r#"STRSTARTS(?n, "1")"#), None);
+        assert_eq!(ev(r#"STRSTARTS(STR(?n), "1")"#), Some(true));
+    }
+
+    #[test]
+    fn langmatches_follows_basic_filtering() {
+        let row = bind_map(&[(
+            "t",
+            SparqlValue::LangLiteral {
+                text: "colour".into(),
+                lang: "en-GB".into(),
+            },
+        )]);
+        let ev = |e: &str| eval_filter(&row, &filter(e), &names());
+        assert_eq!(ev(r#"LANGMATCHES(LANG(?t), "en")"#), Some(true));
+        assert_eq!(ev(r#"LANGMATCHES(LANG(?t), "EN-gb")"#), Some(true));
+        assert_eq!(ev(r#"LANGMATCHES(LANG(?t), "e")"#), Some(false));
+        assert_eq!(ev(r#"LANGMATCHES(LANG(?t), "*")"#), Some(true));
+        let untagged = bind_map(&[("t", SparqlValue::Literal("x".into()))]);
+        assert_eq!(
+            eval_filter(
+                &untagged,
+                &filter(r#"LANGMATCHES(LANG(?t), "*")"#),
+                &names()
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn regex_with_flags() {
+        let row = bind_map(&[
+            ("s", SparqlValue::Literal("Hello World".into())),
+            ("n", SparqlValue::LiteralInt(1)),
+        ]);
+        let ev = |e: &str| eval_filter(&row, &filter(e), &names());
+        assert_eq!(ev(r#"REGEX(?s, "^hello")"#), Some(false));
+        assert_eq!(ev(r#"REGEX(?s, "^hello", "i")"#), Some(true));
+        assert_eq!(ev(r#"REGEX(?s, "o W")"#), Some(true));
+        assert_eq!(
+            ev(r#"REGEX(?s, ".", "q")"#),
+            Some(false),
+            "q quotes the pattern"
+        );
+        assert_eq!(ev(r#"REGEX(?s, "(")"#), None, "invalid pattern");
+        assert_eq!(ev(r#"REGEX(?s, "a", "z")"#), None, "invalid flag");
+        assert_eq!(ev(r#"REGEX(?n, "1")"#), None, "not a string");
+        assert_eq!(ev(r#"!REGEX(?s, "xyz")"#), Some(true));
+    }
 }
