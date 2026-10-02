@@ -2639,18 +2639,13 @@ async fn execute_sparql_query(
         };
 
         // Convert proto bindings → SparqlBindings.
-        let mut branch_bindings: Vec<SparqlBindings> = resp
+        let rows: Vec<SparqlBindings> = resp
             .bindings
             .into_iter()
-            .filter_map(|pb| {
-                let b = sparql_row(pb);
-                if graph_vars_ok(&b) && sparql_filter_bindings(&b, &branch.filters) {
-                    Some(b)
-                } else {
-                    None
-                }
-            })
+            .map(sparql_row)
+            .filter(|b| graph_vars_ok(b))
             .collect();
+        let mut branch_bindings = filter_sparql_rows(&mut client, rows, &branch.filters).await;
 
         // 3a. Handle OPTIONAL branches (left join).
         for opt in &branch.optional_branches {
@@ -2669,18 +2664,13 @@ async fn execute_sparql_query(
                     continue;
                 }
             };
-            let right: Vec<SparqlBindings> = opt_resp
+            let rows: Vec<SparqlBindings> = opt_resp
                 .bindings
                 .into_iter()
-                .filter_map(|pb| {
-                    let b = sparql_row(pb);
-                    if graph_vars_ok(&b) && sparql_filter_bindings(&b, &opt.filters) {
-                        Some(b)
-                    } else {
-                        None
-                    }
-                })
+                .map(sparql_row)
+                .filter(|b| graph_vars_ok(b))
                 .collect();
+            let right = filter_sparql_rows(&mut client, rows, &opt.filters).await;
             branch_bindings = polargraph_sparql::execute::left_join(branch_bindings, right, None);
         }
 
@@ -2878,13 +2868,33 @@ fn sparql_rule_to_proto(rule: &polargraph_query::Rule) -> proto::DatalogRule {
 }
 
 /// Apply all SPARQL post-filters to a single SparqlBindings row.
-fn sparql_filter_bindings(
-    bindings: &polargraph_sparql::SparqlBindings,
+/// Keep the rows every filter accepts. IRIs are resolved first (one
+/// `ResolveIris` call) only when a filter reads IRI text (`STR` of a node).
+async fn filter_sparql_rows(
+    client: &mut GrpcClient,
+    rows: Vec<polargraph_sparql::SparqlBindings>,
     filters: &[polargraph_sparql::SparqlFilter],
-) -> bool {
-    filters
-        .iter()
-        .all(|f| polargraph_sparql::execute::apply_sparql_filter(bindings, f))
+) -> Vec<polargraph_sparql::SparqlBindings> {
+    if filters.is_empty() {
+        return rows;
+    }
+    let names = if filters.iter().any(|f| f.uses_iri_text()) {
+        resolve_names(
+            client,
+            polargraph_sparql::node_ids_in_bindings(&rows),
+            false,
+        )
+        .await
+    } else {
+        polargraph_sparql::IriNames::new(Default::default(), false)
+    };
+    rows.into_iter()
+        .filter(|b| {
+            filters
+                .iter()
+                .all(|f| polargraph_sparql::execute::apply_sparql_filter_named(b, f, &names))
+        })
+        .collect()
 }
 
 // ── SPARQL CONSTRUCT / DESCRIBE ───────────────────────────────────────────────

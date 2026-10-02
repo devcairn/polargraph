@@ -1484,8 +1484,8 @@ mod value_semantics {
         let a_string = bind_map(&[("x", lit("a"))]);
         let five = bind_map(&[("x", int(5))]);
         // An error (unbound / incomparable) is neither true nor false.
-        assert_eq!(eval_filter(&unbound, &gt("x", 3)), None);
-        assert_eq!(eval_filter(&a_string, &gt("x", 3)), None);
+        assert_eq!(eval_filter(&unbound, &gt("x", 3), &names()), None);
+        assert_eq!(eval_filter(&a_string, &gt("x", 3), &names()), None);
         // `!` keeps the error: previously !(error) kept the row.
         let not = SparqlFilter::Not(Box::new(gt("x", 3)));
         assert!(!apply_sparql_filter(&unbound, &not));
@@ -1495,10 +1495,10 @@ mod value_semantics {
             Box::new(gt("x", 3)),
             Box::new(SparqlFilter::Bound("y".into())),
         );
-        assert_eq!(eval_filter(&a_string, &or), None);
-        assert_eq!(eval_filter(&five, &or), Some(true));
+        assert_eq!(eval_filter(&a_string, &or, &names()), None);
+        assert_eq!(eval_filter(&five, &or, &names()), Some(true));
         let and = SparqlFilter::And(Box::new(gt("x", 9)), Box::new(gt("z", 0)));
-        assert_eq!(eval_filter(&five, &and), Some(false));
+        assert_eq!(eval_filter(&five, &and, &names()), Some(false));
         // != between incomparable types is an error, so the row is dropped.
         let ne = SparqlFilter::NotEqualLiteral("x".into(), SparqlLiteral::Int(1));
         assert!(!apply_sparql_filter(&a_string, &ne));
@@ -1526,7 +1526,7 @@ mod value_semantics {
         assert!(apply_sparql_filter(&tagged, &eq));
         // < on language-tagged strings is an error.
         let lt = SparqlFilter::LessThan("t".into(), SparqlLiteral::Str("z".into()));
-        assert_eq!(eval_filter(&tagged, &lt), None);
+        assert_eq!(eval_filter(&tagged, &lt, &names()), None);
     }
 
     #[test]
@@ -1698,4 +1698,99 @@ fn a_variable_predicate_binds_the_predicate() {
     let vp = &t.branches[0].patterns[0];
     assert_eq!(vp.predicate, None);
     assert_eq!(vp.predicate_var.as_deref(), Some("p"));
+}
+
+mod filter_expressions {
+    use super::*;
+    use polargraph_sparql::execute::eval_filter;
+
+    fn names() -> IriNames {
+        IriNames::new(Default::default(), false)
+    }
+
+    /// The translated FILTER of `SELECT * WHERE { ?s ?p ?o FILTER(<expr>) }`.
+    fn filter(expr: &str) -> SparqlFilter {
+        let q = spargebra::Query::parse(
+            &format!("SELECT * WHERE {{ ?s ?p ?o FILTER({expr}) }}"),
+            None,
+        )
+        .unwrap();
+        let t = translate_query(&q).unwrap();
+        t.branches[0].filters[0].clone()
+    }
+
+    #[test]
+    fn variables_compare_with_each_other() {
+        let row = bind_map(&[
+            ("a", SparqlValue::LiteralInt(2)),
+            ("b", SparqlValue::LiteralFloat(2.5)),
+        ]);
+        assert_eq!(eval_filter(&row, &filter("?a < ?b"), &names()), Some(true));
+        assert_eq!(
+            eval_filter(&row, &filter("?a >= ?b"), &names()),
+            Some(false)
+        );
+        assert_eq!(eval_filter(&row, &filter("?a != ?b"), &names()), Some(true));
+        // Unbound → error.
+        assert_eq!(eval_filter(&row, &filter("?a < ?c"), &names()), None);
+    }
+
+    #[test]
+    fn lang_and_datatype() {
+        let row = bind_map(&[
+            (
+                "t",
+                SparqlValue::LangLiteral {
+                    text: "Hei".into(),
+                    lang: "no".into(),
+                },
+            ),
+            ("n", SparqlValue::LiteralInt(3)),
+            ("s", SparqlValue::Literal("x".into())),
+            ("u", SparqlValue::Iri("http://ex/u".into())),
+        ]);
+        let ev = |e: &str| eval_filter(&row, &filter(e), &names());
+        assert_eq!(ev(r#"LANG(?t) = "no""#), Some(true));
+        assert_eq!(ev(r#"LANG(?s) = """#), Some(true));
+        assert_eq!(
+            ev("DATATYPE(?n) = <http://www.w3.org/2001/XMLSchema#integer>"),
+            Some(true)
+        );
+        assert_eq!(
+            ev("DATATYPE(?s) = <http://www.w3.org/2001/XMLSchema#string>"),
+            Some(true)
+        );
+        assert_eq!(
+            ev("DATATYPE(?t) = <http://www.w3.org/1999/02/22-rdf-syntax-ns#langString>"),
+            Some(true)
+        );
+        // LANG / DATATYPE of an IRI is an error.
+        assert_eq!(ev(r#"LANG(?u) = """#), None);
+        assert_eq!(ev("DATATYPE(?u) = <http://ex/x>"), None);
+    }
+
+    #[test]
+    fn str_of_a_node_uses_its_iri() {
+        let n = node("01890000-0000-7000-8000-000000000002");
+        let names = IriNames::new(
+            std::iter::once((n, "http://ex/alice".to_string())).collect(),
+            false,
+        );
+        let row = bind_map(&[
+            ("x", SparqlValue::Uri(n)),
+            ("v", SparqlValue::LiteralInt(7)),
+        ]);
+        let f = filter(r#"STR(?x) = "http://ex/alice""#);
+        assert!(f.uses_iri_text());
+        assert_eq!(eval_filter(&row, &f, &names), Some(true));
+        assert_eq!(
+            eval_filter(
+                &row,
+                &filter(r#"STR(?v) = "7""#),
+                &IriNames::new(Default::default(), false)
+            ),
+            Some(true)
+        );
+        assert!(!filter("?v > 3").uses_iri_text());
+    }
 }

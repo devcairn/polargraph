@@ -15,8 +15,8 @@ use std::{cmp::Ordering, collections::HashMap};
 use crate::{
     names::IriNames,
     response::{SparqlBindings, SparqlValue},
-    translate::{SparqlAggFunc, SparqlAggregateSpec, SparqlFilter, SparqlOrder},
-    values::{numeric, order_cmp, sparql_cmp, sparql_eq, term_key, Num},
+    translate::{CmpOp, FilterExpr, SparqlAggFunc, SparqlAggregateSpec, SparqlFilter, SparqlOrder},
+    values::{numeric, order_cmp, sparql_cmp, sparql_eq, term_key, Num, XSD},
 };
 
 // ── Left join (OPTIONAL) ──────────────────────────────────────────────────────
@@ -152,7 +152,7 @@ pub fn execute_sparql_aggregations(
         }
 
         // Apply HAVING filter.
-        if having.map_or(true, |f| apply_sparql_filter(&out, f)) {
+        if having.map_or(true, |f| apply_sparql_filter_named(&out, f, names)) {
             result.push(out);
         }
     }
@@ -258,14 +258,31 @@ pub fn order_bindings(rows: &mut [SparqlBindings], order: &[SparqlOrder], names:
 /// Evaluate a `SparqlFilter` against a single binding row: a row is kept only
 /// when the filter is `true` — `false` and errors (an unbound variable, a
 /// comparison of incomparable values) both remove it (SPARQL 1.1 §17.2).
+///
+/// `STR` of a node renders `urn:uuid:…` here; use
+/// [`apply_sparql_filter_named`] when the filter uses IRI text
+/// ([`SparqlFilter::uses_iri_text`]).
 pub fn apply_sparql_filter(binding: &SparqlBindings, filter: &SparqlFilter) -> bool {
-    eval_filter(binding, filter) == Some(true)
+    apply_sparql_filter_named(binding, filter, &IriNames::new(Default::default(), false))
+}
+
+/// [`apply_sparql_filter`] with IRIs for `STR` of a node.
+pub fn apply_sparql_filter_named(
+    binding: &SparqlBindings,
+    filter: &SparqlFilter,
+    names: &IriNames,
+) -> bool {
+    eval_filter(binding, filter, names) == Some(true)
 }
 
 /// Three-valued filter evaluation: `Some(true)`, `Some(false)`, or `None` for
 /// an error. `!` keeps errors; `&&` / `||` follow SPARQL's error rules
 /// (`false && error = false`, `true || error = true`).
-pub fn eval_filter(binding: &SparqlBindings, filter: &SparqlFilter) -> Option<bool> {
+pub fn eval_filter(
+    binding: &SparqlBindings,
+    filter: &SparqlFilter,
+    names: &IriNames,
+) -> Option<bool> {
     let get = |var: &str| binding.get(var);
     match filter {
         SparqlFilter::Bound(var) => Some(binding.contains_key(var)),
@@ -284,13 +301,19 @@ pub fn eval_filter(binding: &SparqlBindings, filter: &SparqlFilter) -> Option<bo
         // PolarGraph has no blank nodes at query time.
         SparqlFilter::IsBlank(var) => get(var).map(|_| false),
 
-        SparqlFilter::Not(inner) => eval_filter(binding, inner).map(|b| !b),
-        SparqlFilter::And(a, b) => match (eval_filter(binding, a), eval_filter(binding, b)) {
+        SparqlFilter::Not(inner) => eval_filter(binding, inner, names).map(|b| !b),
+        SparqlFilter::And(a, b) => match (
+            eval_filter(binding, a, names),
+            eval_filter(binding, b, names),
+        ) {
             (Some(false), _) | (_, Some(false)) => Some(false),
             (Some(true), Some(true)) => Some(true),
             _ => None,
         },
-        SparqlFilter::Or(a, b) => match (eval_filter(binding, a), eval_filter(binding, b)) {
+        SparqlFilter::Or(a, b) => match (
+            eval_filter(binding, a, names),
+            eval_filter(binding, b, names),
+        ) {
             (Some(true), _) | (_, Some(true)) => Some(true),
             (Some(false), Some(false)) => Some(false),
             _ => None,
@@ -312,5 +335,52 @@ pub fn eval_filter(binding: &SparqlBindings, filter: &SparqlFilter) -> Option<bo
         SparqlFilter::NotEqualLiteral(var, lit) => {
             sparql_eq(get(var)?, &lit.to_value()).map(|b| !b)
         }
+        SparqlFilter::Compare { op, left, right } => {
+            let (l, r) = (
+                eval_expr(binding, left, names)?,
+                eval_expr(binding, right, names)?,
+            );
+            match op {
+                CmpOp::Eq => sparql_eq(&l, &r),
+                CmpOp::Lt => sparql_cmp(&l, &r).map(Ordering::is_lt),
+                CmpOp::Le => sparql_cmp(&l, &r).map(Ordering::is_le),
+                CmpOp::Gt => sparql_cmp(&l, &r).map(Ordering::is_gt),
+                CmpOp::Ge => sparql_cmp(&l, &r).map(Ordering::is_ge),
+            }
+        }
     }
+}
+
+const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+
+/// Evaluate a filter operand; `None` is an error (an unbound variable, or a
+/// built-in applied to the wrong kind of term).
+pub fn eval_expr(
+    binding: &SparqlBindings,
+    e: &FilterExpr,
+    names: &IriNames,
+) -> Option<SparqlValue> {
+    Some(match e {
+        FilterExpr::Var(v) => binding.get(v)?.clone(),
+        FilterExpr::Const(c) => c.clone(),
+        FilterExpr::Str(x) => SparqlValue::Literal(match eval_expr(binding, x, names)? {
+            SparqlValue::Uri(id) => names.iri(&id),
+            SparqlValue::Iri(iri) => iri,
+            literal => literal.lexical()?,
+        }),
+        FilterExpr::Lang(x) => match eval_expr(binding, x, names)? {
+            SparqlValue::Uri(_) | SparqlValue::Iri(_) => return None,
+            SparqlValue::LangLiteral { lang, .. } => SparqlValue::Literal(lang),
+            _ => SparqlValue::Literal(String::new()),
+        },
+        FilterExpr::Datatype(x) => SparqlValue::Iri(match eval_expr(binding, x, names)? {
+            SparqlValue::Uri(_) | SparqlValue::Iri(_) => return None,
+            SparqlValue::Literal(_) => format!("{XSD}string"),
+            SparqlValue::LiteralInt(_) => format!("{XSD}integer"),
+            SparqlValue::LiteralFloat(_) => format!("{XSD}double"),
+            SparqlValue::LiteralBool(_) => format!("{XSD}boolean"),
+            SparqlValue::LangLiteral { .. } => RDF_LANG_STRING.to_string(),
+            SparqlValue::TypedLiteral { datatype, .. } => datatype,
+        }),
+    })
 }

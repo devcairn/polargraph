@@ -170,6 +170,30 @@ pub struct SparqlDataset {
     pub named: Option<Vec<String>>,
 }
 
+/// An operand of a filter comparison: a variable, a constant, or a built-in
+/// over another operand.
+#[derive(Debug, Clone)]
+pub enum FilterExpr {
+    Var(String),
+    Const(crate::response::SparqlValue),
+    /// `STR(x)`: a literal's lexical form or an IRI's text.
+    Str(Box<FilterExpr>),
+    /// `LANG(x)`: a literal's language tag (`""` if none).
+    Lang(Box<FilterExpr>),
+    /// `DATATYPE(x)`: a literal's datatype IRI.
+    Datatype(Box<FilterExpr>),
+}
+
+/// A comparison operator (`!=` is `Not(Eq)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Eq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
 /// A post-filter applied in-process after gRPC query results are received.
 #[derive(Debug, Clone)]
 pub enum SparqlFilter {
@@ -200,6 +224,39 @@ pub enum SparqlFilter {
     /// `FILTER(?var = literal)` — variable against a literal value
     EqualLiteral(String, SparqlLiteral),
     NotEqualLiteral(String, SparqlLiteral),
+    /// Any other comparison: `?a < ?b`, `LANG(?t) = "en"`,
+    /// `DATATYPE(?v) = xsd:integer`, …
+    Compare {
+        op: CmpOp,
+        left: FilterExpr,
+        right: FilterExpr,
+    },
+}
+
+impl FilterExpr {
+    fn uses_iri_text(&self) -> bool {
+        match self {
+            FilterExpr::Str(_) => true,
+            FilterExpr::Lang(x) | FilterExpr::Datatype(x) => x.uses_iri_text(),
+            FilterExpr::Var(_) | FilterExpr::Const(_) => false,
+        }
+    }
+}
+
+impl SparqlFilter {
+    /// Whether evaluating this filter needs IRI text (`STR` of a node).
+    pub fn uses_iri_text(&self) -> bool {
+        match self {
+            SparqlFilter::Compare { left, right, .. } => {
+                left.uses_iri_text() || right.uses_iri_text()
+            }
+            SparqlFilter::Not(f) => f.uses_iri_text(),
+            SparqlFilter::And(a, b) | SparqlFilter::Or(a, b) => {
+                a.uses_iri_text() || b.uses_iri_text()
+            }
+            _ => false,
+        }
+    }
 }
 
 /// One `ORDER BY` key (a variable; other expressions are unsupported).
@@ -747,6 +804,7 @@ pub(crate) fn translate_filter(expr: &Expression) -> Result<SparqlFilter, Sparql
             // Variable = Literal
             translate_var_literal_comparison(a, b, SparqlFilter::EqualLiteral)
                 .or_else(|_| translate_var_literal_comparison(b, a, SparqlFilter::EqualLiteral))
+                .or_else(|_| translate_comparison(CmpOp::Eq, a, b))
         }
 
         Expression::SameTerm(a, b) => {
@@ -765,16 +823,20 @@ pub(crate) fn translate_filter(expr: &Expression) -> Result<SparqlFilter, Sparql
         Expression::Greater(a, b) => {
             translate_var_literal_comparison(a, b, SparqlFilter::GreaterThan)
                 .or_else(|_| translate_var_literal_comparison(b, a, SparqlFilter::LessThan))
+                .or_else(|_| translate_comparison(CmpOp::Gt, a, b))
         }
         Expression::GreaterOrEqual(a, b) => {
             translate_var_literal_comparison(a, b, SparqlFilter::GreaterOrEqual)
                 .or_else(|_| translate_var_literal_comparison(b, a, SparqlFilter::LessOrEqual))
+                .or_else(|_| translate_comparison(CmpOp::Ge, a, b))
         }
         Expression::Less(a, b) => translate_var_literal_comparison(a, b, SparqlFilter::LessThan)
-            .or_else(|_| translate_var_literal_comparison(b, a, SparqlFilter::GreaterThan)),
+            .or_else(|_| translate_var_literal_comparison(b, a, SparqlFilter::GreaterThan))
+            .or_else(|_| translate_comparison(CmpOp::Lt, a, b)),
         Expression::LessOrEqual(a, b) => {
             translate_var_literal_comparison(a, b, SparqlFilter::LessOrEqual)
                 .or_else(|_| translate_var_literal_comparison(b, a, SparqlFilter::GreaterOrEqual))
+                .or_else(|_| translate_comparison(CmpOp::Le, a, b))
         }
 
         Expression::FunctionCall(func, args) => {
@@ -833,6 +895,45 @@ pub(crate) fn translate_filter(expr: &Expression) -> Result<SparqlFilter, Sparql
             other
         ))),
     }
+}
+
+/// A general comparison between two operands.
+fn translate_comparison(
+    op: CmpOp,
+    a: &Expression,
+    b: &Expression,
+) -> Result<SparqlFilter, SparqlError> {
+    Ok(SparqlFilter::Compare {
+        op,
+        left: translate_expr(a)?,
+        right: translate_expr(b)?,
+    })
+}
+
+/// A filter operand: variable, literal, IRI, or `STR` / `LANG` / `DATATYPE`.
+pub(crate) fn translate_expr(e: &Expression) -> Result<FilterExpr, SparqlError> {
+    use spargebra::algebra::Function;
+    let one = |args: &[Expression]| match args {
+        [x] => translate_expr(x).map(Box::new),
+        _ => Err(SparqlError::Unsupported(
+            "built-in expects one argument".to_string(),
+        )),
+    };
+    Ok(match e {
+        Expression::Variable(v) => FilterExpr::Var(v.as_str().to_string()),
+        Expression::Literal(l) => FilterExpr::Const(sparql_literal_to_value(l).to_value()),
+        Expression::NamedNode(n) => {
+            FilterExpr::Const(crate::response::SparqlValue::Iri(n.as_str().to_string()))
+        }
+        Expression::FunctionCall(Function::Str, args) => FilterExpr::Str(one(args)?),
+        Expression::FunctionCall(Function::Lang, args) => FilterExpr::Lang(one(args)?),
+        Expression::FunctionCall(Function::Datatype, args) => FilterExpr::Datatype(one(args)?),
+        other => {
+            return Err(SparqlError::Unsupported(format!(
+                "filter operand '{other}' not supported"
+            )))
+        }
+    })
 }
 
 /// Translate `?var OP literal` into a comparison SparqlFilter.
