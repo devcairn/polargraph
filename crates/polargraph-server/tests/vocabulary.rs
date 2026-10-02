@@ -531,3 +531,76 @@ async fn cypher_write_is_deprecated_but_still_works() {
         1
     );
 }
+
+#[tokio::test]
+async fn relations_can_name_their_object_by_iri() {
+    use polargraph_server::proto::{ApplyChangesRequest, GraphTriples};
+
+    let dir = TempDir::new().unwrap();
+    let svc = PolarGraphServer::new(TripleStore::open(dir.path()).unwrap()).unwrap();
+    svc.put_prefix(Request::new(PutPrefixRequest {
+        name: "ex".into(),
+        namespace: "http://ex/".into(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    let typed = |node: CoreNodeId, class: &str| Triple {
+        kind: Some(TripleKind::Relation(RelationTriple {
+            subject: Some(proto_node(node)),
+            predicate: RDF_TYPE.into(),
+            object_iri: class.into(),
+            ..Default::default()
+        })),
+    };
+
+    // Insert: a bare class name and a prefixed one.
+    let (a, b) = (CoreNodeId::new(), CoreNodeId::new());
+    svc.insert(Request::new(InsertRequest {
+        triples: vec![typed(a, "Person"), typed(b, "ex:Widget")],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    // ApplyChanges: a full IRI.
+    let c = CoreNodeId::new();
+    svc.apply_changes(Request::new(ApplyChangesRequest {
+        adds: vec![GraphTriples {
+            graph: String::new(),
+            triples: vec![typed(c, "http://ex/Widget")],
+        }],
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        cypher_rows(&svc, "MATCH (p:Person) RETURN p").await.len(),
+        1
+    );
+    assert_eq!(instances(&svc, "http://ex/Widget").await.len(), 2);
+    // The class IRIs were recorded in the IRI dictionary.
+    let iris = svc
+        .resolve_iris(Request::new(polargraph_server::proto::ResolveIrisRequest {
+            nodes: vec![proto_node(iri_to_node_id("http://ex/Widget"))],
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .iris;
+    assert_eq!(iris, ["http://ex/Widget"]);
+
+    // A conflicting object and object_iri is rejected.
+    let mut bad = typed(a, "Person");
+    if let Some(TripleKind::Relation(r)) = &mut bad.kind {
+        r.object = Some(proto_node(b));
+    }
+    let err = svc
+        .insert(Request::new(InsertRequest {
+            triples: vec![bad],
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}

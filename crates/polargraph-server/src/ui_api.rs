@@ -550,6 +550,7 @@ async fn api_insert(
                 object: Some(object_id),
                 vt_start: 0,
                 vt_end: 0,
+                object_iri: String::new(),
                 properties: vec![],
             })),
         }

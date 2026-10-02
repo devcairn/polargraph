@@ -91,6 +91,7 @@ pub fn triple_to_proto(t: &Triple, include_values: bool) -> Option<proto::Triple
                 object: Some(node_id_to_proto(*object)),
                 vt_start: temporal.vt_start.0,
                 vt_end: temporal.vt_end.0,
+                object_iri: String::new(),
                 properties: vec![],
             }),
             Triple::Property {

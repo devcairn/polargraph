@@ -727,7 +727,39 @@ impl PolarGraphServer {
         }))
     }
 
-    /// Stream WAL entries to a replica. Primary-only.
+    /// Resolve `RelationTriple.object_iri` (an IRI, `prefix:local` or a bare
+    /// vocabulary name) to the object node, returning the IRIs to record in
+    /// the IRI dictionary.
+    #[allow(clippy::result_large_err)]
+    fn resolve_object_iris<'a>(
+        &self,
+        triples: impl Iterator<Item = &'a mut crate::proto::Triple>,
+    ) -> Result<Vec<String>, Status> {
+        let vocab = self.store.vocabulary();
+        let mut iris = Vec::new();
+        for t in triples {
+            let Some(crate::proto::triple::Kind::Relation(r)) = &mut t.kind else {
+                continue;
+            };
+            if r.object_iri.is_empty() {
+                continue;
+            }
+            let iri = vocab.expand(&r.object_iri);
+            let node = convert::node_id_to_proto(polargraph_core::term::iri_to_node_id(&iri));
+            match &r.object {
+                Some(o) if *o != node => {
+                    return Err(Status::invalid_argument(format!(
+                        "relation object and object_iri <{iri}> name different nodes"
+                    )))
+                }
+                _ => r.object = Some(node),
+            }
+            if polargraph_core::term::needs_dictionary(&iri) {
+                iris.push(iri);
+            }
+        }
+        Ok(iris)
+    }
 
     /// Checks shared by the vocabulary mutations.
     #[allow(clippy::result_large_err)]
@@ -1699,7 +1731,10 @@ impl PolarGraphService for PolarGraphServer {
     ) -> Result<Response<ApplyChangesResponse>, Status> {
         self.check_not_replica()?;
         let meta_uid = meta_user_id(request.metadata());
-        let req = request.into_inner();
+        let mut req = request.into_inner();
+        let resolved =
+            self.resolve_object_iris(req.adds.iter_mut().flat_map(|g| g.triples.iter_mut()))?;
+        req.iris.extend(resolved);
         let author = resolve_user_id(&req.user_id, &meta_uid);
         let access = self.caller_access(&author);
 
@@ -1874,7 +1909,12 @@ impl PolarGraphService for PolarGraphServer {
     ) -> Result<Response<ValidateShapesResponse>, Status> {
         use polargraph_shacl::{DataView, Obj, Overlay, Shapes};
         let meta_uid = meta_user_id(request.metadata());
-        let req = request.into_inner();
+        let mut req = request.into_inner();
+        self.resolve_object_iris(
+            req.overlay_adds
+                .iter_mut()
+                .flat_map(|g| g.triples.iter_mut()),
+        )?;
         let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
         if req.shapes_graphs.is_empty() {
             return Err(Status::invalid_argument(
@@ -2172,7 +2212,9 @@ impl PolarGraphService for PolarGraphServer {
     ) -> Result<Response<InsertResponse>, Status> {
         self.check_not_replica()?;
         let meta_uid = meta_user_id(request.metadata());
-        let req = request.into_inner();
+        let mut req = request.into_inner();
+        let resolved = self.resolve_object_iris(req.triples.iter_mut())?;
+        req.iris.extend(resolved);
         let author = resolve_user_id(&req.user_id, &meta_uid);
         let access = self.caller_access(&author);
 
@@ -3838,6 +3880,7 @@ impl PolarGraphService for PolarGraphServer {
         Ok(response)
     }
 
+    /// Stream WAL entries to a replica. Primary-only.
     async fn stream_wal(
         &self,
         request: Request<StreamWalRequest>,

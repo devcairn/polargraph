@@ -629,6 +629,7 @@ async fn handle_insert(
             vt_start: 0,
             vt_end: i64::MAX,
             properties,
+            object_iri: String::new(),
         })),
     };
 
@@ -1347,6 +1348,7 @@ fn change_triple(t: ChangeQuadJson, iris: &mut Vec<String>) -> Option<proto::Tri
             object: Some(change_node(&o, iris)),
             vt_start: 0,
             vt_end: i64::MAX,
+            object_iri: String::new(),
             properties: vec![],
         }),
         (None, Some(v)) => proto::triple::Kind::Property(proto::PropertyTriple {
@@ -3838,6 +3840,7 @@ fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Tr
                     }),
                     vt_start: 0,
                     vt_end: i64::MAX,
+                    object_iri: String::new(),
                     properties: vec![],
                 })),
             })
@@ -4001,6 +4004,7 @@ fn resolve_quad_pattern_to_proto(
                     }),
                     vt_start: 0,
                     vt_end: i64::MAX,
+                    object_iri: String::new(),
                     properties: vec![],
                 })),
             })
@@ -4017,6 +4021,7 @@ fn resolve_quad_pattern_to_proto(
                     }),
                     vt_start: 0,
                     vt_end: i64::MAX,
+                    object_iri: String::new(),
                     properties: vec![],
                 })),
             }),
@@ -4105,6 +4110,7 @@ fn imported_triples_to_proto(
                             object: Some(pg_node_id_to_proto(obj_node_id)),
                             vt_start: 0,
                             vt_end: i64::MAX,
+                            object_iri: String::new(),
                             properties: vec![],
                         })),
                     }
