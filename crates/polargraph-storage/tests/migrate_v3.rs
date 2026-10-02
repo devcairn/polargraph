@@ -224,6 +224,9 @@ fn v2_store_is_refused_until_migrated_then_reads_the_same() {
     assert_eq!(report.edge_relation_annotations, 1);
 
     let store = TripleStore::open(dir.path()).unwrap();
+    // Pre-vocabulary names become IRIs only via the explicit conversion
+    // (docs/upgrade-cypher-rdf.md); bare names then resolve to them.
+    store.convert_legacy(false).unwrap();
 
     // Relations and current property values.
     let knows = store.scan_by_subject_predicate(&f.alice, "knows").unwrap();
@@ -320,6 +323,9 @@ fn interrupted_migration_is_rerun_from_scratch() {
     let report = migrate_v3::migrate(dir.path()).unwrap();
     assert_eq!(report.quad_versions, 9, "junk was cleared, not counted");
     let store = TripleStore::open(dir.path()).unwrap();
+    // Pre-vocabulary names become IRIs only via the explicit conversion
+    // (docs/upgrade-cypher-rdf.md); bare names then resolve to them.
+    store.convert_legacy(false).unwrap();
     assert_eq!(
         prop_values(&store, &f.alice, "name"),
         vec![Value::Text("Alice".into())]

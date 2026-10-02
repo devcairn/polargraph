@@ -125,13 +125,13 @@ fn rdfs2_domain_type_inference() {
     let bob = NodeId::new();
     let person_class = NodeId::new();
 
-    // Use the bridge: the predicate "knows" maps to its NodeId for schema triples
-    let knows_node = owl_rl::predicate_node("knows");
+    // Use the bridge: the predicate "http://ex/knows" maps to its NodeId for schema triples
+    let knows_node = owl_rl::predicate_node("http://ex/knows");
 
     // knows rdfs:domain Person
     insert_relation(&store, knows_node, RDFS_DOMAIN, person_class);
     // Alice knows Bob
-    insert_relation(&store, alice, "knows", bob);
+    insert_relation(&store, alice, "http://ex/knows", bob);
 
     owl_rl::materialize(&store, true).unwrap();
 
@@ -152,12 +152,12 @@ fn rdfs3_range_type_inference() {
     let bob = NodeId::new();
     let person_class = NodeId::new();
 
-    let knows_node = owl_rl::predicate_node("knows");
+    let knows_node = owl_rl::predicate_node("http://ex/knows");
 
     // knows rdfs:range Person
     insert_relation(&store, knows_node, RDFS_RANGE, person_class);
     // Alice knows Bob
-    insert_relation(&store, alice, "knows", bob);
+    insert_relation(&store, alice, "http://ex/knows", bob);
 
     owl_rl::materialize(&store, true).unwrap();
 
@@ -177,7 +177,7 @@ fn prp_symp_symmetric_property() {
     let alice = NodeId::new();
     let bob = NodeId::new();
 
-    let likes_node = owl_rl::predicate_node("likes");
+    let likes_node = owl_rl::predicate_node("http://ex/likes");
     let owl_sym_node = owl_rl::predicate_node(OWL_SYMMETRIC_PROP);
 
     // likes rdf:type owl:SymmetricProperty
@@ -187,13 +187,13 @@ fn prp_symp_symmetric_property() {
     let _ = owl_sym_node; // used to make sure it's the same as sym_prop_class
 
     // Alice likes Bob
-    insert_relation(&store, alice, "likes", bob);
+    insert_relation(&store, alice, "http://ex/likes", bob);
 
     owl_rl::materialize(&store, true).unwrap();
 
     // Should infer: Bob likes Alice
     assert!(
-        derived_contains(&store, bob, "likes", alice),
+        derived_contains(&store, bob, "http://ex/likes", alice),
         "prp-symp should infer bob likes alice"
     );
 }
@@ -208,25 +208,25 @@ fn prp_inv1_inverse_of() {
     let bob = NodeId::new();
     let dummy = NodeId::new();
 
-    let knows_node = owl_rl::predicate_node("knows");
-    let known_by_node = owl_rl::predicate_node("knownBy");
+    let knows_node = owl_rl::predicate_node("http://ex/knows");
+    let known_by_node = owl_rl::predicate_node("http://ex/knownBy");
 
-    // Pre-intern "knownBy" by using it as an actual predicate at least once.
+    // Pre-intern "http://ex/knownBy" by using it as an actual predicate at least once.
     // The materializer can only infer triples using predicates that are interned
     // (bridge is built from intern table). A dummy self-loop achieves this without
     // affecting the test assertion.
-    insert_relation(&store, dummy, "knownBy", dummy);
+    insert_relation(&store, dummy, "http://ex/knownBy", dummy);
 
     // knows owl:inverseOf knownBy
     insert_relation(&store, knows_node, OWL_INVERSE_OF, known_by_node);
     // Alice knows Bob
-    insert_relation(&store, alice, "knows", bob);
+    insert_relation(&store, alice, "http://ex/knows", bob);
 
     owl_rl::materialize(&store, true).unwrap();
 
     // Should infer: Bob knownBy Alice
     assert!(
-        derived_contains(&store, bob, "knownBy", alice),
+        derived_contains(&store, bob, "http://ex/knownBy", alice),
         "prp-inv1 should infer bob knownBy alice"
     );
 }

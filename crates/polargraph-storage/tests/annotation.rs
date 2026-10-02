@@ -88,7 +88,7 @@ fn insert_and_scan_edge_property_annotations() {
 
     let conf = annotations
         .iter()
-        .find(|a| a.predicate.0.as_str() == "confidence")
+        .find(|a| a.predicate.0.as_str() == "urn:pg:vocab:confidence")
         .expect("confidence annotation missing");
     match &conf.value {
         EdgeAnnotationValue::Scalar(Value::Float(f)) => {
@@ -99,7 +99,7 @@ fn insert_and_scan_edge_property_annotations() {
 
     let src = annotations
         .iter()
-        .find(|a| a.predicate.0.as_str() == "source")
+        .find(|a| a.predicate.0.as_str() == "urn:pg:vocab:source")
         .expect("source annotation missing");
     match &src.value {
         EdgeAnnotationValue::Scalar(Value::Text(s)) => assert_eq!(s, "db_import"),
@@ -117,13 +117,13 @@ fn insert_and_scan_edge_relation_annotations() {
     let provenance_node = NodeId::new();
 
     let edge_id = insert_relation(&store, alice, "trusts", bob);
-    let ts = insert_edge_relation(&store, edge_id, "assertedBy", provenance_node);
+    let ts = insert_edge_relation(&store, edge_id, "urn:pg:vocab:assertedBy", provenance_node);
 
     let annotations = store.scan_edge_annotations(edge_id, ts).unwrap();
 
     assert_eq!(annotations.len(), 1);
     let ann = &annotations[0];
-    assert_eq!(ann.predicate.0.as_str(), "assertedBy");
+    assert_eq!(ann.predicate.0.as_str(), "urn:pg:vocab:assertedBy");
     match ann.value {
         EdgeAnnotationValue::Node(nid) => assert_eq!(nid, provenance_node),
         _ => panic!("expected Node annotation"),

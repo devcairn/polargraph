@@ -77,9 +77,9 @@ fn scan_by_subject_returns_all_triples_for_node() {
     assert_eq!(triples.len(), 3);
 
     let preds: Vec<&str> = triples.iter().map(|t| t.predicate().0.as_str()).collect();
-    assert!(preds.contains(&"reports-to"));
-    assert!(preds.contains(&"collaborates-with"));
-    assert!(preds.contains(&"name"));
+    assert!(preds.contains(&"urn:pg:vocab:reports-to"));
+    assert!(preds.contains(&"urn:pg:vocab:collaborates-with"));
+    assert!(preds.contains(&"urn:pg:vocab:name"));
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn scan_by_subject_predicate_filters_correctly() {
         .unwrap();
     assert_eq!(triples.len(), 2);
     for t in &triples {
-        assert_eq!(t.predicate().0, "reports-to");
+        assert_eq!(t.predicate().0, "urn:pg:vocab:reports-to");
         assert_eq!(t.subject(), alice);
     }
 }
@@ -117,7 +117,7 @@ fn scan_by_predicate_returns_all_subjects() {
     let triples = store.scan_by_predicate("reports-to").unwrap();
     assert_eq!(triples.len(), 2);
     for t in &triples {
-        assert_eq!(t.predicate().0, "reports-to");
+        assert_eq!(t.predicate().0, "urn:pg:vocab:reports-to");
     }
 }
 
@@ -332,7 +332,7 @@ fn multiple_property_types_on_same_node() {
     let find_value = |pred: &str| -> Value {
         triples
             .iter()
-            .find(|t| t.predicate().0 == pred)
+            .find(|t| t.predicate().0 == format!("urn:pg:vocab:{pred}"))
             .and_then(|t| match t {
                 Triple::Property { value, .. } => Some(value.clone()),
                 _ => None,
@@ -426,8 +426,8 @@ fn triple_data_persists_after_reopen() {
         assert_eq!(triples.len(), 2, "triples must survive a reopen");
 
         let preds: Vec<&str> = triples.iter().map(|t| t.predicate().0.as_str()).collect();
-        assert!(preds.contains(&"reports-to"));
-        assert!(preds.contains(&"name"));
+        assert!(preds.contains(&"urn:pg:vocab:reports-to"));
+        assert!(preds.contains(&"urn:pg:vocab:name"));
     }
 }
 
@@ -447,8 +447,8 @@ fn predicate_table_persists_across_reopen() {
         let id = store.intern_predicate("knows").unwrap();
         assert_eq!(
             store.predicate_string(id),
-            Some("knows".to_owned()),
-            "predicate must reload from META CF"
+            Some("urn:pg:vocab:knows".to_owned()),
+            "predicate must reload from META CF (bare names live under the vocabulary base)"
         );
     }
 }
@@ -504,7 +504,7 @@ fn inserting_many_triples_does_not_corrupt_scans() {
     for &spoke in &spokes {
         let out = store.scan_by_subject(&spoke).unwrap();
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].predicate().0, "member-of");
+        assert_eq!(out[0].predicate().0, "urn:pg:vocab:member-of");
     }
 }
 

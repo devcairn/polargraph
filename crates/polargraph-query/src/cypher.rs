@@ -2881,9 +2881,16 @@ pub fn apply_edge_annotation_filters(
             // Reinterpret NodeId bytes as EdgeId (same UUID).
             let edge_id = EdgeId(node_id.0);
             let annotations = snapshot.scan_edge_annotations(edge_id)?;
+            // Stored predicates are canonical (bare names under the
+            // vocabulary base); compare in that form.
+            let wanted = snapshot
+                .store()
+                .vocabulary()
+                .canonical_predicate(&filter.predicate)
+                .into_owned();
 
             let matched = annotations.iter().any(|ann| {
-                if ann.predicate.0 != filter.predicate {
+                if ann.predicate.0 != wanted {
                     return false;
                 }
                 match &ann.value {

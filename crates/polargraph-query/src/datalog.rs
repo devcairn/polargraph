@@ -2092,9 +2092,12 @@ mod tests {
             .iter()
             .map(|(_nb, pb)| pb.get("p").cloned().unwrap())
             .collect();
-        assert!(preds.contains("knows"), "predicate 'knows' must be bound");
         assert!(
-            preds.contains("manages"),
+            preds.contains("urn:pg:vocab:knows"),
+            "predicate 'knows' must be bound"
+        );
+        assert!(
+            preds.contains("urn:pg:vocab:manages"),
             "predicate 'manages' must be bound"
         );
 
@@ -2131,8 +2134,8 @@ mod tests {
             .iter()
             .map(|(_nb, pb)| pb.get("p").cloned().unwrap())
             .collect();
-        assert!(preds.contains("knows"));
-        assert!(preds.contains("manages"));
+        assert!(preds.contains("urn:pg:vocab:knows"));
+        assert!(preds.contains("urn:pg:vocab:manages"));
     }
 
     #[test]
@@ -2176,7 +2179,7 @@ mod tests {
         let (nb, pb) = &results[0];
         assert_eq!(nb.get("o").copied(), Some(bob));
         assert_eq!(nb.get("x").copied(), Some(dave));
-        assert_eq!(pb.get("p").map(String::as_str), Some("knows"));
+        assert_eq!(pb.get("p").map(String::as_str), Some("urn:pg:vocab:knows"));
     }
 
     #[test]
@@ -2205,7 +2208,7 @@ mod tests {
         assert_eq!(results.len(), 1, "only the self-loop satisfies x == x");
         let (nb, pb) = &results[0];
         assert_eq!(nb.get("x").copied(), Some(a));
-        assert_eq!(pb.get("p").map(String::as_str), Some("self"));
+        assert_eq!(pb.get("p").map(String::as_str), Some("urn:pg:vocab:self"));
     }
 
     #[test]
@@ -2250,6 +2253,6 @@ mod tests {
         );
         let (nb, pb) = &results[0];
         assert_eq!(nb.get("x").copied(), Some(carol));
-        assert_eq!(pb.get("p").map(String::as_str), Some("knows"));
+        assert_eq!(pb.get("p").map(String::as_str), Some("urn:pg:vocab:knows"));
     }
 }

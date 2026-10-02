@@ -1161,9 +1161,10 @@ impl PolarGraphService for PolarGraphServer {
                 continue;
             }
             let info = graph_info(&self.store, g, iri).map_err(storage_err_to_status)?;
+            let vocab = self.store.vocabulary();
             let has = |(p, v): &(String, Value)| {
                 info.metadata.iter().any(|m| {
-                    m.predicate == *p
+                    m.predicate == vocab.canonical_predicate(p).as_ref()
                         && m.value
                             .as_ref()
                             .and_then(|pv| convert::value_from_proto(pv).ok())
@@ -1631,8 +1632,13 @@ impl PolarGraphService for PolarGraphServer {
                     })
                     .collect()
             }),
-            predicates: (!req.predicates.is_empty())
-                .then(|| req.predicates.iter().cloned().collect()),
+            predicates: (!req.predicates.is_empty()).then(|| {
+                let vocab = self.store.vocabulary();
+                req.predicates
+                    .iter()
+                    .map(|p| vocab.canonical_predicate(p).into_owned())
+                    .collect()
+            }),
             types: req.types.clone(),
             include_values: req.include_values,
         };

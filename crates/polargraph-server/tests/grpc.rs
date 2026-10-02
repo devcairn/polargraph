@@ -5604,7 +5604,7 @@ async fn edge_annotation_property_roundtrip() {
 
     assert_eq!(resp.annotations.len(), 1);
     let ann = &resp.annotations[0];
-    assert_eq!(ann.predicate, "confidence");
+    assert_eq!(ann.predicate, "urn:pg:vocab:confidence");
     match &ann.value {
         Some(AnnotationValue::Scalar(v)) => match &v.kind {
             Some(ValueKind::FloatVal(f)) => assert!((f - 0.9).abs() < 1e-6),
@@ -5645,7 +5645,7 @@ async fn edge_annotation_relation_roundtrip() {
 
     assert_eq!(resp.annotations.len(), 1);
     let ann = &resp.annotations[0];
-    assert_eq!(ann.predicate, "assertedBy");
+    assert_eq!(ann.predicate, "urn:pg:vocab:assertedBy");
     match &ann.value {
         Some(AnnotationValue::NodeId(nid_bytes)) => {
             assert_eq!(nid_bytes, &provenance.bytes)
@@ -5710,8 +5710,8 @@ async fn edge_annotation_in_insert_batch() {
         .iter()
         .map(|a| a.predicate.as_str())
         .collect();
-    assert!(predicates.contains("weight"));
-    assert!(predicates.contains("source"));
+    assert!(predicates.contains("urn:pg:vocab:weight"));
+    assert!(predicates.contains("urn:pg:vocab:source"));
 }
 
 // ── Access control tests ──────────────────────────────────────────────────────
@@ -7162,9 +7162,12 @@ async fn export_graph_streams_live_quads() {
     let named = export("urn:g:p1", false).await;
     assert_eq!(named.len(), 2);
     assert!(named.iter().all(|q| q.graph == "urn:g:p1"));
-    assert!(named
-        .iter()
-        .any(|q| q.predicate == "owner" && matches!(q.object, Some(Object::Value(_)))));
+    assert!(
+        named
+            .iter()
+            .any(|q| q.predicate == "urn:pg:vocab:owner"
+                && matches!(q.object, Some(Object::Value(_))))
+    );
     assert_eq!(export("", false).await.len(), 1);
     let all = export("", true).await;
     assert_eq!(all.len(), 3);
@@ -7899,7 +7902,7 @@ async fn subscribe_streams_filtered_changes_with_resume() {
     assert!(named
         .iter()
         .filter(|e| e.quad.is_some())
-        .all(|e| matches!(&e.quad.as_ref().unwrap().kind, Some(TripleKind::Property(p)) if p.predicate == "name")));
+        .all(|e| matches!(&e.quad.as_ref().unwrap().kind, Some(TripleKind::Property(p)) if p.predicate == "urn:pg:vocab:name")));
 
     // Resume after the first commit replays the rest.
     let first_ts = events[0].commit_ts;

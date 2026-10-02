@@ -189,6 +189,9 @@ struct Inner {
     commits: tokio::sync::watch::Sender<Timestamp>,
     /// The vocabulary (base IRI + prefixes), swapped on change.
     pub(crate) vocabulary: RwLock<Arc<crate::vocab::Vocabulary>>,
+    /// Whether bare predicate names are stored under the vocabulary base
+    /// (always, except to simulate a pre-vocabulary store in tests).
+    canonical_names: std::sync::atomic::AtomicBool,
 }
 
 // META key for persisting the last replicated WAL sequence number.
@@ -381,6 +384,7 @@ impl TripleStore {
                 data_dir: path.to_path_buf(),
                 commits: tokio::sync::watch::channel(Timestamp(oracle_ts)).0,
                 vocabulary: RwLock::new(Arc::new(crate::vocab::Vocabulary::default())),
+                canonical_names: std::sync::atomic::AtomicBool::new(true),
                 mode,
             }),
         };
@@ -1092,6 +1096,9 @@ impl TripleStore {
     // ── predicate interning ───────────────────────────────────────────────────
 
     pub fn intern_predicate(&self, pred: &str) -> Result<PredId, StorageError> {
+        // Bare names are stored under the vocabulary base (see `crate::vocab`).
+        let canonical = self.canonical_name(pred);
+        let pred: &str = &canonical;
         if let Some(&id) = self.inner.fwd.read().unwrap().get(pred) {
             return Ok(id);
         }
@@ -1118,18 +1125,82 @@ impl TripleStore {
         Ok(id)
     }
 
+    /// Every interned predicate name, exactly as stored.
+    pub fn interned_predicates(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.inner.fwd.read().unwrap().keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Rename an interned predicate (exact names, no canonicalisation): a
+    /// metadata update — quads reference the id, not the name. `to` must
+    /// not be interned yet.
+    pub(crate) fn rename_predicate(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        if self.is_replica() {
+            return Err(Self::read_only_err());
+        }
+        let mut fwd = self.inner.fwd.write().unwrap();
+        let Some(&id) = fwd.get(from) else {
+            return Err(StorageError::Validation(format!(
+                "predicate {from:?} is not interned"
+            )));
+        };
+        if fwd.contains_key(to) {
+            return Err(StorageError::Validation(format!(
+                "predicate {to:?} is already interned"
+            )));
+        }
+        let meta_cf = self.cf_handle(cf::META)?;
+        let mut batch = WriteBatch::default();
+        batch.delete_cf(&meta_cf, meta_forward_key(from));
+        batch.put_cf(&meta_cf, meta_forward_key(to), id.to_be_bytes());
+        batch.put_cf(&meta_cf, meta_reverse_key(id), to.as_bytes());
+        self.inner.db.write(batch)?;
+        fwd.remove(from);
+        fwd.insert(to.to_owned(), id);
+        self.inner.rev.write().unwrap().insert(id, to.to_owned());
+        Ok(())
+    }
+
     pub fn predicate_string(&self, id: PredId) -> Option<String> {
         self.inner.rev.read().unwrap().get(&id).cloned()
     }
 
     /// Look up a predicate ID without assigning one (used by conflict check).
     pub(crate) fn predicate_id(&self, pred: &str) -> Option<PredId> {
-        self.inner.fwd.read().unwrap().get(pred).copied()
+        let fwd = self.inner.fwd.read().unwrap();
+        if crate::vocab::Vocabulary::is_bare(pred) {
+            fwd.get(self.canonical_name(pred).as_str()).copied()
+        } else {
+            fwd.get(pred).copied()
+        }
+    }
+
+    /// The stored form of predicate `pred` (see [`crate::vocab`]).
+    fn canonical_name(&self, pred: &str) -> String {
+        if self
+            .inner
+            .canonical_names
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.vocabulary().canonical_predicate(pred).into_owned()
+        } else {
+            pred.to_string()
+        }
+    }
+
+    /// Store bare predicate names verbatim (`false`) — only to simulate a
+    /// store written before the vocabulary existed, in tests and tooling.
+    #[doc(hidden)]
+    pub fn set_canonical_predicate_names(&self, on: bool) {
+        self.inner
+            .canonical_names
+            .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Public version of [`predicate_id`] — returns `None` if the predicate has never been interned.
     pub fn lookup_predicate(&self, pred: &str) -> Option<PredId> {
-        self.inner.fwd.read().unwrap().get(pred).copied()
+        self.predicate_id(pred)
     }
 
     // ── graph interning ───────────────────────────────────────────────────────

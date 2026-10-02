@@ -343,7 +343,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|t| t.predicate().0 == "knows"));
+        assert!(results
+            .iter()
+            .all(|t| t.predicate().0 == "urn:pg:vocab:knows"));
     }
 
     #[test]
@@ -388,7 +390,9 @@ mod tests {
 
         let results = evaluate(&Pattern::new().with_predicate("knows"), &snap).unwrap();
         assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|t| t.predicate().0 == "knows"));
+        assert!(results
+            .iter()
+            .all(|t| t.predicate().0 == "urn:pg:vocab:knows"));
     }
 
     #[test]

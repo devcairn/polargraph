@@ -65,7 +65,7 @@ fn single_triple_tx_commits_and_is_readable() {
     let snap = store.snapshot(commit_ts);
     let triples = snap.scan_by_subject(&alice).unwrap();
     assert_eq!(triples.len(), 1);
-    assert_eq!(triples[0].predicate().0, "knows");
+    assert_eq!(triples[0].predicate().0, "urn:pg:vocab:knows");
 }
 
 #[test]
@@ -255,7 +255,7 @@ fn snapshot_sees_property_values_correctly() {
     let find = |pred: &str| -> Value {
         triples
             .iter()
-            .find(|t| t.predicate().0 == pred)
+            .find(|t| t.predicate().0 == format!("urn:pg:vocab:{pred}"))
             .and_then(|t| match t {
                 Triple::Property { value, .. } => Some(value.clone()),
                 _ => None,
@@ -456,7 +456,7 @@ fn data_from_before_reopen_visible_after_reopen() {
         let snap = store.snapshot(store.begin().read_ts);
         let triples = snap.scan_by_subject(&alice).unwrap();
         assert_eq!(triples.len(), 1, "data must survive reopen");
-        assert_eq!(triples[0].predicate().0, "knows");
+        assert_eq!(triples[0].predicate().0, "urn:pg:vocab:knows");
     }
 }
 
