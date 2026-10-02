@@ -1,8 +1,18 @@
 # Cypher over RDF — labels as `rdf:type`, names as IRIs, and Cypher's future — design note
 
 Status: decisions A–F **approved** (Mark, 2026-10-01) with the hard
-requirement in §2.5 and G2 for the legacy conversion (§2.4); building as
-two PRs on `db/cypher-rdf`.
+requirement in §2.5 and G2 for the legacy conversion (§2.4). **PR 1 built**
+on `db/cypher-rdf` (vocabulary, canonical names, `ConvertLegacyData`,
+`rdf:type` labels, change-log type index; upgrade guide
+`docs/upgrade-cypher-rdf.md`). PR 2 (Cypher write deprecation, SDKs) next.
+
+**As built (PR 1).** Bare names in Cypher are left for the store to place
+under the base; only `prefix:local` names and labels are expanded at compile
+time (plan cache keyed by the vocabulary fingerprint). The type index is
+keyed by class node (`iri_to_node_id(class IRI)`) rather than the IRI
+string, and recomputes each touched subject's classes from the store rather
+than replaying assert / close events. Prefix names that are URI schemes
+(`http`, `urn`, …) are rejected.
 
 ## 1. How Cypher stores things today
 
