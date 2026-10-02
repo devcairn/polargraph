@@ -5819,6 +5819,27 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn query_rows_carry_value_bindings_under_at_values() {
+        let node = proto::NodeId {
+            bytes: Uuid::nil().as_bytes().to_vec(),
+        };
+        let vars = std::collections::HashMap::from([("b".to_string(), node)]);
+        let values = std::collections::HashMap::from([(
+            "t".to_string(),
+            proto::Value {
+                kind: Some(proto::value::Kind::TextVal("Dune".into())),
+            },
+        )]);
+        let row = query_row_json(vars.clone(), values);
+        assert_eq!(row["b"], Uuid::nil().to_string());
+        assert_eq!(row["@values"]["t"], "Dune");
+        // No value bindings: the row shape is unchanged.
+        let row = query_row_json(vars, Default::default());
+        assert!(row.get("@values").is_none());
+    }
+
     use super::*;
 
     #[test]

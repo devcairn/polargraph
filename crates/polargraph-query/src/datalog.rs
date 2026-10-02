@@ -2232,4 +2232,165 @@ mod tests {
         assert_eq!(nb.get("x").copied(), Some(carol));
         assert_eq!(pb.get("p").map(String::as_str), Some("urn:pg:vocab:knows"));
     }
+
+    // ── value bindings (docs/design/value-bindings.md) ────────────────────────
+
+    fn vp(s: Term, p: &str, o: Term) -> VarPattern {
+        VarPattern::new().subject(s).predicate(p).object(o)
+    }
+
+    #[test]
+    fn full_query_binds_property_values() {
+        let (store, _d) = open();
+        let (alice, bob) = (NodeId::new(), NodeId::new());
+        let snap = commit(
+            &store,
+            vec![
+                prop(alice, "name", "Alice"),
+                prop(bob, "name", "Bob"),
+                rel(alice, "knows", bob),
+            ],
+        );
+        let q = Query::new()
+            .pattern(vp(var("a"), "knows", var("b")))
+            .pattern(vp(var("b"), "name", var("n")));
+        let rows = execute_query_full(&q, &snap, None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].nodes.get("a"), Some(&alice));
+        assert_eq!(rows[0].values.get("n"), Some(&Value::Text("Bob".into())));
+        assert!(
+            !rows[0].nodes.contains_key("n"),
+            "a variable is a node or a value"
+        );
+
+        // The node-only API keeps its semantics: the property match is dropped.
+        let q = Query::new().pattern(vp(var("p"), "name", var("n")));
+        assert!(execute_query(&q, &snap, None, None).unwrap().is_empty());
+        assert_eq!(execute_query_full(&q, &snap, None, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn value_variables_join_by_rdf_term_equality() {
+        let (store, _d) = open();
+        let (a, b, c, d) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
+        let snap = commit(
+            &store,
+            vec![
+                prop(a, "age", 30i64),
+                prop(b, "age", 30i64),
+                prop(c, "age", 30.0f64), // a different term (decision B)
+                prop(d, "age", 31i64),
+            ],
+        );
+        let q = Query::new()
+            .pattern(vp(bound(a), "age", var("x")))
+            .pattern(vp(var("other"), "age", var("x")));
+        let rows = execute_query_full(&q, &snap, None, None).unwrap();
+        let mut others: Vec<NodeId> = rows.iter().map(|r| r.nodes["other"]).collect();
+        others.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+        assert_eq!(others, expected);
+    }
+
+    #[test]
+    fn a_value_never_joins_a_node_or_acts_as_subject() {
+        let (store, _d) = open();
+        let (a, b) = (NodeId::new(), NodeId::new());
+        let snap = commit(
+            &store,
+            vec![
+                prop(a, "label", "x"),
+                rel(a, "link", b),
+                prop(b, "name", "B"),
+            ],
+        );
+        // ?o is a value in the first pattern, so it can't be a link target.
+        let q = Query::new()
+            .pattern(vp(bound(a), "label", var("o")))
+            .pattern(vp(bound(a), "link", var("o")));
+        assert!(execute_query_full(&q, &snap, None, None)
+            .unwrap()
+            .is_empty());
+        // ... nor a subject.
+        let q = Query::new()
+            .pattern(vp(bound(a), "label", var("o")))
+            .pattern(vp(var("o"), "name", Term::Any));
+        assert!(execute_query_full(&q, &snap, None, None)
+            .unwrap()
+            .is_empty());
+        // A node-bound variable doesn't match a property value either.
+        let q = Query::new()
+            .pattern(vp(bound(a), "link", var("o")))
+            .pattern(vp(bound(a), "label", var("o")));
+        assert!(execute_query_full(&q, &snap, None, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn vectors_do_not_bind_and_language_and_typed_literals_do() {
+        let (store, _d) = open();
+        let a = NodeId::new();
+        let snap = commit(
+            &store,
+            vec![
+                prop(a, "emb", Value::Vector(vec![0.1, 0.2])),
+                prop(
+                    a,
+                    "title",
+                    Value::LangText {
+                        text: "Bonjour".into(),
+                        lang: "fr".into(),
+                    },
+                ),
+                prop(
+                    a,
+                    "born",
+                    Value::Typed {
+                        lexical: "1990-01-01".into(),
+                        datatype: "http://www.w3.org/2001/XMLSchema#date".into(),
+                    },
+                ),
+            ],
+        );
+        let q = Query::new().pattern(
+            VarPattern::new()
+                .subject(bound(a))
+                .predicate_var("p")
+                .object(var("o")),
+        );
+        let rows = execute_query_full(&q, &snap, None, None).unwrap();
+        let mut preds: Vec<&str> = rows.iter().map(|r| r.preds["p"].as_str()).collect();
+        preds.sort();
+        assert_eq!(preds, ["urn:pg:vocab:born", "urn:pg:vocab:title"]);
+        assert!(rows.iter().all(|r| r.values.contains_key("o")));
+    }
+
+    #[test]
+    fn rule_bodies_bind_values_and_heads_stay_nodes() {
+        let (store, _d) = open();
+        let (a, b, c) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let snap = commit(
+            &store,
+            vec![
+                prop(a, "city", "Oslo"),
+                prop(b, "city", "Oslo"),
+                prop(c, "city", "Rome"),
+                rel(a, "knows", b),
+            ],
+        );
+        // sameCity(x, y) :- x city ?c, y city ?c — joins on a value.
+        let same_city = Rule::new("sameCity", "x", "y").with_body(vec![
+            vp(var("x"), "city", var("c")),
+            vp(var("y"), "city", var("c")),
+        ]);
+        // A head variable that holds a value derives nothing (decision E).
+        let city_of = Rule::new("cityOf", "x", "c").with_body(vec![vp(var("x"), "city", var("c"))]);
+        let derived = execute_recursive(&[], &[same_city, city_of], &snap, None).unwrap();
+        let pairs = &derived["sameCity"];
+        assert!(pairs.contains(&(a, b)) && pairs.contains(&(b, a)));
+        assert!(!pairs.contains(&(a, c)));
+        assert!(derived.get("cityOf").map_or(true, |s| s.is_empty()));
+    }
 }
