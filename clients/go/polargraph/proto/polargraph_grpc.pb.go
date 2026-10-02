@@ -19,7 +19,26 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	PolarGraphService_GetVocabulary_FullMethodName         = "/polargraph.v1.PolarGraphService/GetVocabulary"
+	PolarGraphService_SetVocabularyBase_FullMethodName     = "/polargraph.v1.PolarGraphService/SetVocabularyBase"
+	PolarGraphService_PutPrefix_FullMethodName             = "/polargraph.v1.PolarGraphService/PutPrefix"
+	PolarGraphService_RemovePrefix_FullMethodName          = "/polargraph.v1.PolarGraphService/RemovePrefix"
+	PolarGraphService_ConvertLegacyData_FullMethodName     = "/polargraph.v1.PolarGraphService/ConvertLegacyData"
 	PolarGraphService_Insert_FullMethodName                = "/polargraph.v1.PolarGraphService/Insert"
+	PolarGraphService_ResolveIris_FullMethodName           = "/polargraph.v1.PolarGraphService/ResolveIris"
+	PolarGraphService_CreateGraph_FullMethodName           = "/polargraph.v1.PolarGraphService/CreateGraph"
+	PolarGraphService_ListGraphs_FullMethodName            = "/polargraph.v1.PolarGraphService/ListGraphs"
+	PolarGraphService_GraphStats_FullMethodName            = "/polargraph.v1.PolarGraphService/GraphStats"
+	PolarGraphService_CopyGraph_FullMethodName             = "/polargraph.v1.PolarGraphService/CopyGraph"
+	PolarGraphService_MoveGraph_FullMethodName             = "/polargraph.v1.PolarGraphService/MoveGraph"
+	PolarGraphService_DropGraph_FullMethodName             = "/polargraph.v1.PolarGraphService/DropGraph"
+	PolarGraphService_ExportGraph_FullMethodName           = "/polargraph.v1.PolarGraphService/ExportGraph"
+	PolarGraphService_ApplyChanges_FullMethodName          = "/polargraph.v1.PolarGraphService/ApplyChanges"
+	PolarGraphService_ValidateShapes_FullMethodName        = "/polargraph.v1.PolarGraphService/ValidateShapes"
+	PolarGraphService_Subscribe_FullMethodName             = "/polargraph.v1.PolarGraphService/Subscribe"
+	PolarGraphService_GrantGraphAccess_FullMethodName      = "/polargraph.v1.PolarGraphService/GrantGraphAccess"
+	PolarGraphService_RevokeGraphAccess_FullMethodName     = "/polargraph.v1.PolarGraphService/RevokeGraphAccess"
+	PolarGraphService_GetGraphAccess_FullMethodName        = "/polargraph.v1.PolarGraphService/GetGraphAccess"
 	PolarGraphService_Query_FullMethodName                 = "/polargraph.v1.PolarGraphService/Query"
 	PolarGraphService_InsertVector_FullMethodName          = "/polargraph.v1.PolarGraphService/InsertVector"
 	PolarGraphService_SearchVector_FullMethodName          = "/polargraph.v1.PolarGraphService/SearchVector"
@@ -33,6 +52,7 @@ const (
 	PolarGraphService_ListEdgeTypes_FullMethodName         = "/polargraph.v1.PolarGraphService/ListEdgeTypes"
 	PolarGraphService_ValidateEdge_FullMethodName          = "/polargraph.v1.PolarGraphService/ValidateEdge"
 	PolarGraphService_ListPredicatesBetween_FullMethodName = "/polargraph.v1.PolarGraphService/ListPredicatesBetween"
+	PolarGraphService_ValidateOntology_FullMethodName      = "/polargraph.v1.PolarGraphService/ValidateOntology"
 	PolarGraphService_SearchVectorFiltered_FullMethodName  = "/polargraph.v1.PolarGraphService/SearchVectorFiltered"
 	PolarGraphService_SearchVectorInSet_FullMethodName     = "/polargraph.v1.PolarGraphService/SearchVectorInSet"
 	PolarGraphService_BatchInsertVectors_FullMethodName    = "/polargraph.v1.PolarGraphService/BatchInsertVectors"
@@ -50,15 +70,71 @@ const (
 	PolarGraphService_CypherWrite_FullMethodName           = "/polargraph.v1.PolarGraphService/CypherWrite"
 	PolarGraphService_QueryStream_FullMethodName           = "/polargraph.v1.PolarGraphService/QueryStream"
 	PolarGraphService_CypherQueryStream_FullMethodName     = "/polargraph.v1.PolarGraphService/CypherQueryStream"
+	PolarGraphService_ShowIndexes_FullMethodName           = "/polargraph.v1.PolarGraphService/ShowIndexes"
+	PolarGraphService_ShowStats_FullMethodName             = "/polargraph.v1.PolarGraphService/ShowStats"
+	PolarGraphService_BeginTransaction_FullMethodName      = "/polargraph.v1.PolarGraphService/BeginTransaction"
+	PolarGraphService_CommitTransaction_FullMethodName     = "/polargraph.v1.PolarGraphService/CommitTransaction"
+	PolarGraphService_RollbackTransaction_FullMethodName   = "/polargraph.v1.PolarGraphService/RollbackTransaction"
+	PolarGraphService_GetEdgeAnnotations_FullMethodName    = "/polargraph.v1.PolarGraphService/GetEdgeAnnotations"
+	PolarGraphService_GetEdgeIdsByTriple_FullMethodName    = "/polargraph.v1.PolarGraphService/GetEdgeIdsByTriple"
+	PolarGraphService_AddApiKey_FullMethodName             = "/polargraph.v1.PolarGraphService/AddApiKey"
+	PolarGraphService_RevokeApiKey_FullMethodName          = "/polargraph.v1.PolarGraphService/RevokeApiKey"
+	PolarGraphService_ListApiKeys_FullMethodName           = "/polargraph.v1.PolarGraphService/ListApiKeys"
+	PolarGraphService_GrantAccess_FullMethodName           = "/polargraph.v1.PolarGraphService/GrantAccess"
+	PolarGraphService_RevokeAccess_FullMethodName          = "/polargraph.v1.PolarGraphService/RevokeAccess"
+	PolarGraphService_AddUserToGroup_FullMethodName        = "/polargraph.v1.PolarGraphService/AddUserToGroup"
+	PolarGraphService_GetUserAccess_FullMethodName         = "/polargraph.v1.PolarGraphService/GetUserAccess"
+	PolarGraphService_GetPropertyHistory_FullMethodName    = "/polargraph.v1.PolarGraphService/GetPropertyHistory"
+	PolarGraphService_DeleteTriples_FullMethodName         = "/polargraph.v1.PolarGraphService/DeleteTriples"
+	PolarGraphService_RunMaterialization_FullMethodName    = "/polargraph.v1.PolarGraphService/RunMaterialization"
 )
 
 // PolarGraphServiceClient is the client API for PolarGraphService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type PolarGraphServiceClient interface {
+	// / The vocabulary base, prefixes and legacy-conversion status.
+	GetVocabulary(ctx context.Context, in *GetVocabularyRequest, opts ...grpc.CallOption) (*Vocabulary, error)
+	// / Set the base IRI for bare names.
+	SetVocabularyBase(ctx context.Context, in *SetVocabularyBaseRequest, opts ...grpc.CallOption) (*Vocabulary, error)
+	// / Declare or re-point a prefix.
+	PutPrefix(ctx context.Context, in *PutPrefixRequest, opts ...grpc.CallOption) (*Vocabulary, error)
+	// / Remove a prefix (no-op if absent).
+	RemovePrefix(ctx context.Context, in *RemovePrefixRequest, opts ...grpc.CallOption) (*Vocabulary, error)
+	// / One-time conversion of pre-vocabulary data: bare predicates → IRIs,
+	// / `__type` labels → `rdf:type`. Idempotent and resumable.
+	ConvertLegacyData(ctx context.Context, in *ConvertLegacyDataRequest, opts ...grpc.CallOption) (*ConvertLegacyDataResponse, error)
 	// / Insert one or more triples in a single atomic transaction.
 	// / Returns ABORTED if a write-write conflict is detected.
 	Insert(ctx context.Context, in *InsertRequest, opts ...grpc.CallOption) (*InsertResponse, error)
+	// / Map node IDs back to IRIs via the IRI dictionary.
+	ResolveIris(ctx context.Context, in *ResolveIrisRequest, opts ...grpc.CallOption) (*ResolveIrisResponse, error)
+	// / Register a named graph (idempotent) and set its metadata.
+	CreateGraph(ctx context.Context, in *CreateGraphRequest, opts ...grpc.CallOption) (*CreateGraphResponse, error)
+	// / List named graphs with their metadata, optionally filtered.
+	ListGraphs(ctx context.Context, in *ListGraphsRequest, opts ...grpc.CallOption) (*ListGraphsResponse, error)
+	// / Live-quad count and last write time of one graph.
+	GraphStats(ctx context.Context, in *GraphStatsRequest, opts ...grpc.CallOption) (*GraphStatsResponse, error)
+	// / Copy a graph's live quads into another graph (COPY / ADD semantics).
+	CopyGraph(ctx context.Context, in *CopyGraphRequest, opts ...grpc.CallOption) (*CopyGraphResponse, error)
+	// / Copy into the target (replacing it), then drop the source.
+	MoveGraph(ctx context.Context, in *MoveGraphRequest, opts ...grpc.CallOption) (*CopyGraphResponse, error)
+	// / Close every live quad of a graph (bitemporal tombstones).
+	DropGraph(ctx context.Context, in *DropGraphRequest, opts ...grpc.CallOption) (*DropGraphResponse, error)
+	// / Stream the live quads of one graph, or of the whole dataset.
+	ExportGraph(ctx context.Context, in *ExportGraphRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExportGraphChunk], error)
+	// / Apply adds and retractions across graphs atomically.
+	ApplyChanges(ctx context.Context, in *ApplyChangesRequest, opts ...grpc.CallOption) (*ApplyChangesResponse, error)
+	// / Validate a dataset (optionally with uncommitted changes) against SHACL shapes.
+	ValidateShapes(ctx context.Context, in *ValidateShapesRequest, opts ...grpc.CallOption) (*ValidateShapesResponse, error)
+	// / Stream committed changes (with resume), filtered by graph access.
+	Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ChangeEvent], error)
+	// / Grant a user or group a level on a named graph.
+	GrantGraphAccess(ctx context.Context, in *GrantGraphAccessRequest, opts ...grpc.CallOption) (*GrantGraphAccessResponse, error)
+	// / Revoke a user's or group's grant on a named graph.
+	RevokeGraphAccess(ctx context.Context, in *RevokeGraphAccessRequest, opts ...grpc.CallOption) (*RevokeGraphAccessResponse, error)
+	// / A user's effective graph access.
+	GetGraphAccess(ctx context.Context, in *GetGraphAccessRequest, opts ...grpc.CallOption) (*GetGraphAccessResponse, error)
 	// / Execute a conjunctive query and return all satisfying variable bindings.
 	Query(ctx context.Context, in *QueryRequest, opts ...grpc.CallOption) (*QueryResponse, error)
 	// / Insert or update a node's embedding vector in the HNSW index.
@@ -89,6 +165,12 @@ type PolarGraphServiceClient interface {
 	// / Return all registered predicate names whose domain and range match
 	// / the supplied node type names. Unconstrained slots match any type.
 	ListPredicatesBetween(ctx context.Context, in *ListPredicatesBetweenRequest, opts ...grpc.CallOption) (*ListPredicatesBetweenResponse, error)
+	// / Check the full ontology for consistency:
+	// / - cardinality violations across all committed triples
+	// / - missing inverse-predicate counterparts
+	// / - cycles in the node type hierarchy (should not occur if RegisterNodeType
+	// /   enforcement is in place, but this double-checks the live data)
+	ValidateOntology(ctx context.Context, in *ValidateOntologyRequest, opts ...grpc.CallOption) (*ValidateOntologyResponse, error)
 	// / Vector search with a node-type or reachability filter.
 	// / Runs HNSW with a large candidate pool then post-filters to the allowed set.
 	SearchVectorFiltered(ctx context.Context, in *SearchVectorFilteredRequest, opts ...grpc.CallOption) (*SearchVectorFilteredResponse, error)
@@ -110,8 +192,8 @@ type PolarGraphServiceClient interface {
 	// / Returns FAILED_PRECONDITION if the server was not started with --backup-dir.
 	// / Note: restore is an offline operation — see docs/architecture.md.
 	PurgeOldBackups(ctx context.Context, in *PurgeOldBackupsRequest, opts ...grpc.CallOption) (*PurgeOldBackupsResponse, error)
-	// / Scan all hexastore column families and delete triples whose
-	// / transaction time or valid-time window has expired per the supplied policy.
+	// / Scan all hexastore column families and delete superseded versions (and
+	// / triples whose valid-time windows have fully expired) per the policy.
 	// / Triggers a full RocksDB compaction on any CF that had deletions.
 	RunRetention(ctx context.Context, in *RunRetentionRequest, opts ...grpc.CallOption) (*RunRetentionResponse, error)
 	// / Return replication status for this server instance.
@@ -137,6 +219,9 @@ type PolarGraphServiceClient interface {
 	// / Returns INVALID_ARGUMENT if the Cypher string cannot be parsed or contains
 	// / write clauses (CREATE/MERGE/SET/DELETE) — use CypherWrite for mutations.
 	CypherQuery(ctx context.Context, in *CypherQueryRequest, opts ...grpc.CallOption) (*CypherQueryResponse, error)
+	// / DEPRECATED — removed in the next release; write with ApplyChanges or
+	// / SPARQL Update (docs/upgrade-cypher-rdf.md). Responses carry a
+	// / `warning` header.
 	// / Parse and execute a Cypher write statement (CREATE, MERGE, SET, DELETE).
 	// / Executes atomically in a single MVCC transaction.
 	// / Returns INVALID_ARGUMENT if the statement cannot be parsed or contains no
@@ -149,6 +234,76 @@ type PolarGraphServiceClient interface {
 	// / Like `CypherQuery` but streams results in chunks. Respects the LIMIT clause
 	// / in the Cypher string. The final chunk has `done = true`.
 	CypherQueryStream(ctx context.Context, in *CypherQueryRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryStreamChunk], error)
+	// / Return per-column-family key counts and sizes, plus HNSW space info.
+	ShowIndexes(ctx context.Context, in *ShowIndexesRequest, opts ...grpc.CallOption) (*ShowIndexesResponse, error)
+	// / Return server-wide storage and MVCC statistics.
+	ShowStats(ctx context.Context, in *ShowStatsRequest, opts ...grpc.CallOption) (*ShowStatsResponse, error)
+	// / Open a new multi-RPC transaction. Returns an opaque tx_id.
+	// / Pass tx_id to Insert, Query, CypherWrite, or CypherQuery to join the
+	// / transaction. Returns FAILED_PRECONDITION on a read replica.
+	BeginTransaction(ctx context.Context, in *BeginTransactionRequest, opts ...grpc.CallOption) (*BeginTransactionResponse, error)
+	// / Commit an open transaction. Returns ABORTED on write-write conflict,
+	// / NOT_FOUND if tx_id is unknown or has expired.
+	// / Returns FAILED_PRECONDITION on a read replica.
+	CommitTransaction(ctx context.Context, in *CommitTransactionRequest, opts ...grpc.CallOption) (*CommitTransactionResponse, error)
+	// / Roll back an open transaction, discarding all buffered writes.
+	// / Returns NOT_FOUND if tx_id is unknown or has expired.
+	// / Returns FAILED_PRECONDITION on a read replica.
+	RollbackTransaction(ctx context.Context, in *RollbackTransactionRequest, opts ...grpc.CallOption) (*RollbackTransactionResponse, error)
+	// / Return all RDF-star annotations on the edge identified by `edge_id`.
+	// / Returns an empty list if the edge has no annotations or does not exist.
+	GetEdgeAnnotations(ctx context.Context, in *GetEdgeAnnotationsRequest, opts ...grpc.CallOption) (*GetEdgeAnnotationsResponse, error)
+	// / Resolve the edge UUID(s) for a specific (subject, predicate, object) relation triple.
+	// / Used by the SPARQL-star executor to look up edge IDs before fetching annotations.
+	GetEdgeIdsByTriple(ctx context.Context, in *GetEdgeIdsByTripleRequest, opts ...grpc.CallOption) (*GetEdgeIdsByTripleResponse, error)
+	// / Add a new API key to the live key store. Takes effect immediately.
+	// / Returns FAILED_PRECONDITION when the server was started without any
+	// / keys (auth is disabled). Returns INVALID_ARGUMENT for an empty key.
+	// / Returns FAILED_PRECONDITION on a read replica.
+	AddApiKey(ctx context.Context, in *AddApiKeyRequest, opts ...grpc.CallOption) (*AddApiKeyResponse, error)
+	// / Remove an API key from the live key store. The caller should immediately
+	// / stop using the revoked key. Returns FAILED_PRECONDITION when auth is
+	// / disabled. Returns FAILED_PRECONDITION on a read replica.
+	RevokeApiKey(ctx context.Context, in *RevokeApiKeyRequest, opts ...grpc.CallOption) (*RevokeApiKeyResponse, error)
+	// / List all configured API keys as masked prefixes (first 4 chars + "****").
+	// / Never reveals full key values. Returns FAILED_PRECONDITION on a read
+	// / replica.
+	ListApiKeys(ctx context.Context, in *ListApiKeysRequest, opts ...grpc.CallOption) (*ListApiKeysResponse, error)
+	// / Grant a group access to a specific node or all nodes of a given type.
+	// / Writes a HAS_ACCESS (or HAS_ACCESS_TYPE) triple and updates the
+	// / in-memory access cache immediately.
+	// / Returns FAILED_PRECONDITION on a read replica.
+	GrantAccess(ctx context.Context, in *GrantAccessRequest, opts ...grpc.CallOption) (*GrantAccessResponse, error)
+	// / Revoke a group's access grant by closing the valid time of the
+	// / HAS_ACCESS / HAS_ACCESS_TYPE triple and updating the cache.
+	// / Returns FAILED_PRECONDITION on a read replica.
+	RevokeAccess(ctx context.Context, in *RevokeAccessRequest, opts ...grpc.CallOption) (*RevokeAccessResponse, error)
+	// / Add a user to a group by writing a MEMBER_OF triple and updating
+	// / the in-memory access cache.
+	// / Returns FAILED_PRECONDITION on a read replica.
+	AddUserToGroup(ctx context.Context, in *AddUserToGroupRequest, opts ...grpc.CallOption) (*AddUserToGroupResponse, error)
+	// / Return all node IDs and type grants accessible to a user, derived from
+	// / their group memberships and HAS_ACCESS / HAS_ACCESS_TYPE triples.
+	GetUserAccess(ctx context.Context, in *GetUserAccessRequest, opts ...grpc.CallOption) (*GetUserAccessResponse, error)
+	// / Return all historical versions of a node property, ordered newest-first
+	// / by transaction time. Scans the full SPO column family without MVCC
+	// / deduplication so every committed write is visible.
+	GetPropertyHistory(ctx context.Context, in *GetPropertyHistoryRequest, opts ...grpc.CallOption) (*GetPropertyHistoryResponse, error)
+	// / Soft-delete triples for one or more subjects by closing their valid-time
+	// / window. Each live triple (vt_end == END_OF_TIME) matching the subject (and
+	// / optional predicate filter) receives a superseding entry with vt_end set to
+	// / the requested timestamp (or server clock when vt_end == 0).
+	// / Returns FAILED_PRECONDITION on a read replica.
+	DeleteTriples(ctx context.Context, in *DeleteTriplesRequest, opts ...grpc.CallOption) (*DeleteTriplesResponse, error)
+	// / Run OWL 2 RL forward-chaining materialization to fixpoint.
+	// /
+	// / Derives new Relation triples according to the RDFS entailment and OWL
+	// / property characteristic rules and writes them to the DRV column family.
+	// / The DRV CF is separate from the base hexastore so derived triples can be
+	// / wiped and rebuilt cleanly without touching user data.
+	// /
+	// / Returns FAILED_PRECONDITION on a read replica.
+	RunMaterialization(ctx context.Context, in *RunMaterializationRequest, opts ...grpc.CallOption) (*RunMaterializationResponse, error)
 }
 
 type polarGraphServiceClient struct {
@@ -159,10 +314,218 @@ func NewPolarGraphServiceClient(cc grpc.ClientConnInterface) PolarGraphServiceCl
 	return &polarGraphServiceClient{cc}
 }
 
+func (c *polarGraphServiceClient) GetVocabulary(ctx context.Context, in *GetVocabularyRequest, opts ...grpc.CallOption) (*Vocabulary, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Vocabulary)
+	err := c.cc.Invoke(ctx, PolarGraphService_GetVocabulary_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) SetVocabularyBase(ctx context.Context, in *SetVocabularyBaseRequest, opts ...grpc.CallOption) (*Vocabulary, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Vocabulary)
+	err := c.cc.Invoke(ctx, PolarGraphService_SetVocabularyBase_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) PutPrefix(ctx context.Context, in *PutPrefixRequest, opts ...grpc.CallOption) (*Vocabulary, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Vocabulary)
+	err := c.cc.Invoke(ctx, PolarGraphService_PutPrefix_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) RemovePrefix(ctx context.Context, in *RemovePrefixRequest, opts ...grpc.CallOption) (*Vocabulary, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Vocabulary)
+	err := c.cc.Invoke(ctx, PolarGraphService_RemovePrefix_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) ConvertLegacyData(ctx context.Context, in *ConvertLegacyDataRequest, opts ...grpc.CallOption) (*ConvertLegacyDataResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConvertLegacyDataResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_ConvertLegacyData_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *polarGraphServiceClient) Insert(ctx context.Context, in *InsertRequest, opts ...grpc.CallOption) (*InsertResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InsertResponse)
 	err := c.cc.Invoke(ctx, PolarGraphService_Insert_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) ResolveIris(ctx context.Context, in *ResolveIrisRequest, opts ...grpc.CallOption) (*ResolveIrisResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveIrisResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_ResolveIris_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) CreateGraph(ctx context.Context, in *CreateGraphRequest, opts ...grpc.CallOption) (*CreateGraphResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateGraphResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_CreateGraph_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) ListGraphs(ctx context.Context, in *ListGraphsRequest, opts ...grpc.CallOption) (*ListGraphsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListGraphsResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_ListGraphs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) GraphStats(ctx context.Context, in *GraphStatsRequest, opts ...grpc.CallOption) (*GraphStatsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GraphStatsResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_GraphStats_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) CopyGraph(ctx context.Context, in *CopyGraphRequest, opts ...grpc.CallOption) (*CopyGraphResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CopyGraphResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_CopyGraph_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) MoveGraph(ctx context.Context, in *MoveGraphRequest, opts ...grpc.CallOption) (*CopyGraphResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CopyGraphResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_MoveGraph_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) DropGraph(ctx context.Context, in *DropGraphRequest, opts ...grpc.CallOption) (*DropGraphResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DropGraphResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_DropGraph_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) ExportGraph(ctx context.Context, in *ExportGraphRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExportGraphChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &PolarGraphService_ServiceDesc.Streams[0], PolarGraphService_ExportGraph_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ExportGraphRequest, ExportGraphChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type PolarGraphService_ExportGraphClient = grpc.ServerStreamingClient[ExportGraphChunk]
+
+func (c *polarGraphServiceClient) ApplyChanges(ctx context.Context, in *ApplyChangesRequest, opts ...grpc.CallOption) (*ApplyChangesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApplyChangesResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_ApplyChanges_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) ValidateShapes(ctx context.Context, in *ValidateShapesRequest, opts ...grpc.CallOption) (*ValidateShapesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ValidateShapesResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_ValidateShapes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ChangeEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &PolarGraphService_ServiceDesc.Streams[1], PolarGraphService_Subscribe_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SubscribeRequest, ChangeEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type PolarGraphService_SubscribeClient = grpc.ServerStreamingClient[ChangeEvent]
+
+func (c *polarGraphServiceClient) GrantGraphAccess(ctx context.Context, in *GrantGraphAccessRequest, opts ...grpc.CallOption) (*GrantGraphAccessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GrantGraphAccessResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_GrantGraphAccess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) RevokeGraphAccess(ctx context.Context, in *RevokeGraphAccessRequest, opts ...grpc.CallOption) (*RevokeGraphAccessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeGraphAccessResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_RevokeGraphAccess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) GetGraphAccess(ctx context.Context, in *GetGraphAccessRequest, opts ...grpc.CallOption) (*GetGraphAccessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetGraphAccessResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_GetGraphAccess_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -299,6 +662,16 @@ func (c *polarGraphServiceClient) ListPredicatesBetween(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *polarGraphServiceClient) ValidateOntology(ctx context.Context, in *ValidateOntologyRequest, opts ...grpc.CallOption) (*ValidateOntologyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ValidateOntologyResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_ValidateOntology_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *polarGraphServiceClient) SearchVectorFiltered(ctx context.Context, in *SearchVectorFilteredRequest, opts ...grpc.CallOption) (*SearchVectorFilteredResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SearchVectorFilteredResponse)
@@ -391,7 +764,7 @@ func (c *polarGraphServiceClient) ReplicaStatus(ctx context.Context, in *Replica
 
 func (c *polarGraphServiceClient) StreamWal(ctx context.Context, in *StreamWalRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WalEntry], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &PolarGraphService_ServiceDesc.Streams[0], PolarGraphService_StreamWal_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &PolarGraphService_ServiceDesc.Streams[2], PolarGraphService_StreamWal_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -460,7 +833,7 @@ func (c *polarGraphServiceClient) CypherWrite(ctx context.Context, in *CypherWri
 
 func (c *polarGraphServiceClient) QueryStream(ctx context.Context, in *QueryRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryStreamChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &PolarGraphService_ServiceDesc.Streams[1], PolarGraphService_QueryStream_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &PolarGraphService_ServiceDesc.Streams[3], PolarGraphService_QueryStream_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +852,7 @@ type PolarGraphService_QueryStreamClient = grpc.ServerStreamingClient[QueryStrea
 
 func (c *polarGraphServiceClient) CypherQueryStream(ctx context.Context, in *CypherQueryRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryStreamChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &PolarGraphService_ServiceDesc.Streams[2], PolarGraphService_CypherQueryStream_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &PolarGraphService_ServiceDesc.Streams[4], PolarGraphService_CypherQueryStream_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -496,13 +869,222 @@ func (c *polarGraphServiceClient) CypherQueryStream(ctx context.Context, in *Cyp
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type PolarGraphService_CypherQueryStreamClient = grpc.ServerStreamingClient[QueryStreamChunk]
 
+func (c *polarGraphServiceClient) ShowIndexes(ctx context.Context, in *ShowIndexesRequest, opts ...grpc.CallOption) (*ShowIndexesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ShowIndexesResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_ShowIndexes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) ShowStats(ctx context.Context, in *ShowStatsRequest, opts ...grpc.CallOption) (*ShowStatsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ShowStatsResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_ShowStats_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) BeginTransaction(ctx context.Context, in *BeginTransactionRequest, opts ...grpc.CallOption) (*BeginTransactionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BeginTransactionResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_BeginTransaction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) CommitTransaction(ctx context.Context, in *CommitTransactionRequest, opts ...grpc.CallOption) (*CommitTransactionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitTransactionResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_CommitTransaction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) RollbackTransaction(ctx context.Context, in *RollbackTransactionRequest, opts ...grpc.CallOption) (*RollbackTransactionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RollbackTransactionResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_RollbackTransaction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) GetEdgeAnnotations(ctx context.Context, in *GetEdgeAnnotationsRequest, opts ...grpc.CallOption) (*GetEdgeAnnotationsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetEdgeAnnotationsResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_GetEdgeAnnotations_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) GetEdgeIdsByTriple(ctx context.Context, in *GetEdgeIdsByTripleRequest, opts ...grpc.CallOption) (*GetEdgeIdsByTripleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetEdgeIdsByTripleResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_GetEdgeIdsByTriple_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) AddApiKey(ctx context.Context, in *AddApiKeyRequest, opts ...grpc.CallOption) (*AddApiKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddApiKeyResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_AddApiKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) RevokeApiKey(ctx context.Context, in *RevokeApiKeyRequest, opts ...grpc.CallOption) (*RevokeApiKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeApiKeyResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_RevokeApiKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) ListApiKeys(ctx context.Context, in *ListApiKeysRequest, opts ...grpc.CallOption) (*ListApiKeysResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListApiKeysResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_ListApiKeys_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) GrantAccess(ctx context.Context, in *GrantAccessRequest, opts ...grpc.CallOption) (*GrantAccessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GrantAccessResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_GrantAccess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) RevokeAccess(ctx context.Context, in *RevokeAccessRequest, opts ...grpc.CallOption) (*RevokeAccessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeAccessResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_RevokeAccess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) AddUserToGroup(ctx context.Context, in *AddUserToGroupRequest, opts ...grpc.CallOption) (*AddUserToGroupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddUserToGroupResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_AddUserToGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) GetUserAccess(ctx context.Context, in *GetUserAccessRequest, opts ...grpc.CallOption) (*GetUserAccessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetUserAccessResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_GetUserAccess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) GetPropertyHistory(ctx context.Context, in *GetPropertyHistoryRequest, opts ...grpc.CallOption) (*GetPropertyHistoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetPropertyHistoryResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_GetPropertyHistory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) DeleteTriples(ctx context.Context, in *DeleteTriplesRequest, opts ...grpc.CallOption) (*DeleteTriplesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteTriplesResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_DeleteTriples_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) RunMaterialization(ctx context.Context, in *RunMaterializationRequest, opts ...grpc.CallOption) (*RunMaterializationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RunMaterializationResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_RunMaterialization_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PolarGraphServiceServer is the server API for PolarGraphService service.
 // All implementations must embed UnimplementedPolarGraphServiceServer
 // for forward compatibility.
 type PolarGraphServiceServer interface {
+	// / The vocabulary base, prefixes and legacy-conversion status.
+	GetVocabulary(context.Context, *GetVocabularyRequest) (*Vocabulary, error)
+	// / Set the base IRI for bare names.
+	SetVocabularyBase(context.Context, *SetVocabularyBaseRequest) (*Vocabulary, error)
+	// / Declare or re-point a prefix.
+	PutPrefix(context.Context, *PutPrefixRequest) (*Vocabulary, error)
+	// / Remove a prefix (no-op if absent).
+	RemovePrefix(context.Context, *RemovePrefixRequest) (*Vocabulary, error)
+	// / One-time conversion of pre-vocabulary data: bare predicates → IRIs,
+	// / `__type` labels → `rdf:type`. Idempotent and resumable.
+	ConvertLegacyData(context.Context, *ConvertLegacyDataRequest) (*ConvertLegacyDataResponse, error)
 	// / Insert one or more triples in a single atomic transaction.
 	// / Returns ABORTED if a write-write conflict is detected.
 	Insert(context.Context, *InsertRequest) (*InsertResponse, error)
+	// / Map node IDs back to IRIs via the IRI dictionary.
+	ResolveIris(context.Context, *ResolveIrisRequest) (*ResolveIrisResponse, error)
+	// / Register a named graph (idempotent) and set its metadata.
+	CreateGraph(context.Context, *CreateGraphRequest) (*CreateGraphResponse, error)
+	// / List named graphs with their metadata, optionally filtered.
+	ListGraphs(context.Context, *ListGraphsRequest) (*ListGraphsResponse, error)
+	// / Live-quad count and last write time of one graph.
+	GraphStats(context.Context, *GraphStatsRequest) (*GraphStatsResponse, error)
+	// / Copy a graph's live quads into another graph (COPY / ADD semantics).
+	CopyGraph(context.Context, *CopyGraphRequest) (*CopyGraphResponse, error)
+	// / Copy into the target (replacing it), then drop the source.
+	MoveGraph(context.Context, *MoveGraphRequest) (*CopyGraphResponse, error)
+	// / Close every live quad of a graph (bitemporal tombstones).
+	DropGraph(context.Context, *DropGraphRequest) (*DropGraphResponse, error)
+	// / Stream the live quads of one graph, or of the whole dataset.
+	ExportGraph(*ExportGraphRequest, grpc.ServerStreamingServer[ExportGraphChunk]) error
+	// / Apply adds and retractions across graphs atomically.
+	ApplyChanges(context.Context, *ApplyChangesRequest) (*ApplyChangesResponse, error)
+	// / Validate a dataset (optionally with uncommitted changes) against SHACL shapes.
+	ValidateShapes(context.Context, *ValidateShapesRequest) (*ValidateShapesResponse, error)
+	// / Stream committed changes (with resume), filtered by graph access.
+	Subscribe(*SubscribeRequest, grpc.ServerStreamingServer[ChangeEvent]) error
+	// / Grant a user or group a level on a named graph.
+	GrantGraphAccess(context.Context, *GrantGraphAccessRequest) (*GrantGraphAccessResponse, error)
+	// / Revoke a user's or group's grant on a named graph.
+	RevokeGraphAccess(context.Context, *RevokeGraphAccessRequest) (*RevokeGraphAccessResponse, error)
+	// / A user's effective graph access.
+	GetGraphAccess(context.Context, *GetGraphAccessRequest) (*GetGraphAccessResponse, error)
 	// / Execute a conjunctive query and return all satisfying variable bindings.
 	Query(context.Context, *QueryRequest) (*QueryResponse, error)
 	// / Insert or update a node's embedding vector in the HNSW index.
@@ -533,6 +1115,12 @@ type PolarGraphServiceServer interface {
 	// / Return all registered predicate names whose domain and range match
 	// / the supplied node type names. Unconstrained slots match any type.
 	ListPredicatesBetween(context.Context, *ListPredicatesBetweenRequest) (*ListPredicatesBetweenResponse, error)
+	// / Check the full ontology for consistency:
+	// / - cardinality violations across all committed triples
+	// / - missing inverse-predicate counterparts
+	// / - cycles in the node type hierarchy (should not occur if RegisterNodeType
+	// /   enforcement is in place, but this double-checks the live data)
+	ValidateOntology(context.Context, *ValidateOntologyRequest) (*ValidateOntologyResponse, error)
 	// / Vector search with a node-type or reachability filter.
 	// / Runs HNSW with a large candidate pool then post-filters to the allowed set.
 	SearchVectorFiltered(context.Context, *SearchVectorFilteredRequest) (*SearchVectorFilteredResponse, error)
@@ -554,8 +1142,8 @@ type PolarGraphServiceServer interface {
 	// / Returns FAILED_PRECONDITION if the server was not started with --backup-dir.
 	// / Note: restore is an offline operation — see docs/architecture.md.
 	PurgeOldBackups(context.Context, *PurgeOldBackupsRequest) (*PurgeOldBackupsResponse, error)
-	// / Scan all hexastore column families and delete triples whose
-	// / transaction time or valid-time window has expired per the supplied policy.
+	// / Scan all hexastore column families and delete superseded versions (and
+	// / triples whose valid-time windows have fully expired) per the policy.
 	// / Triggers a full RocksDB compaction on any CF that had deletions.
 	RunRetention(context.Context, *RunRetentionRequest) (*RunRetentionResponse, error)
 	// / Return replication status for this server instance.
@@ -581,6 +1169,9 @@ type PolarGraphServiceServer interface {
 	// / Returns INVALID_ARGUMENT if the Cypher string cannot be parsed or contains
 	// / write clauses (CREATE/MERGE/SET/DELETE) — use CypherWrite for mutations.
 	CypherQuery(context.Context, *CypherQueryRequest) (*CypherQueryResponse, error)
+	// / DEPRECATED — removed in the next release; write with ApplyChanges or
+	// / SPARQL Update (docs/upgrade-cypher-rdf.md). Responses carry a
+	// / `warning` header.
 	// / Parse and execute a Cypher write statement (CREATE, MERGE, SET, DELETE).
 	// / Executes atomically in a single MVCC transaction.
 	// / Returns INVALID_ARGUMENT if the statement cannot be parsed or contains no
@@ -593,6 +1184,76 @@ type PolarGraphServiceServer interface {
 	// / Like `CypherQuery` but streams results in chunks. Respects the LIMIT clause
 	// / in the Cypher string. The final chunk has `done = true`.
 	CypherQueryStream(*CypherQueryRequest, grpc.ServerStreamingServer[QueryStreamChunk]) error
+	// / Return per-column-family key counts and sizes, plus HNSW space info.
+	ShowIndexes(context.Context, *ShowIndexesRequest) (*ShowIndexesResponse, error)
+	// / Return server-wide storage and MVCC statistics.
+	ShowStats(context.Context, *ShowStatsRequest) (*ShowStatsResponse, error)
+	// / Open a new multi-RPC transaction. Returns an opaque tx_id.
+	// / Pass tx_id to Insert, Query, CypherWrite, or CypherQuery to join the
+	// / transaction. Returns FAILED_PRECONDITION on a read replica.
+	BeginTransaction(context.Context, *BeginTransactionRequest) (*BeginTransactionResponse, error)
+	// / Commit an open transaction. Returns ABORTED on write-write conflict,
+	// / NOT_FOUND if tx_id is unknown or has expired.
+	// / Returns FAILED_PRECONDITION on a read replica.
+	CommitTransaction(context.Context, *CommitTransactionRequest) (*CommitTransactionResponse, error)
+	// / Roll back an open transaction, discarding all buffered writes.
+	// / Returns NOT_FOUND if tx_id is unknown or has expired.
+	// / Returns FAILED_PRECONDITION on a read replica.
+	RollbackTransaction(context.Context, *RollbackTransactionRequest) (*RollbackTransactionResponse, error)
+	// / Return all RDF-star annotations on the edge identified by `edge_id`.
+	// / Returns an empty list if the edge has no annotations or does not exist.
+	GetEdgeAnnotations(context.Context, *GetEdgeAnnotationsRequest) (*GetEdgeAnnotationsResponse, error)
+	// / Resolve the edge UUID(s) for a specific (subject, predicate, object) relation triple.
+	// / Used by the SPARQL-star executor to look up edge IDs before fetching annotations.
+	GetEdgeIdsByTriple(context.Context, *GetEdgeIdsByTripleRequest) (*GetEdgeIdsByTripleResponse, error)
+	// / Add a new API key to the live key store. Takes effect immediately.
+	// / Returns FAILED_PRECONDITION when the server was started without any
+	// / keys (auth is disabled). Returns INVALID_ARGUMENT for an empty key.
+	// / Returns FAILED_PRECONDITION on a read replica.
+	AddApiKey(context.Context, *AddApiKeyRequest) (*AddApiKeyResponse, error)
+	// / Remove an API key from the live key store. The caller should immediately
+	// / stop using the revoked key. Returns FAILED_PRECONDITION when auth is
+	// / disabled. Returns FAILED_PRECONDITION on a read replica.
+	RevokeApiKey(context.Context, *RevokeApiKeyRequest) (*RevokeApiKeyResponse, error)
+	// / List all configured API keys as masked prefixes (first 4 chars + "****").
+	// / Never reveals full key values. Returns FAILED_PRECONDITION on a read
+	// / replica.
+	ListApiKeys(context.Context, *ListApiKeysRequest) (*ListApiKeysResponse, error)
+	// / Grant a group access to a specific node or all nodes of a given type.
+	// / Writes a HAS_ACCESS (or HAS_ACCESS_TYPE) triple and updates the
+	// / in-memory access cache immediately.
+	// / Returns FAILED_PRECONDITION on a read replica.
+	GrantAccess(context.Context, *GrantAccessRequest) (*GrantAccessResponse, error)
+	// / Revoke a group's access grant by closing the valid time of the
+	// / HAS_ACCESS / HAS_ACCESS_TYPE triple and updating the cache.
+	// / Returns FAILED_PRECONDITION on a read replica.
+	RevokeAccess(context.Context, *RevokeAccessRequest) (*RevokeAccessResponse, error)
+	// / Add a user to a group by writing a MEMBER_OF triple and updating
+	// / the in-memory access cache.
+	// / Returns FAILED_PRECONDITION on a read replica.
+	AddUserToGroup(context.Context, *AddUserToGroupRequest) (*AddUserToGroupResponse, error)
+	// / Return all node IDs and type grants accessible to a user, derived from
+	// / their group memberships and HAS_ACCESS / HAS_ACCESS_TYPE triples.
+	GetUserAccess(context.Context, *GetUserAccessRequest) (*GetUserAccessResponse, error)
+	// / Return all historical versions of a node property, ordered newest-first
+	// / by transaction time. Scans the full SPO column family without MVCC
+	// / deduplication so every committed write is visible.
+	GetPropertyHistory(context.Context, *GetPropertyHistoryRequest) (*GetPropertyHistoryResponse, error)
+	// / Soft-delete triples for one or more subjects by closing their valid-time
+	// / window. Each live triple (vt_end == END_OF_TIME) matching the subject (and
+	// / optional predicate filter) receives a superseding entry with vt_end set to
+	// / the requested timestamp (or server clock when vt_end == 0).
+	// / Returns FAILED_PRECONDITION on a read replica.
+	DeleteTriples(context.Context, *DeleteTriplesRequest) (*DeleteTriplesResponse, error)
+	// / Run OWL 2 RL forward-chaining materialization to fixpoint.
+	// /
+	// / Derives new Relation triples according to the RDFS entailment and OWL
+	// / property characteristic rules and writes them to the DRV column family.
+	// / The DRV CF is separate from the base hexastore so derived triples can be
+	// / wiped and rebuilt cleanly without touching user data.
+	// /
+	// / Returns FAILED_PRECONDITION on a read replica.
+	RunMaterialization(context.Context, *RunMaterializationRequest) (*RunMaterializationResponse, error)
 	mustEmbedUnimplementedPolarGraphServiceServer()
 }
 
@@ -603,8 +1264,65 @@ type PolarGraphServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedPolarGraphServiceServer struct{}
 
+func (UnimplementedPolarGraphServiceServer) GetVocabulary(context.Context, *GetVocabularyRequest) (*Vocabulary, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetVocabulary not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) SetVocabularyBase(context.Context, *SetVocabularyBaseRequest) (*Vocabulary, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetVocabularyBase not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) PutPrefix(context.Context, *PutPrefixRequest) (*Vocabulary, error) {
+	return nil, status.Error(codes.Unimplemented, "method PutPrefix not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) RemovePrefix(context.Context, *RemovePrefixRequest) (*Vocabulary, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemovePrefix not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) ConvertLegacyData(context.Context, *ConvertLegacyDataRequest) (*ConvertLegacyDataResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConvertLegacyData not implemented")
+}
 func (UnimplementedPolarGraphServiceServer) Insert(context.Context, *InsertRequest) (*InsertResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Insert not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) ResolveIris(context.Context, *ResolveIrisRequest) (*ResolveIrisResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveIris not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) CreateGraph(context.Context, *CreateGraphRequest) (*CreateGraphResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateGraph not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) ListGraphs(context.Context, *ListGraphsRequest) (*ListGraphsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListGraphs not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) GraphStats(context.Context, *GraphStatsRequest) (*GraphStatsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GraphStats not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) CopyGraph(context.Context, *CopyGraphRequest) (*CopyGraphResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CopyGraph not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) MoveGraph(context.Context, *MoveGraphRequest) (*CopyGraphResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MoveGraph not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) DropGraph(context.Context, *DropGraphRequest) (*DropGraphResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DropGraph not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) ExportGraph(*ExportGraphRequest, grpc.ServerStreamingServer[ExportGraphChunk]) error {
+	return status.Error(codes.Unimplemented, "method ExportGraph not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) ApplyChanges(context.Context, *ApplyChangesRequest) (*ApplyChangesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ApplyChanges not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) ValidateShapes(context.Context, *ValidateShapesRequest) (*ValidateShapesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ValidateShapes not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) Subscribe(*SubscribeRequest, grpc.ServerStreamingServer[ChangeEvent]) error {
+	return status.Error(codes.Unimplemented, "method Subscribe not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) GrantGraphAccess(context.Context, *GrantGraphAccessRequest) (*GrantGraphAccessResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GrantGraphAccess not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) RevokeGraphAccess(context.Context, *RevokeGraphAccessRequest) (*RevokeGraphAccessResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeGraphAccess not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) GetGraphAccess(context.Context, *GetGraphAccessRequest) (*GetGraphAccessResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetGraphAccess not implemented")
 }
 func (UnimplementedPolarGraphServiceServer) Query(context.Context, *QueryRequest) (*QueryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Query not implemented")
@@ -644,6 +1362,9 @@ func (UnimplementedPolarGraphServiceServer) ValidateEdge(context.Context, *Valid
 }
 func (UnimplementedPolarGraphServiceServer) ListPredicatesBetween(context.Context, *ListPredicatesBetweenRequest) (*ListPredicatesBetweenResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListPredicatesBetween not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) ValidateOntology(context.Context, *ValidateOntologyRequest) (*ValidateOntologyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ValidateOntology not implemented")
 }
 func (UnimplementedPolarGraphServiceServer) SearchVectorFiltered(context.Context, *SearchVectorFilteredRequest) (*SearchVectorFilteredResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SearchVectorFiltered not implemented")
@@ -696,6 +1417,57 @@ func (UnimplementedPolarGraphServiceServer) QueryStream(*QueryRequest, grpc.Serv
 func (UnimplementedPolarGraphServiceServer) CypherQueryStream(*CypherQueryRequest, grpc.ServerStreamingServer[QueryStreamChunk]) error {
 	return status.Error(codes.Unimplemented, "method CypherQueryStream not implemented")
 }
+func (UnimplementedPolarGraphServiceServer) ShowIndexes(context.Context, *ShowIndexesRequest) (*ShowIndexesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ShowIndexes not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) ShowStats(context.Context, *ShowStatsRequest) (*ShowStatsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ShowStats not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) BeginTransaction(context.Context, *BeginTransactionRequest) (*BeginTransactionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BeginTransaction not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) CommitTransaction(context.Context, *CommitTransactionRequest) (*CommitTransactionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitTransaction not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) RollbackTransaction(context.Context, *RollbackTransactionRequest) (*RollbackTransactionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RollbackTransaction not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) GetEdgeAnnotations(context.Context, *GetEdgeAnnotationsRequest) (*GetEdgeAnnotationsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetEdgeAnnotations not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) GetEdgeIdsByTriple(context.Context, *GetEdgeIdsByTripleRequest) (*GetEdgeIdsByTripleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetEdgeIdsByTriple not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) AddApiKey(context.Context, *AddApiKeyRequest) (*AddApiKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddApiKey not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) RevokeApiKey(context.Context, *RevokeApiKeyRequest) (*RevokeApiKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeApiKey not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) ListApiKeys(context.Context, *ListApiKeysRequest) (*ListApiKeysResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListApiKeys not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) GrantAccess(context.Context, *GrantAccessRequest) (*GrantAccessResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GrantAccess not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) RevokeAccess(context.Context, *RevokeAccessRequest) (*RevokeAccessResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeAccess not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) AddUserToGroup(context.Context, *AddUserToGroupRequest) (*AddUserToGroupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddUserToGroup not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) GetUserAccess(context.Context, *GetUserAccessRequest) (*GetUserAccessResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetUserAccess not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) GetPropertyHistory(context.Context, *GetPropertyHistoryRequest) (*GetPropertyHistoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetPropertyHistory not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) DeleteTriples(context.Context, *DeleteTriplesRequest) (*DeleteTriplesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteTriples not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) RunMaterialization(context.Context, *RunMaterializationRequest) (*RunMaterializationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RunMaterialization not implemented")
+}
 func (UnimplementedPolarGraphServiceServer) mustEmbedUnimplementedPolarGraphServiceServer() {}
 func (UnimplementedPolarGraphServiceServer) testEmbeddedByValue()                           {}
 
@@ -717,6 +1489,96 @@ func RegisterPolarGraphServiceServer(s grpc.ServiceRegistrar, srv PolarGraphServ
 	s.RegisterService(&PolarGraphService_ServiceDesc, srv)
 }
 
+func _PolarGraphService_GetVocabulary_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetVocabularyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).GetVocabulary(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_GetVocabulary_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).GetVocabulary(ctx, req.(*GetVocabularyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_SetVocabularyBase_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetVocabularyBaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).SetVocabularyBase(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_SetVocabularyBase_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).SetVocabularyBase(ctx, req.(*SetVocabularyBaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_PutPrefix_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PutPrefixRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).PutPrefix(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_PutPrefix_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).PutPrefix(ctx, req.(*PutPrefixRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_RemovePrefix_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemovePrefixRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).RemovePrefix(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_RemovePrefix_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).RemovePrefix(ctx, req.(*RemovePrefixRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_ConvertLegacyData_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConvertLegacyDataRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).ConvertLegacyData(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_ConvertLegacyData_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).ConvertLegacyData(ctx, req.(*ConvertLegacyDataRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _PolarGraphService_Insert_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(InsertRequest)
 	if err := dec(in); err != nil {
@@ -731,6 +1593,244 @@ func _PolarGraphService_Insert_Handler(srv interface{}, ctx context.Context, dec
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(PolarGraphServiceServer).Insert(ctx, req.(*InsertRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_ResolveIris_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveIrisRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).ResolveIris(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_ResolveIris_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).ResolveIris(ctx, req.(*ResolveIrisRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_CreateGraph_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateGraphRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).CreateGraph(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_CreateGraph_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).CreateGraph(ctx, req.(*CreateGraphRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_ListGraphs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListGraphsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).ListGraphs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_ListGraphs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).ListGraphs(ctx, req.(*ListGraphsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_GraphStats_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GraphStatsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).GraphStats(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_GraphStats_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).GraphStats(ctx, req.(*GraphStatsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_CopyGraph_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CopyGraphRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).CopyGraph(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_CopyGraph_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).CopyGraph(ctx, req.(*CopyGraphRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_MoveGraph_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MoveGraphRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).MoveGraph(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_MoveGraph_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).MoveGraph(ctx, req.(*MoveGraphRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_DropGraph_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DropGraphRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).DropGraph(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_DropGraph_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).DropGraph(ctx, req.(*DropGraphRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_ExportGraph_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ExportGraphRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(PolarGraphServiceServer).ExportGraph(m, &grpc.GenericServerStream[ExportGraphRequest, ExportGraphChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type PolarGraphService_ExportGraphServer = grpc.ServerStreamingServer[ExportGraphChunk]
+
+func _PolarGraphService_ApplyChanges_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApplyChangesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).ApplyChanges(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_ApplyChanges_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).ApplyChanges(ctx, req.(*ApplyChangesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_ValidateShapes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ValidateShapesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).ValidateShapes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_ValidateShapes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).ValidateShapes(ctx, req.(*ValidateShapesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_Subscribe_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SubscribeRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(PolarGraphServiceServer).Subscribe(m, &grpc.GenericServerStream[SubscribeRequest, ChangeEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type PolarGraphService_SubscribeServer = grpc.ServerStreamingServer[ChangeEvent]
+
+func _PolarGraphService_GrantGraphAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GrantGraphAccessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).GrantGraphAccess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_GrantGraphAccess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).GrantGraphAccess(ctx, req.(*GrantGraphAccessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_RevokeGraphAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeGraphAccessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).RevokeGraphAccess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_RevokeGraphAccess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).RevokeGraphAccess(ctx, req.(*RevokeGraphAccessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_GetGraphAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetGraphAccessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).GetGraphAccess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_GetGraphAccess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).GetGraphAccess(ctx, req.(*GetGraphAccessRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -965,6 +2065,24 @@ func _PolarGraphService_ListPredicatesBetween_Handler(srv interface{}, ctx conte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(PolarGraphServiceServer).ListPredicatesBetween(ctx, req.(*ListPredicatesBetweenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_ValidateOntology_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ValidateOntologyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).ValidateOntology(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_ValidateOntology_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).ValidateOntology(ctx, req.(*ValidateOntologyRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1254,6 +2372,312 @@ func _PolarGraphService_CypherQueryStream_Handler(srv interface{}, stream grpc.S
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type PolarGraphService_CypherQueryStreamServer = grpc.ServerStreamingServer[QueryStreamChunk]
 
+func _PolarGraphService_ShowIndexes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ShowIndexesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).ShowIndexes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_ShowIndexes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).ShowIndexes(ctx, req.(*ShowIndexesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_ShowStats_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ShowStatsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).ShowStats(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_ShowStats_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).ShowStats(ctx, req.(*ShowStatsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_BeginTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BeginTransactionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).BeginTransaction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_BeginTransaction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).BeginTransaction(ctx, req.(*BeginTransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_CommitTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitTransactionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).CommitTransaction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_CommitTransaction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).CommitTransaction(ctx, req.(*CommitTransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_RollbackTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RollbackTransactionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).RollbackTransaction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_RollbackTransaction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).RollbackTransaction(ctx, req.(*RollbackTransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_GetEdgeAnnotations_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetEdgeAnnotationsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).GetEdgeAnnotations(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_GetEdgeAnnotations_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).GetEdgeAnnotations(ctx, req.(*GetEdgeAnnotationsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_GetEdgeIdsByTriple_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetEdgeIdsByTripleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).GetEdgeIdsByTriple(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_GetEdgeIdsByTriple_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).GetEdgeIdsByTriple(ctx, req.(*GetEdgeIdsByTripleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_AddApiKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddApiKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).AddApiKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_AddApiKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).AddApiKey(ctx, req.(*AddApiKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_RevokeApiKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeApiKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).RevokeApiKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_RevokeApiKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).RevokeApiKey(ctx, req.(*RevokeApiKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_ListApiKeys_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListApiKeysRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).ListApiKeys(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_ListApiKeys_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).ListApiKeys(ctx, req.(*ListApiKeysRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_GrantAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GrantAccessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).GrantAccess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_GrantAccess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).GrantAccess(ctx, req.(*GrantAccessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_RevokeAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeAccessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).RevokeAccess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_RevokeAccess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).RevokeAccess(ctx, req.(*RevokeAccessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_AddUserToGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddUserToGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).AddUserToGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_AddUserToGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).AddUserToGroup(ctx, req.(*AddUserToGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_GetUserAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetUserAccessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).GetUserAccess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_GetUserAccess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).GetUserAccess(ctx, req.(*GetUserAccessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_GetPropertyHistory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPropertyHistoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).GetPropertyHistory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_GetPropertyHistory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).GetPropertyHistory(ctx, req.(*GetPropertyHistoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_DeleteTriples_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteTriplesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).DeleteTriples(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_DeleteTriples_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).DeleteTriples(ctx, req.(*DeleteTriplesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_RunMaterialization_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunMaterializationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).RunMaterialization(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_RunMaterialization_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).RunMaterialization(ctx, req.(*RunMaterializationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PolarGraphService_ServiceDesc is the grpc.ServiceDesc for PolarGraphService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1262,8 +2686,76 @@ var PolarGraphService_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*PolarGraphServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
+			MethodName: "GetVocabulary",
+			Handler:    _PolarGraphService_GetVocabulary_Handler,
+		},
+		{
+			MethodName: "SetVocabularyBase",
+			Handler:    _PolarGraphService_SetVocabularyBase_Handler,
+		},
+		{
+			MethodName: "PutPrefix",
+			Handler:    _PolarGraphService_PutPrefix_Handler,
+		},
+		{
+			MethodName: "RemovePrefix",
+			Handler:    _PolarGraphService_RemovePrefix_Handler,
+		},
+		{
+			MethodName: "ConvertLegacyData",
+			Handler:    _PolarGraphService_ConvertLegacyData_Handler,
+		},
+		{
 			MethodName: "Insert",
 			Handler:    _PolarGraphService_Insert_Handler,
+		},
+		{
+			MethodName: "ResolveIris",
+			Handler:    _PolarGraphService_ResolveIris_Handler,
+		},
+		{
+			MethodName: "CreateGraph",
+			Handler:    _PolarGraphService_CreateGraph_Handler,
+		},
+		{
+			MethodName: "ListGraphs",
+			Handler:    _PolarGraphService_ListGraphs_Handler,
+		},
+		{
+			MethodName: "GraphStats",
+			Handler:    _PolarGraphService_GraphStats_Handler,
+		},
+		{
+			MethodName: "CopyGraph",
+			Handler:    _PolarGraphService_CopyGraph_Handler,
+		},
+		{
+			MethodName: "MoveGraph",
+			Handler:    _PolarGraphService_MoveGraph_Handler,
+		},
+		{
+			MethodName: "DropGraph",
+			Handler:    _PolarGraphService_DropGraph_Handler,
+		},
+		{
+			MethodName: "ApplyChanges",
+			Handler:    _PolarGraphService_ApplyChanges_Handler,
+		},
+		{
+			MethodName: "ValidateShapes",
+			Handler:    _PolarGraphService_ValidateShapes_Handler,
+		},
+		{
+			MethodName: "GrantGraphAccess",
+			Handler:    _PolarGraphService_GrantGraphAccess_Handler,
+		},
+		{
+			MethodName: "RevokeGraphAccess",
+			Handler:    _PolarGraphService_RevokeGraphAccess_Handler,
+		},
+		{
+			MethodName: "GetGraphAccess",
+			Handler:    _PolarGraphService_GetGraphAccess_Handler,
 		},
 		{
 			MethodName: "Query",
@@ -1316,6 +2808,10 @@ var PolarGraphService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListPredicatesBetween",
 			Handler:    _PolarGraphService_ListPredicatesBetween_Handler,
+		},
+		{
+			MethodName: "ValidateOntology",
+			Handler:    _PolarGraphService_ValidateOntology_Handler,
 		},
 		{
 			MethodName: "SearchVectorFiltered",
@@ -1373,8 +2869,86 @@ var PolarGraphService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "CypherWrite",
 			Handler:    _PolarGraphService_CypherWrite_Handler,
 		},
+		{
+			MethodName: "ShowIndexes",
+			Handler:    _PolarGraphService_ShowIndexes_Handler,
+		},
+		{
+			MethodName: "ShowStats",
+			Handler:    _PolarGraphService_ShowStats_Handler,
+		},
+		{
+			MethodName: "BeginTransaction",
+			Handler:    _PolarGraphService_BeginTransaction_Handler,
+		},
+		{
+			MethodName: "CommitTransaction",
+			Handler:    _PolarGraphService_CommitTransaction_Handler,
+		},
+		{
+			MethodName: "RollbackTransaction",
+			Handler:    _PolarGraphService_RollbackTransaction_Handler,
+		},
+		{
+			MethodName: "GetEdgeAnnotations",
+			Handler:    _PolarGraphService_GetEdgeAnnotations_Handler,
+		},
+		{
+			MethodName: "GetEdgeIdsByTriple",
+			Handler:    _PolarGraphService_GetEdgeIdsByTriple_Handler,
+		},
+		{
+			MethodName: "AddApiKey",
+			Handler:    _PolarGraphService_AddApiKey_Handler,
+		},
+		{
+			MethodName: "RevokeApiKey",
+			Handler:    _PolarGraphService_RevokeApiKey_Handler,
+		},
+		{
+			MethodName: "ListApiKeys",
+			Handler:    _PolarGraphService_ListApiKeys_Handler,
+		},
+		{
+			MethodName: "GrantAccess",
+			Handler:    _PolarGraphService_GrantAccess_Handler,
+		},
+		{
+			MethodName: "RevokeAccess",
+			Handler:    _PolarGraphService_RevokeAccess_Handler,
+		},
+		{
+			MethodName: "AddUserToGroup",
+			Handler:    _PolarGraphService_AddUserToGroup_Handler,
+		},
+		{
+			MethodName: "GetUserAccess",
+			Handler:    _PolarGraphService_GetUserAccess_Handler,
+		},
+		{
+			MethodName: "GetPropertyHistory",
+			Handler:    _PolarGraphService_GetPropertyHistory_Handler,
+		},
+		{
+			MethodName: "DeleteTriples",
+			Handler:    _PolarGraphService_DeleteTriples_Handler,
+		},
+		{
+			MethodName: "RunMaterialization",
+			Handler:    _PolarGraphService_RunMaterialization_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "ExportGraph",
+			Handler:       _PolarGraphService_ExportGraph_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "Subscribe",
+			Handler:       _PolarGraphService_Subscribe_Handler,
+			ServerStreams: true,
+		},
 		{
 			StreamName:    "StreamWal",
 			Handler:       _PolarGraphService_StreamWal_Handler,
