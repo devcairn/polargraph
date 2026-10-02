@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import uuid
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -267,6 +268,37 @@ def test_indexes(base_url: str):
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
+def test_vocabulary_runtime_types(base_url: str):
+    """A prefix and a class added at runtime work from Cypher and SPARQL at once."""
+    unique = uuid.uuid4().hex[:8]
+    ns = f"http://e2e.example/{unique}/"
+    status, vocab = http_post(base_url + "/vocabulary/prefixes", {"name": "e2e", "namespace": ns})
+    assert status == 200, f"put prefix failed with status {status}: {vocab}"
+    assert vocab["prefixes"].get("e2e") == ns, f"prefix not in vocabulary: {vocab}"
+    assert vocab["legacy"]["conversion_pending"] is False, f"unexpected legacy data: {vocab}"
+
+    name = f"w-{unique}"
+    status, data = http_post(base_url + "/cypher/write", {
+        "cypher": f"CREATE (w:`e2e:Widget` {{name: '{name}'}})"
+    })
+    assert status == 200, f"cypher/write failed with status {status}: {data}"
+
+    status, data = http_post(base_url + "/cypher", {
+        "cypher": f"MATCH (w:`e2e:Widget`) WHERE w.name = '{name}' RETURN w"
+    })
+    assert status == 200, f"cypher failed with status {status}: {data}"
+    assert len(data.get("results", [])) == 1, f"expected one widget: {data}"
+
+    query = (
+        f"SELECT ?w WHERE {{ ?w a <{ns}Widget> . "
+        f"?w <urn:pg:vocab:name> \"{name}\" }}"
+    )
+    status, data = http_get(base_url + "/sparql?" + urllib.parse.urlencode({"query": query}))
+    assert status == 200, f"sparql failed with status {status}: {data}"
+    bindings = data["results"]["bindings"]
+    assert len(bindings) == 1, f"expected one SPARQL binding: {data}"
+
+
 TESTS = [
     test_health,
     test_insert_relation,
@@ -280,6 +312,7 @@ TESTS = [
     test_streaming,
     test_stats,
     test_indexes,
+    test_vocabulary_runtime_types,
 ]
 
 

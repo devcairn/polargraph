@@ -184,11 +184,11 @@ pre.codeblock{background:#161b22;border:1px solid #21262d;border-radius:6px;padd
       <div id="query-hint">
         Each line is a pattern: <code>subject predicate object</code><br>
         Use <code>?varName</code> for variables, a UUID for bound nodes, or leave blank for wildcards.<br>
-        Example: <code>?x __type ?t</code> &nbsp;·&nbsp; <code>?x knows ?y</code>
+        Example: <code>?x name ?n</code> &nbsp;·&nbsp; <code>?x knows ?y</code>
       </div>
       <div class="form-group">
         <label>Patterns (one per line)</label>
-        <textarea id="q-patterns" rows="5" placeholder="?x __type ?t&#10;?x name ?n"></textarea>
+        <textarea id="q-patterns" rows="5" placeholder="?x knows ?y&#10;?x name ?n"></textarea>
       </div>
       <div class="input-row" style="margin-bottom:14px">
         <div class="form-group">
@@ -237,7 +237,7 @@ pre.codeblock{background:#161b22;border:1px solid #21262d;border-radius:6px;padd
       </div>
       <div class="form-group">
         <label>Predicate</label>
-        <input type="text" id="i-predicate" placeholder="knows, name, __type …">
+        <input type="text" id="i-predicate" placeholder="knows, name, ex:sku …">
       </div>
       <div class="form-group">
         <label>Object <span style="color:#6e7681">(UUID → relation triple; text → property triple)</span></label>

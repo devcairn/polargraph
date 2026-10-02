@@ -136,6 +136,8 @@ RocksDB-backed persistence. Owns the quad-index layout (storage format v3,
 | `changes` | Change log for `Subscribe`: `chg` CF entry per commit (author, `GraphOp`s, quad versions); `changes_after`, `changes_floor`, `prune_changes`, `commit_watch` |
 | `migrate_v3` | `migrate`, `open_for_migration`, `MigrationReport` — offline v2 → v3 storage migration |
 | `graph_acl` | Graph-level access control: `grant_graph_access` / `revoke_graph_access` / `graph_grants` (grants in the system graph), `GraphAccessIndex` → `UserGraphAccess` (roaring bitmaps per level); enforced via `Snapshot::with_readable_graphs` inside scans |
+| `vocab` | `Vocabulary` (base IRI + prefixes; `expand`, `compact`, `canonical_predicate`, `fingerprint`) stored on `urn:pg:vocab` in the system graph; `set_vocabulary_base`, `put_prefix`, `remove_prefix`, `reload_vocabulary` on `TripleStore`; bare predicate names are stored under the base |
+| `legacy` | `legacy_status` / `convert_legacy(dry_run)` — operator-triggered conversion of pre-vocabulary data (bare predicates → IRIs, `__type` → `rdf:type`); `LegacyStatus`, `ConversionReport`, `RDF_TYPE` |
 | `graphs` | Named-graph management on `TripleStore`: `create_graph`, graph metadata (system graph `urn:pg:graph:meta`), `graph_stats`, bitemporal `drop_graph`, `copy_graph` / `move_graph` (chunked, `urn:pg:copyInProgress` flag) |
 | `error` | `StorageError` |
 | `hnsw` | `HnswIndex` — pure-Rust HNSW, named-space key helpers, serialize/deserialize, mmap storage |
@@ -180,6 +182,7 @@ query layers over gRPC.
 | `ui_api` | `UiState`, `build_ui_router` — axum REST handlers + embedded SPA for the management UI |
 | `wal_client` | `run_replication` — WAL streaming client (replica mode) |
 | `rate_limit` | `RateLimitLayer` / `RateLimitService` — per-IP token-bucket rate limiting tower middleware |
+| `type_index` | `TypeIndex` — `rdf:type` membership by class node, caught up from the change log on read (all write paths, replicas); drives typed vector filters, `Subscribe` types, `HAS_ACCESS_TYPE` |
 | `retention_scheduler` | `run_retention_scheduler()` — background task that fires `CompactionManager::run_retention()` on a configurable interval |
 
 Configuration priority: **CLI flag > environment variable > config file > built-in default**
@@ -265,6 +268,7 @@ Endpoints include: `POST /query`, `POST /query/stream`, `POST /insert`, `GET /tr
 `POST /access/grant`, `POST /access/revoke`, `POST /access/add-user`, `GET /access/user/:id`,
 `POST` / `DELETE` / `GET /graphs/access` (graph grants; `X-User-Id` is forwarded on every endpoint),
 `GET /subscribe` (change feed as Server-Sent Events), `POST /changes` (atomic changeset), `POST /validate` (SHACL),
+`GET /vocabulary`, `PUT /vocabulary/base`, `POST` / `DELETE /vocabulary/prefixes`, `POST /vocabulary/convert`,
 `POST /graphs`, `GET /graphs`, `DELETE /graphs?iri=`, `GET /graphs/stats`, `POST /graphs/copy`,
 `POST /graphs/move`, `GET /graphs/export`, `POST /import/rdf` (incl. N-Quads/TriG, `?graph=`),
 `GET /export/subgraph`. Query patterns take an optional `@default` / `@<iri>` / `@?g` graph suffix.
@@ -313,6 +317,12 @@ the default graph). Variants:
 - **Property**: subject → predicate → value (scalar `Value`, incl. `LangText`
   and `Typed` RDF literals)
 - **EdgeProperty / EdgeRelation**: RDF-star annotations keyed by `EdgeId`
+
+Predicates are IRIs: a bare name (`name`) is stored under the vocabulary
+base (`urn:pg:vocab:name`); internal names (`__…`, access-control builtins)
+stay verbatim. Node types are `rdf:type` relations to class IRIs (Cypher
+labels compile to them); `__type` is legacy, converted by
+`ConvertLegacyData` (`docs/upgrade-cypher-rdf.md`).
 
 A property's object slot in every index key is its value's content hash
 (`keys::value_object`), so a subject can hold several values per predicate
@@ -495,12 +505,14 @@ entries were superseded by storage format v3 (last entries below).
 - [x] Change feed (ContxtBroker plan step 7) — `chg` CF written in each commit batch (author, graph ops, quad versions; `polargraph-storage::changes`); `Subscribe` server-streaming RPC (resume by commit ts, `OUT_OF_RANGE` below the floor, graph / predicate / current-type filters, per-event graph ACL, `ASSERT` / `CLOSE` / `GRAPH_*` events); authors recorded on writes; `--change-retention-secs` (default 7 days) hourly pruner; REST `GET /subscribe` (SSE, `Last-Event-ID`); +9.5 % write bytes, no measurable latency — see `docs/design/change-feed.md`
 - [x] Atomic changesets (ContxtBroker plan step 8a; promotion workflow lives in a ContxtBroker service) — `ApplyChanges` RPC + REST `POST /changes`: adds across graphs + exact-quad retractions in one transaction / one change-feed entry; `read_ts` precondition via `TripleStore::begin_at` (MVCC conflict → `ABORTED` / 409); `strict` retractions; ≤ 100 000 changes; graph ACL; `polargraph_storage::close_at`; see `docs/design/proposals-shacl.md`
 - [x] SHACL validation (ContxtBroker plan step 8b) — `polargraph-shacl` crate (node/property shapes, targets incl. `rdfs:subClassOf`, predicate/inverse/sequence paths, cardinality, datatype, class, nodeKind, ranges, pattern, lengths, in, node, closed, severity); `ValidateShapes` RPC + REST `POST /validate` (JSON or Turtle `sh:ValidationReport`); dataset at a read point plus optional uncommitted overlay, touched-node focus; direct evaluation (not Datalog) — see `docs/design/proposals-shacl.md`
+- [x] Cypher over RDF, PR 1 (ContxtBroker plan step 8.5; **breaking**, `docs/upgrade-cypher-rdf.md`) — runtime vocabulary (`polargraph-storage::vocab`; `GetVocabulary` / `SetVocabularyBase` / `PutPrefix` / `RemovePrefix`, REST `/vocabulary*`); bare predicate names stored as `<base><name>`; operator-triggered `ConvertLegacyData` (bare predicates → IRIs, `__type` → `rdf:type`; idempotent, resumable, dry run; startup warning + `legacy_*` fields in `GetVocabulary` / `ShowStats` / `/health`); Cypher labels → `rdf:type` patterns, backtick names for CURIEs / IRIs, `compile_with_vocabulary`, plan cache keyed by vocabulary fingerprint; change-log-driven `TypeIndex` keyed by class node; runtime acceptance tests in `crates/polargraph-server/tests/vocabulary.rs` — see `docs/design/cypher-rdf.md`
 
 ## Adding a new predicate
 
 Predicates are interned automatically on first `insert()` — no schema
-migration needed. Just use the string you want in `Triple::Relation` or
-`Triple::Property`. The intern table persists across restarts.
+migration needed. Use an IRI, or a bare name (stored under the vocabulary
+base), in `Triple::Relation` or `Triple::Property`. The intern table
+persists across restarts.
 
 ## Adding a new `Value` variant
 
