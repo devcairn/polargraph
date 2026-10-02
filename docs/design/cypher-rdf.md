@@ -1,7 +1,8 @@
 # Cypher over RDF — labels as `rdf:type`, names as IRIs, and Cypher's future — design note
 
 Status: decisions A–F **approved** (Mark, 2026-10-01) with the hard
-requirement in §2.5; build after step 8b merges, as two PRs.
+requirement in §2.5 and G2 for the legacy conversion (§2.4); building as
+two PRs on `db/cypher-rdf`.
 
 ## 1. How Cypher stores things today
 
@@ -74,23 +75,48 @@ Two ways to make exports and SPARQL see one spelling:
   vocabulary) maps `<vocab_base>x` ↔ `x`. No migration, but every RDF path
   carries the mapping forever and must never miss it.
 
-### 2.4 Migration (schema migration v3, online, primary only)
+### 2.4 Legacy-data conversion (decision G2: operator-triggered, online)
 
-Runs once at startup through the existing `MigrationRunner`, after the
-vocabulary base is configured:
+There is **no automatic migration at startup** (Mark, 2026-10-01, G2). The
+operator first sets the vocabulary base (`SetVocabularyBase`, plus any
+prefixes), then triggers the one-time conversion explicitly with
+`ConvertLegacyData` (REST `POST /vocabulary/convert`; `dry_run` reports
+what would change):
 
-1. For every live `__type "X"` property (all graphs): write
-   `s rdf:type <iri(X)>` in the same graph with the same valid time, and
-   close the `__type` property (bitemporal — history keeps it).
-2. (B1) Rename bare predicates to `iri(name)` in the intern table; merge
-   quads only where both spellings exist (expected to be rare; reported).
-3. Node type registry entries re-keyed to class IRIs.
-4. Rebuild the type cache and access caches; record IRIs in the dictionary.
+1. **Predicate renames (B1).** Every interned bare predicate `P` becomes
+   `base + P`. Normally this is a rename of the intern-table entry — a
+   metadata update, no quad rewrite. If `base + P` is already interned
+   separately, the live quads of `P` are copied to it and closed under `P`,
+   and `P`'s entry is renamed to `__legacy__/P` (its history stays
+   queryable there).
+2. **Labels.** Every live `__type "X"` property (all graphs) becomes
+   `s rdf:type <expand(X)>` in the same graph with the same valid time; the
+   property is closed (bitemporal — history keeps it).
+3. Caches (type, access, registry) are rebuilt; class IRIs are recorded in
+   the IRI dictionary.
 
-Chunked commits (as graph copies), resumable, with a dry-run report (the
-existing `MigrateSchema` RPC's `dry_run`). `__type` is then **no
-longer written or read**; a store that still has live `__type` properties
-logs a warning at startup.
+The node type registry keeps the names it was given (`Person`,
+`ex:Widget`); they resolve through the vocabulary when used, so registry
+entries need no rewrite.
+
+**Idempotent and resumable**: both steps work from what is still legacy
+(bare entries in the intern table, live `__type` properties), in chunked
+commits; re-running after an interruption continues, and running it again
+when nothing is left is a no-op.
+
+**Pending state is visible, not silent.** While legacy data exists:
+
+- the server logs a **startup warning** with the counts and the command to
+  run;
+- `GetVocabulary`, `ShowStats` and the management `/health` JSON report
+  `legacy_bare_predicates` / `legacy_type_labels` counts and
+  `legacy_conversion_pending: true`.
+
+**The window** (documented in the upgrade guide): from the upgrade until the
+conversion has run, data stored under bare predicate names and `__type`
+labels **is not reachable by bare name** — bare names now resolve under the
+vocabulary base, and Cypher labels match `rdf:type`. It stays reachable by
+its stored name, e.g. in exports.
 
 ### 2.5 Hard requirement — runtime type and vocabulary changes
 
@@ -100,8 +126,8 @@ immediately from Cypher, SPARQL and SHACL. This covers
 `RegisterNodeType` / `RegisterEdgeType`, plain `rdf:type` writes with a new
 class (any write path: `Insert`, `ApplyChanges`, Cypher, SPARQL Update,
 imports), later WS4 type-package installs, and prefix / vocabulary-base
-changes. The only startup-time work is the one-time `__type` migration
-(§2.4).
+changes. The only startup-time work is the one-time, operator-triggered
+legacy conversion (§2.4).
 
 How the design meets it:
 
@@ -129,20 +155,10 @@ canonicalisation and the rename migration must ship together and the
 migration must complete before the server serves requests — which makes G
 blocking for PR 1.
 
-**Open question G (for Mark).** The `__type` migration runs at startup,
-before any RPC can set the vocabulary base, so with a runtime-only base the
-migrated labels would always become `urn:pg:vocab:…` IRIs (and a later base
-change doesn't rewrite them). Options:
-
-- **G1 (recommended)** — an *initial-value* setting (`--initial-vocab-base`,
-  env, TOML) read **only** when the system graph has no vocabulary yet (first
-  start after the upgrade, or a new store). The migration uses it; every
-  later change is runtime-only via `SetVocabularyBase` / `PutPrefix`.
-- **G2** — no startup migration: the server starts, reports the pending
-  migration, and the operator sets the base by RPC and then runs it via
-  `MigrateSchema`. Until then, Cypher labels don't see old `__type` data.
-- **G3** — migrate with the default base; operators who want another
-  namespace re-map the class IRIs afterwards (an extra rewrite step).
+**Decision G — G2** (Mark, 2026-10-01): no startup migration; the operator
+sets the base by RPC and triggers the conversion (§2.4). Considered: G1, an
+initial-value setting used by an automatic startup migration; G3, migrate
+with the default base and re-map later.
 
 ## 3. Should we keep Cypher?
 
@@ -191,5 +207,5 @@ same data.
 | B | Names: store IRIs (B1) or map at the RDF boundary (B2) | **B1** — store IRIs; one rename migration (metadata-only in the common case), no mapping in RDF paths. Also applies to bare predicates written by REST `/insert` and Datalog. |
 | C | Vocabulary base default | `urn:pg:vocab:`, changed at runtime via `SetVocabularyBase`; prefixes via `PutPrefix` (§2.5). Operators set a real namespace before the `__type` migration runs. |
 | D | `MATCH (n:Person)` and subclasses | Exact `rdf:type` by default (fast, predictable); subclass instances via OWL RL materialization, which already derives `rdf:type` from `rdfs:subClassOf`. |
-| E | Migration timing | Online schema migration at startup (resumable, dry-run report), not an offline storage migration. Breaking for clients reading `__type` directly — release note + upgrade guide as for the graph ACL. |
+| E | Migration timing | Superseded by **G2**: online, operator-triggered `ConvertLegacyData` (resumable, dry run, visible pending state). Breaking for clients reading `__type` or bare predicate names — release note + upgrade guide. |
 | F | Sequencing | Its own step before the plan's step 9; ships in two PRs: (1) vocabulary + labels/names + migration, (2) Cypher write deprecation + SDK/doc updates. |
