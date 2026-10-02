@@ -904,10 +904,26 @@ async fn handle_cypher(
 
 // ── POST /cypher/write ────────────────────────────────────────────────────────
 
+/// `POST /cypher/write` — **deprecated** (removed next release): responses
+/// carry `Deprecation: true` and a `Warning` header. Write with
+/// `POST /changes` or `POST /sparql/update` instead.
 async fn handle_cypher_write(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CypherWriteBody>,
 ) -> Response {
+    let mut response = cypher_write(state, body).await;
+    let headers = response.headers_mut();
+    headers.insert("deprecation", axum::http::HeaderValue::from_static("true"));
+    headers.insert(
+        axum::http::header::WARNING,
+        axum::http::HeaderValue::from_static(
+            "299 polargraph \"POST /cypher/write is deprecated; use POST /changes or POST /sparql/update\"",
+        ),
+    );
+    response
+}
+
+async fn cypher_write(state: Arc<AppState>, body: CypherWriteBody) -> Response {
     let req = proto::CypherWriteRequest {
         user_id: String::new(),
         cypher: body.cypher,

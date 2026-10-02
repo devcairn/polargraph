@@ -299,6 +299,18 @@ def test_vocabulary_runtime_types(base_url: str):
     assert len(bindings) == 1, f"expected one SPARQL binding: {data}"
 
 
+def test_cypher_write_deprecated(base_url: str):
+    """POST /cypher/write still works and is marked deprecated."""
+    body = json.dumps({"cypher": f"CREATE (n {{tag: '{uuid.uuid4().hex[:8]}'}})"}).encode()
+    req = urllib.request.Request(
+        base_url + "/cypher/write", data=body, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200, f"cypher/write failed with status {resp.status}"
+        assert resp.headers.get("Deprecation") == "true", f"no Deprecation header: {resp.headers}"
+        assert "/changes" in (resp.headers.get("Warning") or ""), f"no Warning header: {resp.headers}"
+
+
 TESTS = [
     test_health,
     test_insert_relation,
@@ -313,6 +325,7 @@ TESTS = [
     test_stats,
     test_indexes,
     test_vocabulary_runtime_types,
+    test_cypher_write_deprecated,
 ]
 
 

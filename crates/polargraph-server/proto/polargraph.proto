@@ -1604,6 +1604,9 @@ service PolarGraphService {
     /// write clauses (CREATE/MERGE/SET/DELETE) — use CypherWrite for mutations.
     rpc CypherQuery(CypherQueryRequest) returns (CypherQueryResponse);
 
+    /// DEPRECATED — removed in the next release; write with ApplyChanges or
+    /// SPARQL Update (docs/upgrade-cypher-rdf.md). Responses carry a
+    /// `warning` header.
     /// Parse and execute a Cypher write statement (CREATE, MERGE, SET, DELETE).
     /// Executes atomically in a single MVCC transaction.
     /// Returns INVALID_ARGUMENT if the statement cannot be parsed or contains no

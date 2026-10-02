@@ -511,3 +511,23 @@ async fn legacy_data_is_converted_on_demand() {
     assert_eq!(again.labels_converted, 0);
     assert!(again.predicates.is_empty());
 }
+
+#[tokio::test]
+async fn cypher_write_is_deprecated_but_still_works() {
+    let dir = TempDir::new().unwrap();
+    let svc = PolarGraphServer::new(TripleStore::open(dir.path()).unwrap()).unwrap();
+    let resp = svc
+        .cypher_write(Request::new(CypherWriteRequest {
+            cypher: r#"CREATE (a:Person {name: "Alice"})"#.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    let warning = resp.metadata().get("warning").unwrap().to_str().unwrap();
+    assert!(warning.starts_with("299 ") && warning.contains("ApplyChanges"));
+    assert_eq!(resp.into_inner().created_node_ids.len(), 1);
+    assert_eq!(
+        cypher_rows(&svc, "MATCH (a:Person) RETURN a").await.len(),
+        1
+    );
+}
