@@ -96,6 +96,37 @@ pub enum SparqlLiteral {
     Float(f64),
     Str(String),
     Bool(bool),
+    /// A language-tagged string.
+    Lang {
+        text: String,
+        lang: String,
+    },
+    /// Any other typed literal.
+    Typed {
+        lexical: String,
+        datatype: String,
+    },
+}
+
+impl SparqlLiteral {
+    /// The literal as a result value, for comparison with bound values.
+    pub fn to_value(&self) -> crate::response::SparqlValue {
+        use crate::response::SparqlValue as V;
+        match self {
+            Self::Int(n) => V::LiteralInt(*n),
+            Self::Float(f) => V::LiteralFloat(*f),
+            Self::Str(s) => V::Literal(s.clone()),
+            Self::Bool(b) => V::LiteralBool(*b),
+            Self::Lang { text, lang } => V::LangLiteral {
+                text: text.clone(),
+                lang: lang.clone(),
+            },
+            Self::Typed { lexical, datatype } => V::TypedLiteral {
+                lexical: lexical.clone(),
+                datatype: datatype.clone(),
+            },
+        }
+    }
 }
 
 // ── Public output types ───────────────────────────────────────────────────────
@@ -144,8 +175,10 @@ pub struct SparqlDataset {
 pub enum SparqlFilter {
     /// `FILTER(BOUND(?x))`
     Bound(String),
-    /// `FILTER(?x = ?y)` — two variables
+    /// `FILTER(?x = ?y)` — two variables, SPARQL value equality
     VarEq(String, String),
+    /// `FILTER(sameTerm(?x, ?y))` — RDF term identity
+    SameTerm(String, String),
     /// `FILTER(isIRI(?x))` / `FILTER(isURI(?x))` — both map here (SPARQL 1.1 synonyms)
     IsIri(String),
     /// `FILTER(isLiteral(?x))`
@@ -169,6 +202,13 @@ pub enum SparqlFilter {
     NotEqualLiteral(String, SparqlLiteral),
 }
 
+/// One `ORDER BY` key (a variable; other expressions are unsupported).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SparqlOrder {
+    pub var: String,
+    pub descending: bool,
+}
+
 /// The full output of translating one SPARQL query.
 #[derive(Debug, Default, Clone)]
 pub struct SparqlTranslation {
@@ -184,6 +224,8 @@ pub struct SparqlTranslation {
     // ── Phase 2: aggregation ──────────────────────────────────────────────────
     /// GROUP BY variable names.
     pub group_by: Vec<String>,
+    /// `ORDER BY` keys, applied after aggregation and before projection.
+    pub order_by: Vec<SparqlOrder>,
     /// Aggregate function specifications from the SELECT clause.
     pub aggregates: Vec<SparqlAggregateSpec>,
     /// HAVING filter applied after aggregation.
@@ -488,8 +530,27 @@ pub(crate) fn translate_pattern(
             Ok(branches)
         }
 
-        // ── OrderBy (ignore ordering for Phase 1/2) ───────────────────────────
-        GraphPattern::OrderBy { inner, .. } => translate_pattern(inner, counter, translation),
+        // ── OrderBy ───────────────────────────────────────────────────────────
+        GraphPattern::OrderBy { inner, expression } => {
+            let mut keys = Vec::with_capacity(expression.len());
+            for e in expression {
+                let (expr, descending) = match e {
+                    spargebra::algebra::OrderExpression::Asc(x) => (x, false),
+                    spargebra::algebra::OrderExpression::Desc(x) => (x, true),
+                };
+                let Expression::Variable(v) = expr else {
+                    return Err(SparqlError::Unsupported(
+                        "ORDER BY supports variables only".to_string(),
+                    ));
+                };
+                keys.push(SparqlOrder {
+                    var: v.as_str().to_string(),
+                    descending,
+                });
+            }
+            translation.order_by = keys;
+            translate_pattern(inner, counter, translation)
+        }
 
         // ── Extend (BIND / AS alias) ──────────────────────────────────────────
         //
@@ -687,9 +748,8 @@ pub(crate) fn translate_filter(expr: &Expression) -> Result<SparqlFilter, Sparql
         }
 
         Expression::SameTerm(a, b) => {
-            // Treat sameTerm like equality for our purposes
             if let (Expression::Variable(va), Expression::Variable(vb)) = (a.as_ref(), b.as_ref()) {
-                return Ok(SparqlFilter::VarEq(
+                return Ok(SparqlFilter::SameTerm(
                     va.as_str().to_string(),
                     vb.as_str().to_string(),
                 ));
@@ -699,15 +759,20 @@ pub(crate) fn translate_filter(expr: &Expression) -> Result<SparqlFilter, Sparql
             ))
         }
 
+        // `literal op ?var` is `?var flipped-op literal`.
         Expression::Greater(a, b) => {
             translate_var_literal_comparison(a, b, SparqlFilter::GreaterThan)
+                .or_else(|_| translate_var_literal_comparison(b, a, SparqlFilter::LessThan))
         }
         Expression::GreaterOrEqual(a, b) => {
             translate_var_literal_comparison(a, b, SparqlFilter::GreaterOrEqual)
+                .or_else(|_| translate_var_literal_comparison(b, a, SparqlFilter::LessOrEqual))
         }
-        Expression::Less(a, b) => translate_var_literal_comparison(a, b, SparqlFilter::LessThan),
+        Expression::Less(a, b) => translate_var_literal_comparison(a, b, SparqlFilter::LessThan)
+            .or_else(|_| translate_var_literal_comparison(b, a, SparqlFilter::GreaterThan)),
         Expression::LessOrEqual(a, b) => {
             translate_var_literal_comparison(a, b, SparqlFilter::LessOrEqual)
+                .or_else(|_| translate_var_literal_comparison(b, a, SparqlFilter::GreaterOrEqual))
         }
 
         Expression::FunctionCall(func, args) => {
@@ -793,36 +858,24 @@ fn translate_var_literal_comparison(
     Ok(make(var_name, lit))
 }
 
+/// A query literal, mapped exactly as stored values are
+/// (`term::literal_to_value`), so a filter constant compares like the data.
 fn sparql_literal_to_value(lit: &spargebra::term::Literal) -> SparqlLiteral {
-    let dt = lit.datatype().as_str();
-    let val = lit.value();
-    // Integer types
-    if dt.ends_with("#integer")
-        || dt.ends_with("#int")
-        || dt.ends_with("#long")
-        || dt.ends_with("#short")
-    {
-        if let Ok(n) = val.parse::<i64>() {
-            return SparqlLiteral::Int(n);
-        }
+    use polargraph_core::value::Value;
+    match polargraph_core::term::literal_to_value(
+        lit.value(),
+        Some(lit.datatype().as_str()),
+        lit.language(),
+    ) {
+        Value::Int(n) => SparqlLiteral::Int(n),
+        Value::Float(f) => SparqlLiteral::Float(f),
+        Value::Bool(b) => SparqlLiteral::Bool(b),
+        Value::Text(t) => SparqlLiteral::Str(t),
+        Value::LangText { text, lang } => SparqlLiteral::Lang { text, lang },
+        Value::Typed { lexical, datatype } => SparqlLiteral::Typed { lexical, datatype },
+        // literal_to_value produces none of these.
+        _ => SparqlLiteral::Str(lit.value().to_string()),
     }
-    // Float/decimal types
-    if dt.ends_with("#double") || dt.ends_with("#float") || dt.ends_with("#decimal") {
-        if let Ok(f) = val.parse::<f64>() {
-            return SparqlLiteral::Float(f);
-        }
-    }
-    // Boolean
-    if dt.ends_with("#boolean") {
-        if val == "true" {
-            return SparqlLiteral::Bool(true);
-        }
-        if val == "false" {
-            return SparqlLiteral::Bool(false);
-        }
-    }
-    // Default: plain string
-    SparqlLiteral::Str(val.to_string())
 }
 
 // ── Aggregate translation ─────────────────────────────────────────────────────

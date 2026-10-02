@@ -7,13 +7,16 @@
 //!
 //! - [`left_join`]: OPTIONAL / LEFT JOIN semantics
 //! - [`execute_sparql_aggregations`]: GROUP BY + aggregate functions + HAVING
+//! - [`order_bindings`]: ORDER BY
+//! - [`apply_sparql_filter`] / [`eval_filter`]: FILTER with SPARQL's error rules
 
-use std::collections::HashMap;
+use std::{cmp::Ordering, collections::HashMap};
 
 use crate::{
     names::IriNames,
     response::{SparqlBindings, SparqlValue},
-    translate::{SparqlAggFunc, SparqlAggregateSpec, SparqlFilter, SparqlLiteral},
+    translate::{SparqlAggFunc, SparqlAggregateSpec, SparqlFilter, SparqlOrder},
+    values::{numeric, order_cmp, sparql_cmp, sparql_eq, term_key, Num},
 };
 
 // ── Left join (OPTIONAL) ──────────────────────────────────────────────────────
@@ -63,7 +66,7 @@ pub fn left_join(
 fn compatible(a: &SparqlBindings, b: &SparqlBindings) -> bool {
     for (k, av) in a {
         if let Some(bv) = b.get(k) {
-            if av != bv {
+            if term_key(av) != term_key(bv) {
                 return false;
             }
         }
@@ -87,11 +90,15 @@ fn merge(left: &SparqlBindings, right: &SparqlBindings) -> SparqlBindings {
 ///
 /// Returns one result row per group.  Each row contains:
 /// - The group-by variable bindings (same values for all rows in the group).
-/// - One entry per aggregate spec, keyed by its alias.
+/// - One entry per aggregate spec, keyed by its alias — absent when the
+///   aggregate is unbound (`MIN` / `MAX` / `SAMPLE` of an empty group, or a
+///   non-numeric value in `SUM` / `AVG`, as SPARQL 1.1 §18.5 defines).
 ///
-/// If `having` is provided, only groups satisfying the filter are returned.
+/// Groups are keyed by RDF term identity (`1` and `1.0` are different
+/// groups). If `having` is provided, only groups it accepts are returned.
 ///
-/// `names` renders URIs inside `GROUP_CONCAT` results.
+/// `names` renders URIs inside `GROUP_CONCAT` results and orders IRIs for
+/// `MIN` / `MAX`.
 pub fn execute_sparql_aggregations(
     bindings: Vec<SparqlBindings>,
     group_by: &[String],
@@ -103,18 +110,15 @@ pub fn execute_sparql_aggregations(
         return bindings;
     }
 
-    // Group rows by the serialized tuple of group-by variable values.
-    // We keep an insertion-order list of group keys to preserve output order.
+    // Group rows by the term keys of the group-by variables, keeping
+    // first-seen group order.
     let mut groups: HashMap<Vec<String>, Vec<SparqlBindings>> = HashMap::new();
     let mut group_order: Vec<Vec<String>> = Vec::new();
 
     for b in bindings {
         let key: Vec<String> = group_by
             .iter()
-            .map(|v| match b.get(v) {
-                Some(val) => serialize_for_key(val),
-                None => String::new(),
-            })
+            .map(|v| b.get(v).map(term_key).unwrap_or_default())
             .collect();
         let entry = groups.entry(key.clone()).or_insert_with(|| {
             group_order.push(key);
@@ -142,8 +146,9 @@ pub fn execute_sparql_aggregations(
 
         // Compute each aggregate.
         for spec in aggregates {
-            let agg_val = compute_aggregate(rows, &spec.func, names);
-            out.insert(spec.alias.clone(), agg_val);
+            if let Some(agg_val) = compute_aggregate(rows, &spec.func, names) {
+                out.insert(spec.alias.clone(), agg_val);
+            }
         }
 
         // Apply HAVING filter.
@@ -155,212 +160,157 @@ pub fn execute_sparql_aggregations(
     result
 }
 
+/// The values `var` is bound to across `rows`.
+fn bound<'a>(rows: &'a [SparqlBindings], var: &'a str) -> impl Iterator<Item = &'a SparqlValue> {
+    rows.iter().filter_map(move |r| r.get(var))
+}
+
+/// One aggregate over a group; `None` when it is unbound.
 fn compute_aggregate(
     rows: &[SparqlBindings],
     func: &SparqlAggFunc,
     names: &IriNames,
-) -> SparqlValue {
-    match func {
+) -> Option<SparqlValue> {
+    Some(match func {
         SparqlAggFunc::CountStar => SparqlValue::LiteralInt(rows.len() as i64),
 
-        SparqlAggFunc::CountVar(var) => {
-            let count = rows.iter().filter(|r| r.contains_key(var)).count();
-            SparqlValue::LiteralInt(count as i64)
-        }
+        SparqlAggFunc::CountVar(var) => SparqlValue::LiteralInt(bound(rows, var).count() as i64),
 
+        // Integer if every input is an integer (and the sum fits), else a
+        // double; a non-numeric input makes the sum unbound.
         SparqlAggFunc::Sum(var) => {
-            let mut sum_i: i64 = 0;
-            let mut sum_f: f64 = 0.0;
-            let mut is_float = false;
-            for r in rows {
-                match r.get(var) {
-                    Some(SparqlValue::LiteralInt(n)) => sum_i += n,
-                    Some(SparqlValue::LiteralFloat(f)) => {
-                        sum_f += f;
-                        is_float = true;
-                    }
-                    _ => {}
-                }
+            let mut int_sum: Option<i64> = Some(0);
+            let mut dbl_sum = 0.0;
+            for v in bound(rows, var) {
+                let n = numeric(v)?;
+                dbl_sum += n.as_f64();
+                int_sum = match (int_sum, n) {
+                    (Some(acc), Num::Int(x)) => acc.checked_add(x),
+                    _ => None,
+                };
             }
-            if is_float {
-                SparqlValue::LiteralFloat(sum_f + sum_i as f64)
-            } else {
-                SparqlValue::LiteralInt(sum_i)
+            match int_sum {
+                Some(n) => SparqlValue::LiteralInt(n),
+                None => SparqlValue::LiteralFloat(dbl_sum),
             }
         }
 
+        // A double (the spec's xsd:decimal isn't stored); 0 for no input.
         SparqlAggFunc::Avg(var) => {
-            let mut sum: f64 = 0.0;
-            let mut count: usize = 0;
-            for r in rows {
-                match r.get(var) {
-                    Some(SparqlValue::LiteralInt(n)) => {
-                        sum += *n as f64;
-                        count += 1;
-                    }
-                    Some(SparqlValue::LiteralFloat(f)) => {
-                        sum += f;
-                        count += 1;
-                    }
-                    _ => {}
-                }
+            let mut sum = 0.0;
+            let mut count = 0usize;
+            for v in bound(rows, var) {
+                sum += numeric(v)?.as_f64();
+                count += 1;
             }
             if count == 0 {
-                SparqlValue::LiteralFloat(0.0)
+                SparqlValue::LiteralInt(0)
             } else {
                 SparqlValue::LiteralFloat(sum / count as f64)
             }
         }
 
-        SparqlAggFunc::Min(var) => {
-            let mut min_i: Option<i64> = None;
-            let mut min_f: Option<f64> = None;
-            let mut is_float = false;
-            for r in rows {
-                match r.get(var) {
-                    Some(SparqlValue::LiteralInt(n)) => {
-                        min_i = Some(min_i.map_or(*n, |m: i64| m.min(*n)));
-                    }
-                    Some(SparqlValue::LiteralFloat(f)) => {
-                        min_f = Some(min_f.map_or(*f, |m: f64| if *f < m { *f } else { m }));
-                        is_float = true;
-                    }
-                    _ => {}
-                }
-            }
-            if is_float {
-                SparqlValue::LiteralFloat(min_f.unwrap_or(0.0) + min_i.unwrap_or(0) as f64)
-            } else {
-                SparqlValue::LiteralInt(min_i.unwrap_or(0))
-            }
-        }
-
-        SparqlAggFunc::Max(var) => {
-            let mut max_i: Option<i64> = None;
-            let mut max_f: Option<f64> = None;
-            let mut is_float = false;
-            for r in rows {
-                match r.get(var) {
-                    Some(SparqlValue::LiteralInt(n)) => {
-                        max_i = Some(max_i.map_or(*n, |m: i64| m.max(*n)));
-                    }
-                    Some(SparqlValue::LiteralFloat(f)) => {
-                        max_f = Some(max_f.map_or(*f, |m: f64| if *f > m { *f } else { m }));
-                        is_float = true;
-                    }
-                    _ => {}
-                }
-            }
-            if is_float {
-                SparqlValue::LiteralFloat(max_f.unwrap_or(0.0) + max_i.unwrap_or(0) as f64)
-            } else {
-                SparqlValue::LiteralInt(max_i.unwrap_or(0))
-            }
-        }
+        // The least / greatest value in ORDER BY order; unbound when empty.
+        SparqlAggFunc::Min(var) => bound(rows, var)
+            .min_by(|a, b| order_cmp(Some(a), Some(b), names))?
+            .clone(),
+        SparqlAggFunc::Max(var) => bound(rows, var)
+            .max_by(|a, b| order_cmp(Some(a), Some(b), names))?
+            .clone(),
 
         SparqlAggFunc::GroupConcat { var, separator } => {
             let sep = separator.as_deref().unwrap_or(" ");
-            let parts: Vec<String> = rows
-                .iter()
-                .filter_map(|r| r.get(var))
+            let parts: Vec<String> = bound(rows, var)
                 .map(|v| match v {
                     SparqlValue::Uri(id) => names.iri(id),
-                    SparqlValue::Literal(s) => s.clone(),
-                    SparqlValue::LiteralInt(n) => n.to_string(),
-                    SparqlValue::LiteralFloat(f) => f.to_string(),
-                    SparqlValue::LiteralBool(b) => b.to_string(),
+                    literal => literal.lexical().unwrap_or_default(),
                 })
                 .collect();
             SparqlValue::Literal(parts.join(sep))
         }
 
-        SparqlAggFunc::Sample(var) => rows
-            .first()
-            .and_then(|r| r.get(var))
-            .cloned()
-            .unwrap_or(SparqlValue::Literal(String::new())),
+        SparqlAggFunc::Sample(var) => bound(rows, var).next()?.clone(),
+    })
+}
+
+// ── ORDER BY ──────────────────────────────────────────────────────────────────
+
+/// Sort rows by `order` keys (SPARQL `ORDER BY`), stably, using the total
+/// order of [`order_cmp`].
+pub fn order_bindings(rows: &mut [SparqlBindings], order: &[SparqlOrder], names: &IriNames) {
+    if order.is_empty() {
+        return;
     }
+    rows.sort_by(|a, b| {
+        for key in order {
+            let o = order_cmp(a.get(&key.var), b.get(&key.var), names);
+            let o = if key.descending { o.reverse() } else { o };
+            if o != Ordering::Equal {
+                return o;
+            }
+        }
+        Ordering::Equal
+    });
 }
 
 // ── Filter evaluation ─────────────────────────────────────────────────────────
 
-/// Evaluate a `SparqlFilter` against a single binding row.
+/// Evaluate a `SparqlFilter` against a single binding row: a row is kept only
+/// when the filter is `true` — `false` and errors (an unbound variable, a
+/// comparison of incomparable values) both remove it (SPARQL 1.1 §17.2).
 pub fn apply_sparql_filter(binding: &SparqlBindings, filter: &SparqlFilter) -> bool {
-    match filter {
-        SparqlFilter::Bound(var) => binding.contains_key(var),
+    eval_filter(binding, filter) == Some(true)
+}
 
-        SparqlFilter::VarEq(a, b) => match (binding.get(a), binding.get(b)) {
-            (Some(av), Some(bv)) => av == bv,
-            _ => false,
+/// Three-valued filter evaluation: `Some(true)`, `Some(false)`, or `None` for
+/// an error. `!` keeps errors; `&&` / `||` follow SPARQL's error rules
+/// (`false && error = false`, `true || error = true`).
+pub fn eval_filter(binding: &SparqlBindings, filter: &SparqlFilter) -> Option<bool> {
+    let get = |var: &str| binding.get(var);
+    match filter {
+        SparqlFilter::Bound(var) => Some(binding.contains_key(var)),
+
+        SparqlFilter::VarEq(a, b) => sparql_eq(get(a)?, get(b)?),
+        SparqlFilter::SameTerm(a, b) => Some(term_key(get(a)?) == term_key(get(b)?)),
+
+        SparqlFilter::IsIri(var) => Some(matches!(
+            get(var)?,
+            SparqlValue::Uri(_) | SparqlValue::Iri(_)
+        )),
+        SparqlFilter::IsLiteral(var) => Some(!matches!(
+            get(var)?,
+            SparqlValue::Uri(_) | SparqlValue::Iri(_)
+        )),
+        // PolarGraph has no blank nodes at query time.
+        SparqlFilter::IsBlank(var) => get(var).map(|_| false),
+
+        SparqlFilter::Not(inner) => eval_filter(binding, inner).map(|b| !b),
+        SparqlFilter::And(a, b) => match (eval_filter(binding, a), eval_filter(binding, b)) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), Some(true)) => Some(true),
+            _ => None,
+        },
+        SparqlFilter::Or(a, b) => match (eval_filter(binding, a), eval_filter(binding, b)) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
         },
 
-        SparqlFilter::IsIri(var) => {
-            matches!(binding.get(var), Some(SparqlValue::Uri(_)))
+        SparqlFilter::GreaterThan(var, lit) => {
+            sparql_cmp(get(var)?, &lit.to_value()).map(Ordering::is_gt)
         }
-
-        SparqlFilter::IsLiteral(var) => matches!(
-            binding.get(var),
-            Some(
-                SparqlValue::Literal(_)
-                    | SparqlValue::LiteralInt(_)
-                    | SparqlValue::LiteralFloat(_)
-                    | SparqlValue::LiteralBool(_)
-            )
-        ),
-
-        SparqlFilter::IsBlank(_var) => false,
-
-        SparqlFilter::Not(inner) => !apply_sparql_filter(binding, inner),
-        SparqlFilter::And(a, b) => {
-            apply_sparql_filter(binding, a) && apply_sparql_filter(binding, b)
+        SparqlFilter::LessThan(var, lit) => {
+            sparql_cmp(get(var)?, &lit.to_value()).map(Ordering::is_lt)
         }
-        SparqlFilter::Or(a, b) => {
-            apply_sparql_filter(binding, a) || apply_sparql_filter(binding, b)
+        SparqlFilter::GreaterOrEqual(var, lit) => {
+            sparql_cmp(get(var)?, &lit.to_value()).map(Ordering::is_ge)
         }
-
-        SparqlFilter::GreaterThan(var, lit) => compare_var_lit(binding, var, lit) > 0,
-        SparqlFilter::LessThan(var, lit) => compare_var_lit(binding, var, lit) < 0,
-        SparqlFilter::GreaterOrEqual(var, lit) => compare_var_lit(binding, var, lit) >= 0,
-        SparqlFilter::LessOrEqual(var, lit) => compare_var_lit(binding, var, lit) <= 0,
-        SparqlFilter::EqualLiteral(var, lit) => compare_var_lit(binding, var, lit) == 0,
-        SparqlFilter::NotEqualLiteral(var, lit) => compare_var_lit(binding, var, lit) != 0,
-    }
-}
-
-/// Compare a bound variable's value against a literal. Returns an integer like `cmp()`:
-/// negative = var < lit, 0 = equal, positive = var > lit.
-/// Returns `i32::MIN` when the variable is unbound or types are incomparable.
-fn compare_var_lit(binding: &SparqlBindings, var: &str, lit: &SparqlLiteral) -> i32 {
-    let Some(val) = binding.get(var) else {
-        return i32::MIN;
-    };
-    match (val, lit) {
-        (SparqlValue::LiteralInt(v), SparqlLiteral::Int(l)) => v.cmp(l) as i32,
-        (SparqlValue::LiteralFloat(v), SparqlLiteral::Float(l)) => {
-            v.partial_cmp(l).map(|o| o as i32).unwrap_or(i32::MIN)
+        SparqlFilter::LessOrEqual(var, lit) => {
+            sparql_cmp(get(var)?, &lit.to_value()).map(Ordering::is_le)
         }
-        (SparqlValue::LiteralInt(v), SparqlLiteral::Float(l)) => (*v as f64)
-            .partial_cmp(l)
-            .map(|o| o as i32)
-            .unwrap_or(i32::MIN),
-        (SparqlValue::LiteralFloat(v), SparqlLiteral::Int(l)) => v
-            .partial_cmp(&(*l as f64))
-            .map(|o| o as i32)
-            .unwrap_or(i32::MIN),
-        (SparqlValue::Literal(v), SparqlLiteral::Str(l)) => v.cmp(l) as i32,
-        (SparqlValue::LiteralBool(v), SparqlLiteral::Bool(l)) => v.cmp(l) as i32,
-        // Numeric vs string: incomparable
-        _ => i32::MIN,
-    }
-}
-
-/// Produce a stable string key for grouping.
-fn serialize_for_key(val: &SparqlValue) -> String {
-    match val {
-        SparqlValue::Uri(id) => format!("uri:{}", id.0),
-        SparqlValue::Literal(s) => format!("lit:{}", s),
-        SparqlValue::LiteralInt(n) => format!("int:{}", n),
-        SparqlValue::LiteralFloat(f) => format!("flt:{}", f.to_bits()),
-        SparqlValue::LiteralBool(b) => format!("bool:{}", b),
+        SparqlFilter::EqualLiteral(var, lit) => sparql_eq(get(var)?, &lit.to_value()),
+        SparqlFilter::NotEqualLiteral(var, lit) => {
+            sparql_eq(get(var)?, &lit.to_value()).map(|b| !b)
+        }
     }
 }

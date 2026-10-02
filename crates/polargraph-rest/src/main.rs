@@ -427,6 +427,31 @@ fn node_id_to_uuid_string(nid: &proto::NodeId) -> String {
     }
 }
 
+/// A query row as SPARQL bindings: node variables as IRIs (by node), value
+/// variables as literals (`docs/design/value-bindings.md`).
+fn sparql_row(pb: proto::Binding) -> polargraph_sparql::SparqlBindings {
+    use polargraph_sparql::SparqlValue;
+    let mut b: polargraph_sparql::SparqlBindings = std::collections::HashMap::new();
+    for (k, v) in pb.vars {
+        if let Some(id) = proto_node_id(&v) {
+            b.insert(k, SparqlValue::Uri(id));
+        }
+    }
+    for (k, v) in pb.values {
+        if let Some(value) = proto_value_to_pg(&v)
+            .as_ref()
+            .and_then(SparqlValue::from_value)
+        {
+            b.insert(k, value);
+        }
+    }
+    // Predicate variables (`?p` in `?s ?p ?o`) bind the predicate IRI.
+    for (k, p) in pb.predicates {
+        b.insert(k, SparqlValue::Iri(p));
+    }
+    b
+}
+
 /// Query rows whose variables are all nodes. Paths that don't read value
 /// bindings yet use this to keep their results as before value bindings
 /// (docs/design/value-bindings.md); a row with a value binding is one the
@@ -2614,17 +2639,11 @@ async fn execute_sparql_query(
         };
 
         // Convert proto bindings → SparqlBindings.
-        let mut branch_bindings: Vec<SparqlBindings> = node_rows(resp.bindings)
+        let mut branch_bindings: Vec<SparqlBindings> = resp
+            .bindings
+            .into_iter()
             .filter_map(|pb| {
-                let mut b: SparqlBindings = std::collections::HashMap::new();
-                for (k, v) in pb.vars {
-                    if v.bytes.len() == 16 {
-                        if let Ok(arr) = v.bytes[..16].try_into() {
-                            let uuid = uuid::Uuid::from_bytes(arr);
-                            b.insert(k, SparqlValue::Uri(NodeId(uuid)));
-                        }
-                    }
-                }
+                let b = sparql_row(pb);
                 if graph_vars_ok(&b) && sparql_filter_bindings(&b, &branch.filters) {
                     Some(b)
                 } else {
@@ -2650,17 +2669,11 @@ async fn execute_sparql_query(
                     continue;
                 }
             };
-            let right: Vec<SparqlBindings> = node_rows(opt_resp.bindings)
+            let right: Vec<SparqlBindings> = opt_resp
+                .bindings
+                .into_iter()
                 .filter_map(|pb| {
-                    let mut b: SparqlBindings = std::collections::HashMap::new();
-                    for (k, v) in pb.vars {
-                        if v.bytes.len() == 16 {
-                            if let Ok(arr) = v.bytes[..16].try_into() {
-                                let uuid = uuid::Uuid::from_bytes(arr);
-                                b.insert(k, SparqlValue::Uri(NodeId(uuid)));
-                            }
-                        }
-                    }
+                    let b = sparql_row(pb);
                     if graph_vars_ok(&b) && sparql_filter_bindings(&b, &opt.filters) {
                         Some(b)
                     } else {
@@ -2715,6 +2728,10 @@ async fn execute_sparql_query(
             &names,
         );
     }
+
+    // 4a. ORDER BY (after aggregation, before projection, so it can sort on
+    // variables that aren't projected).
+    polargraph_sparql::execute::order_bindings(&mut all_bindings, &translation.order_by, &names);
 
     // 5. Determine projected variables.
     let all_var_names: Vec<String> = if let Some(proj) = &translation.projection {
@@ -2932,7 +2949,9 @@ async fn execute_sparql_construct(
             Err(e) => return grpc_error(e),
         };
 
-        let branch_bindings: Vec<polargraph_sparql::SparqlBindings> = node_rows(resp.bindings)
+        let branch_bindings: Vec<polargraph_sparql::SparqlBindings> = resp
+            .bindings
+            .into_iter()
             .filter(|pb| {
                 // FROM NAMED: graph variables must name one of the graphs.
                 let Some(named) = &named_nodes else {
@@ -2945,18 +2964,7 @@ async fn execute_sparql_construct(
                         None => true,
                     })
             })
-            .map(|pb| {
-                let mut b: polargraph_sparql::SparqlBindings = std::collections::HashMap::new();
-                for (k, v) in pb.vars {
-                    if v.bytes.len() == 16 {
-                        if let Ok(arr) = v.bytes[..16].try_into() {
-                            let uuid = uuid::Uuid::from_bytes(arr);
-                            b.insert(k, SparqlValue::Uri(NodeId(uuid)));
-                        }
-                    }
-                }
-                b
-            })
+            .map(sparql_row)
             .collect();
         all_bindings.extend(branch_bindings);
     }
@@ -2980,7 +2988,8 @@ async fn execute_sparql_construct(
         }
 
         let mut result = Vec::new();
-        // For each NodeId, scan its Relation triples via the Query RPC.
+        // For each NodeId, scan its triples (relations and property values)
+        // via the Query RPC.
         // We use a wildcard predicate with a bound subject and variable object.
         for id in &node_ids {
             let subj_bytes: Vec<u8> = id.0.as_bytes().to_vec();
@@ -3002,26 +3011,29 @@ async fn execute_sparql_construct(
             };
             let mut client = state.client.clone();
             if let Ok(resp) = client.query(tonic::Request::new(req)).await {
-                for pb in node_rows(resp.into_inner().bindings) {
-                    if let Some(obj_val) = pb.vars.get("_o") {
-                        if obj_val.bytes.len() == 16 {
-                            if let Ok(arr) = obj_val.bytes[..16].try_into() {
-                                let obj_uuid = uuid::Uuid::from_bytes(arr);
-                                let predicate = pb
-                                    .predicates
-                                    .get("_p")
-                                    .map(|p| format!("<{}>", p))
-                                    .unwrap_or_else(|| {
-                                        "<urn:polargraph:unknownPredicate>".to_string()
-                                    });
-                                result.push(RdfStarTriple {
-                                    subject: RdfStarSubject::Iri(node_id_to_iri(id)),
-                                    predicate,
-                                    object: node_id_to_iri(&NodeId(obj_uuid)),
-                                });
-                            }
-                        }
-                    }
+                for pb in resp.into_inner().bindings {
+                    let predicate = pb
+                        .predicates
+                        .get("_p")
+                        .map(|p| format!("<{}>", p))
+                        .unwrap_or_else(|| "<urn:polargraph:unknownPredicate>".to_string());
+                    // The object: a node, or a property value (a literal).
+                    let object = match (
+                        pb.vars.get("_o").and_then(proto_node_id),
+                        pb.values.get("_o"),
+                    ) {
+                        (Some(node), _) => node_id_to_iri(&node),
+                        (None, Some(v)) => match proto_value_to_pg(v) {
+                            Some(value) => polargraph_sparql::value_to_nt_literal(&value),
+                            None => continue,
+                        },
+                        (None, None) => continue,
+                    };
+                    result.push(RdfStarTriple {
+                        subject: RdfStarSubject::Iri(node_id_to_iri(id)),
+                        predicate,
+                        object,
+                    });
                 }
             }
         }
@@ -3072,9 +3084,7 @@ fn substitute_construct_template(
     tmpl: &polargraph_sparql::ConstructTemplate,
     binding: &polargraph_sparql::SparqlBindings,
 ) -> Option<polargraph_sparql::RdfStarTriple> {
-    use polargraph_sparql::{
-        node_id_to_iri, RdfStarSubject, RdfStarTriple, SparqlLiteral, SparqlValue,
-    };
+    use polargraph_sparql::{node_id_to_iri, RdfStarSubject, RdfStarTriple, SparqlValue};
 
     // Gap 3: subject may be a quoted triple.
     let star_subject = if let Some(ref inner) = tmpl.subject_quoted {
@@ -3099,40 +3109,12 @@ fn substitute_construct_template(
     let object = if let Some(ref var) = tmpl.object_var {
         match binding.get(var)? {
             SparqlValue::Uri(id) => node_id_to_iri(id),
-            SparqlValue::Literal(s) => {
-                format!(
-                    "\"{}\"^^<http://www.w3.org/2001/XMLSchema#string>",
-                    s.replace('"', "\\\"")
-                )
-            }
-            SparqlValue::LiteralInt(n) => {
-                format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>", n)
-            }
-            SparqlValue::LiteralFloat(f) => {
-                format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#double>", f)
-            }
-            SparqlValue::LiteralBool(b) => {
-                format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#boolean>", b)
-            }
+            literal => polargraph_sparql::value_to_nt_literal(&literal.to_value()?),
         }
     } else if let Some(ref iri) = tmpl.object_iri {
         format!("<{}>", iri)
     } else if let Some(ref lit) = tmpl.object_literal {
-        match lit {
-            SparqlLiteral::Str(s) => format!(
-                "\"{}\"^^<http://www.w3.org/2001/XMLSchema#string>",
-                s.replace('"', "\\\"")
-            ),
-            SparqlLiteral::Int(n) => {
-                format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>", n)
-            }
-            SparqlLiteral::Float(f) => {
-                format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#double>", f)
-            }
-            SparqlLiteral::Bool(b) => {
-                format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#boolean>", b)
-            }
-        }
+        polargraph_sparql::value_to_nt_literal(&lit.to_value().to_value()?)
     } else {
         return None;
     };
@@ -3350,21 +3332,8 @@ async fn handle_sparql_update(
                     };
                     let mut client = state.client.clone();
                     if let Ok(resp) = client.query(tonic::Request::new(req)).await {
-                        for pb in node_rows(resp.into_inner().bindings) {
-                            let mut b: polargraph_sparql::SparqlBindings =
-                                std::collections::HashMap::new();
-                            for (k, v) in pb.vars {
-                                if v.bytes.len() == 16 {
-                                    if let Ok(arr) = v.bytes[..16].try_into() {
-                                        let uuid = uuid::Uuid::from_bytes(arr);
-                                        b.insert(
-                                            k,
-                                            polargraph_sparql::SparqlValue::Uri(NodeId(uuid)),
-                                        );
-                                    }
-                                }
-                            }
-                            where_bindings.push(b);
+                        for pb in resp.into_inner().bindings {
+                            where_bindings.push(sparql_row(pb));
                         }
                     }
                 }
@@ -3392,14 +3361,8 @@ async fn handle_sparql_update(
                 for gqp in &delete {
                     for binding in &where_bindings {
                         if let Some(subj_id) = resolve_ground_term_subject(&gqp.subject, binding) {
-                            let pred = match &gqp.predicate {
-                                spargebra::term::NamedNodePattern::NamedNode(n) => {
-                                    n.as_str().to_string()
-                                }
-                                spargebra::term::NamedNodePattern::Variable(_) => {
-                                    // Variable predicate in DELETE template — skip.
-                                    continue;
-                                }
+                            let Some(pred) = template_predicate(&gqp.predicate, binding) else {
+                                continue;
                             };
                             let Some(target) = resolve_ground_term_object(&gqp.object, binding)
                             else {
@@ -3949,6 +3912,7 @@ fn resolve_ground_term_object(
         GroundTermPattern::Literal(l) => sparql_literal_to_proto_value(l).map(DeleteTarget::Value),
         GroundTermPattern::Variable(v) => match binding.get(v.as_str())? {
             SparqlValue::Uri(id) => Some(DeleteTarget::Node(*id)),
+            SparqlValue::Iri(iri) => Some(DeleteTarget::Node(iri_to_node_id(iri))),
             other => sparql_value_to_proto(other).map(DeleteTarget::Value),
         },
         _ => None,
@@ -3957,16 +3921,7 @@ fn resolve_ground_term_object(
 
 /// Convert a literal SPARQL binding to a proto value; `None` for URIs.
 fn sparql_value_to_proto(v: &polargraph_sparql::SparqlValue) -> Option<proto::Value> {
-    use polargraph_sparql::SparqlValue;
-    use proto::value::Kind;
-    let kind = match v {
-        SparqlValue::Uri(_) => return None,
-        SparqlValue::Literal(s) => Kind::TextVal(s.clone()),
-        SparqlValue::LiteralInt(n) => Kind::IntVal(*n),
-        SparqlValue::LiteralFloat(f) => Kind::FloatVal(*f),
-        SparqlValue::LiteralBool(b) => Kind::BoolVal(*b),
-    };
-    Some(proto::Value { kind: Some(kind) })
+    v.to_value().as_ref().map(pg_value_to_proto)
 }
 
 /// Resolve a [`GroundTermPattern`] subject to a [`NodeId`] using current bindings.
@@ -3995,82 +3950,75 @@ fn resolve_quad_pattern_to_proto(
     binding: &polargraph_sparql::SparqlBindings,
 ) -> Option<proto::Triple> {
     use polargraph_sparql::SparqlValue;
-    use spargebra::term::{NamedNodePattern, TermPattern};
+    use spargebra::term::TermPattern;
 
-    // Resolve subject.
+    // Resolve subject (a literal can't be a subject: the triple is skipped).
     let subj_id = match &qp.subject {
         TermPattern::NamedNode(n) => iri_to_node_id(n.as_str()),
-        TermPattern::Variable(v) => {
-            if let Some(SparqlValue::Uri(id)) = binding.get(v.as_str()) {
-                *id
-            } else {
-                return None;
-            }
-        }
+        TermPattern::Variable(v) => match binding.get(v.as_str())? {
+            SparqlValue::Uri(id) => *id,
+            SparqlValue::Iri(iri) => iri_to_node_id(iri),
+            _ => return None,
+        },
         _ => return None,
     };
+    let subject = Some(pg_node_id_to_proto(subj_id));
 
-    // Resolve predicate.
-    let predicate = match &qp.predicate {
-        NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
-        NamedNodePattern::Variable(_) => return None, // variable predicate not supported
+    let predicate = template_predicate(&qp.predicate, binding)?;
+    let relation = |object: Option<proto::NodeId>, object_iri: String| proto::Triple {
+        kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
+            subject: subject.clone(),
+            predicate: predicate.clone(),
+            object,
+            vt_start: 0,
+            vt_end: i64::MAX,
+            object_iri,
+            properties: vec![],
+        })),
+    };
+    let property = |value: proto::Value| proto::Triple {
+        kind: Some(proto::triple::Kind::Property(proto::PropertyTriple {
+            subject: subject.clone(),
+            predicate: predicate.clone(),
+            value: Some(value),
+            vt_start: 0,
+            vt_end: i64::MAX,
+            mode: proto::PropertyWriteMode::Add as i32,
+        })),
     };
 
     // Resolve object.
     match &qp.object {
-        TermPattern::NamedNode(n) => {
-            let iri = n.as_str();
-            let obj_id = iri_to_node_id(iri).0;
-            Some(proto::Triple {
-                kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
-                    subject: Some(proto::NodeId {
-                        bytes: subj_id.0.as_bytes().to_vec(),
-                    }),
-                    predicate,
-                    object: Some(proto::NodeId {
-                        bytes: obj_id.as_bytes().to_vec(),
-                    }),
-                    vt_start: 0,
-                    vt_end: i64::MAX,
-                    object_iri: String::new(),
-                    properties: vec![],
-                })),
-            })
-        }
-        TermPattern::Variable(v) => match binding.get(v.as_str()) {
-            Some(SparqlValue::Uri(obj_id)) => Some(proto::Triple {
-                kind: Some(proto::triple::Kind::Relation(proto::RelationTriple {
-                    subject: Some(proto::NodeId {
-                        bytes: subj_id.0.as_bytes().to_vec(),
-                    }),
-                    predicate,
-                    object: Some(proto::NodeId {
-                        bytes: obj_id.0.as_bytes().to_vec(),
-                    }),
-                    vt_start: 0,
-                    vt_end: i64::MAX,
-                    object_iri: String::new(),
-                    properties: vec![],
-                })),
-            }),
+        TermPattern::NamedNode(n) => Some(relation(
+            Some(pg_node_id_to_proto(iri_to_node_id(n.as_str()))),
+            String::new(),
+        )),
+        TermPattern::Variable(v) => match binding.get(v.as_str())? {
+            SparqlValue::Uri(obj_id) => {
+                Some(relation(Some(pg_node_id_to_proto(*obj_id)), String::new()))
+            }
+            SparqlValue::Iri(iri) => Some(relation(None, iri.clone())),
+            // A value variable inserts the bound literal.
+            literal => sparql_value_to_proto(literal).map(property),
+        },
+        TermPattern::Literal(lit) => sparql_literal_to_proto_value(lit).map(property),
+        _ => None,
+    }
+}
+
+/// A template's predicate: an IRI, or a predicate variable's binding.
+/// `None` (skip the triple) when the variable is unbound or not an IRI.
+fn template_predicate(
+    p: &spargebra::term::NamedNodePattern,
+    binding: &polargraph_sparql::SparqlBindings,
+) -> Option<String> {
+    use polargraph_sparql::SparqlValue;
+    match p {
+        spargebra::term::NamedNodePattern::NamedNode(n) => Some(n.as_str().to_string()),
+        spargebra::term::NamedNodePattern::Variable(v) => match binding.get(v.as_str())? {
+            SparqlValue::Iri(iri) => Some(iri.clone()),
             _ => None,
         },
-        TermPattern::Literal(lit) => {
-            let val = sparql_literal_to_proto_value(lit)?;
-            Some(proto::Triple {
-                kind: Some(proto::triple::Kind::Property(proto::PropertyTriple {
-                    subject: Some(proto::NodeId {
-                        bytes: subj_id.0.as_bytes().to_vec(),
-                    }),
-                    predicate,
-                    value: Some(val),
-                    vt_start: 0,
-                    vt_end: i64::MAX,
-                    mode: proto::PropertyWriteMode::Add as i32,
-                })),
-            })
-        }
-        _ => None,
     }
 }
 

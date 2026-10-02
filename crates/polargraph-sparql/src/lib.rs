@@ -17,6 +17,7 @@ pub mod rdf_import;
 pub mod response;
 pub mod serialize;
 pub mod translate;
+pub mod values;
 
 pub use names::{node_ids_in_bindings, node_ids_in_star_triples, node_ids_in_triples, IriNames};
 pub use polargraph_core::skolem::{ImportScope, DEFAULT_SKOLEM_BASE};
@@ -38,8 +39,10 @@ pub use serialize::{
 pub use translate::{
     translate_construct, translate_pattern_pub, translate_query, Branch, ConstructTemplate,
     ConstructTranslation, EdgeAnnotationObjectStep, EdgeAnnotationStep, SparqlAggFunc,
-    SparqlAggregateSpec, SparqlDataset, SparqlFilter, SparqlLiteral, SparqlTranslation,
+    SparqlAggregateSpec, SparqlDataset, SparqlFilter, SparqlLiteral, SparqlOrder,
+    SparqlTranslation,
 };
+pub use values::{order_cmp, sparql_cmp, sparql_eq, term_key};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SparqlError {
