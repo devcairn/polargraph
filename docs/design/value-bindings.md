@@ -1,7 +1,16 @@
 # Value bindings — query variables that hold literals — design note
 
 Status: decisions A–G **approved as recommended** (Mark, 2026-10-02; A: a
-separate value map). Building as the two PRs in G on `db/value-bindings`.
+separate value map). Building as the two PRs in G on `db/value-bindings`; **PR 1 built**
+(engine, proto, `Query` / `QueryStream`, REST, UI, SDKs).
+
+**As built (PR 1).** REST rows put values under `"@values"` (a variable may
+be named `values`; `@` can't occur in one). Go keeps `Query` and adds
+`QueryRows`; Python / TypeScript rows include value variables (TS
+`QueryResult` widens to `BoundValue`). REST paths that don't read values yet
+(SPARQL, CONSTRUCT, exports) keep node-only rows until PR 2. The `?s ?p ?o`
+change already applies to `Query` / `QueryStream` / REST `/query`; release
+note `docs/upgrade-value-bindings.md`.
 
 ## 1. The gap
 

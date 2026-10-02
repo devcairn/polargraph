@@ -776,6 +776,12 @@ or `urn:uuid:<id>` when the node has none.
 
 ### `Query` — graph terms and dataset
 
+`Binding.values` (`map<string, Value>`, also `QueryResult.values` on
+`QueryStream`) holds variables bound to property values — `?n` in
+`?p name ?n`. A variable is in `vars` or `values`, never both; vectors don't
+bind. REST `/query` rows carry them as `"@values": {var: value}`. See
+`docs/upgrade-value-bindings.md` for the `?s ?p ?o` behaviour change.
+
 `VarPattern.graph` (`GraphTerm`, optional) scopes a pattern:
 
 ```proto
