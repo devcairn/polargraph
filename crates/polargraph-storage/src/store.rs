@@ -340,7 +340,16 @@ impl TripleStore {
         }
         let cf_descriptors: Vec<ColumnFamilyDescriptor> = names
             .iter()
-            .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
+            .map(|name| {
+                let mut opts = Options::default();
+                if name == cf::STS {
+                    opts.set_merge_operator_associative(
+                        "polargraph_add_i64",
+                        crate::counters::add_i64,
+                    );
+                }
+                ColumnFamilyDescriptor::new(name, opts)
+            })
             .collect();
 
         let db = DB::open_cf_descriptors(&db_opts, path, cf_descriptors)?;

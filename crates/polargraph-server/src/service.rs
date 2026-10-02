@@ -1489,6 +1489,52 @@ fn filter_bindings_full(
 
 #[tonic::async_trait]
 impl PolarGraphService for PolarGraphServer {
+    // ── Counters (step 9d) ────────────────────────────────────────────────────
+
+    async fn increment_counters(
+        &self,
+        request: Request<crate::proto::IncrementCountersRequest>,
+    ) -> Result<Response<crate::proto::IncrementCountersResponse>, Status> {
+        self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
+        let req = request.into_inner();
+        require_service(&self.caller_access(&resolve_user_id(&req.user_id, &meta_uid)))?;
+        let increments = req
+            .increments
+            .iter()
+            .map(|i| {
+                let node = i
+                    .node
+                    .as_ref()
+                    .ok_or_else(|| Status::invalid_argument("increment needs a node"))?;
+                Ok((convert::node_id_from_proto(node)?, i.delta))
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
+        self.store
+            .increment_counters(&req.namespace, &increments)
+            .map_err(vocab_err_to_status)?;
+        Ok(Response::new(crate::proto::IncrementCountersResponse {}))
+    }
+
+    async fn get_counters(
+        &self,
+        request: Request<crate::proto::GetCountersRequest>,
+    ) -> Result<Response<crate::proto::GetCountersResponse>, Status> {
+        let meta_uid = meta_user_id(request.metadata());
+        let req = request.into_inner();
+        require_service(&self.caller_access(&resolve_user_id(&req.user_id, &meta_uid)))?;
+        let nodes = req
+            .nodes
+            .iter()
+            .map(convert::node_id_from_proto)
+            .collect::<Result<Vec<_>, Status>>()?;
+        let values = self
+            .store
+            .get_counters(&req.namespace, &nodes)
+            .map_err(vocab_err_to_status)?;
+        Ok(Response::new(crate::proto::GetCountersResponse { values }))
+    }
+
     // ── Vocabulary (docs/design/cypher-rdf.md) ────────────────────────────────
 
     async fn get_vocabulary(

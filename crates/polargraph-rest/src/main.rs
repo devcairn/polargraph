@@ -5213,6 +5213,87 @@ struct GraphAccessParams {
     graph: String,
 }
 
+// ── Counters (step 9d) ───────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CounterIncrementJson {
+    /// Node UUID or IRI.
+    node: String,
+    delta: i64,
+}
+
+#[derive(Deserialize)]
+struct IncrementCountersBody {
+    namespace: String,
+    increments: Vec<CounterIncrementJson>,
+}
+
+/// `POST /counters {namespace, increments: [{node, delta}]}` — add to counters.
+async fn handle_increment_counters(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<IncrementCountersBody>,
+) -> Response {
+    let mut iris = Vec::new();
+    let req = proto::IncrementCountersRequest {
+        namespace: body.namespace,
+        increments: body
+            .increments
+            .iter()
+            .map(|i| proto::CounterIncrement {
+                node: Some(change_node(&i.node, &mut iris)),
+                delta: i.delta,
+            })
+            .collect(),
+        user_id: String::new(),
+    };
+    match state
+        .client
+        .clone()
+        .increment_counters(tonic::Request::new(req))
+        .await
+    {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct CountersParams {
+    namespace: String,
+    /// Comma-separated node UUIDs or IRIs.
+    nodes: String,
+}
+
+/// `GET /counters?namespace=&nodes=a,b` — `{"counters": {node: value}}`.
+async fn handle_get_counters(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<CountersParams>,
+) -> Response {
+    let mut iris = Vec::new();
+    let names: Vec<&str> = params.nodes.split(',').filter(|n| !n.is_empty()).collect();
+    let req = proto::GetCountersRequest {
+        namespace: params.namespace,
+        nodes: names.iter().map(|n| change_node(n, &mut iris)).collect(),
+        user_id: String::new(),
+    };
+    match state
+        .client
+        .clone()
+        .get_counters(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            let counters: serde_json::Map<String, serde_json::Value> = names
+                .iter()
+                .zip(r.into_inner().values)
+                .map(|(n, v)| (n.to_string(), serde_json::json!(v)))
+                .collect();
+            Json(serde_json::json!({ "counters": counters })).into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
 // ── Vocabulary (docs/design/cypher-rdf.md) ───────────────────────────────────
 
 fn vocabulary_json(v: proto::Vocabulary) -> serde_json::Value {
@@ -5784,6 +5865,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/subscribe", get(handle_subscribe))
         .route("/changes", post(handle_apply_changes))
         .route("/validate", post(handle_validate))
+        .route(
+            "/counters",
+            get(handle_get_counters).post(handle_increment_counters),
+        )
         .route("/vocabulary", get(handle_get_vocabulary))
         .route("/vocabulary/base", put(handle_set_vocabulary_base))
         .route(

@@ -448,6 +448,38 @@ def test_sparql_filter_functions(base_url: str):
     assert titles(f'STR(?s) = "urn:uuid:{b}"') == ["Hello"]
 
 
+def test_inferred_facts_via_sparql(base_url: str):
+    """Materialized subclass instances are visible to SPARQL; ?inferred=false hides them."""
+    ns = f"http://e2e.example/{uuid.uuid4().hex[:8]}/"
+    rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+    sco = "http://www.w3.org/2000/01/rdf-schema#subClassOf"
+    tom = new_id()
+    status, data = http_post(base_url + "/changes", {"adds": [{"triples": [
+        {"subject": ns + "Cat", "predicate": sco, "object": ns + "Animal"},
+        {"subject": tom, "predicate": rdf_type, "object": ns + "Cat"},
+    ]}]})
+    assert status == 200, f"/changes failed: {status} {data}"
+    status, data = http_post(base_url + "/materialize", {})
+    assert status == 200 and data["asserted"] >= 1, f"materialize: {status} {data}"
+
+    query = f"SELECT ?a WHERE {{ ?a a <{ns}Animal> }}"
+    rows = sparql_select(base_url, query)
+    assert [r["a"]["value"] for r in rows] == [f"urn:uuid:{tom}"], rows
+    status, data = http_get(base_url + "/sparql?" + urllib.parse.urlencode({"query": query, "inferred": "false"}))
+    assert status == 200 and data["results"]["bindings"] == [], f"opt-out: {data}"
+
+
+def test_counters(base_url: str):
+    """POST /counters adds atomically; GET /counters reads them back."""
+    ns = f"used-{uuid.uuid4().hex[:8]}"
+    a, b = new_id(), new_id()
+    for delta in (2, 3):
+        status, data = http_post(base_url + "/counters", {"namespace": ns, "increments": [{"node": a, "delta": delta}]})
+        assert status == 200, f"increment: {status} {data}"
+    status, data = http_get(base_url + "/counters?" + urllib.parse.urlencode({"namespace": ns, "nodes": f"{a},{b}"}))
+    assert status == 200 and data["counters"] == {a: 5, b: 0}, data
+
+
 TESTS = [
     test_health,
     test_insert_relation,
@@ -468,6 +500,8 @@ TESTS = [
     test_sparql_literal_results,
     test_sparql_update_with_value_variables,
     test_sparql_filter_functions,
+    test_inferred_facts_via_sparql,
+    test_counters,
 ]
 
 

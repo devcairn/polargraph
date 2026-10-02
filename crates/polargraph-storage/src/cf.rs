@@ -46,10 +46,14 @@ pub const BLOB: &str = "blob";
 /// (see [`crate::changes`]).
 pub const CHG: &str = "chg";
 
+/// Counters (step 9d): `[namespace][0x00][node(16)]` → `i64` LE, updated
+/// with an add merge operator — not versioned, not in the change log.
+pub const STS: &str = "sts";
+
 /// Every column family of the current format.
 pub const ALL: &[&str] = &[
     SPOG, SOPG, PSOG, POSG, OSPG, OPSG, GSPO, GPOS, META, HNSW, TRI, EPA, EPO, PEA, DRV, IRI, BLOB,
-    CHG,
+    CHG, STS,
 ];
 
 /// Column families of storage format v2, read only by `migrate_v3` and

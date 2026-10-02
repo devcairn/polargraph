@@ -1472,7 +1472,43 @@ message ConvertLegacyDataResponse {
     LegacyStatus legacy = 4;
 }
 
+// ── Counters (step 9d) ────────────────────────────────────────────────────────
+//
+// i64 counters per (namespace, node) in their own column family, updated
+// atomically without MVCC versions or change-log entries. Service calls only
+// (no user id); increments on the primary.
+
+message CounterIncrement {
+    NodeId node = 1;
+    int64 delta = 2;
+}
+
+message IncrementCountersRequest {
+    string namespace = 1;
+    /// At most 10 000.
+    repeated CounterIncrement increments = 2;
+    string user_id = 3;
+}
+
+message IncrementCountersResponse {}
+
+message GetCountersRequest {
+    string namespace = 1;
+    /// At most 10 000.
+    repeated NodeId nodes = 2;
+    string user_id = 3;
+}
+
+message GetCountersResponse {
+    /// One value per requested node, in request order (0 if never counted).
+    repeated int64 values = 1;
+}
+
 service PolarGraphService {
+    /// Add to counters (service calls, primary only).
+    rpc IncrementCounters(IncrementCountersRequest) returns (IncrementCountersResponse);
+    /// Read counters (service calls).
+    rpc GetCounters(GetCountersRequest) returns (GetCountersResponse);
     /// The vocabulary base, prefixes and legacy-conversion status.
     rpc GetVocabulary(GetVocabularyRequest) returns (Vocabulary);
     /// Set the base IRI for bare names.
