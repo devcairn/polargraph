@@ -10,6 +10,12 @@ import grpc.aio
 from ._proto import polargraph_pb2 as pb
 from ._proto import polargraph_pb2_grpc as pb_grpc
 from .client import (
+    _CYPHER_WRITE_DEPRECATED,
+    _apply_changes_request,
+    _apply_changes_result,
+    _conversion_to_dict,
+    _type_triple,
+    _vocabulary_to_dict,
     _binding_to_dict,
     _cypher_binding_to_dict,
     _dict_to_rule,
@@ -19,6 +25,7 @@ from .client import (
     _str_node_id,
 )
 import uuid
+import warnings
 
 
 class AsyncPolarGraphClient:
@@ -62,13 +69,7 @@ class AsyncPolarGraphClient:
     # ── Insert ───────────────────────────────────────────────────────────────
 
     async def insert_node(self, node_id: str, type_name: str, **properties: Any) -> None:
-        triples: list[pb.Triple] = [
-            pb.Triple(property=pb.PropertyTriple(
-                subject=_pb_node_id(node_id),
-                predicate="__type",
-                value=_encode_value(type_name),
-            ))
-        ]
+        triples: list[pb.Triple] = [_type_triple(node_id, type_name)]
         for pred, val in properties.items():
             triples.append(pb.Triple(property=pb.PropertyTriple(
                 subject=_pb_node_id(node_id),
@@ -163,6 +164,8 @@ class AsyncPolarGraphClient:
         return [_cypher_binding_to_dict(r) for r in resp.rows]
 
     async def cypher_write(self, query: str) -> dict:
+        """Deprecated: removed in the next server release; use :meth:`apply_changes`."""
+        warnings.warn(_CYPHER_WRITE_DEPRECATED, DeprecationWarning, stacklevel=2)
         req = pb.CypherWriteRequest(cypher=query)
         resp: pb.CypherWriteResponse = await self._stub.CypherWrite(req, metadata=self._metadata)
         return {
@@ -170,6 +173,43 @@ class AsyncPolarGraphClient:
             "triples_written": resp.triples_written,
             "triples_deleted": resp.triples_deleted,
         }
+
+    # ── Changesets ───────────────────────────────────────────────────────────
+
+    async def apply_changes(
+        self,
+        adds: Optional[dict[str, list[dict]]] = None,
+        retractions: Optional[list[dict]] = None,
+        read_ts: int = 0,
+        strict: bool = False,
+        iris: Optional[list[str]] = None,
+    ) -> dict:
+        """See :meth:`PolarGraphClient.apply_changes`."""
+        req = _apply_changes_request(adds, retractions, read_ts, strict, iris)
+        resp = await self._stub.ApplyChanges(req, metadata=self._metadata)
+        return _apply_changes_result(resp)
+
+    # ── Vocabulary ───────────────────────────────────────────────────────────
+
+    async def get_vocabulary(self) -> dict:
+        v = await self._stub.GetVocabulary(pb.GetVocabularyRequest(), metadata=self._metadata)
+        return _vocabulary_to_dict(v)
+
+    async def set_vocabulary_base(self, base: str) -> dict:
+        req = pb.SetVocabularyBaseRequest(base=base)
+        return _vocabulary_to_dict(await self._stub.SetVocabularyBase(req, metadata=self._metadata))
+
+    async def put_prefix(self, name: str, namespace: str) -> dict:
+        req = pb.PutPrefixRequest(name=name, namespace=namespace)
+        return _vocabulary_to_dict(await self._stub.PutPrefix(req, metadata=self._metadata))
+
+    async def remove_prefix(self, name: str) -> dict:
+        req = pb.RemovePrefixRequest(name=name)
+        return _vocabulary_to_dict(await self._stub.RemovePrefix(req, metadata=self._metadata))
+
+    async def convert_legacy_data(self, dry_run: bool = False) -> dict:
+        req = pb.ConvertLegacyDataRequest(dry_run=dry_run)
+        return _conversion_to_dict(await self._stub.ConvertLegacyData(req, metadata=self._metadata))
 
     # ── Vector ───────────────────────────────────────────────────────────────
 

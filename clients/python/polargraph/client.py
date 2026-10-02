@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+import warnings
 from typing import Any, Generator, Iterator, Optional
 
 import grpc
@@ -73,6 +74,126 @@ def _cypher_binding_to_dict(b: pb.CypherBinding) -> dict:
     return row
 
 
+RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+
+_CYPHER_WRITE_DEPRECATED = (
+    "cypher_write is deprecated and will be removed in the next server release; "
+    "use apply_changes (or SPARQL Update over REST) instead"
+)
+
+_WRITE_MODES = {
+    None: pb.PROPERTY_WRITE_MODE_AUTO,
+    "auto": pb.PROPERTY_WRITE_MODE_AUTO,
+    "replace": pb.PROPERTY_WRITE_MODE_REPLACE,
+    "add": pb.PROPERTY_WRITE_MODE_ADD,
+}
+
+
+def _type_triple(node_id: str, type_name: str) -> pb.Triple:
+    """``node rdf:type <class>``; the server resolves ``type_name`` (bare name,
+    ``prefix:local`` or full IRI) through its vocabulary."""
+    return pb.Triple(relation=pb.RelationTriple(
+        subject=_pb_node_id(node_id), predicate=RDF_TYPE, object_iri=type_name,
+    ))
+
+
+def _change_triple(change: dict) -> pb.Triple:
+    """One add for :meth:`PolarGraphClient.apply_changes`::
+
+        {"subject": id, "predicate": p, "object": id}        # relation
+        {"subject": id, "predicate": p, "object_iri": iri}   # relation to a named node
+        {"subject": id, "predicate": p, "value": v,          # property
+         "mode": "auto" | "replace" | "add"}
+    """
+    subject = _pb_node_id(change["subject"])
+    if "value" in change:
+        return pb.Triple(property=pb.PropertyTriple(
+            subject=subject,
+            predicate=change["predicate"],
+            value=_encode_value(change["value"]),
+            mode=_WRITE_MODES[change.get("mode")],
+        ))
+    rel = pb.RelationTriple(subject=subject, predicate=change["predicate"])
+    if "object_iri" in change:
+        rel.object_iri = change["object_iri"]
+    else:
+        rel.object.CopyFrom(_pb_node_id(change["object"]))
+    return pb.Triple(relation=rel)
+
+
+def _quad_ref(retraction: dict) -> pb.QuadRef:
+    """One retraction: ``{"subject", "predicate", "object" | "value", "graph"?}``."""
+    ref = pb.QuadRef(
+        subject=_pb_node_id(retraction["subject"]),
+        predicate=retraction["predicate"],
+        graph=retraction.get("graph", ""),
+    )
+    if "value" in retraction:
+        ref.value.CopyFrom(_encode_value(retraction["value"]))
+    else:
+        ref.node.CopyFrom(_pb_node_id(retraction["object"]))
+    return ref
+
+
+def _apply_changes_request(
+    adds: Optional[dict[str, list[dict]]],
+    retractions: Optional[list[dict]],
+    read_ts: int,
+    strict: bool,
+    iris: Optional[list[str]],
+) -> pb.ApplyChangesRequest:
+    return pb.ApplyChangesRequest(
+        adds=[
+            pb.GraphTriples(graph=graph, triples=[_change_triple(c) for c in changes])
+            for graph, changes in (adds or {}).items()
+        ],
+        retractions=[_quad_ref(r) for r in retractions or []],
+        read_ts=read_ts,
+        strict=strict,
+        iris=iris or [],
+    )
+
+
+def _apply_changes_result(resp: pb.ApplyChangesResponse) -> dict:
+    return {
+        "commit_ts": resp.commit_ts,
+        "added": resp.added,
+        "retracted": resp.retracted,
+        "retractions_not_found": resp.retractions_not_found,
+        "edge_ids": [str(uuid.UUID(bytes=b)) for b in resp.edge_ids],
+    }
+
+
+def _legacy_to_dict(l: pb.LegacyStatus) -> dict:
+    return {
+        "conversion_pending": l.conversion_pending,
+        "bare_predicates": list(l.bare_predicates),
+        "type_labels": l.type_labels,
+        "pending_merges": list(l.pending_merges),
+    }
+
+
+def _vocabulary_to_dict(v: pb.Vocabulary) -> dict:
+    return {
+        "base": v.base,
+        "prefixes": {p.name: p.namespace for p in v.prefixes},
+        "legacy": _legacy_to_dict(v.legacy),
+    }
+
+
+def _conversion_to_dict(r: pb.ConvertLegacyDataResponse) -> dict:
+    return {
+        "dry_run": r.dry_run,
+        "predicates": [
+            {"from": getattr(p, "from"), "to": p.to, "merged": p.merged,
+             "quads_moved": p.quads_moved}
+            for p in r.predicates
+        ],
+        "labels_converted": r.labels_converted,
+        "legacy": _legacy_to_dict(r.legacy),
+    }
+
+
 class PolarGraphClient:
     """Synchronous client for the PolarGraph gRPC API.
 
@@ -118,13 +239,12 @@ class PolarGraphClient:
     # ── Insert helpers ───────────────────────────────────────────────────────
 
     def insert_node(self, node_id: str, type_name: str, **properties: Any) -> None:
-        """Insert a node with a type label and optional property triples."""
-        triples: list[pb.Triple] = []
-        triples.append(pb.Triple(property=pb.PropertyTriple(
-            subject=_pb_node_id(node_id),
-            predicate="__type",
-            value=_encode_value(type_name),
-        )))
+        """Insert a node typed ``rdf:type <type_name>`` with optional properties.
+
+        ``type_name`` is a bare name (under the server's vocabulary base), a
+        ``prefix:local`` name or a full IRI.
+        """
+        triples: list[pb.Triple] = [_type_triple(node_id, type_name)]
         for pred, val in properties.items():
             triples.append(pb.Triple(property=pb.PropertyTriple(
                 subject=_pb_node_id(node_id),
@@ -238,7 +358,12 @@ class PolarGraphClient:
         return [_cypher_binding_to_dict(r) for r in resp.rows]
 
     def cypher_write(self, query: str) -> dict:
-        """Execute a Cypher write statement (CREATE/MERGE/SET/DELETE)."""
+        """Execute a Cypher write statement (CREATE/MERGE/SET/DELETE).
+
+        .. deprecated:: 0.2.0
+            Removed in the next server release; use :meth:`apply_changes`.
+        """
+        warnings.warn(_CYPHER_WRITE_DEPRECATED, DeprecationWarning, stacklevel=2)
         req = pb.CypherWriteRequest(cypher=query)
         resp: pb.CypherWriteResponse = self._stub.CypherWrite(req, metadata=self._metadata)
         return {
@@ -246,6 +371,60 @@ class PolarGraphClient:
             "triples_written": resp.triples_written,
             "triples_deleted": resp.triples_deleted,
         }
+
+    # ── Changesets ───────────────────────────────────────────────────────────
+
+    def apply_changes(
+        self,
+        adds: Optional[dict[str, list[dict]]] = None,
+        retractions: Optional[list[dict]] = None,
+        read_ts: int = 0,
+        strict: bool = False,
+        iris: Optional[list[str]] = None,
+    ) -> dict:
+        """Apply adds and retractions across graphs in one transaction.
+
+        ``adds`` maps a graph IRI (``""`` = default graph) to changes — see
+        ``_change_triple`` for their shape. With ``read_ts``, nothing is
+        applied (``ABORTED``) if a touched quad changed after it.
+
+        Example::
+
+            client.apply_changes(adds={"": [
+                {"subject": n, "predicate": RDF_TYPE, "object_iri": "Person"},
+                {"subject": n, "predicate": "name", "value": "Alice"},
+            ]})
+        """
+        req = _apply_changes_request(adds, retractions, read_ts, strict, iris)
+        resp = self._stub.ApplyChanges(req, metadata=self._metadata)
+        return _apply_changes_result(resp)
+
+    # ── Vocabulary ───────────────────────────────────────────────────────────
+
+    def get_vocabulary(self) -> dict:
+        """Base IRI, prefixes and legacy-conversion status."""
+        v = self._stub.GetVocabulary(pb.GetVocabularyRequest(), metadata=self._metadata)
+        return _vocabulary_to_dict(v)
+
+    def set_vocabulary_base(self, base: str) -> dict:
+        """Set the base IRI for bare names (service calls, primary only)."""
+        req = pb.SetVocabularyBaseRequest(base=base)
+        return _vocabulary_to_dict(self._stub.SetVocabularyBase(req, metadata=self._metadata))
+
+    def put_prefix(self, name: str, namespace: str) -> dict:
+        """Declare or re-point a prefix."""
+        req = pb.PutPrefixRequest(name=name, namespace=namespace)
+        return _vocabulary_to_dict(self._stub.PutPrefix(req, metadata=self._metadata))
+
+    def remove_prefix(self, name: str) -> dict:
+        """Remove a prefix (no-op if absent)."""
+        req = pb.RemovePrefixRequest(name=name)
+        return _vocabulary_to_dict(self._stub.RemovePrefix(req, metadata=self._metadata))
+
+    def convert_legacy_data(self, dry_run: bool = False) -> dict:
+        """One-time conversion of pre-vocabulary data (idempotent, resumable)."""
+        req = pb.ConvertLegacyDataRequest(dry_run=dry_run)
+        return _conversion_to_dict(self._stub.ConvertLegacyData(req, metadata=self._metadata))
 
     # ── Vector ───────────────────────────────────────────────────────────────
 
