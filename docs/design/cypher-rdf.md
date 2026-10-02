@@ -121,6 +121,14 @@ validates it; (4) a typed vector filter and `Subscribe` `types` see it; (5)
 the same holds for a class first introduced by a plain `rdf:type` insert.
 Run on a replica as well for the change-log-driven caches.
 
+**Finding while building (2026-10-01).** Canonicalising bare predicate
+names at the storage layer (B1) makes data **already stored** under a bare
+predicate (`name`, `KNOWS`, any Cypher / REST `/insert` data) unreachable by
+that name until the predicate-rename migration (§2.4 step 2) has run. So
+canonicalisation and the rename migration must ship together and the
+migration must complete before the server serves requests — which makes G
+blocking for PR 1.
+
 **Open question G (for Mark).** The `__type` migration runs at startup,
 before any RPC can set the vocabulary base, so with a runtime-only base the
 migrated labels would always become `urn:pg:vocab:…` IRIs (and a later base
