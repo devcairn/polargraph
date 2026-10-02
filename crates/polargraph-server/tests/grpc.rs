@@ -8141,3 +8141,143 @@ async fn apply_changes_is_atomic_with_precondition() {
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
+
+#[tokio::test]
+async fn validate_shapes_full_and_overlay() {
+    use polargraph_core::{
+        term::iri_to_node_id,
+        triple::{Predicate as CPred, Triple as CTriple},
+        value::Value as CValue,
+    };
+    use polargraph_server::proto::{
+        quad_ref::Object as QObject, GraphTriples, QuadRef, ValidateShapesRequest,
+    };
+    use polargraph_storage::WriteMode;
+
+    const SH: &str = "http://www.w3.org/ns/shacl#";
+    const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+    let dir = TempDir::new().unwrap();
+    let store = TripleStore::open(dir.path()).unwrap();
+    let svc = PolarGraphServer::new(store.clone()).unwrap();
+
+    // Write (s, p, o-IRI | literal) triples into a graph, recording IRIs.
+    let write = |graph: &str, rows: Vec<(&str, &str, Result<&str, CValue>)>| {
+        let g = store.create_graph(graph, &[]).unwrap();
+        let mut tx = store.begin();
+        let now = polargraph_core::temporal::BiTemporalRange::assert_now(
+            polargraph_core::temporal::Timestamp(0),
+        );
+        for (s, p, o) in rows {
+            tx.bind_iri(s);
+            tx.bind_iri(p);
+            let t = match o {
+                Ok(iri) => {
+                    tx.bind_iri(iri);
+                    CTriple::Relation {
+                        subject: iri_to_node_id(s),
+                        predicate: CPred::new(p),
+                        object: iri_to_node_id(iri),
+                        edge_id: polargraph_core::id::EdgeId::new(),
+                        temporal: now,
+                    }
+                }
+                Err(v) => CTriple::Property {
+                    subject: iri_to_node_id(s),
+                    predicate: CPred::new(p),
+                    value: v,
+                    temporal: now,
+                },
+            };
+            tx.insert_in(t, g, WriteMode::Add);
+        }
+        tx.commit().unwrap();
+    };
+    let sh = |l: &str| format!("{SH}{l}");
+    let (shape, owner_shape) = ("http://ex/ServiceShape", "http://ex/OwnerShape");
+    write(
+        "urn:shapes",
+        vec![
+            (shape, RDF_TYPE, Ok(&sh("NodeShape"))),
+            (shape, &sh("targetClass"), Ok("http://ex/Service")),
+            (shape, &sh("property"), Ok(owner_shape)),
+            (owner_shape, &sh("path"), Ok("http://ex/owner")),
+            (owner_shape, &sh("minCount"), Err(CValue::Int(1))),
+            (owner_shape, &sh("datatype"), Ok(XSD_STRING)),
+        ],
+    );
+    write(
+        "urn:data",
+        vec![
+            ("http://ex/api", RDF_TYPE, Ok("http://ex/Service")),
+            ("http://ex/db", RDF_TYPE, Ok("http://ex/Service")),
+            (
+                "http://ex/db",
+                "http://ex/owner",
+                Err(CValue::Text("team".into())),
+            ),
+        ],
+    );
+
+    let validate = |req: ValidateShapesRequest| {
+        let svc = &svc;
+        async move { svc.validate_shapes(Request::new(req)).await }
+    };
+    let base = || ValidateShapesRequest {
+        shapes_graphs: vec!["urn:shapes".into()],
+        data_graphs: vec!["urn:data".into()],
+        ..Default::default()
+    };
+
+    let r = validate(base()).await.unwrap().into_inner();
+    assert!(!r.conforms && !r.no_violations);
+    assert_eq!(r.results.len(), 1);
+    assert_eq!(r.results[0].focus_node, "http://ex/api");
+    assert_eq!(r.results[0].path, "<http://ex/owner>");
+    assert_eq!(
+        r.results[0].constraint_component,
+        format!("{SH}MinCountConstraintComponent")
+    );
+    assert_eq!(r.results[0].source_shape, owner_shape);
+
+    let api = NodeId {
+        bytes: iri_to_node_id("http://ex/api").as_bytes().to_vec(),
+    };
+    let db = NodeId {
+        bytes: iri_to_node_id("http://ex/db").as_bytes().to_vec(),
+    };
+    // Overlay: give api an owner, retract db's — only touched nodes checked.
+    let r = validate(ValidateShapesRequest {
+        overlay_adds: vec![GraphTriples {
+            graph: "urn:data".into(),
+            triples: vec![text_prop(api.clone(), "http://ex/owner", "team-api")],
+        }],
+        overlay_retractions: vec![QuadRef {
+            subject: Some(db.clone()),
+            predicate: "http://ex/owner".into(),
+            object: Some(QObject::Value(Value {
+                kind: Some(ValueKind::TextVal("team".into())),
+            })),
+            graph: "urn:data".into(),
+        }],
+        ..base()
+    })
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(r.results.len(), 1);
+    assert_eq!(r.results[0].focus_node, "http://ex/db");
+
+    // A user who can't read the shapes graph is refused.
+    let err = validate(ValidateShapesRequest {
+        user_id: uuid::Uuid::now_v7().to_string(),
+        ..base()
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    let err = validate(ValidateShapesRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}

@@ -1854,6 +1854,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "polargraph-core",
  "polargraph-query",
+ "polargraph-shacl",
  "polargraph-storage",
  "prost",
  "reqwest",
@@ -1875,6 +1876,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "polargraph-shacl"
+version = "0.1.0"
+dependencies = [
+ "polargraph-core",
+ "polargraph-sparql",
+ "polargraph-storage",
+ "regex",
+ "serde",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

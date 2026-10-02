@@ -1123,27 +1123,10 @@ async fn handle_apply_changes(
     for group in body.adds {
         let mut triples = Vec::new();
         for t in group.triples {
-            let subject = Some(change_node(&t.subject, &mut iris));
-            let kind = match (t.object, t.value) {
-                (Some(o), None) => proto::triple::Kind::Relation(proto::RelationTriple {
-                    subject,
-                    predicate: t.predicate,
-                    object: Some(change_node(&o, &mut iris)),
-                    vt_start: 0,
-                    vt_end: i64::MAX,
-                    properties: vec![],
-                }),
-                (None, Some(v)) => proto::triple::Kind::Property(proto::PropertyTriple {
-                    subject,
-                    predicate: t.predicate,
-                    value: Some(json_to_proto_value(&v)),
-                    vt_start: 0,
-                    vt_end: i64::MAX,
-                    mode: proto::PropertyWriteMode::Auto as i32,
-                }),
-                _ => return bad("each triple needs exactly one of object or value"),
-            };
-            triples.push(proto::Triple { kind: Some(kind) });
+            match change_triple(t, &mut iris) {
+                Some(t) => triples.push(t),
+                None => return bad("each triple needs exactly one of object or value"),
+            }
         }
         adds.push(proto::GraphTriples {
             graph: group.graph,
@@ -1152,17 +1135,10 @@ async fn handle_apply_changes(
     }
     let mut retractions = Vec::new();
     for r in body.retractions {
-        let object = match (r.object, r.value) {
-            (Some(o), None) => proto::quad_ref::Object::Node(change_node(&o, &mut iris)),
-            (None, Some(v)) => proto::quad_ref::Object::Value(json_to_proto_value(&v)),
-            _ => return bad("each retraction needs exactly one of object or value"),
-        };
-        retractions.push(proto::QuadRef {
-            subject: Some(change_node(&r.subject, &mut iris)),
-            predicate: r.predicate,
-            object: Some(object),
-            graph: r.graph,
-        });
+        match change_quad_ref(r, &mut iris) {
+            Some(q) => retractions.push(q),
+            None => return bad("each retraction needs exactly one of object or value"),
+        }
     }
     iris.sort();
     iris.dedup();
@@ -1211,6 +1187,245 @@ async fn handle_apply_changes(
             .into_response(),
         Err(e) => grpc_error(e),
     }
+}
+
+// ── POST /validate (SHACL) ────────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+struct OverlayJson {
+    #[serde(default)]
+    adds: Vec<ChangeGroupJson>,
+    #[serde(default)]
+    retractions: Vec<ChangeQuadJson>,
+}
+
+#[derive(Deserialize)]
+struct ValidateBody {
+    shapes_graphs: Vec<String>,
+    #[serde(default)]
+    data_graphs: Vec<String>,
+    #[serde(default)]
+    overlay: OverlayJson,
+    #[serde(default)]
+    read_ts: i64,
+    #[serde(default)]
+    all_focus_nodes: bool,
+}
+
+/// `POST /validate` — SHACL validation (`ValidateShapes`). Body:
+/// `{shapes_graphs, data_graphs, overlay: {adds, retractions}, read_ts,
+/// all_focus_nodes}` (overlay entries as in `POST /changes`). JSON report by
+/// default; `Accept: text/turtle` returns an `sh:ValidationReport`.
+async fn handle_validate(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ValidateBody>,
+) -> Response {
+    let mut iris = Vec::new();
+    let mut overlay_adds = Vec::new();
+    for group in body.overlay.adds {
+        let mut triples = Vec::new();
+        for t in group.triples {
+            match change_triple(t, &mut iris) {
+                Some(t) => triples.push(t),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "each triple needs exactly one of object or value"
+                        })),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        overlay_adds.push(proto::GraphTriples {
+            graph: group.graph,
+            triples,
+        });
+    }
+    let mut overlay_retractions = Vec::new();
+    for r in body.overlay.retractions {
+        match change_quad_ref(r, &mut iris) {
+            Some(q) => overlay_retractions.push(q),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "each retraction needs exactly one of object or value"
+                    })),
+                )
+                    .into_response()
+            }
+        }
+    }
+    let req = proto::ValidateShapesRequest {
+        shapes_graphs: body.shapes_graphs,
+        data_graphs: body.data_graphs,
+        overlay_adds,
+        overlay_retractions,
+        read_ts: body.read_ts,
+        user_id: String::new(),
+        all_focus_nodes: body.all_focus_nodes,
+    };
+    let resp = match state
+        .client
+        .clone()
+        .validate_shapes(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(e) => return grpc_error(e),
+    };
+    let wants_turtle = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("text/turtle"));
+    if wants_turtle {
+        return axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/turtle")
+            .body(axum::body::boxed(axum::body::Full::from(
+                validation_report_turtle(&resp),
+            )))
+            .unwrap();
+    }
+    let results: Vec<serde_json::Value> = resp
+        .results
+        .iter()
+        .map(|r| {
+            let mut o = serde_json::json!({
+                "path": r.path,
+                "source_shape": r.source_shape,
+                "constraint_component": r.constraint_component,
+                "severity": r.severity,
+                "message": r.message,
+            });
+            match &r.focus_literal {
+                Some(v) => o["focus_literal"] = proto_value_to_json(v),
+                None => o["focus_node"] = serde_json::json!(r.focus_node),
+            }
+            if let Some(v) = &r.value_literal {
+                o["value_literal"] = proto_value_to_json(v);
+            } else if !r.value_node.is_empty() {
+                o["value_node"] = serde_json::json!(r.value_node);
+            }
+            o
+        })
+        .collect();
+    Json(serde_json::json!({
+        "conforms": resp.conforms,
+        "no_violations": resp.no_violations,
+        "results": results,
+    }))
+    .into_response()
+}
+
+/// A changeset triple (`object` or `value`) as a proto triple.
+fn change_triple(t: ChangeQuadJson, iris: &mut Vec<String>) -> Option<proto::Triple> {
+    let subject = Some(change_node(&t.subject, iris));
+    let kind = match (t.object, t.value) {
+        (Some(o), None) => proto::triple::Kind::Relation(proto::RelationTriple {
+            subject,
+            predicate: t.predicate,
+            object: Some(change_node(&o, iris)),
+            vt_start: 0,
+            vt_end: i64::MAX,
+            properties: vec![],
+        }),
+        (None, Some(v)) => proto::triple::Kind::Property(proto::PropertyTriple {
+            subject,
+            predicate: t.predicate,
+            value: Some(json_to_proto_value(&v)),
+            vt_start: 0,
+            vt_end: i64::MAX,
+            mode: proto::PropertyWriteMode::Auto as i32,
+        }),
+        _ => return None,
+    };
+    Some(proto::Triple { kind: Some(kind) })
+}
+
+/// A changeset retraction as a `QuadRef`.
+fn change_quad_ref(r: ChangeQuadJson, iris: &mut Vec<String>) -> Option<proto::QuadRef> {
+    let object = match (r.object, r.value) {
+        (Some(o), None) => proto::quad_ref::Object::Node(change_node(&o, iris)),
+        (None, Some(v)) => proto::quad_ref::Object::Value(json_to_proto_value(&v)),
+        _ => return None,
+    };
+    Some(proto::QuadRef {
+        subject: Some(change_node(&r.subject, iris)),
+        predicate: r.predicate,
+        object: Some(object),
+        graph: r.graph,
+    })
+}
+
+/// A SHACL path string (`<p>`, `^<p>`, `<a>/<b>`) as a Turtle path term.
+fn path_turtle(path: &str) -> String {
+    let mut steps = Vec::new();
+    let mut rest = path;
+    while let Some(start) = rest.find('<') {
+        let inverse = rest[..start].contains('^');
+        let Some(end) = rest[start..].find('>') else {
+            break;
+        };
+        let iri = &rest[start..start + end + 1];
+        steps.push(if inverse {
+            format!("[ sh:inversePath {iri} ]")
+        } else {
+            iri.to_string()
+        });
+        rest = &rest[start + end + 1..];
+    }
+    match steps.len() {
+        0 => String::new(),
+        1 => steps.remove(0),
+        _ => format!("( {} )", steps.join(" ")),
+    }
+}
+
+/// The report as an `sh:ValidationReport` in Turtle.
+fn validation_report_turtle(resp: &proto::ValidateShapesResponse) -> String {
+    let term = |node: &str, lit: &Option<proto::Value>| match lit {
+        Some(v) => proto_value_to_pg(v)
+            .map(|v| polargraph_sparql::value_to_nt_literal(&v))
+            .unwrap_or_else(|| "\"\"".into()),
+        None => format!("<{node}>"),
+    };
+    let mut out = String::from("@prefix sh: <http://www.w3.org/ns/shacl#> .\n\n");
+    out.push_str(&format!(
+        "[] a sh:ValidationReport ;\n    sh:conforms {}",
+        resp.conforms
+    ));
+    for r in &resp.results {
+        out.push_str(" ;\n    sh:result [\n        a sh:ValidationResult ;\n");
+        out.push_str(&format!(
+            "        sh:focusNode {} ;\n",
+            term(&r.focus_node, &r.focus_literal)
+        ));
+        if !r.path.is_empty() {
+            out.push_str(&format!(
+                "        sh:resultPath {} ;\n",
+                path_turtle(&r.path)
+            ));
+        }
+        if r.value_literal.is_some() || !r.value_node.is_empty() {
+            out.push_str(&format!(
+                "        sh:value {} ;\n",
+                term(&r.value_node, &r.value_literal)
+            ));
+        }
+        out.push_str(&format!(
+            "        sh:sourceShape <{}> ;\n        sh:sourceConstraintComponent <{}> ;\n        sh:resultSeverity <{}> ;\n        sh:resultMessage {}\n    ]",
+            r.source_shape,
+            r.constraint_component,
+            r.severity,
+            serde_json::to_string(&r.message).unwrap_or_else(|_| "\"\"".into())
+        ));
+    }
+    out.push_str(" .\n");
+    out
 }
 
 // ── GET /subscribe (Server-Sent Events) ───────────────────────────────────────
@@ -5366,6 +5581,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/graphs/move", post(handle_move_graph))
         .route("/subscribe", get(handle_subscribe))
         .route("/changes", post(handle_apply_changes))
+        .route("/validate", post(handle_validate))
         .route(
             "/graphs/access",
             get(handle_get_graph_access)
@@ -5474,6 +5690,41 @@ mod tests {
 
     /// attach_user_id sets the x-polargraph-user-id metadata header for a
     /// non-empty user_id and leaves the request unmodified for an empty one.
+    #[test]
+    fn validation_report_turtle_renders_results_and_paths() {
+        assert_eq!(path_turtle("<http://ex/p>"), "<http://ex/p>");
+        assert_eq!(
+            path_turtle("^<http://ex/p>"),
+            "[ sh:inversePath <http://ex/p> ]"
+        );
+        assert_eq!(
+            path_turtle("<http://ex/a>/^<http://ex/b>"),
+            "( <http://ex/a> [ sh:inversePath <http://ex/b> ] )"
+        );
+        let resp = proto::ValidateShapesResponse {
+            conforms: false,
+            no_violations: false,
+            results: vec![proto::ValidationResult {
+                focus_node: "http://ex/api".into(),
+                path: "<http://ex/owner>".into(),
+                value_literal: Some(proto::Value {
+                    kind: Some(proto::value::Kind::TextVal("x".into())),
+                }),
+                source_shape: "http://ex/S".into(),
+                constraint_component: "http://www.w3.org/ns/shacl#PatternConstraintComponent"
+                    .into(),
+                severity: "http://www.w3.org/ns/shacl#Violation".into(),
+                message: "no \"match\"".into(),
+                ..Default::default()
+            }],
+        };
+        let ttl = validation_report_turtle(&resp);
+        assert!(ttl.contains("sh:conforms false"));
+        assert!(ttl.contains("sh:focusNode <http://ex/api>"));
+        assert!(ttl.contains("sh:resultPath <http://ex/owner>"));
+        assert!(ttl.contains("sh:resultMessage \"no \\\"match\\\"\""));
+    }
+
     #[test]
     fn change_event_json_renders_nodes_and_kind() {
         let id = uuid::Uuid::now_v7();

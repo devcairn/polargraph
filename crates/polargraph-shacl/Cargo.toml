@@ -1,0 +1,19 @@
+[package]
+name        = "polargraph-shacl"
+description = "SHACL Core validation for PolarGraph (subset; see docs/design/proposals-shacl.md)"
+version.workspace      = true
+edition.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+rust-version.workspace = true
+
+[dependencies]
+polargraph-core    = { path = "../polargraph-core" }
+polargraph-storage = { path = "../polargraph-storage" }
+regex              = { workspace = true }
+thiserror          = { workspace = true }
+serde              = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+polargraph-sparql = { path = "../polargraph-sparql" }

@@ -1,8 +1,9 @@
 # Trust-layer primitives — changesets, SHACL validation, graph diff (plan step 8, WS3) — design note
 
 Status: decisions A–F **approved as recommended** (Mark, 2026-10-01).
-**8a built** on branch `db/ws3-proposals` (`ApplyChanges`, REST
-`POST /changes`); 8b (SHACL) next, after 8a merges.
+**8a merged** (PR #9: `ApplyChanges`, REST `POST /changes`). **8b built** on
+branch `db/ws3-shacl` (`polargraph-shacl`, `ValidateShapes`, REST
+`POST /validate`).
 
 ## The split (approved by Mark, 2026-10-01)
 
@@ -91,6 +92,33 @@ message ValidateShapesResponse {
 With an overlay, only focus nodes the overlay touches (subjects, objects, and
 nodes whose targets may change) are validated, so cost scales with the
 change, not the graph.
+
+### 8b as built — implementation choices
+
+- **Direct evaluation, not Datalog compilation.** Plan §3.4 suggested
+  compiling shapes to Datalog violation rules. Shapes are instead evaluated
+  directly over a `DataView` (dataset at a snapshot + optional overlay): an
+  overlay must remove a retracted quad only from the graph it names, which
+  per-graph scans (`Snapshot::scan_scoped`) express directly and the Datalog
+  evaluator doesn't. Same results, simpler engine.
+- **Class membership** (`sh:targetClass`, `sh:class`) is `rdf:type`, closed
+  over `rdfs:subClassOf`, both read from the dataset — the RDF way. The
+  Cypher `__type` property is not consulted.
+- **Datatypes** follow how RDF literals become values
+  (`term::literal_to_value`): an integer value matches `xsd:integer` and its
+  narrower types (with sign checks for `nonNegativeInteger` /
+  `positiveInteger`), a float matches `xsd:double` / `float` / `decimal`,
+  text `xsd:string`, language text `rdf:langString`, other typed literals
+  their exact datatype.
+- **Skolemized blank nodes** count as blank nodes for `sh:nodeKind`.
+- **`sh:conforms`** is false when there is any result (SHACL); the response
+  also reports `no_violations` for callers that treat warnings as advisory.
+- **Overlay semantics**: overlay adds count wherever they're aimed; a
+  retraction removes its quad's contribution from the graph it names only.
+  With an overlay, only touched nodes are focus nodes unless
+  `all_focus_nodes`.
+- Path IRIs, datatypes and node kinds are read through the IRI dictionary,
+  so shapes should be loaded with IRIs recorded (`/import/rdf` does).
 
 ## 8c — `DiffGraphs` (optional)
 
