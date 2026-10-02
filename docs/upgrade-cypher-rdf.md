@@ -170,14 +170,11 @@ consistent.
 SDK `insert_node` / `InsertNode` / `insertNode` now write
 `rdf:type` (by class name) instead of `__type`.
 
-**Gap before removal.** Two Cypher write patterns have no one-call
-replacement yet, because query variables bind nodes, not property values:
-deleting a node with all its properties (`DELETE n`), and SPARQL updates
-whose `WHERE` binds a literal (`DELETE WHERE { <n> ?p ?o }`). Today a client
-lists the node's values (Cypher `RETURN n.prop`, `GetPropertyHistory`,
-`ExportGraph`) and retracts them. Removing Cypher writes is planned only
-after one of these lands: literal-valued variables in Datalog / SPARQL, or a
-"close every quad of these subjects" option on `ApplyChanges`.
+**Node deletes.** `DELETE n` is SPARQL Update
+`DELETE WHERE { <urn:uuid:…> ?p ?o }`, which closes every live quad of the
+node (relations and property values) now that query variables bind values
+(`docs/design/value-bindings.md`). That closed the last gap before removing
+Cypher writes.
 
 ## Notes
 

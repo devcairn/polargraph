@@ -3132,8 +3132,28 @@ Every IRI maps to a node through `polargraph_core::term::iri_to_node_id` —
 mapping RDF import uses, so data loaded with `/import/rdf` can be queried by
 its IRIs. An IRI or literal in a triple pattern never widens to a wildcard: a
 literal object becomes `Term::Literal(value)` and matches only property
-triples with an equal value. (Binding a *variable* to a property value —
-`?s :name ?n` — is not supported yet; Datalog bindings hold nodes only.)
+triples with an equal value. A variable in object position binds either a
+node (an IRI result) or a property value (a literal result: plain, typed or
+language-tagged — vectors don't bind); a variable predicate binds the
+predicate IRI (`docs/design/value-bindings.md`).
+
+**Value semantics** (`polargraph_sparql::values`). `FILTER` is three-valued:
+an error — an unbound variable, or comparing incomparable values — removes
+the row and propagates through `!`, `&&` and `||` as SPARQL 1.1 §17.2
+defines. `=` compares values (numbers with promotion, `1 = 1.0`;
+language-tagged strings by text and case-insensitive tag; same-datatype
+typed literals by lexical form); literals of different, non-numeric types
+are a type error. `<` is defined for numbers, strings, booleans and
+same-datatype `xsd:date` / `dateTime` / `time` (compared by lexical form, so
+timezones are compared as written); language-tagged strings and IRIs don't
+compare. Joins, `GROUP BY`, `DISTINCT`, `OPTIONAL` compatibility and
+`sameTerm` use RDF term identity (`1` ≠ `1.0`). `ORDER BY` uses a total
+order — unbound < IRIs < numbers < booleans < strings < language-tagged
+strings < other typed literals — which `MIN` / `MAX` share. Aggregates:
+`COUNT` and an all-integer `SUM` are integers, other `SUM`s and `AVG`
+doubles (`AVG` isn't `xsd:decimal`: decimals aren't stored); `MIN` / `MAX`
+return the original value; an empty group leaves `MIN` / `MAX` / `SAMPLE`
+unbound and a non-numeric input leaves `SUM` / `AVG` unbound.
 
 ### HTTP endpoints
 
@@ -3152,19 +3172,19 @@ Content negotiation via `Accept` header: `application/sparql-results+json`
 |---------|-------|
 | SELECT, ASK | Full support |
 | CONSTRUCT | WHERE clause evaluated; template triples assembled from bindings; output in N-Triples or Turtle |
-| DESCRIBE | Fetches all triples for the described subjects; output in N-Triples or Turtle |
+| DESCRIBE | Fetches all triples (relations and property values) for the described subjects; output in N-Triples or Turtle |
 | BGP (Basic Graph Patterns) | Translated to `VarPattern` lists |
 | UNION | Each branch translated independently; results merged |
 | OPTIONAL / LEFT JOIN | Implemented in `polargraph_sparql::execute::left_join()` |
-| FILTER | BOUND, equality, comparison (`>`, `<`, `>=`, `<=`), NOT, AND, OR, `isIRI()` |
+| FILTER | BOUND, `=` / `!=` (value semantics), comparison (`>`, `<`, `>=`, `<=`, a literal on either side), `sameTerm`, NOT, AND, OR (three-valued, errors drop rows), `isIRI()`, `isLiteral()` |
 | Property paths: simple | Named node paths translated to a single `VarPattern` |
 | Property paths: sequence | `a/b` — translated to two patterns with an intermediate variable |
 | Property paths: `+`, `*`, `?` | `+` and `*` compile to recursive Datalog rules; `?` treated as single-hop |
 | Property paths: reverse | `^pred` — subject/object swapped |
 | Property paths: alternative | First alternative only (full UNION requires separate branches; see limitations) |
-| GROUP BY + aggregates | COUNT, SUM, AVG, MIN, MAX, GROUP_CONCAT, SAMPLE via `execute_sparql_aggregations()` |
+| GROUP BY + aggregates | COUNT, SUM, AVG, MIN, MAX, GROUP_CONCAT, SAMPLE via `execute_sparql_aggregations()`, over node and value bindings |
 | HAVING | Applied as a post-filter after aggregation |
-| ORDER BY | Passthrough to aggregation ordering |
+| ORDER BY | Variables, ASC / DESC, multiple keys (`execute::order_bindings`); applied after aggregation, before projection. Other expressions → 501 |
 | LIMIT / OFFSET | Passthrough |
 | DISTINCT | Deduplicated after projection |
 | GRAPH (named graphs) | Graph IRI recorded; mapped to PolarGraph `View` for pattern scoping |
