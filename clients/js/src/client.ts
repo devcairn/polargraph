@@ -3,10 +3,15 @@ import { promisify } from "util";
 
 import {
   PolarGraphServiceClient as GrpcClient,
-  type InsertRequest,
-  type QueryRequest,
-  type CypherQueryRequest,
-  type CypherWriteRequest,
+  ApplyChangesRequest,
+  InsertRequest,
+  QueryRequest,
+  CypherQueryRequest,
+  CypherWriteRequest,
+  PropertyWriteMode,
+  VarPattern,
+  type LegacyStatus as PbLegacyStatus,
+  type Vocabulary as PbVocabulary,
   type SearchVectorRequest,
   type BeginTransactionRequest,
   type CommitTransactionRequest,
@@ -15,7 +20,6 @@ import {
   type Triple,
   type PropertyTriple,
   type RelationTriple,
-  type VarPattern,
   type Term,
   type DatalogRule as PbDatalogRule,
   type EdgeProperty,
@@ -24,6 +28,13 @@ import {
 } from "./proto/polargraph.js";
 
 import type {
+  Change,
+  ChangeResult,
+  ChangeSet,
+  ConversionReport,
+  LegacyStatus,
+  Retraction,
+  Vocabulary,
   ClientOptions,
   PatternSpec,
   QueryOptions,
@@ -92,6 +103,90 @@ function decodeValue(v: Value): string | number | boolean | null | number[] {
   return null;
 }
 
+// ── Changeset / vocabulary helpers ───────────────────────────────────────────
+
+/** The `rdf:type` predicate IRI: node types are relations to class IRIs. */
+export const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+
+const WRITE_MODES: Record<NonNullable<Change["mode"]>, PropertyWriteMode> = {
+  auto: PropertyWriteMode.PROPERTY_WRITE_MODE_AUTO,
+  replace: PropertyWriteMode.PROPERTY_WRITE_MODE_REPLACE,
+  add: PropertyWriteMode.PROPERTY_WRITE_MODE_ADD,
+};
+
+/** `node rdf:type <class>`; the server resolves `typeName` through its vocabulary. */
+function typeTriple(nodeId: string, typeName: string): Triple {
+  return {
+    relation: {
+      subject: nodeIdProto(nodeId),
+      predicate: RDF_TYPE,
+      objectIri: typeName,
+      vtStart: 0,
+      vtEnd: 0,
+      properties: [],
+    },
+  };
+}
+
+function changeTriple(c: Change): Triple {
+  if (c.value !== undefined) {
+    return {
+      property: {
+        subject: nodeIdProto(c.subject),
+        predicate: c.predicate,
+        value: encodeValue(c.value),
+        vtStart: 0,
+        vtEnd: 0,
+        mode: WRITE_MODES[c.mode ?? "auto"],
+      },
+    };
+  }
+  if (!c.object && !c.objectIri) {
+    throw new Error(`change ${c.subject} ${c.predicate}: set value, object or objectIri`);
+  }
+  return {
+    relation: {
+      subject: nodeIdProto(c.subject),
+      predicate: c.predicate,
+      object: c.object ? nodeIdProto(c.object) : undefined,
+      objectIri: c.objectIri ?? "",
+      vtStart: 0,
+      vtEnd: 0,
+      properties: [],
+    },
+  };
+}
+
+function quadRef(r: Retraction) {
+  return {
+    subject: nodeIdProto(r.subject),
+    predicate: r.predicate,
+    graph: r.graph ?? "",
+    ...(r.value !== undefined
+      ? { value: encodeValue(r.value) }
+      : { node: nodeIdProto(r.object ?? "") }),
+  };
+}
+
+function legacyFromProto(l: PbLegacyStatus | undefined): LegacyStatus {
+  return {
+    conversionPending: l?.conversionPending ?? false,
+    barePredicates: l?.barePredicates ?? [],
+    typeLabels: Number(l?.typeLabels ?? 0),
+    pendingMerges: l?.pendingMerges ?? [],
+  };
+}
+
+function vocabularyFromProto(v: PbVocabulary): Vocabulary {
+  return {
+    base: v.base,
+    prefixes: Object.fromEntries(v.prefixes.map((p) => [p.name, p.namespace])),
+    legacy: legacyFromProto(v.legacy),
+  };
+}
+
+let cypherWriteWarned = false;
+
 // ── Pattern helpers ───────────────────────────────────────────────────────────
 
 function makeTerm(slot: string | undefined): Term | undefined {
@@ -101,7 +196,7 @@ function makeTerm(slot: string | undefined): Term | undefined {
 }
 
 function patternProto(p: PatternSpec): VarPattern {
-  const vp: VarPattern = { predicate: (p.p ?? "").replace(/^:/, ""), subject: undefined, object: undefined };
+  const vp = VarPattern.fromPartial({ predicate: (p.p ?? "").replace(/^:/, "") });
   const s = makeTerm(p.s);
   const o = makeTerm(p.o);
   if (s) vp.subject = s;
@@ -206,26 +301,16 @@ export class PolarGraphClient {
   // ── Insert ──────────────────────────────────────────────────────────────────
 
   /**
-   * Insert a node with a type label and optional scalar properties.
-   * Sends a `__type` property triple plus one triple per entry in `properties`.
+   * Insert a node typed `rdf:type <typeName>` with optional scalar properties.
+   * `typeName` is a bare name (under the server's vocabulary base), a
+   * `prefix:local` name or a full IRI.
    */
   async insertNode(
     nodeId: string,
     typeName: string,
     properties: Record<string, unknown> = {},
   ): Promise<void> {
-    const triples: Triple[] = [
-      {
-        relation: undefined,
-        property: {
-          subject: nodeIdProto(nodeId),
-          predicate: "__type",
-          value: encodeValue(typeName),
-          vtStart: 0,
-          vtEnd: 0,
-        } as PropertyTriple,
-      },
-    ];
+    const triples: Triple[] = [typeTriple(nodeId, typeName)];
     for (const [pred, val] of Object.entries(properties)) {
       triples.push({
         relation: undefined,
@@ -238,7 +323,7 @@ export class PolarGraphClient {
         } as PropertyTriple,
       });
     }
-    await this._unary(this._grpc.insert.bind(this._grpc), { triples, txId: "", edgeAnnotations: [] } as InsertRequest);
+    await this._unary(this._grpc.insert.bind(this._grpc), InsertRequest.fromPartial({ triples }));
   }
 
   /**
@@ -265,7 +350,7 @@ export class PolarGraphClient {
         properties: edgeProps,
       } as RelationTriple,
     };
-    await this._unary(this._grpc.insert.bind(this._grpc), { triples: [triple], txId: "", edgeAnnotations: [] } as InsertRequest);
+    await this._unary(this._grpc.insert.bind(this._grpc), InsertRequest.fromPartial({ triples: [triple] }));
   }
 
   // ── Query ───────────────────────────────────────────────────────────────────
@@ -275,16 +360,13 @@ export class PolarGraphClient {
    * Each result is a map from variable name (without `?`) to node UUID string.
    */
   async query(patterns: PatternSpec[], options: QueryOptions = {}): Promise<QueryResult[]> {
-    const req: QueryRequest = {
+    const req = QueryRequest.fromPartial({
       patterns: patterns.map(patternProto),
       rules: (options.rules ?? []).map(ruleProto),
-      snapshotTs: 0,
       asOfValidTime: options.asOfValidTime ?? 0,
       asOfTxTime: options.asOfTxTime ?? 0,
       txId: options.txId ?? "",
-      userId: "",
-      params: {},
-    };
+    });
     const resp = await this._unary(this._grpc.query.bind(this._grpc), req);
     return resp.bindings.map((b) => {
       const row: QueryResult = {};
@@ -302,16 +384,15 @@ export class PolarGraphClient {
    * Node variables map to UUID strings; aggregate variables map to scalar values.
    */
   async cypher(query: string, options: CypherOptions = {}): Promise<CypherRow[]> {
-    const req: CypherQueryRequest = {
+    const req = CypherQueryRequest.fromPartial({
       cypher: query,
       vector: options.vector ?? [],
       ef: options.ef ?? 0,
       asOfValidTime: options.asOfValidTime ?? 0,
       asOfTxTime: options.asOfTxTime ?? 0,
       txId: options.txId ?? "",
-      userId: "",
       params: options.params ?? {},
-    };
+    });
     const resp = await this._unary(this._grpc.cypherQuery.bind(this._grpc), req);
     return resp.rows.map((row) => {
       const out: CypherRow = {};
@@ -327,17 +408,100 @@ export class PolarGraphClient {
 
   /**
    * Execute a Cypher write statement (CREATE / MERGE / SET / DELETE).
+   *
+   * @deprecated Cypher writes are removed in the next server release; use
+   * {@link applyChanges}.
    */
   async cypherWrite(query: string, txId?: string): Promise<WriteResult> {
-    const req: CypherWriteRequest = {
-      cypher: query,
-      txId: txId ?? "",
-    };
+    if (!cypherWriteWarned) {
+      cypherWriteWarned = true;
+      process.emitWarning(
+        "cypherWrite is deprecated and will be removed in the next server release; use applyChanges",
+        "DeprecationWarning",
+      );
+    }
+    const req = CypherWriteRequest.fromPartial({ cypher: query, txId: txId ?? "" });
     const resp = await this._unary(this._grpc.cypherWrite.bind(this._grpc), req);
     return {
       createdNodeIds: resp.createdNodeIds.map((b) => bytesToUuid(b)),
       triplesWritten: Number(resp.triplesWritten),
       triplesDeleted: Number(resp.triplesDeleted),
+    };
+  }
+
+  // ── Changesets ──────────────────────────────────────────────────────────────
+
+  /**
+   * Apply adds and retractions across graphs in one transaction (one commit,
+   * one change-feed entry). Replaces the deprecated `cypherWrite`.
+   *
+   * ```ts
+   * await client.applyChanges({ adds: { "": [
+   *   { subject: id, predicate: RDF_TYPE, objectIri: "Person" },
+   *   { subject: id, predicate: "name", value: "Alice" },
+   * ] } });
+   * ```
+   */
+  async applyChanges(cs: ChangeSet): Promise<ChangeResult> {
+    const req = ApplyChangesRequest.fromPartial({
+      adds: Object.entries(cs.adds ?? {}).map(([graph, changes]) => ({
+        graph,
+        triples: changes.map(changeTriple),
+      })),
+      retractions: (cs.retractions ?? []).map(quadRef),
+      readTs: cs.readTs ?? 0,
+      strict: cs.strict ?? false,
+      iris: cs.iris ?? [],
+    });
+    const resp = await this._unary(this._grpc.applyChanges.bind(this._grpc), req);
+    return {
+      commitTs: Number(resp.commitTs),
+      added: Number(resp.added),
+      retracted: Number(resp.retracted),
+      retractionsNotFound: Number(resp.retractionsNotFound),
+      edgeIds: resp.edgeIds.map((b) => bytesToUuid(b)),
+    };
+  }
+
+  // ── Vocabulary ──────────────────────────────────────────────────────────────
+
+  /** Base IRI, prefixes and legacy-conversion status. */
+  async getVocabulary(): Promise<Vocabulary> {
+    return vocabularyFromProto(await this._unary(this._grpc.getVocabulary.bind(this._grpc), {}));
+  }
+
+  /** Set the base IRI for bare names (service calls, primary only). */
+  async setVocabularyBase(base: string): Promise<Vocabulary> {
+    const req = { base, userId: "" };
+    return vocabularyFromProto(await this._unary(this._grpc.setVocabularyBase.bind(this._grpc), req));
+  }
+
+  /** Declare or re-point a prefix. */
+  async putPrefix(name: string, namespace: string): Promise<Vocabulary> {
+    const req = { name, namespace, userId: "" };
+    return vocabularyFromProto(await this._unary(this._grpc.putPrefix.bind(this._grpc), req));
+  }
+
+  /** Remove a prefix (no-op if absent). */
+  async removePrefix(name: string): Promise<Vocabulary> {
+    const req = { name, userId: "" };
+    return vocabularyFromProto(await this._unary(this._grpc.removePrefix.bind(this._grpc), req));
+  }
+
+  /** One-time conversion of pre-vocabulary data (idempotent, resumable). */
+  async convertLegacyData(dryRun = false): Promise<ConversionReport> {
+    const req = { dryRun, userId: "" };
+    const r = await this._unary(this._grpc.convertLegacyData.bind(this._grpc), req);
+    return {
+      dryRun: r.dryRun,
+      predicates: r.predicates.map((p) => ({
+        from: p.from,
+        to: p.to,
+        merged: p.merged,
+        quadsMoved: Number(p.quadsMoved),
+      })),
+      labelsConverted: Number(r.labelsConverted),
+      legacy: legacyFromProto(r.legacy),
     };
   }
 
@@ -373,7 +537,7 @@ export class PolarGraphClient {
    *
    * @example
    * ```ts
-   * for await (const row of client.streamQuery([{ s: "?n", p: "__type", o: "?t" }])) {
+   * for await (const row of client.streamQuery([{ s: "?n", p: "knows", o: "?m" }])) {
    *   console.log(row);
    * }
    * ```
@@ -382,16 +546,13 @@ export class PolarGraphClient {
     patterns: PatternSpec[],
     options: QueryOptions = {},
   ): AsyncIterable<QueryResult> {
-    const req: QueryRequest = {
+    const req = QueryRequest.fromPartial({
       patterns: patterns.map(patternProto),
       rules: (options.rules ?? []).map(ruleProto),
-      snapshotTs: 0,
       asOfValidTime: options.asOfValidTime ?? 0,
       asOfTxTime: options.asOfTxTime ?? 0,
       txId: options.txId ?? "",
-      userId: "",
-      params: {},
-    };
+    });
     const stream = this._grpc.queryStream(req, this._meta);
     for await (const chunk of streamToAsyncIterable<QueryStreamChunk>(stream)) {
       for (const result of chunk.results) {

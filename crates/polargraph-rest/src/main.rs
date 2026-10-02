@@ -629,6 +629,7 @@ async fn handle_insert(
             vt_start: 0,
             vt_end: i64::MAX,
             properties,
+            object_iri: String::new(),
         })),
     };
 
@@ -904,10 +905,26 @@ async fn handle_cypher(
 
 // ── POST /cypher/write ────────────────────────────────────────────────────────
 
+/// `POST /cypher/write` — **deprecated** (removed next release): responses
+/// carry `Deprecation: true` and a `Warning` header. Write with
+/// `POST /changes` or `POST /sparql/update` instead.
 async fn handle_cypher_write(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CypherWriteBody>,
 ) -> Response {
+    let mut response = cypher_write(state, body).await;
+    let headers = response.headers_mut();
+    headers.insert("deprecation", axum::http::HeaderValue::from_static("true"));
+    headers.insert(
+        axum::http::header::WARNING,
+        axum::http::HeaderValue::from_static(
+            "299 polargraph \"POST /cypher/write is deprecated; use POST /changes or POST /sparql/update\"",
+        ),
+    );
+    response
+}
+
+async fn cypher_write(state: Arc<AppState>, body: CypherWriteBody) -> Response {
     let req = proto::CypherWriteRequest {
         user_id: String::new(),
         cypher: body.cypher,
@@ -1106,7 +1123,10 @@ fn change_node(s: &str, iris: &mut Vec<String>) -> proto::NodeId {
 /// `POST /changes` — apply adds and retractions across graphs atomically
 /// (`ApplyChanges`). Body: `{adds: [{graph, triples: [{subject, predicate,
 /// object | value}]}], retractions: [{subject, predicate, object | value,
-/// graph}], read_ts, strict}`. A precondition failure is HTTP 409.
+/// graph}], read_ts, strict}`. A precondition failure is HTTP 409. An add's
+/// `object` may name a node by IRI, `prefix:local` or bare vocabulary name
+/// (`{"predicate": "rdf-type-iri", "object": "Person"}`); subjects and
+/// retraction objects are UUIDs or full IRIs.
 async fn handle_apply_changes(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ChangesBody>,
@@ -1325,14 +1345,28 @@ async fn handle_validate(
 fn change_triple(t: ChangeQuadJson, iris: &mut Vec<String>) -> Option<proto::Triple> {
     let subject = Some(change_node(&t.subject, iris));
     let kind = match (t.object, t.value) {
-        (Some(o), None) => proto::triple::Kind::Relation(proto::RelationTriple {
-            subject,
-            predicate: t.predicate,
-            object: Some(change_node(&o, iris)),
-            vt_start: 0,
-            vt_end: i64::MAX,
-            properties: vec![],
-        }),
+        // A non-UUID object is named by IRI, `prefix:local` or a bare
+        // vocabulary name; the server resolves it and records the IRI.
+        (Some(o), None) => {
+            let (object, object_iri) = match Uuid::parse_str(&o) {
+                Ok(u) => (
+                    Some(proto::NodeId {
+                        bytes: u.as_bytes().to_vec(),
+                    }),
+                    String::new(),
+                ),
+                Err(_) => (None, o),
+            };
+            proto::triple::Kind::Relation(proto::RelationTriple {
+                subject,
+                predicate: t.predicate,
+                object,
+                vt_start: 0,
+                vt_end: i64::MAX,
+                object_iri,
+                properties: vec![],
+            })
+        }
         (None, Some(v)) => proto::triple::Kind::Property(proto::PropertyTriple {
             subject,
             predicate: t.predicate,
@@ -3822,6 +3856,7 @@ fn sparql_quad_to_proto_triple(quad: &spargebra::term::Quad) -> Option<proto::Tr
                     }),
                     vt_start: 0,
                     vt_end: i64::MAX,
+                    object_iri: String::new(),
                     properties: vec![],
                 })),
             })
@@ -3985,6 +4020,7 @@ fn resolve_quad_pattern_to_proto(
                     }),
                     vt_start: 0,
                     vt_end: i64::MAX,
+                    object_iri: String::new(),
                     properties: vec![],
                 })),
             })
@@ -4001,6 +4037,7 @@ fn resolve_quad_pattern_to_proto(
                     }),
                     vt_start: 0,
                     vt_end: i64::MAX,
+                    object_iri: String::new(),
                     properties: vec![],
                 })),
             }),
@@ -4089,6 +4126,7 @@ fn imported_triples_to_proto(
                             object: Some(pg_node_id_to_proto(obj_node_id)),
                             vt_start: 0,
                             vt_end: i64::MAX,
+                            object_iri: String::new(),
                             properties: vec![],
                         })),
                     }

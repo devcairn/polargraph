@@ -186,6 +186,7 @@ fn relation_triple(subject: Vec<u8>, predicate: &str, object: Vec<u8>) -> ProtoT
             object: Some(proto_node_id(object)),
             vt_start: 0,
             vt_end: 0,
+            object_iri: String::new(),
             properties: vec![],
         })),
     }

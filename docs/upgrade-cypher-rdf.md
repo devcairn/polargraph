@@ -137,6 +137,48 @@ within a minute.
 - `HAS_ACCESS_TYPE` grants, `NodeTypeFilter` and `Subscribe` `types` keep
   taking type names; they now resolve through the vocabulary.
 
+## Cypher writes are deprecated
+
+Cypher stays as a **read** language (MATCH / WHERE / RETURN / WITH,
+aggregations, `VECTOR_NEAR`, `USE GRAPH`). Cypher **writes** — the
+`CypherWrite` RPC and REST `POST /cypher/write` (CREATE, MERGE, SET,
+DELETE) — are deprecated: they still run in this release and are removed in
+the next one. Meanwhile:
+
+- gRPC responses carry a `warning` header, the server logs a warning on the
+  first call, and `polargraph_deprecated_rpc_total{rpc="CypherWrite"}`
+  counts calls (use it to find remaining callers);
+- REST responses carry `Deprecation: true` and a `Warning` header;
+- the SDKs mark `cypher_write` / `CypherWrite` / `cypherWrite` deprecated
+  (Python `DeprecationWarning`, Go `Deprecated:`, TypeScript `@deprecated`
+  plus a one-time `DeprecationWarning`).
+
+Write with an atomic changeset — `ApplyChanges` (REST `POST /changes`, SDK
+`apply_changes` / `ApplyChanges` / `applyChanges`) — or SPARQL Update. One
+write path keeps graph ACLs, authors, the change feed and SHACL validation
+consistent.
+
+| Cypher | Replacement |
+|---|---|
+| `CREATE (n:Person {name: "Alice"})` | `ApplyChanges` adds: `n rdf:type` with `object_iri: "Person"` (REST: `"object": "Person"`) + `n name "Alice"`; the client picks the node UUID |
+| `MERGE (n:Person {name: "Alice"})` | Query first (Cypher `MATCH`), then `ApplyChanges` with `read_ts` set to the query's read time — `ABORTED` if someone wrote in between |
+| `MATCH … SET n.age = 31` | Add `n age 31` (the default write mode replaces the current value), or SPARQL `DELETE { … } INSERT { … } WHERE { … }` |
+| `CREATE (a)-[:knows]->(b)` | Add the relation `a knows b` |
+| `DELETE n` | Retract each of the node's live quads (`ApplyChanges` retractions; see the gap below) |
+| `USE GRAPH <g> CREATE …` | Adds grouped under graph `g` |
+
+SDK `insert_node` / `InsertNode` / `insertNode` now write
+`rdf:type` (by class name) instead of `__type`.
+
+**Gap before removal.** Two Cypher write patterns have no one-call
+replacement yet, because query variables bind nodes, not property values:
+deleting a node with all its properties (`DELETE n`), and SPARQL updates
+whose `WHERE` binds a literal (`DELETE WHERE { <n> ?p ?o }`). Today a client
+lists the node's values (Cypher `RETURN n.prop`, `GetPropertyHistory`,
+`ExportGraph`) and retracts them. Removing Cypher writes is planned only
+after one of these lands: literal-valued variables in Datalog / SPARQL, or a
+"close every quad of these subjects" option on `ApplyChanges`.
+
 ## Notes
 
 - The node and edge type registries keep the names they were registered

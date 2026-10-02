@@ -734,6 +734,13 @@ Proto source: `crates/polargraph-server/proto/polargraph.proto`
 
 ### `Insert` — graph, write mode and IRI bindings
 
+`RelationTriple.object_iri` (`string`) names the object by a full IRI,
+`prefix:local` or bare vocabulary name instead of `object`; the server
+resolves it, maps it to its node and records the IRI (`INVALID_ARGUMENT` if
+both are set and differ). Used by the SDKs' `insert_node` to write
+`rdf:type` by class name. Also accepted by `ApplyChanges` and
+`ValidateShapes` overlays.
+
 `InsertRequest.graph` (`string`) names the graph (IRI) every triple and
 annotation in the request goes to; it is interned on first use. Empty means
 the default graph. REST `POST /insert` accepts the same as `"graph"`.
@@ -848,6 +855,9 @@ Server-streaming variant of `CypherQuery`. Delivers rows in chunks of
 ```
 rpc CypherWrite(CypherWriteRequest) returns (CypherWriteResponse)
 ```
+
+**Deprecated** — removed in the next release; use `ApplyChanges` or SPARQL
+Update (`docs/upgrade-cypher-rdf.md`). Responses carry a `warning` header.
 
 Executes a Cypher write statement (CREATE, MERGE, SET, DELETE).
 
@@ -1032,6 +1042,9 @@ without a suffix.
 Request body mirrors `CypherQueryRequest` (including `"graphs"`). Returns `{"rows": [{...}, ...]}`.
 
 ### `POST /cypher/write`
+
+**Deprecated** (responses carry `Deprecation: true` and `Warning`); use
+`POST /changes` or `POST /sparql/update`.
 
 Request body: `{"cypher": "...", "tx_id": "...", "graph": "<iri>"}`. Returns
 `{"created_node_ids": [...], "triples_written": N, "commit_ts": N}`.

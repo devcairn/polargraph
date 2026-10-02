@@ -23,6 +23,116 @@ import {
 
 export const protobufPackage = "polargraph.v1";
 
+/**
+ * / A scalar property on a node.
+ * / How a property write treats existing values of the same
+ * / (subject, predicate, graph). See docs/design/v3-key-layout.md §6.
+ */
+export enum PropertyWriteMode {
+  /**
+   * PROPERTY_WRITE_MODE_AUTO - / REPLACE for an open-ended value (vt_end unset / end of time), ADD for
+   * / a closing write. The default — matches pre-v3 behaviour.
+   */
+  PROPERTY_WRITE_MODE_AUTO = 0,
+  /** PROPERTY_WRITE_MODE_REPLACE - / Close every other open value of (s, p, g), then write this one. */
+  PROPERTY_WRITE_MODE_REPLACE = 1,
+  /** PROPERTY_WRITE_MODE_ADD - / Write alongside existing values (multi-valued properties, RDF). */
+  PROPERTY_WRITE_MODE_ADD = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function propertyWriteModeFromJSON(object: any): PropertyWriteMode {
+  switch (object) {
+    case 0:
+    case "PROPERTY_WRITE_MODE_AUTO":
+      return PropertyWriteMode.PROPERTY_WRITE_MODE_AUTO;
+    case 1:
+    case "PROPERTY_WRITE_MODE_REPLACE":
+      return PropertyWriteMode.PROPERTY_WRITE_MODE_REPLACE;
+    case 2:
+    case "PROPERTY_WRITE_MODE_ADD":
+      return PropertyWriteMode.PROPERTY_WRITE_MODE_ADD;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return PropertyWriteMode.UNRECOGNIZED;
+  }
+}
+
+export function propertyWriteModeToJSON(object: PropertyWriteMode): string {
+  switch (object) {
+    case PropertyWriteMode.PROPERTY_WRITE_MODE_AUTO:
+      return "PROPERTY_WRITE_MODE_AUTO";
+    case PropertyWriteMode.PROPERTY_WRITE_MODE_REPLACE:
+      return "PROPERTY_WRITE_MODE_REPLACE";
+    case PropertyWriteMode.PROPERTY_WRITE_MODE_ADD:
+      return "PROPERTY_WRITE_MODE_ADD";
+    case PropertyWriteMode.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum ChangeKind {
+  CHANGE_KIND_UNSPECIFIED = 0,
+  /** CHANGE_KIND_ASSERT - / A quad version asserted (open-ended valid time). */
+  CHANGE_KIND_ASSERT = 1,
+  /** CHANGE_KIND_CLOSE - / A quad version closed (delete, replaced value, graph drop). */
+  CHANGE_KIND_CLOSE = 2,
+  CHANGE_KIND_GRAPH_CREATED = 3,
+  CHANGE_KIND_GRAPH_DROPPED = 4,
+  /** CHANGE_KIND_GRAPH_COPIED - / Quads of `source_graph` copied into `graph` (ADD / COPY / MOVE). */
+  CHANGE_KIND_GRAPH_COPIED = 5,
+  UNRECOGNIZED = -1,
+}
+
+export function changeKindFromJSON(object: any): ChangeKind {
+  switch (object) {
+    case 0:
+    case "CHANGE_KIND_UNSPECIFIED":
+      return ChangeKind.CHANGE_KIND_UNSPECIFIED;
+    case 1:
+    case "CHANGE_KIND_ASSERT":
+      return ChangeKind.CHANGE_KIND_ASSERT;
+    case 2:
+    case "CHANGE_KIND_CLOSE":
+      return ChangeKind.CHANGE_KIND_CLOSE;
+    case 3:
+    case "CHANGE_KIND_GRAPH_CREATED":
+      return ChangeKind.CHANGE_KIND_GRAPH_CREATED;
+    case 4:
+    case "CHANGE_KIND_GRAPH_DROPPED":
+      return ChangeKind.CHANGE_KIND_GRAPH_DROPPED;
+    case 5:
+    case "CHANGE_KIND_GRAPH_COPIED":
+      return ChangeKind.CHANGE_KIND_GRAPH_COPIED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ChangeKind.UNRECOGNIZED;
+  }
+}
+
+export function changeKindToJSON(object: ChangeKind): string {
+  switch (object) {
+    case ChangeKind.CHANGE_KIND_UNSPECIFIED:
+      return "CHANGE_KIND_UNSPECIFIED";
+    case ChangeKind.CHANGE_KIND_ASSERT:
+      return "CHANGE_KIND_ASSERT";
+    case ChangeKind.CHANGE_KIND_CLOSE:
+      return "CHANGE_KIND_CLOSE";
+    case ChangeKind.CHANGE_KIND_GRAPH_CREATED:
+      return "CHANGE_KIND_GRAPH_CREATED";
+    case ChangeKind.CHANGE_KIND_GRAPH_DROPPED:
+      return "CHANGE_KIND_GRAPH_DROPPED";
+    case ChangeKind.CHANGE_KIND_GRAPH_COPIED:
+      return "CHANGE_KIND_GRAPH_COPIED";
+    case ChangeKind.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 /** / 16-byte UUID v7 (time-ordered). Always exactly 16 bytes. */
 export interface NodeId {
   bytes: Buffer;
@@ -37,6 +147,24 @@ export interface Value {
   textVal?: string | undefined;
   blobVal?: Buffer | undefined;
   vecVal?: FloatArray | undefined;
+  langText?: LangText | undefined;
+  typed?: TypedLiteral | undefined;
+}
+
+/** / A language-tagged string (rdf:langString), e.g. "Acme"@en. */
+export interface LangText {
+  text: string;
+  lang: string;
+}
+
+/**
+ * / An RDF literal with a datatype that has no native Value kind,
+ * / e.g. "2026-09-29"^^<http://www.w3.org/2001/XMLSchema#date>.
+ */
+export interface TypedLiteral {
+  lexical: string;
+  /** / Full datatype IRI. */
+  datatype: string;
 }
 
 /** / A dense float32 embedding vector. */
@@ -66,15 +194,21 @@ export interface RelationTriple {
    * / Each property is stored as a Property triple whose subject is the edge UUID.
    */
   properties: EdgeProperty[];
+  /**
+   * / The object named by IRI instead of `object`: a full IRI, `prefix:local`
+   * / or a bare name (resolved through the vocabulary). The server maps it to
+   * / its node and records the IRI — e.g. `rdf:type` to a class by name.
+   */
+  objectIri: string;
 }
 
-/** / A scalar property on a node. */
 export interface PropertyTriple {
   subject?: NodeId | undefined;
   predicate: string;
   value?: Value | undefined;
   vtStart: number;
   vtEnd: number;
+  mode: PropertyWriteMode;
 }
 
 export interface Triple {
@@ -91,7 +225,11 @@ export interface Triple {
  */
 export interface Term {
   bound?: NodeId | undefined;
-  var?: string | undefined;
+  var?:
+    | string
+    | undefined;
+  /** / Object slot only: matches property triples whose value equals this. */
+  literal?: Value | undefined;
 }
 
 /**
@@ -102,7 +240,45 @@ export interface Term {
 export interface VarPattern {
   subject?: Term | undefined;
   predicate: string;
-  object?: Term | undefined;
+  object?:
+    | Term
+    | undefined;
+  /**
+   * / Optional variable name that receives the matched predicate string for
+   * / each binding (see `Binding.predicates`). Empty string or omitted means
+   * / the matched predicate is not captured.
+   */
+  predicateVar: string;
+  /**
+   * / Which graph(s) the pattern matches in. Unset = every graph (union),
+   * / or the request's `graphs` dataset when one is given.
+   */
+  graph?: GraphTerm | undefined;
+}
+
+/** / The graph slot of a pattern. */
+export interface GraphTerm {
+  /** / true = only the default graph. */
+  defaultGraph?:
+    | boolean
+    | undefined;
+  /** / One named graph, by IRI. An unknown IRI matches nothing. */
+  iri?:
+    | string
+    | undefined;
+  /**
+   * / A graph variable: binds the IRI node of each match's named graph
+   * / (never the default graph); restricts the match when already bound.
+   */
+  var?:
+    | string
+    | undefined;
+  /** / A set of named graphs, by IRI. */
+  set?: GraphSet | undefined;
+}
+
+export interface GraphSet {
+  iris: string[];
 }
 
 /**
@@ -145,6 +321,23 @@ export interface GetEdgeAnnotationsResponse {
   annotations: EdgeAnnotation[];
 }
 
+/**
+ * / Resolve the edge UUID(s) for a specific (subject, predicate, object) relation triple.
+ * / Returns one edge_id per MVCC version currently visible in the store. For most
+ * / applications a single version is expected; SPARQL-star annotation lookup uses
+ * / the most-recent entry.
+ */
+export interface GetEdgeIdsByTripleRequest {
+  subjectId: Buffer;
+  predicate: string;
+  objectId: Buffer;
+}
+
+export interface GetEdgeIdsByTripleResponse {
+  /** / Each entry is a 16-byte UUID (big-endian) identifying one edge instance. */
+  edgeIds: Buffer[];
+}
+
 export interface InsertRequest {
   triples: Triple[];
   /**
@@ -159,6 +352,23 @@ export interface InsertRequest {
    * / where the edge UUID must be known in advance).
    */
   edgeAnnotations: EdgeAnnotation[];
+  /**
+   * / IRIs of nodes written in this request, recorded in the IRI dictionary in
+   * / the same commit so export can render them. Each IRI names the node
+   * / `iri_to_node_id(iri)` (urn:uuid:<u> → u, otherwise xxHash3-128); urn:uuid
+   * / IRIs are accepted and ignored. A request may carry only IRIs.
+   */
+  iris: string[];
+  /**
+   * / Named graph (IRI) every triple and annotation in this request goes to;
+   * / interned on first use. Empty = the default graph.
+   */
+  graph: string;
+  /**
+   * / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+   * / graph ACL applies — see docs/design/graph-acl.md.
+   */
+  userId: string;
 }
 
 export interface InsertResponse {
@@ -180,8 +390,9 @@ export interface QueryRequest {
   snapshotTs: number;
   /**
    * / Valid-time point-in-time filter (unix microseconds).
-   * / When non-zero, only triples whose valid-time window [vt_start, vt_end)
-   * / contains this value are returned. 0 = no valid-time filter.
+   * / Only triples whose valid-time window [vt_start, vt_end) contains this
+   * / value are returned. 0 = now (current state; deleted/closed triples are
+   * / hidden). Set to a past timestamp for historical/time-travel queries.
    */
   asOfValidTime: number;
   /**
@@ -212,6 +423,11 @@ export interface QueryRequest {
    * / (without the `$`); values are JSON-encoded `Value` objects.
    */
   params: { [key: string]: string };
+  /**
+   * / Dataset: graph IRIs that patterns without their own `graph` term match
+   * / in (like SPARQL FROM). Empty = every graph.
+   */
+  graphs: string[];
 }
 
 export interface QueryRequest_ParamsEntry {
@@ -222,11 +438,21 @@ export interface QueryRequest_ParamsEntry {
 /** / One satisfying assignment of all variables in the query. */
 export interface Binding {
   vars: { [key: string]: NodeId };
+  /**
+   * / Predicate strings bound via `VarPattern.predicate_var`, keyed by
+   * / variable name.
+   */
+  predicates: { [key: string]: string };
 }
 
 export interface Binding_VarsEntry {
   key: string;
   value?: NodeId | undefined;
+}
+
+export interface Binding_PredicatesEntry {
+  key: string;
+  value: string;
 }
 
 export interface QueryResponse {
@@ -628,11 +854,15 @@ export interface PurgeOldBackupsResponse {
 }
 
 export interface RunRetentionRequest {
-  /** / Delete triples whose transaction time is older than this many seconds. */
+  /**
+   * / Delete versions superseded (corrected or deleted) more than this many
+   * / seconds ago. The current version of a triple is never deleted.
+   */
   txAgeSecs: number;
   /**
-   * / Also delete triples whose vt_end is more than this many seconds in the
-   * / past. Set to 0 to disable valid-time lookback (keep all valid-time history).
+   * / Also delete a triple entirely once all of its versions have a vt_end more
+   * / than this many seconds in the past. Set to 0 to disable valid-time
+   * / lookback (keep all valid-time history).
    */
   vtLookbackSecs: number;
 }
@@ -739,6 +969,13 @@ export interface ShowStatsResponse {
   queryCacheHits: number;
   queryCacheMisses: number;
   queryCacheSize: number;
+  /**
+   * / Pre-vocabulary data still awaiting `ConvertLegacyData`
+   * / (docs/upgrade-cypher-rdf.md).
+   */
+  legacyConversionPending: boolean;
+  legacyBarePredicates: number;
+  legacyTypeLabels: number;
 }
 
 /**
@@ -760,7 +997,10 @@ export interface CypherQueryRequest {
    * /   SKIP 0 LIMIT 10
    */
   cypher: string;
-  /** / Valid-time point-in-time filter (unix microseconds). 0 = no filter. */
+  /**
+   * / Valid-time point-in-time filter (unix microseconds). 0 = now (current
+   * / state; deleted/closed triples are hidden). Past timestamp = time-travel.
+   */
   asOfValidTime: number;
   /** / Transaction-time snapshot override (unix microseconds). 0 = latest. */
   asOfTxTime: number;
@@ -780,6 +1020,11 @@ export interface CypherQueryRequest {
    * / (without the `$`); values are JSON-encoded `Value` objects.
    */
   params: { [key: string]: string };
+  /**
+   * / Dataset: graph IRIs the MATCH patterns read (unknown IRIs match
+   * / nothing). Empty = every graph. A `USE GRAPH` clause takes precedence.
+   */
+  graphs: string[];
 }
 
 export interface CypherQueryRequest_ParamsEntry {
@@ -832,6 +1077,17 @@ export interface CypherWriteRequest {
    * / named transaction rather than auto-committed.
    */
   txId: string;
+  /**
+   * / Graph IRI to write to and to MATCH in (interned on first use), as
+   * / `USE GRAPH <iri>`. Empty = the default graph for writes and every
+   * / graph for MATCH / MERGE / DELETE.
+   */
+  graph: string;
+  /**
+   * / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+   * / graph ACL applies — see docs/design/graph-acl.md.
+   */
+  userId: string;
 }
 
 export interface CypherWriteResponse {
@@ -971,6 +1227,490 @@ export interface GetUserAccessResponse {
   typeGrants: string[];
 }
 
+export interface GetPropertyHistoryRequest {
+  /** / 16-byte NodeId of the subject node. */
+  subjectId: Buffer;
+  /** / Predicate name (interned on first use). */
+  predicate: string;
+  /** / Maximum number of versions to return. 0 = default (50). */
+  limit: number;
+}
+
+/** / One historical version of a node property. */
+export interface PropertyVersion {
+  /** / JSON-encoded Value (matches the Value wire format used elsewhere). */
+  valueJson: string;
+  /** / Transaction time of this write, microseconds since Unix epoch. */
+  transactionTime: number;
+}
+
+export interface GetPropertyHistoryResponse {
+  /** / Versions ordered newest-first by transaction time. */
+  versions: PropertyVersion[];
+}
+
+/**
+ * / Soft-delete request: closes the valid-time window of live triples by writing
+ * / a superseding triple with vt_end set to the requested timestamp.
+ */
+export interface DeleteTriplesRequest {
+  /** / 16-byte UUID subject IDs to soft-delete triples for. */
+  subjectIds: Buffer[];
+  /** / Optional predicate filter — if empty, all predicates for each subject are closed. */
+  predicate: string;
+  /** / Explicit vt_end in microseconds since Unix epoch; 0 means use server clock. */
+  vtEnd: number;
+  /**
+   * / Optional 16-byte object NodeId: only relations to this object are closed
+   * / (properties are left alone). Empty means any object.
+   */
+  objectId: Buffer;
+  /**
+   * / Optional property value: only properties with exactly this value are
+   * / closed (relations are left alone). Unset means any value.
+   */
+  value?:
+    | Value
+    | undefined;
+  /**
+   * / Graphs to close the triples in: unset = every graph; `default_graph`,
+   * / `iri` or `set` restrict it (a graph variable is invalid). An unknown
+   * / IRI is NOT_FOUND.
+   */
+  graph?:
+    | GraphTerm
+    | undefined;
+  /**
+   * / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+   * / graph ACL applies — see docs/design/graph-acl.md.
+   */
+  userId: string;
+}
+
+export interface DeleteTriplesResponse {
+  /** / Number of triple versions that were closed. */
+  deletedCount: number;
+}
+
+/** / Request to run OWL 2 RL forward-chaining materialization. */
+export interface RunMaterializationRequest {
+  /**
+   * / When true (default), clear the DRV column family before re-materializing.
+   * / When false, perform an incremental run starting from current DRV state.
+   */
+  clearFirst: boolean;
+}
+
+/** / Statistics from a materialization run. */
+export interface RunMaterializationResponse {
+  /** / Number of new derived triples inserted across all fixpoint iterations. */
+  rulesFired: number;
+  /** / Total unique derived triples now in the DRV CF (approximate). */
+  derivedTriples: number;
+  /** / Number of fixpoint iterations performed before convergence. */
+  iterations: number;
+}
+
+/**
+ * / One metadata property of a graph (stored in the system graph
+ * / `urn:pg:graph:meta` as a property of the graph's IRI node).
+ */
+export interface GraphMetadata {
+  predicate: string;
+  value?: Value | undefined;
+}
+
+export interface GraphInfo {
+  iri: string;
+  /** / Interned id (0 = default graph, which has no IRI). */
+  id: number;
+  metadata: GraphMetadata[];
+}
+
+export interface CreateGraphRequest {
+  iri: string;
+  /** / Set (replace) these metadata properties. */
+  metadata: GraphMetadata[];
+  /**
+   * / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+   * / graph ACL applies — see docs/design/graph-acl.md.
+   */
+  userId: string;
+}
+
+export interface CreateGraphResponse {
+  graph?: GraphInfo | undefined;
+}
+
+export interface ListGraphsRequest {
+  /**
+   * / Only graphs whose metadata has every one of these (predicate, value)
+   * / pairs. Empty = all named graphs.
+   */
+  filter: GraphMetadata[];
+  /** / Include the system graph `urn:pg:graph:meta`. */
+  includeSystem: boolean;
+}
+
+export interface ListGraphsResponse {
+  graphs: GraphInfo[];
+}
+
+export interface GraphStatsRequest {
+  /** / Graph IRI; empty = the default graph. */
+  iri: string;
+}
+
+export interface GraphStatsResponse {
+  iri: string;
+  /** / Quads valid now. */
+  liveQuads: number;
+  /** / Latest transaction time among live quads (µs since epoch); 0 if none. */
+  lastWriteTt: number;
+}
+
+export interface CopyGraphRequest {
+  /** / Source / target graph IRIs; empty = the default graph. */
+  source: string;
+  target: string;
+  /** / true: drop the target's quads first (SPARQL COPY); false: add (ADD). */
+  clearTarget: boolean;
+  /**
+   * / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+   * / graph ACL applies — see docs/design/graph-acl.md.
+   */
+  userId: string;
+}
+
+export interface CopyGraphResponse {
+  quads: number;
+}
+
+export interface MoveGraphRequest {
+  source: string;
+  target: string;
+  /**
+   * / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+   * / graph ACL applies — see docs/design/graph-acl.md.
+   */
+  userId: string;
+}
+
+export interface DropGraphRequest {
+  /** / Graph IRI; empty = the default graph. */
+  iri: string;
+  /**
+   * / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+   * / graph ACL applies — see docs/design/graph-acl.md.
+   */
+  userId: string;
+}
+
+export interface DropGraphResponse {
+  /** / Quads closed (bitemporal: history remains queryable). */
+  quadsClosed: number;
+}
+
+/** / Triples to add to one graph. */
+export interface GraphTriples {
+  /** / Graph IRI ("" = default graph). */
+  graph: string;
+  triples: Triple[];
+}
+
+/** / One exact quad, e.g. to retract. */
+export interface QuadRef {
+  subject?: NodeId | undefined;
+  predicate: string;
+  node?: NodeId | undefined;
+  value?:
+    | Value
+    | undefined;
+  /** / Graph IRI ("" = default graph). */
+  graph: string;
+}
+
+export interface ApplyChangesRequest {
+  adds: GraphTriples[];
+  /** / Live quads to close (valid time ends now). */
+  retractions: QuadRef[];
+  /**
+   * / The commit time the changes were based on (0 = none). If any quad the
+   * / changeset adds or retracts — or any value of a single-valued property
+   * / it replaces — was committed after it, nothing is applied (ABORTED).
+   */
+  readTs: number;
+  /**
+   * / Fail (FAILED_PRECONDITION, nothing applied) if a retraction matches no
+   * / live quad; otherwise such retractions are only counted.
+   */
+  strict: boolean;
+  /** / IRIs to record in the IRI dictionary. */
+  iris: string[];
+  /**
+   * / Caller identity (optional; also `x-polargraph-user-id`): author of the
+   * / change, and the graph ACL applies (write on every graph touched).
+   */
+  userId: string;
+}
+
+export interface ApplyChangesResponse {
+  commitTs: number;
+  added: number;
+  retracted: number;
+  retractionsNotFound: number;
+  /** / Edge ids of added relations, in request order. */
+  edgeIds: Buffer[];
+}
+
+export interface ValidateShapesRequest {
+  /** / Graphs holding the shapes (at least one). */
+  shapesGraphs: string[];
+  /** / Dataset to validate ("" = default graph); empty = every readable graph. */
+  dataGraphs: string[];
+  /** / Uncommitted changes to validate as if applied. */
+  overlayAdds: GraphTriples[];
+  overlayRetractions: QuadRef[];
+  /** / Read point (0 = latest). */
+  readTs: number;
+  /**
+   * / Caller identity (optional; also `x-polargraph-user-id`); shapes and
+   * / data graphs must be readable.
+   */
+  userId: string;
+  /** / With an overlay, only nodes it touches are validated unless this is set. */
+  allFocusNodes: boolean;
+}
+
+export interface ValidationResult {
+  /** / Focus node IRI, or unset with `focus_literal` for a literal focus. */
+  focusNode: string;
+  focusLiteral?:
+    | Value
+    | undefined;
+  /** / Result path in SPARQL property-path syntax (`<p>`, `^<p>`, `<a>/<b>`). */
+  path: string;
+  /** / Offending value: IRI in `value_node` or a literal in `value_literal`. */
+  valueNode: string;
+  valueLiteral?: Value | undefined;
+  sourceShape: string;
+  /** / Full constraint component IRI. */
+  constraintComponent: string;
+  /** / `sh:Violation`, `sh:Warning` or `sh:Info` (full IRI). */
+  severity: string;
+  message: string;
+}
+
+export interface ValidateShapesResponse {
+  /** / `sh:conforms` — no results of any severity. */
+  conforms: boolean;
+  /** / No results of severity sh:Violation. */
+  noViolations: boolean;
+  results: ValidationResult[];
+}
+
+export interface SubscribeRequest {
+  /**
+   * / Graph IRIs to follow (empty = every graph the caller can read; "" is
+   * / the default graph).
+   */
+  graphs: string[];
+  /** / Only quads with these predicates (empty = all). Graph events always pass. */
+  predicates: string[];
+  /** / Only quads whose subject currently has one of these `__type`s. */
+  types: string[];
+  /**
+   * / Deliver commits after this transaction time; 0 = from now. Older than
+   * / the retained log → OUT_OF_RANGE (re-sync, then subscribe from now).
+   */
+  resumeAfterTs: number;
+  /** / Include property values (otherwise property quads carry no value). */
+  includeValues: boolean;
+  /**
+   * / Caller identity (optional; also `x-polargraph-user-id`). Events in
+   * / graphs the caller can't read are never sent.
+   */
+  userId: string;
+}
+
+export interface ChangeEvent {
+  /** / Commit transaction time — the resume token. */
+  commitTs: number;
+  /** / Graph IRI ("" = default graph). */
+  graph: string;
+  kind: ChangeKind;
+  /** / The quad version (assert / close events). */
+  quad?:
+    | Triple
+    | undefined;
+  /** / The relation's edge id (relation quads). */
+  edgeId: Buffer;
+  /** / User id that made the change ("" = service call). */
+  author: string;
+  /** / Source graph of a GRAPH_COPIED event. */
+  sourceGraph: string;
+}
+
+export interface GrantGraphAccessRequest {
+  /** / User or group receiving the grant. */
+  principal: string;
+  /** / Named graph IRI. */
+  graph: string;
+  /** / `read`, `propose`, `write` or `admin`; replaces an earlier level. */
+  level: string;
+  /** / Caller identity (optional). */
+  userId: string;
+}
+
+export interface GrantGraphAccessResponse {
+}
+
+export interface RevokeGraphAccessRequest {
+  principal: string;
+  graph: string;
+  userId: string;
+}
+
+export interface RevokeGraphAccessResponse {
+  /** / Whether a live grant was revoked. */
+  revoked: boolean;
+}
+
+export interface GetGraphAccessRequest {
+  /** / User whose effective access (own + group grants) to list. */
+  principal: string;
+  /**
+   * / Caller identity (optional); a caller other than `principal` only sees
+   * / graphs it administers.
+   */
+  userId: string;
+}
+
+export interface GraphAccessEntry {
+  graph: string;
+  level: string;
+}
+
+export interface GetGraphAccessResponse {
+  /**
+   * / Named graphs the principal can access (the default graph is open to
+   * / everyone and not listed).
+   */
+  graphs: GraphAccessEntry[];
+}
+
+export interface ExportGraphRequest {
+  /** / Graph IRI; empty = the default graph. */
+  iri: string;
+  /**
+   * / Export the default graph and every named graph (not the system
+   * / graph); `iri` is ignored.
+   */
+  allGraphs: boolean;
+}
+
+/** / One live quad. Relation quads set `node`, property quads set `value`. */
+export interface ExportedQuad {
+  subject?: NodeId | undefined;
+  predicate: string;
+  node?: NodeId | undefined;
+  value?:
+    | Value
+    | undefined;
+  /** / Graph IRI; empty = the default graph. */
+  graph: string;
+}
+
+export interface ExportGraphChunk {
+  quads: ExportedQuad[];
+}
+
+export interface ResolveIrisRequest {
+  /** / Nodes to name. At most 10 000 per request. */
+  nodes: NodeId[];
+}
+
+export interface ResolveIrisResponse {
+  /**
+   * / One IRI per requested node, in request order: the stored IRI, or
+   * / `urn:uuid:<id>` when the node has no dictionary entry.
+   */
+  iris: string[];
+}
+
+export interface VocabularyPrefix {
+  name: string;
+  namespace: string;
+}
+
+export interface LegacyStatus {
+  /** / Pre-vocabulary data remains; run ConvertLegacyData. */
+  conversionPending: boolean;
+  /** / Predicates still stored under a bare name. */
+  barePredicates: string[];
+  /** / Live `__type` label properties. */
+  typeLabels: number;
+  /** / Bare predicates whose IRI already existed, with quads left to merge. */
+  pendingMerges: string[];
+}
+
+export interface Vocabulary {
+  base: string;
+  prefixes: VocabularyPrefix[];
+  legacy?: LegacyStatus | undefined;
+}
+
+export interface GetVocabularyRequest {
+}
+
+export interface SetVocabularyBaseRequest {
+  /**
+   * / Absolute IRI, e.g. `https://example.com/ns/`. Affects names resolved
+   * / from now on; stored IRIs are never rewritten.
+   */
+  base: string;
+  userId: string;
+}
+
+export interface PutPrefixRequest {
+  name: string;
+  namespace: string;
+  userId: string;
+}
+
+export interface RemovePrefixRequest {
+  name: string;
+  userId: string;
+}
+
+export interface ConvertLegacyDataRequest {
+  /** / Report what would change; change nothing. */
+  dryRun: boolean;
+  userId: string;
+}
+
+export interface PredicateConversion {
+  /** / The bare name. */
+  from: string;
+  /** / Its IRI under the vocabulary base. */
+  to: string;
+  /**
+   * / The IRI already existed: live quads were moved (count) and the bare
+   * / entry kept as `__legacy__/<name>`; otherwise a metadata-only rename.
+   */
+  merged: boolean;
+  quadsMoved: number;
+}
+
+export interface ConvertLegacyDataResponse {
+  dryRun: boolean;
+  predicates: PredicateConversion[];
+  /** / `__type` labels converted to `rdf:type`. */
+  labelsConverted: number;
+  /** / Status after the run. */
+  legacy?: LegacyStatus | undefined;
+}
+
 function createBaseNodeId(): NodeId {
   return { bytes: Buffer.alloc(0) };
 }
@@ -1038,6 +1778,8 @@ function createBaseValue(): Value {
     textVal: undefined,
     blobVal: undefined,
     vecVal: undefined,
+    langText: undefined,
+    typed: undefined,
   };
 }
 
@@ -1063,6 +1805,12 @@ export const Value: MessageFns<Value> = {
     }
     if (message.vecVal !== undefined) {
       FloatArray.encode(message.vecVal, writer.uint32(58).fork()).join();
+    }
+    if (message.langText !== undefined) {
+      LangText.encode(message.langText, writer.uint32(66).fork()).join();
+    }
+    if (message.typed !== undefined) {
+      TypedLiteral.encode(message.typed, writer.uint32(74).fork()).join();
     }
     return writer;
   },
@@ -1130,6 +1878,22 @@ export const Value: MessageFns<Value> = {
           message.vecVal = FloatArray.decode(reader, reader.uint32());
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.langText = LangText.decode(reader, reader.uint32());
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.typed = TypedLiteral.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1176,6 +1940,12 @@ export const Value: MessageFns<Value> = {
         : isSet(object.vec_val)
         ? FloatArray.fromJSON(object.vec_val)
         : undefined,
+      langText: isSet(object.langText)
+        ? LangText.fromJSON(object.langText)
+        : isSet(object.lang_text)
+        ? LangText.fromJSON(object.lang_text)
+        : undefined,
+      typed: isSet(object.typed) ? TypedLiteral.fromJSON(object.typed) : undefined,
     };
   },
 
@@ -1202,6 +1972,12 @@ export const Value: MessageFns<Value> = {
     if (message.vecVal !== undefined) {
       obj.vecVal = FloatArray.toJSON(message.vecVal);
     }
+    if (message.langText !== undefined) {
+      obj.langText = LangText.toJSON(message.langText);
+    }
+    if (message.typed !== undefined) {
+      obj.typed = TypedLiteral.toJSON(message.typed);
+    }
     return obj;
   },
 
@@ -1219,6 +1995,164 @@ export const Value: MessageFns<Value> = {
     message.vecVal = (object.vecVal !== undefined && object.vecVal !== null)
       ? FloatArray.fromPartial(object.vecVal)
       : undefined;
+    message.langText = (object.langText !== undefined && object.langText !== null)
+      ? LangText.fromPartial(object.langText)
+      : undefined;
+    message.typed = (object.typed !== undefined && object.typed !== null)
+      ? TypedLiteral.fromPartial(object.typed)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseLangText(): LangText {
+  return { text: "", lang: "" };
+}
+
+export const LangText: MessageFns<LangText> = {
+  encode(message: LangText, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.text !== "") {
+      writer.uint32(10).string(message.text);
+    }
+    if (message.lang !== "") {
+      writer.uint32(18).string(message.lang);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LangText {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLangText();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.text = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.lang = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): LangText {
+    return {
+      text: isSet(object.text) ? globalThis.String(object.text) : "",
+      lang: isSet(object.lang) ? globalThis.String(object.lang) : "",
+    };
+  },
+
+  toJSON(message: LangText): unknown {
+    const obj: any = {};
+    if (message.text !== "") {
+      obj.text = message.text;
+    }
+    if (message.lang !== "") {
+      obj.lang = message.lang;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<LangText>, I>>(base?: I): LangText {
+    return LangText.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LangText>, I>>(object: I): LangText {
+    const message = createBaseLangText();
+    message.text = object.text ?? "";
+    message.lang = object.lang ?? "";
+    return message;
+  },
+};
+
+function createBaseTypedLiteral(): TypedLiteral {
+  return { lexical: "", datatype: "" };
+}
+
+export const TypedLiteral: MessageFns<TypedLiteral> = {
+  encode(message: TypedLiteral, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.lexical !== "") {
+      writer.uint32(10).string(message.lexical);
+    }
+    if (message.datatype !== "") {
+      writer.uint32(18).string(message.datatype);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): TypedLiteral {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseTypedLiteral();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.lexical = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.datatype = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): TypedLiteral {
+    return {
+      lexical: isSet(object.lexical) ? globalThis.String(object.lexical) : "",
+      datatype: isSet(object.datatype) ? globalThis.String(object.datatype) : "",
+    };
+  },
+
+  toJSON(message: TypedLiteral): unknown {
+    const obj: any = {};
+    if (message.lexical !== "") {
+      obj.lexical = message.lexical;
+    }
+    if (message.datatype !== "") {
+      obj.datatype = message.datatype;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<TypedLiteral>, I>>(base?: I): TypedLiteral {
+    return TypedLiteral.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<TypedLiteral>, I>>(object: I): TypedLiteral {
+    const message = createBaseTypedLiteral();
+    message.lexical = object.lexical ?? "";
+    message.datatype = object.datatype ?? "";
     return message;
   },
 };
@@ -1372,7 +2306,7 @@ export const EdgeProperty: MessageFns<EdgeProperty> = {
 };
 
 function createBaseRelationTriple(): RelationTriple {
-  return { subject: undefined, predicate: "", object: undefined, vtStart: 0, vtEnd: 0, properties: [] };
+  return { subject: undefined, predicate: "", object: undefined, vtStart: 0, vtEnd: 0, properties: [], objectIri: "" };
 }
 
 export const RelationTriple: MessageFns<RelationTriple> = {
@@ -1394,6 +2328,9 @@ export const RelationTriple: MessageFns<RelationTriple> = {
     }
     for (const v of message.properties) {
       EdgeProperty.encode(v!, writer.uint32(50).fork()).join();
+    }
+    if (message.objectIri !== "") {
+      writer.uint32(58).string(message.objectIri);
     }
     return writer;
   },
@@ -1453,6 +2390,14 @@ export const RelationTriple: MessageFns<RelationTriple> = {
           message.properties.push(EdgeProperty.decode(reader, reader.uint32()));
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.objectIri = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1480,6 +2425,11 @@ export const RelationTriple: MessageFns<RelationTriple> = {
       properties: globalThis.Array.isArray(object?.properties)
         ? object.properties.map((e: any) => EdgeProperty.fromJSON(e))
         : [],
+      objectIri: isSet(object.objectIri)
+        ? globalThis.String(object.objectIri)
+        : isSet(object.object_iri)
+        ? globalThis.String(object.object_iri)
+        : "",
     };
   },
 
@@ -1503,6 +2453,9 @@ export const RelationTriple: MessageFns<RelationTriple> = {
     if (message.properties?.length) {
       obj.properties = message.properties.map((e) => EdgeProperty.toJSON(e));
     }
+    if (message.objectIri !== "") {
+      obj.objectIri = message.objectIri;
+    }
     return obj;
   },
 
@@ -1521,12 +2474,13 @@ export const RelationTriple: MessageFns<RelationTriple> = {
     message.vtStart = object.vtStart ?? 0;
     message.vtEnd = object.vtEnd ?? 0;
     message.properties = object.properties?.map((e) => EdgeProperty.fromPartial(e)) || [];
+    message.objectIri = object.objectIri ?? "";
     return message;
   },
 };
 
 function createBasePropertyTriple(): PropertyTriple {
-  return { subject: undefined, predicate: "", value: undefined, vtStart: 0, vtEnd: 0 };
+  return { subject: undefined, predicate: "", value: undefined, vtStart: 0, vtEnd: 0, mode: 0 };
 }
 
 export const PropertyTriple: MessageFns<PropertyTriple> = {
@@ -1545,6 +2499,9 @@ export const PropertyTriple: MessageFns<PropertyTriple> = {
     }
     if (message.vtEnd !== 0) {
       writer.uint32(40).int64(message.vtEnd);
+    }
+    if (message.mode !== 0) {
+      writer.uint32(48).int32(message.mode);
     }
     return writer;
   },
@@ -1596,6 +2553,14 @@ export const PropertyTriple: MessageFns<PropertyTriple> = {
           message.vtEnd = longToNumber(reader.int64());
           continue;
         }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.mode = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1620,6 +2585,7 @@ export const PropertyTriple: MessageFns<PropertyTriple> = {
         : isSet(object.vt_end)
         ? globalThis.Number(object.vt_end)
         : 0,
+      mode: isSet(object.mode) ? propertyWriteModeFromJSON(object.mode) : 0,
     };
   },
 
@@ -1640,6 +2606,9 @@ export const PropertyTriple: MessageFns<PropertyTriple> = {
     if (message.vtEnd !== 0) {
       obj.vtEnd = Math.round(message.vtEnd);
     }
+    if (message.mode !== 0) {
+      obj.mode = propertyWriteModeToJSON(message.mode);
+    }
     return obj;
   },
 
@@ -1655,6 +2624,7 @@ export const PropertyTriple: MessageFns<PropertyTriple> = {
     message.value = (object.value !== undefined && object.value !== null) ? Value.fromPartial(object.value) : undefined;
     message.vtStart = object.vtStart ?? 0;
     message.vtEnd = object.vtEnd ?? 0;
+    message.mode = object.mode ?? 0;
     return message;
   },
 };
@@ -1740,7 +2710,7 @@ export const Triple: MessageFns<Triple> = {
 };
 
 function createBaseTerm(): Term {
-  return { bound: undefined, var: undefined };
+  return { bound: undefined, var: undefined, literal: undefined };
 }
 
 export const Term: MessageFns<Term> = {
@@ -1750,6 +2720,9 @@ export const Term: MessageFns<Term> = {
     }
     if (message.var !== undefined) {
       writer.uint32(18).string(message.var);
+    }
+    if (message.literal !== undefined) {
+      Value.encode(message.literal, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -1777,6 +2750,14 @@ export const Term: MessageFns<Term> = {
           message.var = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.literal = Value.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1790,6 +2771,7 @@ export const Term: MessageFns<Term> = {
     return {
       bound: isSet(object.bound) ? NodeId.fromJSON(object.bound) : undefined,
       var: isSet(object.var) ? globalThis.String(object.var) : undefined,
+      literal: isSet(object.literal) ? Value.fromJSON(object.literal) : undefined,
     };
   },
 
@@ -1800,6 +2782,9 @@ export const Term: MessageFns<Term> = {
     }
     if (message.var !== undefined) {
       obj.var = message.var;
+    }
+    if (message.literal !== undefined) {
+      obj.literal = Value.toJSON(message.literal);
     }
     return obj;
   },
@@ -1813,12 +2798,15 @@ export const Term: MessageFns<Term> = {
       ? NodeId.fromPartial(object.bound)
       : undefined;
     message.var = object.var ?? undefined;
+    message.literal = (object.literal !== undefined && object.literal !== null)
+      ? Value.fromPartial(object.literal)
+      : undefined;
     return message;
   },
 };
 
 function createBaseVarPattern(): VarPattern {
-  return { subject: undefined, predicate: "", object: undefined };
+  return { subject: undefined, predicate: "", object: undefined, predicateVar: "", graph: undefined };
 }
 
 export const VarPattern: MessageFns<VarPattern> = {
@@ -1831,6 +2819,12 @@ export const VarPattern: MessageFns<VarPattern> = {
     }
     if (message.object !== undefined) {
       Term.encode(message.object, writer.uint32(26).fork()).join();
+    }
+    if (message.predicateVar !== "") {
+      writer.uint32(34).string(message.predicateVar);
+    }
+    if (message.graph !== undefined) {
+      GraphTerm.encode(message.graph, writer.uint32(42).fork()).join();
     }
     return writer;
   },
@@ -1866,6 +2860,22 @@ export const VarPattern: MessageFns<VarPattern> = {
           message.object = Term.decode(reader, reader.uint32());
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.predicateVar = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.graph = GraphTerm.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1880,6 +2890,12 @@ export const VarPattern: MessageFns<VarPattern> = {
       subject: isSet(object.subject) ? Term.fromJSON(object.subject) : undefined,
       predicate: isSet(object.predicate) ? globalThis.String(object.predicate) : "",
       object: isSet(object.object) ? Term.fromJSON(object.object) : undefined,
+      predicateVar: isSet(object.predicateVar)
+        ? globalThis.String(object.predicateVar)
+        : isSet(object.predicate_var)
+        ? globalThis.String(object.predicate_var)
+        : "",
+      graph: isSet(object.graph) ? GraphTerm.fromJSON(object.graph) : undefined,
     };
   },
 
@@ -1893,6 +2909,12 @@ export const VarPattern: MessageFns<VarPattern> = {
     }
     if (message.object !== undefined) {
       obj.object = Term.toJSON(message.object);
+    }
+    if (message.predicateVar !== "") {
+      obj.predicateVar = message.predicateVar;
+    }
+    if (message.graph !== undefined) {
+      obj.graph = GraphTerm.toJSON(message.graph);
     }
     return obj;
   },
@@ -1909,6 +2931,180 @@ export const VarPattern: MessageFns<VarPattern> = {
     message.object = (object.object !== undefined && object.object !== null)
       ? Term.fromPartial(object.object)
       : undefined;
+    message.predicateVar = object.predicateVar ?? "";
+    message.graph = (object.graph !== undefined && object.graph !== null)
+      ? GraphTerm.fromPartial(object.graph)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseGraphTerm(): GraphTerm {
+  return { defaultGraph: undefined, iri: undefined, var: undefined, set: undefined };
+}
+
+export const GraphTerm: MessageFns<GraphTerm> = {
+  encode(message: GraphTerm, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.defaultGraph !== undefined) {
+      writer.uint32(8).bool(message.defaultGraph);
+    }
+    if (message.iri !== undefined) {
+      writer.uint32(18).string(message.iri);
+    }
+    if (message.var !== undefined) {
+      writer.uint32(26).string(message.var);
+    }
+    if (message.set !== undefined) {
+      GraphSet.encode(message.set, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GraphTerm {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGraphTerm();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.defaultGraph = reader.bool();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.iri = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.var = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.set = GraphSet.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GraphTerm {
+    return {
+      defaultGraph: isSet(object.defaultGraph)
+        ? globalThis.Boolean(object.defaultGraph)
+        : isSet(object.default_graph)
+        ? globalThis.Boolean(object.default_graph)
+        : undefined,
+      iri: isSet(object.iri) ? globalThis.String(object.iri) : undefined,
+      var: isSet(object.var) ? globalThis.String(object.var) : undefined,
+      set: isSet(object.set) ? GraphSet.fromJSON(object.set) : undefined,
+    };
+  },
+
+  toJSON(message: GraphTerm): unknown {
+    const obj: any = {};
+    if (message.defaultGraph !== undefined) {
+      obj.defaultGraph = message.defaultGraph;
+    }
+    if (message.iri !== undefined) {
+      obj.iri = message.iri;
+    }
+    if (message.var !== undefined) {
+      obj.var = message.var;
+    }
+    if (message.set !== undefined) {
+      obj.set = GraphSet.toJSON(message.set);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GraphTerm>, I>>(base?: I): GraphTerm {
+    return GraphTerm.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GraphTerm>, I>>(object: I): GraphTerm {
+    const message = createBaseGraphTerm();
+    message.defaultGraph = object.defaultGraph ?? undefined;
+    message.iri = object.iri ?? undefined;
+    message.var = object.var ?? undefined;
+    message.set = (object.set !== undefined && object.set !== null) ? GraphSet.fromPartial(object.set) : undefined;
+    return message;
+  },
+};
+
+function createBaseGraphSet(): GraphSet {
+  return { iris: [] };
+}
+
+export const GraphSet: MessageFns<GraphSet> = {
+  encode(message: GraphSet, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.iris) {
+      writer.uint32(10).string(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GraphSet {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGraphSet();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.iris.push(reader.string());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GraphSet {
+    return { iris: globalThis.Array.isArray(object?.iris) ? object.iris.map((e: any) => globalThis.String(e)) : [] };
+  },
+
+  toJSON(message: GraphSet): unknown {
+    const obj: any = {};
+    if (message.iris?.length) {
+      obj.iris = message.iris;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GraphSet>, I>>(base?: I): GraphSet {
+    return GraphSet.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GraphSet>, I>>(object: I): GraphSet {
+    const message = createBaseGraphSet();
+    message.iris = object.iris?.map((e) => e) || [];
     return message;
   },
 };
@@ -2277,8 +3473,172 @@ export const GetEdgeAnnotationsResponse: MessageFns<GetEdgeAnnotationsResponse> 
   },
 };
 
+function createBaseGetEdgeIdsByTripleRequest(): GetEdgeIdsByTripleRequest {
+  return { subjectId: Buffer.alloc(0), predicate: "", objectId: Buffer.alloc(0) };
+}
+
+export const GetEdgeIdsByTripleRequest: MessageFns<GetEdgeIdsByTripleRequest> = {
+  encode(message: GetEdgeIdsByTripleRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.subjectId.length !== 0) {
+      writer.uint32(10).bytes(message.subjectId);
+    }
+    if (message.predicate !== "") {
+      writer.uint32(18).string(message.predicate);
+    }
+    if (message.objectId.length !== 0) {
+      writer.uint32(26).bytes(message.objectId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetEdgeIdsByTripleRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetEdgeIdsByTripleRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.subjectId = Buffer.from(reader.bytes());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.predicate = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.objectId = Buffer.from(reader.bytes());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GetEdgeIdsByTripleRequest {
+    return {
+      subjectId: isSet(object.subjectId)
+        ? Buffer.from(bytesFromBase64(object.subjectId))
+        : isSet(object.subject_id)
+        ? Buffer.from(bytesFromBase64(object.subject_id))
+        : Buffer.alloc(0),
+      predicate: isSet(object.predicate) ? globalThis.String(object.predicate) : "",
+      objectId: isSet(object.objectId)
+        ? Buffer.from(bytesFromBase64(object.objectId))
+        : isSet(object.object_id)
+        ? Buffer.from(bytesFromBase64(object.object_id))
+        : Buffer.alloc(0),
+    };
+  },
+
+  toJSON(message: GetEdgeIdsByTripleRequest): unknown {
+    const obj: any = {};
+    if (message.subjectId.length !== 0) {
+      obj.subjectId = base64FromBytes(message.subjectId);
+    }
+    if (message.predicate !== "") {
+      obj.predicate = message.predicate;
+    }
+    if (message.objectId.length !== 0) {
+      obj.objectId = base64FromBytes(message.objectId);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetEdgeIdsByTripleRequest>, I>>(base?: I): GetEdgeIdsByTripleRequest {
+    return GetEdgeIdsByTripleRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetEdgeIdsByTripleRequest>, I>>(object: I): GetEdgeIdsByTripleRequest {
+    const message = createBaseGetEdgeIdsByTripleRequest();
+    message.subjectId = object.subjectId ?? Buffer.alloc(0);
+    message.predicate = object.predicate ?? "";
+    message.objectId = object.objectId ?? Buffer.alloc(0);
+    return message;
+  },
+};
+
+function createBaseGetEdgeIdsByTripleResponse(): GetEdgeIdsByTripleResponse {
+  return { edgeIds: [] };
+}
+
+export const GetEdgeIdsByTripleResponse: MessageFns<GetEdgeIdsByTripleResponse> = {
+  encode(message: GetEdgeIdsByTripleResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.edgeIds) {
+      writer.uint32(10).bytes(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetEdgeIdsByTripleResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetEdgeIdsByTripleResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.edgeIds.push(Buffer.from(reader.bytes()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GetEdgeIdsByTripleResponse {
+    return {
+      edgeIds: globalThis.Array.isArray(object?.edgeIds)
+        ? object.edgeIds.map((e: any) => Buffer.from(bytesFromBase64(e)))
+        : globalThis.Array.isArray(object?.edge_ids)
+        ? object.edge_ids.map((e: any) => Buffer.from(bytesFromBase64(e)))
+        : [],
+    };
+  },
+
+  toJSON(message: GetEdgeIdsByTripleResponse): unknown {
+    const obj: any = {};
+    if (message.edgeIds?.length) {
+      obj.edgeIds = message.edgeIds.map((e) => base64FromBytes(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetEdgeIdsByTripleResponse>, I>>(base?: I): GetEdgeIdsByTripleResponse {
+    return GetEdgeIdsByTripleResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetEdgeIdsByTripleResponse>, I>>(object: I): GetEdgeIdsByTripleResponse {
+    const message = createBaseGetEdgeIdsByTripleResponse();
+    message.edgeIds = object.edgeIds?.map((e) => e) || [];
+    return message;
+  },
+};
+
 function createBaseInsertRequest(): InsertRequest {
-  return { triples: [], txId: "", edgeAnnotations: [] };
+  return { triples: [], txId: "", edgeAnnotations: [], iris: [], graph: "", userId: "" };
 }
 
 export const InsertRequest: MessageFns<InsertRequest> = {
@@ -2291,6 +3651,15 @@ export const InsertRequest: MessageFns<InsertRequest> = {
     }
     for (const v of message.edgeAnnotations) {
       EdgeAnnotation.encode(v!, writer.uint32(26).fork()).join();
+    }
+    for (const v of message.iris) {
+      writer.uint32(34).string(v!);
+    }
+    if (message.graph !== "") {
+      writer.uint32(42).string(message.graph);
+    }
+    if (message.userId !== "") {
+      writer.uint32(50).string(message.userId);
     }
     return writer;
   },
@@ -2326,6 +3695,30 @@ export const InsertRequest: MessageFns<InsertRequest> = {
           message.edgeAnnotations.push(EdgeAnnotation.decode(reader, reader.uint32()));
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.iris.push(reader.string());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.graph = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2348,6 +3741,13 @@ export const InsertRequest: MessageFns<InsertRequest> = {
         : globalThis.Array.isArray(object?.edge_annotations)
         ? object.edge_annotations.map((e: any) => EdgeAnnotation.fromJSON(e))
         : [],
+      iris: globalThis.Array.isArray(object?.iris) ? object.iris.map((e: any) => globalThis.String(e)) : [],
+      graph: isSet(object.graph) ? globalThis.String(object.graph) : "",
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
     };
   },
 
@@ -2362,6 +3762,15 @@ export const InsertRequest: MessageFns<InsertRequest> = {
     if (message.edgeAnnotations?.length) {
       obj.edgeAnnotations = message.edgeAnnotations.map((e) => EdgeAnnotation.toJSON(e));
     }
+    if (message.iris?.length) {
+      obj.iris = message.iris;
+    }
+    if (message.graph !== "") {
+      obj.graph = message.graph;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
     return obj;
   },
 
@@ -2373,6 +3782,9 @@ export const InsertRequest: MessageFns<InsertRequest> = {
     message.triples = object.triples?.map((e) => Triple.fromPartial(e)) || [];
     message.txId = object.txId ?? "";
     message.edgeAnnotations = object.edgeAnnotations?.map((e) => EdgeAnnotation.fromPartial(e)) || [];
+    message.iris = object.iris?.map((e) => e) || [];
+    message.graph = object.graph ?? "";
+    message.userId = object.userId ?? "";
     return message;
   },
 };
@@ -2462,7 +3874,17 @@ export const InsertResponse: MessageFns<InsertResponse> = {
 };
 
 function createBaseQueryRequest(): QueryRequest {
-  return { patterns: [], snapshotTs: 0, asOfValidTime: 0, asOfTxTime: 0, rules: [], txId: "", userId: "", params: {} };
+  return {
+    patterns: [],
+    snapshotTs: 0,
+    asOfValidTime: 0,
+    asOfTxTime: 0,
+    rules: [],
+    txId: "",
+    userId: "",
+    params: {},
+    graphs: [],
+  };
 }
 
 export const QueryRequest: MessageFns<QueryRequest> = {
@@ -2491,6 +3913,9 @@ export const QueryRequest: MessageFns<QueryRequest> = {
     globalThis.Object.entries(message.params).forEach(([key, value]: [string, string]) => {
       QueryRequest_ParamsEntry.encode({ key: key as any, value }, writer.uint32(66).fork()).join();
     });
+    for (const v of message.graphs) {
+      writer.uint32(74).string(v!);
+    }
     return writer;
   },
 
@@ -2568,6 +3993,14 @@ export const QueryRequest: MessageFns<QueryRequest> = {
           }
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.graphs.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2617,6 +4050,9 @@ export const QueryRequest: MessageFns<QueryRequest> = {
           {},
         )
         : {},
+      graphs: globalThis.Array.isArray(object?.graphs)
+        ? object.graphs.map((e: any) => globalThis.String(e))
+        : [],
     };
   },
 
@@ -2652,6 +4088,9 @@ export const QueryRequest: MessageFns<QueryRequest> = {
         });
       }
     }
+    if (message.graphs?.length) {
+      obj.graphs = message.graphs;
+    }
     return obj;
   },
 
@@ -2676,6 +4115,7 @@ export const QueryRequest: MessageFns<QueryRequest> = {
       },
       {},
     );
+    message.graphs = object.graphs?.map((e) => e) || [];
     return message;
   },
 };
@@ -2757,13 +4197,16 @@ export const QueryRequest_ParamsEntry: MessageFns<QueryRequest_ParamsEntry> = {
 };
 
 function createBaseBinding(): Binding {
-  return { vars: {} };
+  return { vars: {}, predicates: {} };
 }
 
 export const Binding: MessageFns<Binding> = {
   encode(message: Binding, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     globalThis.Object.entries(message.vars).forEach(([key, value]: [string, NodeId]) => {
       Binding_VarsEntry.encode({ key: key as any, value }, writer.uint32(10).fork()).join();
+    });
+    globalThis.Object.entries(message.predicates).forEach(([key, value]: [string, string]) => {
+      Binding_PredicatesEntry.encode({ key: key as any, value }, writer.uint32(18).fork()).join();
     });
     return writer;
   },
@@ -2783,6 +4226,17 @@ export const Binding: MessageFns<Binding> = {
           const entry1 = Binding_VarsEntry.decode(reader, reader.uint32());
           if (entry1.value !== undefined) {
             message.vars[entry1.key] = entry1.value;
+          }
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          const entry2 = Binding_PredicatesEntry.decode(reader, reader.uint32());
+          if (entry2.value !== undefined) {
+            message.predicates[entry2.key] = entry2.value;
           }
           continue;
         }
@@ -2806,6 +4260,15 @@ export const Binding: MessageFns<Binding> = {
           {},
         )
         : {},
+      predicates: isObject(object.predicates)
+        ? (globalThis.Object.entries(object.predicates) as [string, any][]).reduce(
+          (acc: { [key: string]: string }, [key, value]: [string, any]) => {
+            acc[key] = globalThis.String(value);
+            return acc;
+          },
+          {},
+        )
+        : {},
     };
   },
 
@@ -2817,6 +4280,15 @@ export const Binding: MessageFns<Binding> = {
         obj.vars = {};
         entries.forEach(([k, v]) => {
           obj.vars[k] = NodeId.toJSON(v);
+        });
+      }
+    }
+    if (message.predicates) {
+      const entries = globalThis.Object.entries(message.predicates) as [string, string][];
+      if (entries.length > 0) {
+        obj.predicates = {};
+        entries.forEach(([k, v]) => {
+          obj.predicates[k] = v;
         });
       }
     }
@@ -2832,6 +4304,15 @@ export const Binding: MessageFns<Binding> = {
       (acc: { [key: string]: NodeId }, [key, value]: [string, NodeId]) => {
         if (value !== undefined) {
           acc[key] = NodeId.fromPartial(value);
+        }
+        return acc;
+      },
+      {},
+    );
+    message.predicates = (globalThis.Object.entries(object.predicates ?? {}) as [string, string][]).reduce(
+      (acc: { [key: string]: string }, [key, value]: [string, string]) => {
+        if (value !== undefined) {
+          acc[key] = globalThis.String(value);
         }
         return acc;
       },
@@ -2915,6 +4396,82 @@ export const Binding_VarsEntry: MessageFns<Binding_VarsEntry> = {
     message.value = (object.value !== undefined && object.value !== null)
       ? NodeId.fromPartial(object.value)
       : undefined;
+    return message;
+  },
+};
+
+function createBaseBinding_PredicatesEntry(): Binding_PredicatesEntry {
+  return { key: "", value: "" };
+}
+
+export const Binding_PredicatesEntry: MessageFns<Binding_PredicatesEntry> = {
+  encode(message: Binding_PredicatesEntry, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.key !== "") {
+      writer.uint32(10).string(message.key);
+    }
+    if (message.value !== "") {
+      writer.uint32(18).string(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Binding_PredicatesEntry {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBinding_PredicatesEntry();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): Binding_PredicatesEntry {
+    return {
+      key: isSet(object.key) ? globalThis.String(object.key) : "",
+      value: isSet(object.value) ? globalThis.String(object.value) : "",
+    };
+  },
+
+  toJSON(message: Binding_PredicatesEntry): unknown {
+    const obj: any = {};
+    if (message.key !== "") {
+      obj.key = message.key;
+    }
+    if (message.value !== "") {
+      obj.value = message.value;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<Binding_PredicatesEntry>, I>>(base?: I): Binding_PredicatesEntry {
+    return Binding_PredicatesEntry.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<Binding_PredicatesEntry>, I>>(object: I): Binding_PredicatesEntry {
+    const message = createBaseBinding_PredicatesEntry();
+    message.key = object.key ?? "";
+    message.value = object.value ?? "";
     return message;
   },
 };
@@ -9321,6 +10878,9 @@ function createBaseShowStatsResponse(): ShowStatsResponse {
     queryCacheHits: 0,
     queryCacheMisses: 0,
     queryCacheSize: 0,
+    legacyConversionPending: false,
+    legacyBarePredicates: 0,
+    legacyTypeLabels: 0,
   };
 }
 
@@ -9355,6 +10915,15 @@ export const ShowStatsResponse: MessageFns<ShowStatsResponse> = {
     }
     if (message.queryCacheSize !== 0) {
       writer.uint32(80).uint32(message.queryCacheSize);
+    }
+    if (message.legacyConversionPending !== false) {
+      writer.uint32(88).bool(message.legacyConversionPending);
+    }
+    if (message.legacyBarePredicates !== 0) {
+      writer.uint32(96).uint32(message.legacyBarePredicates);
+    }
+    if (message.legacyTypeLabels !== 0) {
+      writer.uint32(104).uint64(message.legacyTypeLabels);
     }
     return writer;
   },
@@ -9446,6 +11015,30 @@ export const ShowStatsResponse: MessageFns<ShowStatsResponse> = {
           message.queryCacheSize = reader.uint32();
           continue;
         }
+        case 11: {
+          if (tag !== 88) {
+            break;
+          }
+
+          message.legacyConversionPending = reader.bool();
+          continue;
+        }
+        case 12: {
+          if (tag !== 96) {
+            break;
+          }
+
+          message.legacyBarePredicates = reader.uint32();
+          continue;
+        }
+        case 13: {
+          if (tag !== 104) {
+            break;
+          }
+
+          message.legacyTypeLabels = longToNumber(reader.uint64());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9503,6 +11096,21 @@ export const ShowStatsResponse: MessageFns<ShowStatsResponse> = {
         : isSet(object.query_cache_size)
         ? globalThis.Number(object.query_cache_size)
         : 0,
+      legacyConversionPending: isSet(object.legacyConversionPending)
+        ? globalThis.Boolean(object.legacyConversionPending)
+        : isSet(object.legacy_conversion_pending)
+        ? globalThis.Boolean(object.legacy_conversion_pending)
+        : false,
+      legacyBarePredicates: isSet(object.legacyBarePredicates)
+        ? globalThis.Number(object.legacyBarePredicates)
+        : isSet(object.legacy_bare_predicates)
+        ? globalThis.Number(object.legacy_bare_predicates)
+        : 0,
+      legacyTypeLabels: isSet(object.legacyTypeLabels)
+        ? globalThis.Number(object.legacyTypeLabels)
+        : isSet(object.legacy_type_labels)
+        ? globalThis.Number(object.legacy_type_labels)
+        : 0,
     };
   },
 
@@ -9538,6 +11146,15 @@ export const ShowStatsResponse: MessageFns<ShowStatsResponse> = {
     if (message.queryCacheSize !== 0) {
       obj.queryCacheSize = Math.round(message.queryCacheSize);
     }
+    if (message.legacyConversionPending !== false) {
+      obj.legacyConversionPending = message.legacyConversionPending;
+    }
+    if (message.legacyBarePredicates !== 0) {
+      obj.legacyBarePredicates = Math.round(message.legacyBarePredicates);
+    }
+    if (message.legacyTypeLabels !== 0) {
+      obj.legacyTypeLabels = Math.round(message.legacyTypeLabels);
+    }
     return obj;
   },
 
@@ -9556,12 +11173,25 @@ export const ShowStatsResponse: MessageFns<ShowStatsResponse> = {
     message.queryCacheHits = object.queryCacheHits ?? 0;
     message.queryCacheMisses = object.queryCacheMisses ?? 0;
     message.queryCacheSize = object.queryCacheSize ?? 0;
+    message.legacyConversionPending = object.legacyConversionPending ?? false;
+    message.legacyBarePredicates = object.legacyBarePredicates ?? 0;
+    message.legacyTypeLabels = object.legacyTypeLabels ?? 0;
     return message;
   },
 };
 
 function createBaseCypherQueryRequest(): CypherQueryRequest {
-  return { cypher: "", asOfValidTime: 0, asOfTxTime: 0, vector: [], ef: 0, txId: "", userId: "", params: {} };
+  return {
+    cypher: "",
+    asOfValidTime: 0,
+    asOfTxTime: 0,
+    vector: [],
+    ef: 0,
+    txId: "",
+    userId: "",
+    params: {},
+    graphs: [],
+  };
 }
 
 export const CypherQueryRequest: MessageFns<CypherQueryRequest> = {
@@ -9592,6 +11222,9 @@ export const CypherQueryRequest: MessageFns<CypherQueryRequest> = {
     globalThis.Object.entries(message.params).forEach(([key, value]: [string, string]) => {
       CypherQueryRequest_ParamsEntry.encode({ key: key as any, value }, writer.uint32(66).fork()).join();
     });
+    for (const v of message.graphs) {
+      writer.uint32(74).string(v!);
+    }
     return writer;
   },
 
@@ -9679,6 +11312,14 @@ export const CypherQueryRequest: MessageFns<CypherQueryRequest> = {
           }
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.graphs.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9722,6 +11363,9 @@ export const CypherQueryRequest: MessageFns<CypherQueryRequest> = {
           {},
         )
         : {},
+      graphs: globalThis.Array.isArray(object?.graphs)
+        ? object.graphs.map((e: any) => globalThis.String(e))
+        : [],
     };
   },
 
@@ -9757,6 +11401,9 @@ export const CypherQueryRequest: MessageFns<CypherQueryRequest> = {
         });
       }
     }
+    if (message.graphs?.length) {
+      obj.graphs = message.graphs;
+    }
     return obj;
   },
 
@@ -9781,6 +11428,7 @@ export const CypherQueryRequest: MessageFns<CypherQueryRequest> = {
       },
       {},
     );
+    message.graphs = object.graphs?.map((e) => e) || [];
     return message;
   },
 };
@@ -10204,7 +11852,7 @@ export const CypherQueryResponse: MessageFns<CypherQueryResponse> = {
 };
 
 function createBaseCypherWriteRequest(): CypherWriteRequest {
-  return { cypher: "", txId: "" };
+  return { cypher: "", txId: "", graph: "", userId: "" };
 }
 
 export const CypherWriteRequest: MessageFns<CypherWriteRequest> = {
@@ -10214,6 +11862,12 @@ export const CypherWriteRequest: MessageFns<CypherWriteRequest> = {
     }
     if (message.txId !== "") {
       writer.uint32(18).string(message.txId);
+    }
+    if (message.graph !== "") {
+      writer.uint32(26).string(message.graph);
+    }
+    if (message.userId !== "") {
+      writer.uint32(34).string(message.userId);
     }
     return writer;
   },
@@ -10241,6 +11895,22 @@ export const CypherWriteRequest: MessageFns<CypherWriteRequest> = {
           message.txId = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.graph = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -10258,6 +11928,12 @@ export const CypherWriteRequest: MessageFns<CypherWriteRequest> = {
         : isSet(object.tx_id)
         ? globalThis.String(object.tx_id)
         : "",
+      graph: isSet(object.graph) ? globalThis.String(object.graph) : "",
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
     };
   },
 
@@ -10269,6 +11945,12 @@ export const CypherWriteRequest: MessageFns<CypherWriteRequest> = {
     if (message.txId !== "") {
       obj.txId = message.txId;
     }
+    if (message.graph !== "") {
+      obj.graph = message.graph;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
     return obj;
   },
 
@@ -10279,6 +11961,8 @@ export const CypherWriteRequest: MessageFns<CypherWriteRequest> = {
     const message = createBaseCypherWriteRequest();
     message.cypher = object.cypher ?? "";
     message.txId = object.txId ?? "";
+    message.graph = object.graph ?? "";
+    message.userId = object.userId ?? "";
     return message;
   },
 };
@@ -11881,8 +13565,4902 @@ export const GetUserAccessResponse: MessageFns<GetUserAccessResponse> = {
   },
 };
 
+function createBaseGetPropertyHistoryRequest(): GetPropertyHistoryRequest {
+  return { subjectId: Buffer.alloc(0), predicate: "", limit: 0 };
+}
+
+export const GetPropertyHistoryRequest: MessageFns<GetPropertyHistoryRequest> = {
+  encode(message: GetPropertyHistoryRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.subjectId.length !== 0) {
+      writer.uint32(10).bytes(message.subjectId);
+    }
+    if (message.predicate !== "") {
+      writer.uint32(18).string(message.predicate);
+    }
+    if (message.limit !== 0) {
+      writer.uint32(24).uint32(message.limit);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetPropertyHistoryRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetPropertyHistoryRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.subjectId = Buffer.from(reader.bytes());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.predicate = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.limit = reader.uint32();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GetPropertyHistoryRequest {
+    return {
+      subjectId: isSet(object.subjectId)
+        ? Buffer.from(bytesFromBase64(object.subjectId))
+        : isSet(object.subject_id)
+        ? Buffer.from(bytesFromBase64(object.subject_id))
+        : Buffer.alloc(0),
+      predicate: isSet(object.predicate) ? globalThis.String(object.predicate) : "",
+      limit: isSet(object.limit) ? globalThis.Number(object.limit) : 0,
+    };
+  },
+
+  toJSON(message: GetPropertyHistoryRequest): unknown {
+    const obj: any = {};
+    if (message.subjectId.length !== 0) {
+      obj.subjectId = base64FromBytes(message.subjectId);
+    }
+    if (message.predicate !== "") {
+      obj.predicate = message.predicate;
+    }
+    if (message.limit !== 0) {
+      obj.limit = Math.round(message.limit);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetPropertyHistoryRequest>, I>>(base?: I): GetPropertyHistoryRequest {
+    return GetPropertyHistoryRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetPropertyHistoryRequest>, I>>(object: I): GetPropertyHistoryRequest {
+    const message = createBaseGetPropertyHistoryRequest();
+    message.subjectId = object.subjectId ?? Buffer.alloc(0);
+    message.predicate = object.predicate ?? "";
+    message.limit = object.limit ?? 0;
+    return message;
+  },
+};
+
+function createBasePropertyVersion(): PropertyVersion {
+  return { valueJson: "", transactionTime: 0 };
+}
+
+export const PropertyVersion: MessageFns<PropertyVersion> = {
+  encode(message: PropertyVersion, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.valueJson !== "") {
+      writer.uint32(10).string(message.valueJson);
+    }
+    if (message.transactionTime !== 0) {
+      writer.uint32(16).int64(message.transactionTime);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PropertyVersion {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePropertyVersion();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.valueJson = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.transactionTime = longToNumber(reader.int64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): PropertyVersion {
+    return {
+      valueJson: isSet(object.valueJson)
+        ? globalThis.String(object.valueJson)
+        : isSet(object.value_json)
+        ? globalThis.String(object.value_json)
+        : "",
+      transactionTime: isSet(object.transactionTime)
+        ? globalThis.Number(object.transactionTime)
+        : isSet(object.transaction_time)
+        ? globalThis.Number(object.transaction_time)
+        : 0,
+    };
+  },
+
+  toJSON(message: PropertyVersion): unknown {
+    const obj: any = {};
+    if (message.valueJson !== "") {
+      obj.valueJson = message.valueJson;
+    }
+    if (message.transactionTime !== 0) {
+      obj.transactionTime = Math.round(message.transactionTime);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<PropertyVersion>, I>>(base?: I): PropertyVersion {
+    return PropertyVersion.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PropertyVersion>, I>>(object: I): PropertyVersion {
+    const message = createBasePropertyVersion();
+    message.valueJson = object.valueJson ?? "";
+    message.transactionTime = object.transactionTime ?? 0;
+    return message;
+  },
+};
+
+function createBaseGetPropertyHistoryResponse(): GetPropertyHistoryResponse {
+  return { versions: [] };
+}
+
+export const GetPropertyHistoryResponse: MessageFns<GetPropertyHistoryResponse> = {
+  encode(message: GetPropertyHistoryResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.versions) {
+      PropertyVersion.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetPropertyHistoryResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetPropertyHistoryResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.versions.push(PropertyVersion.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GetPropertyHistoryResponse {
+    return {
+      versions: globalThis.Array.isArray(object?.versions)
+        ? object.versions.map((e: any) => PropertyVersion.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: GetPropertyHistoryResponse): unknown {
+    const obj: any = {};
+    if (message.versions?.length) {
+      obj.versions = message.versions.map((e) => PropertyVersion.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetPropertyHistoryResponse>, I>>(base?: I): GetPropertyHistoryResponse {
+    return GetPropertyHistoryResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetPropertyHistoryResponse>, I>>(object: I): GetPropertyHistoryResponse {
+    const message = createBaseGetPropertyHistoryResponse();
+    message.versions = object.versions?.map((e) => PropertyVersion.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseDeleteTriplesRequest(): DeleteTriplesRequest {
+  return {
+    subjectIds: [],
+    predicate: "",
+    vtEnd: 0,
+    objectId: Buffer.alloc(0),
+    value: undefined,
+    graph: undefined,
+    userId: "",
+  };
+}
+
+export const DeleteTriplesRequest: MessageFns<DeleteTriplesRequest> = {
+  encode(message: DeleteTriplesRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.subjectIds) {
+      writer.uint32(10).bytes(v!);
+    }
+    if (message.predicate !== "") {
+      writer.uint32(18).string(message.predicate);
+    }
+    if (message.vtEnd !== 0) {
+      writer.uint32(24).int64(message.vtEnd);
+    }
+    if (message.objectId.length !== 0) {
+      writer.uint32(34).bytes(message.objectId);
+    }
+    if (message.value !== undefined) {
+      Value.encode(message.value, writer.uint32(42).fork()).join();
+    }
+    if (message.graph !== undefined) {
+      GraphTerm.encode(message.graph, writer.uint32(50).fork()).join();
+    }
+    if (message.userId !== "") {
+      writer.uint32(58).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DeleteTriplesRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDeleteTriplesRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.subjectIds.push(Buffer.from(reader.bytes()));
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.predicate = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.vtEnd = longToNumber(reader.int64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.objectId = Buffer.from(reader.bytes());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.value = Value.decode(reader, reader.uint32());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.graph = GraphTerm.decode(reader, reader.uint32());
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): DeleteTriplesRequest {
+    return {
+      subjectIds: globalThis.Array.isArray(object?.subjectIds)
+        ? object.subjectIds.map((e: any) => Buffer.from(bytesFromBase64(e)))
+        : globalThis.Array.isArray(object?.subject_ids)
+        ? object.subject_ids.map((e: any) => Buffer.from(bytesFromBase64(e)))
+        : [],
+      predicate: isSet(object.predicate) ? globalThis.String(object.predicate) : "",
+      vtEnd: isSet(object.vtEnd)
+        ? globalThis.Number(object.vtEnd)
+        : isSet(object.vt_end)
+        ? globalThis.Number(object.vt_end)
+        : 0,
+      objectId: isSet(object.objectId)
+        ? Buffer.from(bytesFromBase64(object.objectId))
+        : isSet(object.object_id)
+        ? Buffer.from(bytesFromBase64(object.object_id))
+        : Buffer.alloc(0),
+      value: isSet(object.value) ? Value.fromJSON(object.value) : undefined,
+      graph: isSet(object.graph) ? GraphTerm.fromJSON(object.graph) : undefined,
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: DeleteTriplesRequest): unknown {
+    const obj: any = {};
+    if (message.subjectIds?.length) {
+      obj.subjectIds = message.subjectIds.map((e) => base64FromBytes(e));
+    }
+    if (message.predicate !== "") {
+      obj.predicate = message.predicate;
+    }
+    if (message.vtEnd !== 0) {
+      obj.vtEnd = Math.round(message.vtEnd);
+    }
+    if (message.objectId.length !== 0) {
+      obj.objectId = base64FromBytes(message.objectId);
+    }
+    if (message.value !== undefined) {
+      obj.value = Value.toJSON(message.value);
+    }
+    if (message.graph !== undefined) {
+      obj.graph = GraphTerm.toJSON(message.graph);
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DeleteTriplesRequest>, I>>(base?: I): DeleteTriplesRequest {
+    return DeleteTriplesRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DeleteTriplesRequest>, I>>(object: I): DeleteTriplesRequest {
+    const message = createBaseDeleteTriplesRequest();
+    message.subjectIds = object.subjectIds?.map((e) => e) || [];
+    message.predicate = object.predicate ?? "";
+    message.vtEnd = object.vtEnd ?? 0;
+    message.objectId = object.objectId ?? Buffer.alloc(0);
+    message.value = (object.value !== undefined && object.value !== null) ? Value.fromPartial(object.value) : undefined;
+    message.graph = (object.graph !== undefined && object.graph !== null)
+      ? GraphTerm.fromPartial(object.graph)
+      : undefined;
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseDeleteTriplesResponse(): DeleteTriplesResponse {
+  return { deletedCount: 0 };
+}
+
+export const DeleteTriplesResponse: MessageFns<DeleteTriplesResponse> = {
+  encode(message: DeleteTriplesResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.deletedCount !== 0) {
+      writer.uint32(8).uint64(message.deletedCount);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DeleteTriplesResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDeleteTriplesResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.deletedCount = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): DeleteTriplesResponse {
+    return {
+      deletedCount: isSet(object.deletedCount)
+        ? globalThis.Number(object.deletedCount)
+        : isSet(object.deleted_count)
+        ? globalThis.Number(object.deleted_count)
+        : 0,
+    };
+  },
+
+  toJSON(message: DeleteTriplesResponse): unknown {
+    const obj: any = {};
+    if (message.deletedCount !== 0) {
+      obj.deletedCount = Math.round(message.deletedCount);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DeleteTriplesResponse>, I>>(base?: I): DeleteTriplesResponse {
+    return DeleteTriplesResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DeleteTriplesResponse>, I>>(object: I): DeleteTriplesResponse {
+    const message = createBaseDeleteTriplesResponse();
+    message.deletedCount = object.deletedCount ?? 0;
+    return message;
+  },
+};
+
+function createBaseRunMaterializationRequest(): RunMaterializationRequest {
+  return { clearFirst: false };
+}
+
+export const RunMaterializationRequest: MessageFns<RunMaterializationRequest> = {
+  encode(message: RunMaterializationRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.clearFirst !== false) {
+      writer.uint32(8).bool(message.clearFirst);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RunMaterializationRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRunMaterializationRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.clearFirst = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RunMaterializationRequest {
+    return {
+      clearFirst: isSet(object.clearFirst)
+        ? globalThis.Boolean(object.clearFirst)
+        : isSet(object.clear_first)
+        ? globalThis.Boolean(object.clear_first)
+        : false,
+    };
+  },
+
+  toJSON(message: RunMaterializationRequest): unknown {
+    const obj: any = {};
+    if (message.clearFirst !== false) {
+      obj.clearFirst = message.clearFirst;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RunMaterializationRequest>, I>>(base?: I): RunMaterializationRequest {
+    return RunMaterializationRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RunMaterializationRequest>, I>>(object: I): RunMaterializationRequest {
+    const message = createBaseRunMaterializationRequest();
+    message.clearFirst = object.clearFirst ?? false;
+    return message;
+  },
+};
+
+function createBaseRunMaterializationResponse(): RunMaterializationResponse {
+  return { rulesFired: 0, derivedTriples: 0, iterations: 0 };
+}
+
+export const RunMaterializationResponse: MessageFns<RunMaterializationResponse> = {
+  encode(message: RunMaterializationResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.rulesFired !== 0) {
+      writer.uint32(8).uint64(message.rulesFired);
+    }
+    if (message.derivedTriples !== 0) {
+      writer.uint32(16).uint64(message.derivedTriples);
+    }
+    if (message.iterations !== 0) {
+      writer.uint32(24).uint32(message.iterations);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RunMaterializationResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRunMaterializationResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.rulesFired = longToNumber(reader.uint64());
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.derivedTriples = longToNumber(reader.uint64());
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.iterations = reader.uint32();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RunMaterializationResponse {
+    return {
+      rulesFired: isSet(object.rulesFired)
+        ? globalThis.Number(object.rulesFired)
+        : isSet(object.rules_fired)
+        ? globalThis.Number(object.rules_fired)
+        : 0,
+      derivedTriples: isSet(object.derivedTriples)
+        ? globalThis.Number(object.derivedTriples)
+        : isSet(object.derived_triples)
+        ? globalThis.Number(object.derived_triples)
+        : 0,
+      iterations: isSet(object.iterations) ? globalThis.Number(object.iterations) : 0,
+    };
+  },
+
+  toJSON(message: RunMaterializationResponse): unknown {
+    const obj: any = {};
+    if (message.rulesFired !== 0) {
+      obj.rulesFired = Math.round(message.rulesFired);
+    }
+    if (message.derivedTriples !== 0) {
+      obj.derivedTriples = Math.round(message.derivedTriples);
+    }
+    if (message.iterations !== 0) {
+      obj.iterations = Math.round(message.iterations);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RunMaterializationResponse>, I>>(base?: I): RunMaterializationResponse {
+    return RunMaterializationResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RunMaterializationResponse>, I>>(object: I): RunMaterializationResponse {
+    const message = createBaseRunMaterializationResponse();
+    message.rulesFired = object.rulesFired ?? 0;
+    message.derivedTriples = object.derivedTriples ?? 0;
+    message.iterations = object.iterations ?? 0;
+    return message;
+  },
+};
+
+function createBaseGraphMetadata(): GraphMetadata {
+  return { predicate: "", value: undefined };
+}
+
+export const GraphMetadata: MessageFns<GraphMetadata> = {
+  encode(message: GraphMetadata, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.predicate !== "") {
+      writer.uint32(10).string(message.predicate);
+    }
+    if (message.value !== undefined) {
+      Value.encode(message.value, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GraphMetadata {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGraphMetadata();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.predicate = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = Value.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GraphMetadata {
+    return {
+      predicate: isSet(object.predicate) ? globalThis.String(object.predicate) : "",
+      value: isSet(object.value) ? Value.fromJSON(object.value) : undefined,
+    };
+  },
+
+  toJSON(message: GraphMetadata): unknown {
+    const obj: any = {};
+    if (message.predicate !== "") {
+      obj.predicate = message.predicate;
+    }
+    if (message.value !== undefined) {
+      obj.value = Value.toJSON(message.value);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GraphMetadata>, I>>(base?: I): GraphMetadata {
+    return GraphMetadata.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GraphMetadata>, I>>(object: I): GraphMetadata {
+    const message = createBaseGraphMetadata();
+    message.predicate = object.predicate ?? "";
+    message.value = (object.value !== undefined && object.value !== null) ? Value.fromPartial(object.value) : undefined;
+    return message;
+  },
+};
+
+function createBaseGraphInfo(): GraphInfo {
+  return { iri: "", id: 0, metadata: [] };
+}
+
+export const GraphInfo: MessageFns<GraphInfo> = {
+  encode(message: GraphInfo, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.iri !== "") {
+      writer.uint32(10).string(message.iri);
+    }
+    if (message.id !== 0) {
+      writer.uint32(16).uint32(message.id);
+    }
+    for (const v of message.metadata) {
+      GraphMetadata.encode(v!, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GraphInfo {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGraphInfo();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.iri = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.id = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.metadata.push(GraphMetadata.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GraphInfo {
+    return {
+      iri: isSet(object.iri) ? globalThis.String(object.iri) : "",
+      id: isSet(object.id) ? globalThis.Number(object.id) : 0,
+      metadata: globalThis.Array.isArray(object?.metadata)
+        ? object.metadata.map((e: any) => GraphMetadata.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: GraphInfo): unknown {
+    const obj: any = {};
+    if (message.iri !== "") {
+      obj.iri = message.iri;
+    }
+    if (message.id !== 0) {
+      obj.id = Math.round(message.id);
+    }
+    if (message.metadata?.length) {
+      obj.metadata = message.metadata.map((e) => GraphMetadata.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GraphInfo>, I>>(base?: I): GraphInfo {
+    return GraphInfo.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GraphInfo>, I>>(object: I): GraphInfo {
+    const message = createBaseGraphInfo();
+    message.iri = object.iri ?? "";
+    message.id = object.id ?? 0;
+    message.metadata = object.metadata?.map((e) => GraphMetadata.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseCreateGraphRequest(): CreateGraphRequest {
+  return { iri: "", metadata: [], userId: "" };
+}
+
+export const CreateGraphRequest: MessageFns<CreateGraphRequest> = {
+  encode(message: CreateGraphRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.iri !== "") {
+      writer.uint32(10).string(message.iri);
+    }
+    for (const v of message.metadata) {
+      GraphMetadata.encode(v!, writer.uint32(18).fork()).join();
+    }
+    if (message.userId !== "") {
+      writer.uint32(26).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CreateGraphRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCreateGraphRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.iri = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.metadata.push(GraphMetadata.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CreateGraphRequest {
+    return {
+      iri: isSet(object.iri) ? globalThis.String(object.iri) : "",
+      metadata: globalThis.Array.isArray(object?.metadata)
+        ? object.metadata.map((e: any) => GraphMetadata.fromJSON(e))
+        : [],
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: CreateGraphRequest): unknown {
+    const obj: any = {};
+    if (message.iri !== "") {
+      obj.iri = message.iri;
+    }
+    if (message.metadata?.length) {
+      obj.metadata = message.metadata.map((e) => GraphMetadata.toJSON(e));
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CreateGraphRequest>, I>>(base?: I): CreateGraphRequest {
+    return CreateGraphRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CreateGraphRequest>, I>>(object: I): CreateGraphRequest {
+    const message = createBaseCreateGraphRequest();
+    message.iri = object.iri ?? "";
+    message.metadata = object.metadata?.map((e) => GraphMetadata.fromPartial(e)) || [];
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseCreateGraphResponse(): CreateGraphResponse {
+  return { graph: undefined };
+}
+
+export const CreateGraphResponse: MessageFns<CreateGraphResponse> = {
+  encode(message: CreateGraphResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.graph !== undefined) {
+      GraphInfo.encode(message.graph, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CreateGraphResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCreateGraphResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.graph = GraphInfo.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CreateGraphResponse {
+    return { graph: isSet(object.graph) ? GraphInfo.fromJSON(object.graph) : undefined };
+  },
+
+  toJSON(message: CreateGraphResponse): unknown {
+    const obj: any = {};
+    if (message.graph !== undefined) {
+      obj.graph = GraphInfo.toJSON(message.graph);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CreateGraphResponse>, I>>(base?: I): CreateGraphResponse {
+    return CreateGraphResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CreateGraphResponse>, I>>(object: I): CreateGraphResponse {
+    const message = createBaseCreateGraphResponse();
+    message.graph = (object.graph !== undefined && object.graph !== null)
+      ? GraphInfo.fromPartial(object.graph)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseListGraphsRequest(): ListGraphsRequest {
+  return { filter: [], includeSystem: false };
+}
+
+export const ListGraphsRequest: MessageFns<ListGraphsRequest> = {
+  encode(message: ListGraphsRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.filter) {
+      GraphMetadata.encode(v!, writer.uint32(10).fork()).join();
+    }
+    if (message.includeSystem !== false) {
+      writer.uint32(16).bool(message.includeSystem);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ListGraphsRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseListGraphsRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.filter.push(GraphMetadata.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.includeSystem = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ListGraphsRequest {
+    return {
+      filter: globalThis.Array.isArray(object?.filter) ? object.filter.map((e: any) => GraphMetadata.fromJSON(e)) : [],
+      includeSystem: isSet(object.includeSystem)
+        ? globalThis.Boolean(object.includeSystem)
+        : isSet(object.include_system)
+        ? globalThis.Boolean(object.include_system)
+        : false,
+    };
+  },
+
+  toJSON(message: ListGraphsRequest): unknown {
+    const obj: any = {};
+    if (message.filter?.length) {
+      obj.filter = message.filter.map((e) => GraphMetadata.toJSON(e));
+    }
+    if (message.includeSystem !== false) {
+      obj.includeSystem = message.includeSystem;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ListGraphsRequest>, I>>(base?: I): ListGraphsRequest {
+    return ListGraphsRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ListGraphsRequest>, I>>(object: I): ListGraphsRequest {
+    const message = createBaseListGraphsRequest();
+    message.filter = object.filter?.map((e) => GraphMetadata.fromPartial(e)) || [];
+    message.includeSystem = object.includeSystem ?? false;
+    return message;
+  },
+};
+
+function createBaseListGraphsResponse(): ListGraphsResponse {
+  return { graphs: [] };
+}
+
+export const ListGraphsResponse: MessageFns<ListGraphsResponse> = {
+  encode(message: ListGraphsResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.graphs) {
+      GraphInfo.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ListGraphsResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseListGraphsResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.graphs.push(GraphInfo.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ListGraphsResponse {
+    return {
+      graphs: globalThis.Array.isArray(object?.graphs) ? object.graphs.map((e: any) => GraphInfo.fromJSON(e)) : [],
+    };
+  },
+
+  toJSON(message: ListGraphsResponse): unknown {
+    const obj: any = {};
+    if (message.graphs?.length) {
+      obj.graphs = message.graphs.map((e) => GraphInfo.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ListGraphsResponse>, I>>(base?: I): ListGraphsResponse {
+    return ListGraphsResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ListGraphsResponse>, I>>(object: I): ListGraphsResponse {
+    const message = createBaseListGraphsResponse();
+    message.graphs = object.graphs?.map((e) => GraphInfo.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseGraphStatsRequest(): GraphStatsRequest {
+  return { iri: "" };
+}
+
+export const GraphStatsRequest: MessageFns<GraphStatsRequest> = {
+  encode(message: GraphStatsRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.iri !== "") {
+      writer.uint32(10).string(message.iri);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GraphStatsRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGraphStatsRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.iri = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GraphStatsRequest {
+    return { iri: isSet(object.iri) ? globalThis.String(object.iri) : "" };
+  },
+
+  toJSON(message: GraphStatsRequest): unknown {
+    const obj: any = {};
+    if (message.iri !== "") {
+      obj.iri = message.iri;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GraphStatsRequest>, I>>(base?: I): GraphStatsRequest {
+    return GraphStatsRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GraphStatsRequest>, I>>(object: I): GraphStatsRequest {
+    const message = createBaseGraphStatsRequest();
+    message.iri = object.iri ?? "";
+    return message;
+  },
+};
+
+function createBaseGraphStatsResponse(): GraphStatsResponse {
+  return { iri: "", liveQuads: 0, lastWriteTt: 0 };
+}
+
+export const GraphStatsResponse: MessageFns<GraphStatsResponse> = {
+  encode(message: GraphStatsResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.iri !== "") {
+      writer.uint32(10).string(message.iri);
+    }
+    if (message.liveQuads !== 0) {
+      writer.uint32(16).uint64(message.liveQuads);
+    }
+    if (message.lastWriteTt !== 0) {
+      writer.uint32(24).int64(message.lastWriteTt);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GraphStatsResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGraphStatsResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.iri = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.liveQuads = longToNumber(reader.uint64());
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.lastWriteTt = longToNumber(reader.int64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GraphStatsResponse {
+    return {
+      iri: isSet(object.iri) ? globalThis.String(object.iri) : "",
+      liveQuads: isSet(object.liveQuads)
+        ? globalThis.Number(object.liveQuads)
+        : isSet(object.live_quads)
+        ? globalThis.Number(object.live_quads)
+        : 0,
+      lastWriteTt: isSet(object.lastWriteTt)
+        ? globalThis.Number(object.lastWriteTt)
+        : isSet(object.last_write_tt)
+        ? globalThis.Number(object.last_write_tt)
+        : 0,
+    };
+  },
+
+  toJSON(message: GraphStatsResponse): unknown {
+    const obj: any = {};
+    if (message.iri !== "") {
+      obj.iri = message.iri;
+    }
+    if (message.liveQuads !== 0) {
+      obj.liveQuads = Math.round(message.liveQuads);
+    }
+    if (message.lastWriteTt !== 0) {
+      obj.lastWriteTt = Math.round(message.lastWriteTt);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GraphStatsResponse>, I>>(base?: I): GraphStatsResponse {
+    return GraphStatsResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GraphStatsResponse>, I>>(object: I): GraphStatsResponse {
+    const message = createBaseGraphStatsResponse();
+    message.iri = object.iri ?? "";
+    message.liveQuads = object.liveQuads ?? 0;
+    message.lastWriteTt = object.lastWriteTt ?? 0;
+    return message;
+  },
+};
+
+function createBaseCopyGraphRequest(): CopyGraphRequest {
+  return { source: "", target: "", clearTarget: false, userId: "" };
+}
+
+export const CopyGraphRequest: MessageFns<CopyGraphRequest> = {
+  encode(message: CopyGraphRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.source !== "") {
+      writer.uint32(10).string(message.source);
+    }
+    if (message.target !== "") {
+      writer.uint32(18).string(message.target);
+    }
+    if (message.clearTarget !== false) {
+      writer.uint32(24).bool(message.clearTarget);
+    }
+    if (message.userId !== "") {
+      writer.uint32(34).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CopyGraphRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCopyGraphRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.source = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.target = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.clearTarget = reader.bool();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CopyGraphRequest {
+    return {
+      source: isSet(object.source) ? globalThis.String(object.source) : "",
+      target: isSet(object.target) ? globalThis.String(object.target) : "",
+      clearTarget: isSet(object.clearTarget)
+        ? globalThis.Boolean(object.clearTarget)
+        : isSet(object.clear_target)
+        ? globalThis.Boolean(object.clear_target)
+        : false,
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: CopyGraphRequest): unknown {
+    const obj: any = {};
+    if (message.source !== "") {
+      obj.source = message.source;
+    }
+    if (message.target !== "") {
+      obj.target = message.target;
+    }
+    if (message.clearTarget !== false) {
+      obj.clearTarget = message.clearTarget;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CopyGraphRequest>, I>>(base?: I): CopyGraphRequest {
+    return CopyGraphRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CopyGraphRequest>, I>>(object: I): CopyGraphRequest {
+    const message = createBaseCopyGraphRequest();
+    message.source = object.source ?? "";
+    message.target = object.target ?? "";
+    message.clearTarget = object.clearTarget ?? false;
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseCopyGraphResponse(): CopyGraphResponse {
+  return { quads: 0 };
+}
+
+export const CopyGraphResponse: MessageFns<CopyGraphResponse> = {
+  encode(message: CopyGraphResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.quads !== 0) {
+      writer.uint32(8).uint64(message.quads);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CopyGraphResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCopyGraphResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.quads = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CopyGraphResponse {
+    return { quads: isSet(object.quads) ? globalThis.Number(object.quads) : 0 };
+  },
+
+  toJSON(message: CopyGraphResponse): unknown {
+    const obj: any = {};
+    if (message.quads !== 0) {
+      obj.quads = Math.round(message.quads);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CopyGraphResponse>, I>>(base?: I): CopyGraphResponse {
+    return CopyGraphResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CopyGraphResponse>, I>>(object: I): CopyGraphResponse {
+    const message = createBaseCopyGraphResponse();
+    message.quads = object.quads ?? 0;
+    return message;
+  },
+};
+
+function createBaseMoveGraphRequest(): MoveGraphRequest {
+  return { source: "", target: "", userId: "" };
+}
+
+export const MoveGraphRequest: MessageFns<MoveGraphRequest> = {
+  encode(message: MoveGraphRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.source !== "") {
+      writer.uint32(10).string(message.source);
+    }
+    if (message.target !== "") {
+      writer.uint32(18).string(message.target);
+    }
+    if (message.userId !== "") {
+      writer.uint32(26).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MoveGraphRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMoveGraphRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.source = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.target = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MoveGraphRequest {
+    return {
+      source: isSet(object.source) ? globalThis.String(object.source) : "",
+      target: isSet(object.target) ? globalThis.String(object.target) : "",
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: MoveGraphRequest): unknown {
+    const obj: any = {};
+    if (message.source !== "") {
+      obj.source = message.source;
+    }
+    if (message.target !== "") {
+      obj.target = message.target;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<MoveGraphRequest>, I>>(base?: I): MoveGraphRequest {
+    return MoveGraphRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<MoveGraphRequest>, I>>(object: I): MoveGraphRequest {
+    const message = createBaseMoveGraphRequest();
+    message.source = object.source ?? "";
+    message.target = object.target ?? "";
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseDropGraphRequest(): DropGraphRequest {
+  return { iri: "", userId: "" };
+}
+
+export const DropGraphRequest: MessageFns<DropGraphRequest> = {
+  encode(message: DropGraphRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.iri !== "") {
+      writer.uint32(10).string(message.iri);
+    }
+    if (message.userId !== "") {
+      writer.uint32(18).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DropGraphRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDropGraphRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.iri = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): DropGraphRequest {
+    return {
+      iri: isSet(object.iri) ? globalThis.String(object.iri) : "",
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: DropGraphRequest): unknown {
+    const obj: any = {};
+    if (message.iri !== "") {
+      obj.iri = message.iri;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DropGraphRequest>, I>>(base?: I): DropGraphRequest {
+    return DropGraphRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DropGraphRequest>, I>>(object: I): DropGraphRequest {
+    const message = createBaseDropGraphRequest();
+    message.iri = object.iri ?? "";
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseDropGraphResponse(): DropGraphResponse {
+  return { quadsClosed: 0 };
+}
+
+export const DropGraphResponse: MessageFns<DropGraphResponse> = {
+  encode(message: DropGraphResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.quadsClosed !== 0) {
+      writer.uint32(8).uint64(message.quadsClosed);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DropGraphResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDropGraphResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.quadsClosed = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): DropGraphResponse {
+    return {
+      quadsClosed: isSet(object.quadsClosed)
+        ? globalThis.Number(object.quadsClosed)
+        : isSet(object.quads_closed)
+        ? globalThis.Number(object.quads_closed)
+        : 0,
+    };
+  },
+
+  toJSON(message: DropGraphResponse): unknown {
+    const obj: any = {};
+    if (message.quadsClosed !== 0) {
+      obj.quadsClosed = Math.round(message.quadsClosed);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DropGraphResponse>, I>>(base?: I): DropGraphResponse {
+    return DropGraphResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DropGraphResponse>, I>>(object: I): DropGraphResponse {
+    const message = createBaseDropGraphResponse();
+    message.quadsClosed = object.quadsClosed ?? 0;
+    return message;
+  },
+};
+
+function createBaseGraphTriples(): GraphTriples {
+  return { graph: "", triples: [] };
+}
+
+export const GraphTriples: MessageFns<GraphTriples> = {
+  encode(message: GraphTriples, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.graph !== "") {
+      writer.uint32(10).string(message.graph);
+    }
+    for (const v of message.triples) {
+      Triple.encode(v!, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GraphTriples {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGraphTriples();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.graph = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.triples.push(Triple.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GraphTriples {
+    return {
+      graph: isSet(object.graph) ? globalThis.String(object.graph) : "",
+      triples: globalThis.Array.isArray(object?.triples) ? object.triples.map((e: any) => Triple.fromJSON(e)) : [],
+    };
+  },
+
+  toJSON(message: GraphTriples): unknown {
+    const obj: any = {};
+    if (message.graph !== "") {
+      obj.graph = message.graph;
+    }
+    if (message.triples?.length) {
+      obj.triples = message.triples.map((e) => Triple.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GraphTriples>, I>>(base?: I): GraphTriples {
+    return GraphTriples.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GraphTriples>, I>>(object: I): GraphTriples {
+    const message = createBaseGraphTriples();
+    message.graph = object.graph ?? "";
+    message.triples = object.triples?.map((e) => Triple.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseQuadRef(): QuadRef {
+  return { subject: undefined, predicate: "", node: undefined, value: undefined, graph: "" };
+}
+
+export const QuadRef: MessageFns<QuadRef> = {
+  encode(message: QuadRef, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.subject !== undefined) {
+      NodeId.encode(message.subject, writer.uint32(10).fork()).join();
+    }
+    if (message.predicate !== "") {
+      writer.uint32(18).string(message.predicate);
+    }
+    if (message.node !== undefined) {
+      NodeId.encode(message.node, writer.uint32(26).fork()).join();
+    }
+    if (message.value !== undefined) {
+      Value.encode(message.value, writer.uint32(34).fork()).join();
+    }
+    if (message.graph !== "") {
+      writer.uint32(42).string(message.graph);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): QuadRef {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseQuadRef();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.subject = NodeId.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.predicate = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.node = NodeId.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.value = Value.decode(reader, reader.uint32());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.graph = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): QuadRef {
+    return {
+      subject: isSet(object.subject) ? NodeId.fromJSON(object.subject) : undefined,
+      predicate: isSet(object.predicate) ? globalThis.String(object.predicate) : "",
+      node: isSet(object.node) ? NodeId.fromJSON(object.node) : undefined,
+      value: isSet(object.value) ? Value.fromJSON(object.value) : undefined,
+      graph: isSet(object.graph) ? globalThis.String(object.graph) : "",
+    };
+  },
+
+  toJSON(message: QuadRef): unknown {
+    const obj: any = {};
+    if (message.subject !== undefined) {
+      obj.subject = NodeId.toJSON(message.subject);
+    }
+    if (message.predicate !== "") {
+      obj.predicate = message.predicate;
+    }
+    if (message.node !== undefined) {
+      obj.node = NodeId.toJSON(message.node);
+    }
+    if (message.value !== undefined) {
+      obj.value = Value.toJSON(message.value);
+    }
+    if (message.graph !== "") {
+      obj.graph = message.graph;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<QuadRef>, I>>(base?: I): QuadRef {
+    return QuadRef.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<QuadRef>, I>>(object: I): QuadRef {
+    const message = createBaseQuadRef();
+    message.subject = (object.subject !== undefined && object.subject !== null)
+      ? NodeId.fromPartial(object.subject)
+      : undefined;
+    message.predicate = object.predicate ?? "";
+    message.node = (object.node !== undefined && object.node !== null) ? NodeId.fromPartial(object.node) : undefined;
+    message.value = (object.value !== undefined && object.value !== null) ? Value.fromPartial(object.value) : undefined;
+    message.graph = object.graph ?? "";
+    return message;
+  },
+};
+
+function createBaseApplyChangesRequest(): ApplyChangesRequest {
+  return { adds: [], retractions: [], readTs: 0, strict: false, iris: [], userId: "" };
+}
+
+export const ApplyChangesRequest: MessageFns<ApplyChangesRequest> = {
+  encode(message: ApplyChangesRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.adds) {
+      GraphTriples.encode(v!, writer.uint32(10).fork()).join();
+    }
+    for (const v of message.retractions) {
+      QuadRef.encode(v!, writer.uint32(18).fork()).join();
+    }
+    if (message.readTs !== 0) {
+      writer.uint32(24).int64(message.readTs);
+    }
+    if (message.strict !== false) {
+      writer.uint32(32).bool(message.strict);
+    }
+    for (const v of message.iris) {
+      writer.uint32(42).string(v!);
+    }
+    if (message.userId !== "") {
+      writer.uint32(50).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApplyChangesRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseApplyChangesRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.adds.push(GraphTriples.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.retractions.push(QuadRef.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.readTs = longToNumber(reader.int64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.strict = reader.bool();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.iris.push(reader.string());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ApplyChangesRequest {
+    return {
+      adds: globalThis.Array.isArray(object?.adds) ? object.adds.map((e: any) => GraphTriples.fromJSON(e)) : [],
+      retractions: globalThis.Array.isArray(object?.retractions)
+        ? object.retractions.map((e: any) => QuadRef.fromJSON(e))
+        : [],
+      readTs: isSet(object.readTs)
+        ? globalThis.Number(object.readTs)
+        : isSet(object.read_ts)
+        ? globalThis.Number(object.read_ts)
+        : 0,
+      strict: isSet(object.strict) ? globalThis.Boolean(object.strict) : false,
+      iris: globalThis.Array.isArray(object?.iris) ? object.iris.map((e: any) => globalThis.String(e)) : [],
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: ApplyChangesRequest): unknown {
+    const obj: any = {};
+    if (message.adds?.length) {
+      obj.adds = message.adds.map((e) => GraphTriples.toJSON(e));
+    }
+    if (message.retractions?.length) {
+      obj.retractions = message.retractions.map((e) => QuadRef.toJSON(e));
+    }
+    if (message.readTs !== 0) {
+      obj.readTs = Math.round(message.readTs);
+    }
+    if (message.strict !== false) {
+      obj.strict = message.strict;
+    }
+    if (message.iris?.length) {
+      obj.iris = message.iris;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApplyChangesRequest>, I>>(base?: I): ApplyChangesRequest {
+    return ApplyChangesRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApplyChangesRequest>, I>>(object: I): ApplyChangesRequest {
+    const message = createBaseApplyChangesRequest();
+    message.adds = object.adds?.map((e) => GraphTriples.fromPartial(e)) || [];
+    message.retractions = object.retractions?.map((e) => QuadRef.fromPartial(e)) || [];
+    message.readTs = object.readTs ?? 0;
+    message.strict = object.strict ?? false;
+    message.iris = object.iris?.map((e) => e) || [];
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseApplyChangesResponse(): ApplyChangesResponse {
+  return { commitTs: 0, added: 0, retracted: 0, retractionsNotFound: 0, edgeIds: [] };
+}
+
+export const ApplyChangesResponse: MessageFns<ApplyChangesResponse> = {
+  encode(message: ApplyChangesResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.commitTs !== 0) {
+      writer.uint32(8).int64(message.commitTs);
+    }
+    if (message.added !== 0) {
+      writer.uint32(16).uint64(message.added);
+    }
+    if (message.retracted !== 0) {
+      writer.uint32(24).uint64(message.retracted);
+    }
+    if (message.retractionsNotFound !== 0) {
+      writer.uint32(32).uint64(message.retractionsNotFound);
+    }
+    for (const v of message.edgeIds) {
+      writer.uint32(42).bytes(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApplyChangesResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseApplyChangesResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.commitTs = longToNumber(reader.int64());
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.added = longToNumber(reader.uint64());
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.retracted = longToNumber(reader.uint64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.retractionsNotFound = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.edgeIds.push(Buffer.from(reader.bytes()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ApplyChangesResponse {
+    return {
+      commitTs: isSet(object.commitTs)
+        ? globalThis.Number(object.commitTs)
+        : isSet(object.commit_ts)
+        ? globalThis.Number(object.commit_ts)
+        : 0,
+      added: isSet(object.added) ? globalThis.Number(object.added) : 0,
+      retracted: isSet(object.retracted) ? globalThis.Number(object.retracted) : 0,
+      retractionsNotFound: isSet(object.retractionsNotFound)
+        ? globalThis.Number(object.retractionsNotFound)
+        : isSet(object.retractions_not_found)
+        ? globalThis.Number(object.retractions_not_found)
+        : 0,
+      edgeIds: globalThis.Array.isArray(object?.edgeIds)
+        ? object.edgeIds.map((e: any) => Buffer.from(bytesFromBase64(e)))
+        : globalThis.Array.isArray(object?.edge_ids)
+        ? object.edge_ids.map((e: any) => Buffer.from(bytesFromBase64(e)))
+        : [],
+    };
+  },
+
+  toJSON(message: ApplyChangesResponse): unknown {
+    const obj: any = {};
+    if (message.commitTs !== 0) {
+      obj.commitTs = Math.round(message.commitTs);
+    }
+    if (message.added !== 0) {
+      obj.added = Math.round(message.added);
+    }
+    if (message.retracted !== 0) {
+      obj.retracted = Math.round(message.retracted);
+    }
+    if (message.retractionsNotFound !== 0) {
+      obj.retractionsNotFound = Math.round(message.retractionsNotFound);
+    }
+    if (message.edgeIds?.length) {
+      obj.edgeIds = message.edgeIds.map((e) => base64FromBytes(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApplyChangesResponse>, I>>(base?: I): ApplyChangesResponse {
+    return ApplyChangesResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApplyChangesResponse>, I>>(object: I): ApplyChangesResponse {
+    const message = createBaseApplyChangesResponse();
+    message.commitTs = object.commitTs ?? 0;
+    message.added = object.added ?? 0;
+    message.retracted = object.retracted ?? 0;
+    message.retractionsNotFound = object.retractionsNotFound ?? 0;
+    message.edgeIds = object.edgeIds?.map((e) => e) || [];
+    return message;
+  },
+};
+
+function createBaseValidateShapesRequest(): ValidateShapesRequest {
+  return {
+    shapesGraphs: [],
+    dataGraphs: [],
+    overlayAdds: [],
+    overlayRetractions: [],
+    readTs: 0,
+    userId: "",
+    allFocusNodes: false,
+  };
+}
+
+export const ValidateShapesRequest: MessageFns<ValidateShapesRequest> = {
+  encode(message: ValidateShapesRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.shapesGraphs) {
+      writer.uint32(10).string(v!);
+    }
+    for (const v of message.dataGraphs) {
+      writer.uint32(18).string(v!);
+    }
+    for (const v of message.overlayAdds) {
+      GraphTriples.encode(v!, writer.uint32(26).fork()).join();
+    }
+    for (const v of message.overlayRetractions) {
+      QuadRef.encode(v!, writer.uint32(34).fork()).join();
+    }
+    if (message.readTs !== 0) {
+      writer.uint32(40).int64(message.readTs);
+    }
+    if (message.userId !== "") {
+      writer.uint32(50).string(message.userId);
+    }
+    if (message.allFocusNodes !== false) {
+      writer.uint32(56).bool(message.allFocusNodes);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ValidateShapesRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseValidateShapesRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.shapesGraphs.push(reader.string());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.dataGraphs.push(reader.string());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.overlayAdds.push(GraphTriples.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.overlayRetractions.push(QuadRef.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.readTs = longToNumber(reader.int64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.allFocusNodes = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ValidateShapesRequest {
+    return {
+      shapesGraphs: globalThis.Array.isArray(object?.shapesGraphs)
+        ? object.shapesGraphs.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.shapes_graphs)
+        ? object.shapes_graphs.map((e: any) => globalThis.String(e))
+        : [],
+      dataGraphs: globalThis.Array.isArray(object?.dataGraphs)
+        ? object.dataGraphs.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.data_graphs)
+        ? object.data_graphs.map((e: any) => globalThis.String(e))
+        : [],
+      overlayAdds: globalThis.Array.isArray(object?.overlayAdds)
+        ? object.overlayAdds.map((e: any) => GraphTriples.fromJSON(e))
+        : globalThis.Array.isArray(object?.overlay_adds)
+        ? object.overlay_adds.map((e: any) => GraphTriples.fromJSON(e))
+        : [],
+      overlayRetractions: globalThis.Array.isArray(object?.overlayRetractions)
+        ? object.overlayRetractions.map((e: any) => QuadRef.fromJSON(e))
+        : globalThis.Array.isArray(object?.overlay_retractions)
+        ? object.overlay_retractions.map((e: any) => QuadRef.fromJSON(e))
+        : [],
+      readTs: isSet(object.readTs)
+        ? globalThis.Number(object.readTs)
+        : isSet(object.read_ts)
+        ? globalThis.Number(object.read_ts)
+        : 0,
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+      allFocusNodes: isSet(object.allFocusNodes)
+        ? globalThis.Boolean(object.allFocusNodes)
+        : isSet(object.all_focus_nodes)
+        ? globalThis.Boolean(object.all_focus_nodes)
+        : false,
+    };
+  },
+
+  toJSON(message: ValidateShapesRequest): unknown {
+    const obj: any = {};
+    if (message.shapesGraphs?.length) {
+      obj.shapesGraphs = message.shapesGraphs;
+    }
+    if (message.dataGraphs?.length) {
+      obj.dataGraphs = message.dataGraphs;
+    }
+    if (message.overlayAdds?.length) {
+      obj.overlayAdds = message.overlayAdds.map((e) => GraphTriples.toJSON(e));
+    }
+    if (message.overlayRetractions?.length) {
+      obj.overlayRetractions = message.overlayRetractions.map((e) => QuadRef.toJSON(e));
+    }
+    if (message.readTs !== 0) {
+      obj.readTs = Math.round(message.readTs);
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    if (message.allFocusNodes !== false) {
+      obj.allFocusNodes = message.allFocusNodes;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ValidateShapesRequest>, I>>(base?: I): ValidateShapesRequest {
+    return ValidateShapesRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ValidateShapesRequest>, I>>(object: I): ValidateShapesRequest {
+    const message = createBaseValidateShapesRequest();
+    message.shapesGraphs = object.shapesGraphs?.map((e) => e) || [];
+    message.dataGraphs = object.dataGraphs?.map((e) => e) || [];
+    message.overlayAdds = object.overlayAdds?.map((e) => GraphTriples.fromPartial(e)) || [];
+    message.overlayRetractions = object.overlayRetractions?.map((e) => QuadRef.fromPartial(e)) || [];
+    message.readTs = object.readTs ?? 0;
+    message.userId = object.userId ?? "";
+    message.allFocusNodes = object.allFocusNodes ?? false;
+    return message;
+  },
+};
+
+function createBaseValidationResult(): ValidationResult {
+  return {
+    focusNode: "",
+    focusLiteral: undefined,
+    path: "",
+    valueNode: "",
+    valueLiteral: undefined,
+    sourceShape: "",
+    constraintComponent: "",
+    severity: "",
+    message: "",
+  };
+}
+
+export const ValidationResult: MessageFns<ValidationResult> = {
+  encode(message: ValidationResult, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.focusNode !== "") {
+      writer.uint32(10).string(message.focusNode);
+    }
+    if (message.focusLiteral !== undefined) {
+      Value.encode(message.focusLiteral, writer.uint32(18).fork()).join();
+    }
+    if (message.path !== "") {
+      writer.uint32(26).string(message.path);
+    }
+    if (message.valueNode !== "") {
+      writer.uint32(34).string(message.valueNode);
+    }
+    if (message.valueLiteral !== undefined) {
+      Value.encode(message.valueLiteral, writer.uint32(42).fork()).join();
+    }
+    if (message.sourceShape !== "") {
+      writer.uint32(50).string(message.sourceShape);
+    }
+    if (message.constraintComponent !== "") {
+      writer.uint32(58).string(message.constraintComponent);
+    }
+    if (message.severity !== "") {
+      writer.uint32(66).string(message.severity);
+    }
+    if (message.message !== "") {
+      writer.uint32(74).string(message.message);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ValidationResult {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseValidationResult();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.focusNode = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.focusLiteral = Value.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.path = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.valueNode = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.valueLiteral = Value.decode(reader, reader.uint32());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.sourceShape = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.constraintComponent = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.severity = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.message = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ValidationResult {
+    return {
+      focusNode: isSet(object.focusNode)
+        ? globalThis.String(object.focusNode)
+        : isSet(object.focus_node)
+        ? globalThis.String(object.focus_node)
+        : "",
+      focusLiteral: isSet(object.focusLiteral)
+        ? Value.fromJSON(object.focusLiteral)
+        : isSet(object.focus_literal)
+        ? Value.fromJSON(object.focus_literal)
+        : undefined,
+      path: isSet(object.path) ? globalThis.String(object.path) : "",
+      valueNode: isSet(object.valueNode)
+        ? globalThis.String(object.valueNode)
+        : isSet(object.value_node)
+        ? globalThis.String(object.value_node)
+        : "",
+      valueLiteral: isSet(object.valueLiteral)
+        ? Value.fromJSON(object.valueLiteral)
+        : isSet(object.value_literal)
+        ? Value.fromJSON(object.value_literal)
+        : undefined,
+      sourceShape: isSet(object.sourceShape)
+        ? globalThis.String(object.sourceShape)
+        : isSet(object.source_shape)
+        ? globalThis.String(object.source_shape)
+        : "",
+      constraintComponent: isSet(object.constraintComponent)
+        ? globalThis.String(object.constraintComponent)
+        : isSet(object.constraint_component)
+        ? globalThis.String(object.constraint_component)
+        : "",
+      severity: isSet(object.severity) ? globalThis.String(object.severity) : "",
+      message: isSet(object.message) ? globalThis.String(object.message) : "",
+    };
+  },
+
+  toJSON(message: ValidationResult): unknown {
+    const obj: any = {};
+    if (message.focusNode !== "") {
+      obj.focusNode = message.focusNode;
+    }
+    if (message.focusLiteral !== undefined) {
+      obj.focusLiteral = Value.toJSON(message.focusLiteral);
+    }
+    if (message.path !== "") {
+      obj.path = message.path;
+    }
+    if (message.valueNode !== "") {
+      obj.valueNode = message.valueNode;
+    }
+    if (message.valueLiteral !== undefined) {
+      obj.valueLiteral = Value.toJSON(message.valueLiteral);
+    }
+    if (message.sourceShape !== "") {
+      obj.sourceShape = message.sourceShape;
+    }
+    if (message.constraintComponent !== "") {
+      obj.constraintComponent = message.constraintComponent;
+    }
+    if (message.severity !== "") {
+      obj.severity = message.severity;
+    }
+    if (message.message !== "") {
+      obj.message = message.message;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ValidationResult>, I>>(base?: I): ValidationResult {
+    return ValidationResult.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ValidationResult>, I>>(object: I): ValidationResult {
+    const message = createBaseValidationResult();
+    message.focusNode = object.focusNode ?? "";
+    message.focusLiteral = (object.focusLiteral !== undefined && object.focusLiteral !== null)
+      ? Value.fromPartial(object.focusLiteral)
+      : undefined;
+    message.path = object.path ?? "";
+    message.valueNode = object.valueNode ?? "";
+    message.valueLiteral = (object.valueLiteral !== undefined && object.valueLiteral !== null)
+      ? Value.fromPartial(object.valueLiteral)
+      : undefined;
+    message.sourceShape = object.sourceShape ?? "";
+    message.constraintComponent = object.constraintComponent ?? "";
+    message.severity = object.severity ?? "";
+    message.message = object.message ?? "";
+    return message;
+  },
+};
+
+function createBaseValidateShapesResponse(): ValidateShapesResponse {
+  return { conforms: false, noViolations: false, results: [] };
+}
+
+export const ValidateShapesResponse: MessageFns<ValidateShapesResponse> = {
+  encode(message: ValidateShapesResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.conforms !== false) {
+      writer.uint32(8).bool(message.conforms);
+    }
+    if (message.noViolations !== false) {
+      writer.uint32(16).bool(message.noViolations);
+    }
+    for (const v of message.results) {
+      ValidationResult.encode(v!, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ValidateShapesResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseValidateShapesResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.conforms = reader.bool();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.noViolations = reader.bool();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.results.push(ValidationResult.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ValidateShapesResponse {
+    return {
+      conforms: isSet(object.conforms) ? globalThis.Boolean(object.conforms) : false,
+      noViolations: isSet(object.noViolations)
+        ? globalThis.Boolean(object.noViolations)
+        : isSet(object.no_violations)
+        ? globalThis.Boolean(object.no_violations)
+        : false,
+      results: globalThis.Array.isArray(object?.results)
+        ? object.results.map((e: any) => ValidationResult.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: ValidateShapesResponse): unknown {
+    const obj: any = {};
+    if (message.conforms !== false) {
+      obj.conforms = message.conforms;
+    }
+    if (message.noViolations !== false) {
+      obj.noViolations = message.noViolations;
+    }
+    if (message.results?.length) {
+      obj.results = message.results.map((e) => ValidationResult.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ValidateShapesResponse>, I>>(base?: I): ValidateShapesResponse {
+    return ValidateShapesResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ValidateShapesResponse>, I>>(object: I): ValidateShapesResponse {
+    const message = createBaseValidateShapesResponse();
+    message.conforms = object.conforms ?? false;
+    message.noViolations = object.noViolations ?? false;
+    message.results = object.results?.map((e) => ValidationResult.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseSubscribeRequest(): SubscribeRequest {
+  return { graphs: [], predicates: [], types: [], resumeAfterTs: 0, includeValues: false, userId: "" };
+}
+
+export const SubscribeRequest: MessageFns<SubscribeRequest> = {
+  encode(message: SubscribeRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.graphs) {
+      writer.uint32(10).string(v!);
+    }
+    for (const v of message.predicates) {
+      writer.uint32(18).string(v!);
+    }
+    for (const v of message.types) {
+      writer.uint32(26).string(v!);
+    }
+    if (message.resumeAfterTs !== 0) {
+      writer.uint32(32).int64(message.resumeAfterTs);
+    }
+    if (message.includeValues !== false) {
+      writer.uint32(40).bool(message.includeValues);
+    }
+    if (message.userId !== "") {
+      writer.uint32(50).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SubscribeRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSubscribeRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.graphs.push(reader.string());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.predicates.push(reader.string());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.types.push(reader.string());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.resumeAfterTs = longToNumber(reader.int64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.includeValues = reader.bool();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SubscribeRequest {
+    return {
+      graphs: globalThis.Array.isArray(object?.graphs) ? object.graphs.map((e: any) => globalThis.String(e)) : [],
+      predicates: globalThis.Array.isArray(object?.predicates)
+        ? object.predicates.map((e: any) => globalThis.String(e))
+        : [],
+      types: globalThis.Array.isArray(object?.types) ? object.types.map((e: any) => globalThis.String(e)) : [],
+      resumeAfterTs: isSet(object.resumeAfterTs)
+        ? globalThis.Number(object.resumeAfterTs)
+        : isSet(object.resume_after_ts)
+        ? globalThis.Number(object.resume_after_ts)
+        : 0,
+      includeValues: isSet(object.includeValues)
+        ? globalThis.Boolean(object.includeValues)
+        : isSet(object.include_values)
+        ? globalThis.Boolean(object.include_values)
+        : false,
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: SubscribeRequest): unknown {
+    const obj: any = {};
+    if (message.graphs?.length) {
+      obj.graphs = message.graphs;
+    }
+    if (message.predicates?.length) {
+      obj.predicates = message.predicates;
+    }
+    if (message.types?.length) {
+      obj.types = message.types;
+    }
+    if (message.resumeAfterTs !== 0) {
+      obj.resumeAfterTs = Math.round(message.resumeAfterTs);
+    }
+    if (message.includeValues !== false) {
+      obj.includeValues = message.includeValues;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SubscribeRequest>, I>>(base?: I): SubscribeRequest {
+    return SubscribeRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SubscribeRequest>, I>>(object: I): SubscribeRequest {
+    const message = createBaseSubscribeRequest();
+    message.graphs = object.graphs?.map((e) => e) || [];
+    message.predicates = object.predicates?.map((e) => e) || [];
+    message.types = object.types?.map((e) => e) || [];
+    message.resumeAfterTs = object.resumeAfterTs ?? 0;
+    message.includeValues = object.includeValues ?? false;
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseChangeEvent(): ChangeEvent {
+  return { commitTs: 0, graph: "", kind: 0, quad: undefined, edgeId: Buffer.alloc(0), author: "", sourceGraph: "" };
+}
+
+export const ChangeEvent: MessageFns<ChangeEvent> = {
+  encode(message: ChangeEvent, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.commitTs !== 0) {
+      writer.uint32(8).int64(message.commitTs);
+    }
+    if (message.graph !== "") {
+      writer.uint32(18).string(message.graph);
+    }
+    if (message.kind !== 0) {
+      writer.uint32(24).int32(message.kind);
+    }
+    if (message.quad !== undefined) {
+      Triple.encode(message.quad, writer.uint32(34).fork()).join();
+    }
+    if (message.edgeId.length !== 0) {
+      writer.uint32(42).bytes(message.edgeId);
+    }
+    if (message.author !== "") {
+      writer.uint32(50).string(message.author);
+    }
+    if (message.sourceGraph !== "") {
+      writer.uint32(58).string(message.sourceGraph);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ChangeEvent {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseChangeEvent();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.commitTs = longToNumber(reader.int64());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.graph = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.kind = reader.int32() as any;
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.quad = Triple.decode(reader, reader.uint32());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.edgeId = Buffer.from(reader.bytes());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.author = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.sourceGraph = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ChangeEvent {
+    return {
+      commitTs: isSet(object.commitTs)
+        ? globalThis.Number(object.commitTs)
+        : isSet(object.commit_ts)
+        ? globalThis.Number(object.commit_ts)
+        : 0,
+      graph: isSet(object.graph) ? globalThis.String(object.graph) : "",
+      kind: isSet(object.kind) ? changeKindFromJSON(object.kind) : 0,
+      quad: isSet(object.quad) ? Triple.fromJSON(object.quad) : undefined,
+      edgeId: isSet(object.edgeId)
+        ? Buffer.from(bytesFromBase64(object.edgeId))
+        : isSet(object.edge_id)
+        ? Buffer.from(bytesFromBase64(object.edge_id))
+        : Buffer.alloc(0),
+      author: isSet(object.author) ? globalThis.String(object.author) : "",
+      sourceGraph: isSet(object.sourceGraph)
+        ? globalThis.String(object.sourceGraph)
+        : isSet(object.source_graph)
+        ? globalThis.String(object.source_graph)
+        : "",
+    };
+  },
+
+  toJSON(message: ChangeEvent): unknown {
+    const obj: any = {};
+    if (message.commitTs !== 0) {
+      obj.commitTs = Math.round(message.commitTs);
+    }
+    if (message.graph !== "") {
+      obj.graph = message.graph;
+    }
+    if (message.kind !== 0) {
+      obj.kind = changeKindToJSON(message.kind);
+    }
+    if (message.quad !== undefined) {
+      obj.quad = Triple.toJSON(message.quad);
+    }
+    if (message.edgeId.length !== 0) {
+      obj.edgeId = base64FromBytes(message.edgeId);
+    }
+    if (message.author !== "") {
+      obj.author = message.author;
+    }
+    if (message.sourceGraph !== "") {
+      obj.sourceGraph = message.sourceGraph;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ChangeEvent>, I>>(base?: I): ChangeEvent {
+    return ChangeEvent.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ChangeEvent>, I>>(object: I): ChangeEvent {
+    const message = createBaseChangeEvent();
+    message.commitTs = object.commitTs ?? 0;
+    message.graph = object.graph ?? "";
+    message.kind = object.kind ?? 0;
+    message.quad = (object.quad !== undefined && object.quad !== null) ? Triple.fromPartial(object.quad) : undefined;
+    message.edgeId = object.edgeId ?? Buffer.alloc(0);
+    message.author = object.author ?? "";
+    message.sourceGraph = object.sourceGraph ?? "";
+    return message;
+  },
+};
+
+function createBaseGrantGraphAccessRequest(): GrantGraphAccessRequest {
+  return { principal: "", graph: "", level: "", userId: "" };
+}
+
+export const GrantGraphAccessRequest: MessageFns<GrantGraphAccessRequest> = {
+  encode(message: GrantGraphAccessRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.principal !== "") {
+      writer.uint32(10).string(message.principal);
+    }
+    if (message.graph !== "") {
+      writer.uint32(18).string(message.graph);
+    }
+    if (message.level !== "") {
+      writer.uint32(26).string(message.level);
+    }
+    if (message.userId !== "") {
+      writer.uint32(34).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GrantGraphAccessRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGrantGraphAccessRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.principal = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.graph = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.level = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GrantGraphAccessRequest {
+    return {
+      principal: isSet(object.principal) ? globalThis.String(object.principal) : "",
+      graph: isSet(object.graph) ? globalThis.String(object.graph) : "",
+      level: isSet(object.level) ? globalThis.String(object.level) : "",
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: GrantGraphAccessRequest): unknown {
+    const obj: any = {};
+    if (message.principal !== "") {
+      obj.principal = message.principal;
+    }
+    if (message.graph !== "") {
+      obj.graph = message.graph;
+    }
+    if (message.level !== "") {
+      obj.level = message.level;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GrantGraphAccessRequest>, I>>(base?: I): GrantGraphAccessRequest {
+    return GrantGraphAccessRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GrantGraphAccessRequest>, I>>(object: I): GrantGraphAccessRequest {
+    const message = createBaseGrantGraphAccessRequest();
+    message.principal = object.principal ?? "";
+    message.graph = object.graph ?? "";
+    message.level = object.level ?? "";
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseGrantGraphAccessResponse(): GrantGraphAccessResponse {
+  return {};
+}
+
+export const GrantGraphAccessResponse: MessageFns<GrantGraphAccessResponse> = {
+  encode(_: GrantGraphAccessResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GrantGraphAccessResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGrantGraphAccessResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): GrantGraphAccessResponse {
+    return {};
+  },
+
+  toJSON(_: GrantGraphAccessResponse): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GrantGraphAccessResponse>, I>>(base?: I): GrantGraphAccessResponse {
+    return GrantGraphAccessResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GrantGraphAccessResponse>, I>>(_: I): GrantGraphAccessResponse {
+    const message = createBaseGrantGraphAccessResponse();
+    return message;
+  },
+};
+
+function createBaseRevokeGraphAccessRequest(): RevokeGraphAccessRequest {
+  return { principal: "", graph: "", userId: "" };
+}
+
+export const RevokeGraphAccessRequest: MessageFns<RevokeGraphAccessRequest> = {
+  encode(message: RevokeGraphAccessRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.principal !== "") {
+      writer.uint32(10).string(message.principal);
+    }
+    if (message.graph !== "") {
+      writer.uint32(18).string(message.graph);
+    }
+    if (message.userId !== "") {
+      writer.uint32(26).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RevokeGraphAccessRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRevokeGraphAccessRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.principal = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.graph = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RevokeGraphAccessRequest {
+    return {
+      principal: isSet(object.principal) ? globalThis.String(object.principal) : "",
+      graph: isSet(object.graph) ? globalThis.String(object.graph) : "",
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: RevokeGraphAccessRequest): unknown {
+    const obj: any = {};
+    if (message.principal !== "") {
+      obj.principal = message.principal;
+    }
+    if (message.graph !== "") {
+      obj.graph = message.graph;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RevokeGraphAccessRequest>, I>>(base?: I): RevokeGraphAccessRequest {
+    return RevokeGraphAccessRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RevokeGraphAccessRequest>, I>>(object: I): RevokeGraphAccessRequest {
+    const message = createBaseRevokeGraphAccessRequest();
+    message.principal = object.principal ?? "";
+    message.graph = object.graph ?? "";
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseRevokeGraphAccessResponse(): RevokeGraphAccessResponse {
+  return { revoked: false };
+}
+
+export const RevokeGraphAccessResponse: MessageFns<RevokeGraphAccessResponse> = {
+  encode(message: RevokeGraphAccessResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.revoked !== false) {
+      writer.uint32(8).bool(message.revoked);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RevokeGraphAccessResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRevokeGraphAccessResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.revoked = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RevokeGraphAccessResponse {
+    return { revoked: isSet(object.revoked) ? globalThis.Boolean(object.revoked) : false };
+  },
+
+  toJSON(message: RevokeGraphAccessResponse): unknown {
+    const obj: any = {};
+    if (message.revoked !== false) {
+      obj.revoked = message.revoked;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RevokeGraphAccessResponse>, I>>(base?: I): RevokeGraphAccessResponse {
+    return RevokeGraphAccessResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RevokeGraphAccessResponse>, I>>(object: I): RevokeGraphAccessResponse {
+    const message = createBaseRevokeGraphAccessResponse();
+    message.revoked = object.revoked ?? false;
+    return message;
+  },
+};
+
+function createBaseGetGraphAccessRequest(): GetGraphAccessRequest {
+  return { principal: "", userId: "" };
+}
+
+export const GetGraphAccessRequest: MessageFns<GetGraphAccessRequest> = {
+  encode(message: GetGraphAccessRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.principal !== "") {
+      writer.uint32(10).string(message.principal);
+    }
+    if (message.userId !== "") {
+      writer.uint32(18).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetGraphAccessRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetGraphAccessRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.principal = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GetGraphAccessRequest {
+    return {
+      principal: isSet(object.principal) ? globalThis.String(object.principal) : "",
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: GetGraphAccessRequest): unknown {
+    const obj: any = {};
+    if (message.principal !== "") {
+      obj.principal = message.principal;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetGraphAccessRequest>, I>>(base?: I): GetGraphAccessRequest {
+    return GetGraphAccessRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetGraphAccessRequest>, I>>(object: I): GetGraphAccessRequest {
+    const message = createBaseGetGraphAccessRequest();
+    message.principal = object.principal ?? "";
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseGraphAccessEntry(): GraphAccessEntry {
+  return { graph: "", level: "" };
+}
+
+export const GraphAccessEntry: MessageFns<GraphAccessEntry> = {
+  encode(message: GraphAccessEntry, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.graph !== "") {
+      writer.uint32(10).string(message.graph);
+    }
+    if (message.level !== "") {
+      writer.uint32(18).string(message.level);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GraphAccessEntry {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGraphAccessEntry();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.graph = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.level = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GraphAccessEntry {
+    return {
+      graph: isSet(object.graph) ? globalThis.String(object.graph) : "",
+      level: isSet(object.level) ? globalThis.String(object.level) : "",
+    };
+  },
+
+  toJSON(message: GraphAccessEntry): unknown {
+    const obj: any = {};
+    if (message.graph !== "") {
+      obj.graph = message.graph;
+    }
+    if (message.level !== "") {
+      obj.level = message.level;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GraphAccessEntry>, I>>(base?: I): GraphAccessEntry {
+    return GraphAccessEntry.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GraphAccessEntry>, I>>(object: I): GraphAccessEntry {
+    const message = createBaseGraphAccessEntry();
+    message.graph = object.graph ?? "";
+    message.level = object.level ?? "";
+    return message;
+  },
+};
+
+function createBaseGetGraphAccessResponse(): GetGraphAccessResponse {
+  return { graphs: [] };
+}
+
+export const GetGraphAccessResponse: MessageFns<GetGraphAccessResponse> = {
+  encode(message: GetGraphAccessResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.graphs) {
+      GraphAccessEntry.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetGraphAccessResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetGraphAccessResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.graphs.push(GraphAccessEntry.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GetGraphAccessResponse {
+    return {
+      graphs: globalThis.Array.isArray(object?.graphs)
+        ? object.graphs.map((e: any) => GraphAccessEntry.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: GetGraphAccessResponse): unknown {
+    const obj: any = {};
+    if (message.graphs?.length) {
+      obj.graphs = message.graphs.map((e) => GraphAccessEntry.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetGraphAccessResponse>, I>>(base?: I): GetGraphAccessResponse {
+    return GetGraphAccessResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetGraphAccessResponse>, I>>(object: I): GetGraphAccessResponse {
+    const message = createBaseGetGraphAccessResponse();
+    message.graphs = object.graphs?.map((e) => GraphAccessEntry.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseExportGraphRequest(): ExportGraphRequest {
+  return { iri: "", allGraphs: false };
+}
+
+export const ExportGraphRequest: MessageFns<ExportGraphRequest> = {
+  encode(message: ExportGraphRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.iri !== "") {
+      writer.uint32(10).string(message.iri);
+    }
+    if (message.allGraphs !== false) {
+      writer.uint32(16).bool(message.allGraphs);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ExportGraphRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseExportGraphRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.iri = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.allGraphs = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ExportGraphRequest {
+    return {
+      iri: isSet(object.iri) ? globalThis.String(object.iri) : "",
+      allGraphs: isSet(object.allGraphs)
+        ? globalThis.Boolean(object.allGraphs)
+        : isSet(object.all_graphs)
+        ? globalThis.Boolean(object.all_graphs)
+        : false,
+    };
+  },
+
+  toJSON(message: ExportGraphRequest): unknown {
+    const obj: any = {};
+    if (message.iri !== "") {
+      obj.iri = message.iri;
+    }
+    if (message.allGraphs !== false) {
+      obj.allGraphs = message.allGraphs;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ExportGraphRequest>, I>>(base?: I): ExportGraphRequest {
+    return ExportGraphRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ExportGraphRequest>, I>>(object: I): ExportGraphRequest {
+    const message = createBaseExportGraphRequest();
+    message.iri = object.iri ?? "";
+    message.allGraphs = object.allGraphs ?? false;
+    return message;
+  },
+};
+
+function createBaseExportedQuad(): ExportedQuad {
+  return { subject: undefined, predicate: "", node: undefined, value: undefined, graph: "" };
+}
+
+export const ExportedQuad: MessageFns<ExportedQuad> = {
+  encode(message: ExportedQuad, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.subject !== undefined) {
+      NodeId.encode(message.subject, writer.uint32(10).fork()).join();
+    }
+    if (message.predicate !== "") {
+      writer.uint32(18).string(message.predicate);
+    }
+    if (message.node !== undefined) {
+      NodeId.encode(message.node, writer.uint32(26).fork()).join();
+    }
+    if (message.value !== undefined) {
+      Value.encode(message.value, writer.uint32(34).fork()).join();
+    }
+    if (message.graph !== "") {
+      writer.uint32(42).string(message.graph);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ExportedQuad {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseExportedQuad();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.subject = NodeId.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.predicate = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.node = NodeId.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.value = Value.decode(reader, reader.uint32());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.graph = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ExportedQuad {
+    return {
+      subject: isSet(object.subject) ? NodeId.fromJSON(object.subject) : undefined,
+      predicate: isSet(object.predicate) ? globalThis.String(object.predicate) : "",
+      node: isSet(object.node) ? NodeId.fromJSON(object.node) : undefined,
+      value: isSet(object.value) ? Value.fromJSON(object.value) : undefined,
+      graph: isSet(object.graph) ? globalThis.String(object.graph) : "",
+    };
+  },
+
+  toJSON(message: ExportedQuad): unknown {
+    const obj: any = {};
+    if (message.subject !== undefined) {
+      obj.subject = NodeId.toJSON(message.subject);
+    }
+    if (message.predicate !== "") {
+      obj.predicate = message.predicate;
+    }
+    if (message.node !== undefined) {
+      obj.node = NodeId.toJSON(message.node);
+    }
+    if (message.value !== undefined) {
+      obj.value = Value.toJSON(message.value);
+    }
+    if (message.graph !== "") {
+      obj.graph = message.graph;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ExportedQuad>, I>>(base?: I): ExportedQuad {
+    return ExportedQuad.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ExportedQuad>, I>>(object: I): ExportedQuad {
+    const message = createBaseExportedQuad();
+    message.subject = (object.subject !== undefined && object.subject !== null)
+      ? NodeId.fromPartial(object.subject)
+      : undefined;
+    message.predicate = object.predicate ?? "";
+    message.node = (object.node !== undefined && object.node !== null) ? NodeId.fromPartial(object.node) : undefined;
+    message.value = (object.value !== undefined && object.value !== null) ? Value.fromPartial(object.value) : undefined;
+    message.graph = object.graph ?? "";
+    return message;
+  },
+};
+
+function createBaseExportGraphChunk(): ExportGraphChunk {
+  return { quads: [] };
+}
+
+export const ExportGraphChunk: MessageFns<ExportGraphChunk> = {
+  encode(message: ExportGraphChunk, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.quads) {
+      ExportedQuad.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ExportGraphChunk {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseExportGraphChunk();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.quads.push(ExportedQuad.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ExportGraphChunk {
+    return {
+      quads: globalThis.Array.isArray(object?.quads) ? object.quads.map((e: any) => ExportedQuad.fromJSON(e)) : [],
+    };
+  },
+
+  toJSON(message: ExportGraphChunk): unknown {
+    const obj: any = {};
+    if (message.quads?.length) {
+      obj.quads = message.quads.map((e) => ExportedQuad.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ExportGraphChunk>, I>>(base?: I): ExportGraphChunk {
+    return ExportGraphChunk.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ExportGraphChunk>, I>>(object: I): ExportGraphChunk {
+    const message = createBaseExportGraphChunk();
+    message.quads = object.quads?.map((e) => ExportedQuad.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseResolveIrisRequest(): ResolveIrisRequest {
+  return { nodes: [] };
+}
+
+export const ResolveIrisRequest: MessageFns<ResolveIrisRequest> = {
+  encode(message: ResolveIrisRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.nodes) {
+      NodeId.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolveIrisRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolveIrisRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodes.push(NodeId.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ResolveIrisRequest {
+    return { nodes: globalThis.Array.isArray(object?.nodes) ? object.nodes.map((e: any) => NodeId.fromJSON(e)) : [] };
+  },
+
+  toJSON(message: ResolveIrisRequest): unknown {
+    const obj: any = {};
+    if (message.nodes?.length) {
+      obj.nodes = message.nodes.map((e) => NodeId.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ResolveIrisRequest>, I>>(base?: I): ResolveIrisRequest {
+    return ResolveIrisRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolveIrisRequest>, I>>(object: I): ResolveIrisRequest {
+    const message = createBaseResolveIrisRequest();
+    message.nodes = object.nodes?.map((e) => NodeId.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseResolveIrisResponse(): ResolveIrisResponse {
+  return { iris: [] };
+}
+
+export const ResolveIrisResponse: MessageFns<ResolveIrisResponse> = {
+  encode(message: ResolveIrisResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.iris) {
+      writer.uint32(10).string(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolveIrisResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolveIrisResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.iris.push(reader.string());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ResolveIrisResponse {
+    return { iris: globalThis.Array.isArray(object?.iris) ? object.iris.map((e: any) => globalThis.String(e)) : [] };
+  },
+
+  toJSON(message: ResolveIrisResponse): unknown {
+    const obj: any = {};
+    if (message.iris?.length) {
+      obj.iris = message.iris;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ResolveIrisResponse>, I>>(base?: I): ResolveIrisResponse {
+    return ResolveIrisResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolveIrisResponse>, I>>(object: I): ResolveIrisResponse {
+    const message = createBaseResolveIrisResponse();
+    message.iris = object.iris?.map((e) => e) || [];
+    return message;
+  },
+};
+
+function createBaseVocabularyPrefix(): VocabularyPrefix {
+  return { name: "", namespace: "" };
+}
+
+export const VocabularyPrefix: MessageFns<VocabularyPrefix> = {
+  encode(message: VocabularyPrefix, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.name !== "") {
+      writer.uint32(10).string(message.name);
+    }
+    if (message.namespace !== "") {
+      writer.uint32(18).string(message.namespace);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): VocabularyPrefix {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseVocabularyPrefix();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.namespace = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): VocabularyPrefix {
+    return {
+      name: isSet(object.name) ? globalThis.String(object.name) : "",
+      namespace: isSet(object.namespace) ? globalThis.String(object.namespace) : "",
+    };
+  },
+
+  toJSON(message: VocabularyPrefix): unknown {
+    const obj: any = {};
+    if (message.name !== "") {
+      obj.name = message.name;
+    }
+    if (message.namespace !== "") {
+      obj.namespace = message.namespace;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<VocabularyPrefix>, I>>(base?: I): VocabularyPrefix {
+    return VocabularyPrefix.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<VocabularyPrefix>, I>>(object: I): VocabularyPrefix {
+    const message = createBaseVocabularyPrefix();
+    message.name = object.name ?? "";
+    message.namespace = object.namespace ?? "";
+    return message;
+  },
+};
+
+function createBaseLegacyStatus(): LegacyStatus {
+  return { conversionPending: false, barePredicates: [], typeLabels: 0, pendingMerges: [] };
+}
+
+export const LegacyStatus: MessageFns<LegacyStatus> = {
+  encode(message: LegacyStatus, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.conversionPending !== false) {
+      writer.uint32(8).bool(message.conversionPending);
+    }
+    for (const v of message.barePredicates) {
+      writer.uint32(18).string(v!);
+    }
+    if (message.typeLabels !== 0) {
+      writer.uint32(24).uint64(message.typeLabels);
+    }
+    for (const v of message.pendingMerges) {
+      writer.uint32(34).string(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LegacyStatus {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLegacyStatus();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.conversionPending = reader.bool();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.barePredicates.push(reader.string());
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.typeLabels = longToNumber(reader.uint64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.pendingMerges.push(reader.string());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): LegacyStatus {
+    return {
+      conversionPending: isSet(object.conversionPending)
+        ? globalThis.Boolean(object.conversionPending)
+        : isSet(object.conversion_pending)
+        ? globalThis.Boolean(object.conversion_pending)
+        : false,
+      barePredicates: globalThis.Array.isArray(object?.barePredicates)
+        ? object.barePredicates.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.bare_predicates)
+        ? object.bare_predicates.map((e: any) => globalThis.String(e))
+        : [],
+      typeLabels: isSet(object.typeLabels)
+        ? globalThis.Number(object.typeLabels)
+        : isSet(object.type_labels)
+        ? globalThis.Number(object.type_labels)
+        : 0,
+      pendingMerges: globalThis.Array.isArray(object?.pendingMerges)
+        ? object.pendingMerges.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.pending_merges)
+        ? object.pending_merges.map((e: any) => globalThis.String(e))
+        : [],
+    };
+  },
+
+  toJSON(message: LegacyStatus): unknown {
+    const obj: any = {};
+    if (message.conversionPending !== false) {
+      obj.conversionPending = message.conversionPending;
+    }
+    if (message.barePredicates?.length) {
+      obj.barePredicates = message.barePredicates;
+    }
+    if (message.typeLabels !== 0) {
+      obj.typeLabels = Math.round(message.typeLabels);
+    }
+    if (message.pendingMerges?.length) {
+      obj.pendingMerges = message.pendingMerges;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<LegacyStatus>, I>>(base?: I): LegacyStatus {
+    return LegacyStatus.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LegacyStatus>, I>>(object: I): LegacyStatus {
+    const message = createBaseLegacyStatus();
+    message.conversionPending = object.conversionPending ?? false;
+    message.barePredicates = object.barePredicates?.map((e) => e) || [];
+    message.typeLabels = object.typeLabels ?? 0;
+    message.pendingMerges = object.pendingMerges?.map((e) => e) || [];
+    return message;
+  },
+};
+
+function createBaseVocabulary(): Vocabulary {
+  return { base: "", prefixes: [], legacy: undefined };
+}
+
+export const Vocabulary: MessageFns<Vocabulary> = {
+  encode(message: Vocabulary, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.base !== "") {
+      writer.uint32(10).string(message.base);
+    }
+    for (const v of message.prefixes) {
+      VocabularyPrefix.encode(v!, writer.uint32(18).fork()).join();
+    }
+    if (message.legacy !== undefined) {
+      LegacyStatus.encode(message.legacy, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Vocabulary {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseVocabulary();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.base = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.prefixes.push(VocabularyPrefix.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.legacy = LegacyStatus.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): Vocabulary {
+    return {
+      base: isSet(object.base) ? globalThis.String(object.base) : "",
+      prefixes: globalThis.Array.isArray(object?.prefixes)
+        ? object.prefixes.map((e: any) => VocabularyPrefix.fromJSON(e))
+        : [],
+      legacy: isSet(object.legacy) ? LegacyStatus.fromJSON(object.legacy) : undefined,
+    };
+  },
+
+  toJSON(message: Vocabulary): unknown {
+    const obj: any = {};
+    if (message.base !== "") {
+      obj.base = message.base;
+    }
+    if (message.prefixes?.length) {
+      obj.prefixes = message.prefixes.map((e) => VocabularyPrefix.toJSON(e));
+    }
+    if (message.legacy !== undefined) {
+      obj.legacy = LegacyStatus.toJSON(message.legacy);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<Vocabulary>, I>>(base?: I): Vocabulary {
+    return Vocabulary.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<Vocabulary>, I>>(object: I): Vocabulary {
+    const message = createBaseVocabulary();
+    message.base = object.base ?? "";
+    message.prefixes = object.prefixes?.map((e) => VocabularyPrefix.fromPartial(e)) || [];
+    message.legacy = (object.legacy !== undefined && object.legacy !== null)
+      ? LegacyStatus.fromPartial(object.legacy)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseGetVocabularyRequest(): GetVocabularyRequest {
+  return {};
+}
+
+export const GetVocabularyRequest: MessageFns<GetVocabularyRequest> = {
+  encode(_: GetVocabularyRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetVocabularyRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetVocabularyRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): GetVocabularyRequest {
+    return {};
+  },
+
+  toJSON(_: GetVocabularyRequest): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetVocabularyRequest>, I>>(base?: I): GetVocabularyRequest {
+    return GetVocabularyRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetVocabularyRequest>, I>>(_: I): GetVocabularyRequest {
+    const message = createBaseGetVocabularyRequest();
+    return message;
+  },
+};
+
+function createBaseSetVocabularyBaseRequest(): SetVocabularyBaseRequest {
+  return { base: "", userId: "" };
+}
+
+export const SetVocabularyBaseRequest: MessageFns<SetVocabularyBaseRequest> = {
+  encode(message: SetVocabularyBaseRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.base !== "") {
+      writer.uint32(10).string(message.base);
+    }
+    if (message.userId !== "") {
+      writer.uint32(18).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetVocabularyBaseRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetVocabularyBaseRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.base = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SetVocabularyBaseRequest {
+    return {
+      base: isSet(object.base) ? globalThis.String(object.base) : "",
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: SetVocabularyBaseRequest): unknown {
+    const obj: any = {};
+    if (message.base !== "") {
+      obj.base = message.base;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SetVocabularyBaseRequest>, I>>(base?: I): SetVocabularyBaseRequest {
+    return SetVocabularyBaseRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetVocabularyBaseRequest>, I>>(object: I): SetVocabularyBaseRequest {
+    const message = createBaseSetVocabularyBaseRequest();
+    message.base = object.base ?? "";
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBasePutPrefixRequest(): PutPrefixRequest {
+  return { name: "", namespace: "", userId: "" };
+}
+
+export const PutPrefixRequest: MessageFns<PutPrefixRequest> = {
+  encode(message: PutPrefixRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.name !== "") {
+      writer.uint32(10).string(message.name);
+    }
+    if (message.namespace !== "") {
+      writer.uint32(18).string(message.namespace);
+    }
+    if (message.userId !== "") {
+      writer.uint32(26).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PutPrefixRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePutPrefixRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.namespace = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): PutPrefixRequest {
+    return {
+      name: isSet(object.name) ? globalThis.String(object.name) : "",
+      namespace: isSet(object.namespace) ? globalThis.String(object.namespace) : "",
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: PutPrefixRequest): unknown {
+    const obj: any = {};
+    if (message.name !== "") {
+      obj.name = message.name;
+    }
+    if (message.namespace !== "") {
+      obj.namespace = message.namespace;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<PutPrefixRequest>, I>>(base?: I): PutPrefixRequest {
+    return PutPrefixRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PutPrefixRequest>, I>>(object: I): PutPrefixRequest {
+    const message = createBasePutPrefixRequest();
+    message.name = object.name ?? "";
+    message.namespace = object.namespace ?? "";
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseRemovePrefixRequest(): RemovePrefixRequest {
+  return { name: "", userId: "" };
+}
+
+export const RemovePrefixRequest: MessageFns<RemovePrefixRequest> = {
+  encode(message: RemovePrefixRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.name !== "") {
+      writer.uint32(10).string(message.name);
+    }
+    if (message.userId !== "") {
+      writer.uint32(18).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RemovePrefixRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRemovePrefixRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RemovePrefixRequest {
+    return {
+      name: isSet(object.name) ? globalThis.String(object.name) : "",
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: RemovePrefixRequest): unknown {
+    const obj: any = {};
+    if (message.name !== "") {
+      obj.name = message.name;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RemovePrefixRequest>, I>>(base?: I): RemovePrefixRequest {
+    return RemovePrefixRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RemovePrefixRequest>, I>>(object: I): RemovePrefixRequest {
+    const message = createBaseRemovePrefixRequest();
+    message.name = object.name ?? "";
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBaseConvertLegacyDataRequest(): ConvertLegacyDataRequest {
+  return { dryRun: false, userId: "" };
+}
+
+export const ConvertLegacyDataRequest: MessageFns<ConvertLegacyDataRequest> = {
+  encode(message: ConvertLegacyDataRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.dryRun !== false) {
+      writer.uint32(8).bool(message.dryRun);
+    }
+    if (message.userId !== "") {
+      writer.uint32(18).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConvertLegacyDataRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseConvertLegacyDataRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.dryRun = reader.bool();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ConvertLegacyDataRequest {
+    return {
+      dryRun: isSet(object.dryRun)
+        ? globalThis.Boolean(object.dryRun)
+        : isSet(object.dry_run)
+        ? globalThis.Boolean(object.dry_run)
+        : false,
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: ConvertLegacyDataRequest): unknown {
+    const obj: any = {};
+    if (message.dryRun !== false) {
+      obj.dryRun = message.dryRun;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ConvertLegacyDataRequest>, I>>(base?: I): ConvertLegacyDataRequest {
+    return ConvertLegacyDataRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConvertLegacyDataRequest>, I>>(object: I): ConvertLegacyDataRequest {
+    const message = createBaseConvertLegacyDataRequest();
+    message.dryRun = object.dryRun ?? false;
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
+function createBasePredicateConversion(): PredicateConversion {
+  return { from: "", to: "", merged: false, quadsMoved: 0 };
+}
+
+export const PredicateConversion: MessageFns<PredicateConversion> = {
+  encode(message: PredicateConversion, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.from !== "") {
+      writer.uint32(10).string(message.from);
+    }
+    if (message.to !== "") {
+      writer.uint32(18).string(message.to);
+    }
+    if (message.merged !== false) {
+      writer.uint32(24).bool(message.merged);
+    }
+    if (message.quadsMoved !== 0) {
+      writer.uint32(32).uint64(message.quadsMoved);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PredicateConversion {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePredicateConversion();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.from = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.to = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.merged = reader.bool();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.quadsMoved = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): PredicateConversion {
+    return {
+      from: isSet(object.from) ? globalThis.String(object.from) : "",
+      to: isSet(object.to) ? globalThis.String(object.to) : "",
+      merged: isSet(object.merged) ? globalThis.Boolean(object.merged) : false,
+      quadsMoved: isSet(object.quadsMoved)
+        ? globalThis.Number(object.quadsMoved)
+        : isSet(object.quads_moved)
+        ? globalThis.Number(object.quads_moved)
+        : 0,
+    };
+  },
+
+  toJSON(message: PredicateConversion): unknown {
+    const obj: any = {};
+    if (message.from !== "") {
+      obj.from = message.from;
+    }
+    if (message.to !== "") {
+      obj.to = message.to;
+    }
+    if (message.merged !== false) {
+      obj.merged = message.merged;
+    }
+    if (message.quadsMoved !== 0) {
+      obj.quadsMoved = Math.round(message.quadsMoved);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<PredicateConversion>, I>>(base?: I): PredicateConversion {
+    return PredicateConversion.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PredicateConversion>, I>>(object: I): PredicateConversion {
+    const message = createBasePredicateConversion();
+    message.from = object.from ?? "";
+    message.to = object.to ?? "";
+    message.merged = object.merged ?? false;
+    message.quadsMoved = object.quadsMoved ?? 0;
+    return message;
+  },
+};
+
+function createBaseConvertLegacyDataResponse(): ConvertLegacyDataResponse {
+  return { dryRun: false, predicates: [], labelsConverted: 0, legacy: undefined };
+}
+
+export const ConvertLegacyDataResponse: MessageFns<ConvertLegacyDataResponse> = {
+  encode(message: ConvertLegacyDataResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.dryRun !== false) {
+      writer.uint32(8).bool(message.dryRun);
+    }
+    for (const v of message.predicates) {
+      PredicateConversion.encode(v!, writer.uint32(18).fork()).join();
+    }
+    if (message.labelsConverted !== 0) {
+      writer.uint32(24).uint64(message.labelsConverted);
+    }
+    if (message.legacy !== undefined) {
+      LegacyStatus.encode(message.legacy, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConvertLegacyDataResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseConvertLegacyDataResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.dryRun = reader.bool();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.predicates.push(PredicateConversion.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.labelsConverted = longToNumber(reader.uint64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.legacy = LegacyStatus.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ConvertLegacyDataResponse {
+    return {
+      dryRun: isSet(object.dryRun)
+        ? globalThis.Boolean(object.dryRun)
+        : isSet(object.dry_run)
+        ? globalThis.Boolean(object.dry_run)
+        : false,
+      predicates: globalThis.Array.isArray(object?.predicates)
+        ? object.predicates.map((e: any) => PredicateConversion.fromJSON(e))
+        : [],
+      labelsConverted: isSet(object.labelsConverted)
+        ? globalThis.Number(object.labelsConverted)
+        : isSet(object.labels_converted)
+        ? globalThis.Number(object.labels_converted)
+        : 0,
+      legacy: isSet(object.legacy) ? LegacyStatus.fromJSON(object.legacy) : undefined,
+    };
+  },
+
+  toJSON(message: ConvertLegacyDataResponse): unknown {
+    const obj: any = {};
+    if (message.dryRun !== false) {
+      obj.dryRun = message.dryRun;
+    }
+    if (message.predicates?.length) {
+      obj.predicates = message.predicates.map((e) => PredicateConversion.toJSON(e));
+    }
+    if (message.labelsConverted !== 0) {
+      obj.labelsConverted = Math.round(message.labelsConverted);
+    }
+    if (message.legacy !== undefined) {
+      obj.legacy = LegacyStatus.toJSON(message.legacy);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ConvertLegacyDataResponse>, I>>(base?: I): ConvertLegacyDataResponse {
+    return ConvertLegacyDataResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConvertLegacyDataResponse>, I>>(object: I): ConvertLegacyDataResponse {
+    const message = createBaseConvertLegacyDataResponse();
+    message.dryRun = object.dryRun ?? false;
+    message.predicates = object.predicates?.map((e) => PredicateConversion.fromPartial(e)) || [];
+    message.labelsConverted = object.labelsConverted ?? 0;
+    message.legacy = (object.legacy !== undefined && object.legacy !== null)
+      ? LegacyStatus.fromPartial(object.legacy)
+      : undefined;
+    return message;
+  },
+};
+
 export type PolarGraphServiceService = typeof PolarGraphServiceService;
 export const PolarGraphServiceService = {
+  /** / The vocabulary base, prefixes and legacy-conversion status. */
+  getVocabulary: {
+    path: "/polargraph.v1.PolarGraphService/GetVocabulary" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: GetVocabularyRequest): Buffer => Buffer.from(GetVocabularyRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): GetVocabularyRequest => GetVocabularyRequest.decode(value),
+    responseSerialize: (value: Vocabulary): Buffer => Buffer.from(Vocabulary.encode(value).finish()),
+    responseDeserialize: (value: Buffer): Vocabulary => Vocabulary.decode(value),
+  },
+  /** / Set the base IRI for bare names. */
+  setVocabularyBase: {
+    path: "/polargraph.v1.PolarGraphService/SetVocabularyBase" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: SetVocabularyBaseRequest): Buffer =>
+      Buffer.from(SetVocabularyBaseRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): SetVocabularyBaseRequest => SetVocabularyBaseRequest.decode(value),
+    responseSerialize: (value: Vocabulary): Buffer => Buffer.from(Vocabulary.encode(value).finish()),
+    responseDeserialize: (value: Buffer): Vocabulary => Vocabulary.decode(value),
+  },
+  /** / Declare or re-point a prefix. */
+  putPrefix: {
+    path: "/polargraph.v1.PolarGraphService/PutPrefix" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: PutPrefixRequest): Buffer => Buffer.from(PutPrefixRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): PutPrefixRequest => PutPrefixRequest.decode(value),
+    responseSerialize: (value: Vocabulary): Buffer => Buffer.from(Vocabulary.encode(value).finish()),
+    responseDeserialize: (value: Buffer): Vocabulary => Vocabulary.decode(value),
+  },
+  /** / Remove a prefix (no-op if absent). */
+  removePrefix: {
+    path: "/polargraph.v1.PolarGraphService/RemovePrefix" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: RemovePrefixRequest): Buffer => Buffer.from(RemovePrefixRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): RemovePrefixRequest => RemovePrefixRequest.decode(value),
+    responseSerialize: (value: Vocabulary): Buffer => Buffer.from(Vocabulary.encode(value).finish()),
+    responseDeserialize: (value: Buffer): Vocabulary => Vocabulary.decode(value),
+  },
+  /**
+   * / One-time conversion of pre-vocabulary data: bare predicates → IRIs,
+   * / `__type` labels → `rdf:type`. Idempotent and resumable.
+   */
+  convertLegacyData: {
+    path: "/polargraph.v1.PolarGraphService/ConvertLegacyData" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ConvertLegacyDataRequest): Buffer =>
+      Buffer.from(ConvertLegacyDataRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ConvertLegacyDataRequest => ConvertLegacyDataRequest.decode(value),
+    responseSerialize: (value: ConvertLegacyDataResponse): Buffer =>
+      Buffer.from(ConvertLegacyDataResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ConvertLegacyDataResponse => ConvertLegacyDataResponse.decode(value),
+  },
   /**
    * / Insert one or more triples in a single atomic transaction.
    * / Returns ABORTED if a write-write conflict is detected.
@@ -11895,6 +18473,155 @@ export const PolarGraphServiceService = {
     requestDeserialize: (value: Buffer): InsertRequest => InsertRequest.decode(value),
     responseSerialize: (value: InsertResponse): Buffer => Buffer.from(InsertResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): InsertResponse => InsertResponse.decode(value),
+  },
+  /** / Map node IDs back to IRIs via the IRI dictionary. */
+  resolveIris: {
+    path: "/polargraph.v1.PolarGraphService/ResolveIris" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ResolveIrisRequest): Buffer => Buffer.from(ResolveIrisRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ResolveIrisRequest => ResolveIrisRequest.decode(value),
+    responseSerialize: (value: ResolveIrisResponse): Buffer => Buffer.from(ResolveIrisResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ResolveIrisResponse => ResolveIrisResponse.decode(value),
+  },
+  /** / Register a named graph (idempotent) and set its metadata. */
+  createGraph: {
+    path: "/polargraph.v1.PolarGraphService/CreateGraph" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: CreateGraphRequest): Buffer => Buffer.from(CreateGraphRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): CreateGraphRequest => CreateGraphRequest.decode(value),
+    responseSerialize: (value: CreateGraphResponse): Buffer => Buffer.from(CreateGraphResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): CreateGraphResponse => CreateGraphResponse.decode(value),
+  },
+  /** / List named graphs with their metadata, optionally filtered. */
+  listGraphs: {
+    path: "/polargraph.v1.PolarGraphService/ListGraphs" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ListGraphsRequest): Buffer => Buffer.from(ListGraphsRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ListGraphsRequest => ListGraphsRequest.decode(value),
+    responseSerialize: (value: ListGraphsResponse): Buffer => Buffer.from(ListGraphsResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ListGraphsResponse => ListGraphsResponse.decode(value),
+  },
+  /** / Live-quad count and last write time of one graph. */
+  graphStats: {
+    path: "/polargraph.v1.PolarGraphService/GraphStats" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: GraphStatsRequest): Buffer => Buffer.from(GraphStatsRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): GraphStatsRequest => GraphStatsRequest.decode(value),
+    responseSerialize: (value: GraphStatsResponse): Buffer => Buffer.from(GraphStatsResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): GraphStatsResponse => GraphStatsResponse.decode(value),
+  },
+  /** / Copy a graph's live quads into another graph (COPY / ADD semantics). */
+  copyGraph: {
+    path: "/polargraph.v1.PolarGraphService/CopyGraph" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: CopyGraphRequest): Buffer => Buffer.from(CopyGraphRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): CopyGraphRequest => CopyGraphRequest.decode(value),
+    responseSerialize: (value: CopyGraphResponse): Buffer => Buffer.from(CopyGraphResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): CopyGraphResponse => CopyGraphResponse.decode(value),
+  },
+  /** / Copy into the target (replacing it), then drop the source. */
+  moveGraph: {
+    path: "/polargraph.v1.PolarGraphService/MoveGraph" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: MoveGraphRequest): Buffer => Buffer.from(MoveGraphRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): MoveGraphRequest => MoveGraphRequest.decode(value),
+    responseSerialize: (value: CopyGraphResponse): Buffer => Buffer.from(CopyGraphResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): CopyGraphResponse => CopyGraphResponse.decode(value),
+  },
+  /** / Close every live quad of a graph (bitemporal tombstones). */
+  dropGraph: {
+    path: "/polargraph.v1.PolarGraphService/DropGraph" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: DropGraphRequest): Buffer => Buffer.from(DropGraphRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): DropGraphRequest => DropGraphRequest.decode(value),
+    responseSerialize: (value: DropGraphResponse): Buffer => Buffer.from(DropGraphResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): DropGraphResponse => DropGraphResponse.decode(value),
+  },
+  /** / Stream the live quads of one graph, or of the whole dataset. */
+  exportGraph: {
+    path: "/polargraph.v1.PolarGraphService/ExportGraph" as const,
+    requestStream: false as const,
+    responseStream: true as const,
+    requestSerialize: (value: ExportGraphRequest): Buffer => Buffer.from(ExportGraphRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ExportGraphRequest => ExportGraphRequest.decode(value),
+    responseSerialize: (value: ExportGraphChunk): Buffer => Buffer.from(ExportGraphChunk.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ExportGraphChunk => ExportGraphChunk.decode(value),
+  },
+  /** / Apply adds and retractions across graphs atomically. */
+  applyChanges: {
+    path: "/polargraph.v1.PolarGraphService/ApplyChanges" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ApplyChangesRequest): Buffer => Buffer.from(ApplyChangesRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ApplyChangesRequest => ApplyChangesRequest.decode(value),
+    responseSerialize: (value: ApplyChangesResponse): Buffer =>
+      Buffer.from(ApplyChangesResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ApplyChangesResponse => ApplyChangesResponse.decode(value),
+  },
+  /** / Validate a dataset (optionally with uncommitted changes) against SHACL shapes. */
+  validateShapes: {
+    path: "/polargraph.v1.PolarGraphService/ValidateShapes" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ValidateShapesRequest): Buffer =>
+      Buffer.from(ValidateShapesRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ValidateShapesRequest => ValidateShapesRequest.decode(value),
+    responseSerialize: (value: ValidateShapesResponse): Buffer =>
+      Buffer.from(ValidateShapesResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ValidateShapesResponse => ValidateShapesResponse.decode(value),
+  },
+  /** / Stream committed changes (with resume), filtered by graph access. */
+  subscribe: {
+    path: "/polargraph.v1.PolarGraphService/Subscribe" as const,
+    requestStream: false as const,
+    responseStream: true as const,
+    requestSerialize: (value: SubscribeRequest): Buffer => Buffer.from(SubscribeRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): SubscribeRequest => SubscribeRequest.decode(value),
+    responseSerialize: (value: ChangeEvent): Buffer => Buffer.from(ChangeEvent.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ChangeEvent => ChangeEvent.decode(value),
+  },
+  /** / Grant a user or group a level on a named graph. */
+  grantGraphAccess: {
+    path: "/polargraph.v1.PolarGraphService/GrantGraphAccess" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: GrantGraphAccessRequest): Buffer =>
+      Buffer.from(GrantGraphAccessRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): GrantGraphAccessRequest => GrantGraphAccessRequest.decode(value),
+    responseSerialize: (value: GrantGraphAccessResponse): Buffer =>
+      Buffer.from(GrantGraphAccessResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): GrantGraphAccessResponse => GrantGraphAccessResponse.decode(value),
+  },
+  /** / Revoke a user's or group's grant on a named graph. */
+  revokeGraphAccess: {
+    path: "/polargraph.v1.PolarGraphService/RevokeGraphAccess" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: RevokeGraphAccessRequest): Buffer =>
+      Buffer.from(RevokeGraphAccessRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): RevokeGraphAccessRequest => RevokeGraphAccessRequest.decode(value),
+    responseSerialize: (value: RevokeGraphAccessResponse): Buffer =>
+      Buffer.from(RevokeGraphAccessResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): RevokeGraphAccessResponse => RevokeGraphAccessResponse.decode(value),
+  },
+  /** / A user's effective graph access. */
+  getGraphAccess: {
+    path: "/polargraph.v1.PolarGraphService/GetGraphAccess" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: GetGraphAccessRequest): Buffer =>
+      Buffer.from(GetGraphAccessRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): GetGraphAccessRequest => GetGraphAccessRequest.decode(value),
+    responseSerialize: (value: GetGraphAccessResponse): Buffer =>
+      Buffer.from(GetGraphAccessResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): GetGraphAccessResponse => GetGraphAccessResponse.decode(value),
   },
   /** / Execute a conjunctive query and return all satisfying variable bindings. */
   query: {
@@ -12167,8 +18894,8 @@ export const PolarGraphServiceService = {
     responseDeserialize: (value: Buffer): PurgeOldBackupsResponse => PurgeOldBackupsResponse.decode(value),
   },
   /**
-   * / Scan all hexastore column families and delete triples whose
-   * / transaction time or valid-time window has expired per the supplied policy.
+   * / Scan all hexastore column families and delete superseded versions (and
+   * / triples whose valid-time windows have fully expired) per the policy.
    * / Triggers a full RocksDB compaction on any CF that had deletions.
    */
   runRetention: {
@@ -12268,6 +18995,9 @@ export const PolarGraphServiceService = {
     responseDeserialize: (value: Buffer): CypherQueryResponse => CypherQueryResponse.decode(value),
   },
   /**
+   * / DEPRECATED — removed in the next release; write with ApplyChanges or
+   * / SPARQL Update (docs/upgrade-cypher-rdf.md). Responses carry a
+   * / `warning` header.
    * / Parse and execute a Cypher write statement (CREATE, MERGE, SET, DELETE).
    * / Executes atomically in a single MVCC transaction.
    * / Returns INVALID_ARGUMENT if the statement cannot be parsed or contains no
@@ -12393,6 +19123,21 @@ export const PolarGraphServiceService = {
     responseDeserialize: (value: Buffer): GetEdgeAnnotationsResponse => GetEdgeAnnotationsResponse.decode(value),
   },
   /**
+   * / Resolve the edge UUID(s) for a specific (subject, predicate, object) relation triple.
+   * / Used by the SPARQL-star executor to look up edge IDs before fetching annotations.
+   */
+  getEdgeIdsByTriple: {
+    path: "/polargraph.v1.PolarGraphService/GetEdgeIdsByTriple" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: GetEdgeIdsByTripleRequest): Buffer =>
+      Buffer.from(GetEdgeIdsByTripleRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): GetEdgeIdsByTripleRequest => GetEdgeIdsByTripleRequest.decode(value),
+    responseSerialize: (value: GetEdgeIdsByTripleResponse): Buffer =>
+      Buffer.from(GetEdgeIdsByTripleResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): GetEdgeIdsByTripleResponse => GetEdgeIdsByTripleResponse.decode(value),
+  },
+  /**
    * / Add a new API key to the live key store. Takes effect immediately.
    * / Returns FAILED_PRECONDITION when the server was started without any
    * / keys (auth is disabled). Returns INVALID_ARGUMENT for an empty key.
@@ -12496,14 +19241,109 @@ export const PolarGraphServiceService = {
       Buffer.from(GetUserAccessResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): GetUserAccessResponse => GetUserAccessResponse.decode(value),
   },
+  /**
+   * / Return all historical versions of a node property, ordered newest-first
+   * / by transaction time. Scans the full SPO column family without MVCC
+   * / deduplication so every committed write is visible.
+   */
+  getPropertyHistory: {
+    path: "/polargraph.v1.PolarGraphService/GetPropertyHistory" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: GetPropertyHistoryRequest): Buffer =>
+      Buffer.from(GetPropertyHistoryRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): GetPropertyHistoryRequest => GetPropertyHistoryRequest.decode(value),
+    responseSerialize: (value: GetPropertyHistoryResponse): Buffer =>
+      Buffer.from(GetPropertyHistoryResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): GetPropertyHistoryResponse => GetPropertyHistoryResponse.decode(value),
+  },
+  /**
+   * / Soft-delete triples for one or more subjects by closing their valid-time
+   * / window. Each live triple (vt_end == END_OF_TIME) matching the subject (and
+   * / optional predicate filter) receives a superseding entry with vt_end set to
+   * / the requested timestamp (or server clock when vt_end == 0).
+   * / Returns FAILED_PRECONDITION on a read replica.
+   */
+  deleteTriples: {
+    path: "/polargraph.v1.PolarGraphService/DeleteTriples" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: DeleteTriplesRequest): Buffer => Buffer.from(DeleteTriplesRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): DeleteTriplesRequest => DeleteTriplesRequest.decode(value),
+    responseSerialize: (value: DeleteTriplesResponse): Buffer =>
+      Buffer.from(DeleteTriplesResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): DeleteTriplesResponse => DeleteTriplesResponse.decode(value),
+  },
+  /**
+   * / Run OWL 2 RL forward-chaining materialization to fixpoint.
+   * /
+   * / Derives new Relation triples according to the RDFS entailment and OWL
+   * / property characteristic rules and writes them to the DRV column family.
+   * / The DRV CF is separate from the base hexastore so derived triples can be
+   * / wiped and rebuilt cleanly without touching user data.
+   * /
+   * / Returns FAILED_PRECONDITION on a read replica.
+   */
+  runMaterialization: {
+    path: "/polargraph.v1.PolarGraphService/RunMaterialization" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: RunMaterializationRequest): Buffer =>
+      Buffer.from(RunMaterializationRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): RunMaterializationRequest => RunMaterializationRequest.decode(value),
+    responseSerialize: (value: RunMaterializationResponse): Buffer =>
+      Buffer.from(RunMaterializationResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): RunMaterializationResponse => RunMaterializationResponse.decode(value),
+  },
 } as const;
 
 export interface PolarGraphServiceServer extends UntypedServiceImplementation {
+  /** / The vocabulary base, prefixes and legacy-conversion status. */
+  getVocabulary: handleUnaryCall<GetVocabularyRequest, Vocabulary>;
+  /** / Set the base IRI for bare names. */
+  setVocabularyBase: handleUnaryCall<SetVocabularyBaseRequest, Vocabulary>;
+  /** / Declare or re-point a prefix. */
+  putPrefix: handleUnaryCall<PutPrefixRequest, Vocabulary>;
+  /** / Remove a prefix (no-op if absent). */
+  removePrefix: handleUnaryCall<RemovePrefixRequest, Vocabulary>;
+  /**
+   * / One-time conversion of pre-vocabulary data: bare predicates → IRIs,
+   * / `__type` labels → `rdf:type`. Idempotent and resumable.
+   */
+  convertLegacyData: handleUnaryCall<ConvertLegacyDataRequest, ConvertLegacyDataResponse>;
   /**
    * / Insert one or more triples in a single atomic transaction.
    * / Returns ABORTED if a write-write conflict is detected.
    */
   insert: handleUnaryCall<InsertRequest, InsertResponse>;
+  /** / Map node IDs back to IRIs via the IRI dictionary. */
+  resolveIris: handleUnaryCall<ResolveIrisRequest, ResolveIrisResponse>;
+  /** / Register a named graph (idempotent) and set its metadata. */
+  createGraph: handleUnaryCall<CreateGraphRequest, CreateGraphResponse>;
+  /** / List named graphs with their metadata, optionally filtered. */
+  listGraphs: handleUnaryCall<ListGraphsRequest, ListGraphsResponse>;
+  /** / Live-quad count and last write time of one graph. */
+  graphStats: handleUnaryCall<GraphStatsRequest, GraphStatsResponse>;
+  /** / Copy a graph's live quads into another graph (COPY / ADD semantics). */
+  copyGraph: handleUnaryCall<CopyGraphRequest, CopyGraphResponse>;
+  /** / Copy into the target (replacing it), then drop the source. */
+  moveGraph: handleUnaryCall<MoveGraphRequest, CopyGraphResponse>;
+  /** / Close every live quad of a graph (bitemporal tombstones). */
+  dropGraph: handleUnaryCall<DropGraphRequest, DropGraphResponse>;
+  /** / Stream the live quads of one graph, or of the whole dataset. */
+  exportGraph: handleServerStreamingCall<ExportGraphRequest, ExportGraphChunk>;
+  /** / Apply adds and retractions across graphs atomically. */
+  applyChanges: handleUnaryCall<ApplyChangesRequest, ApplyChangesResponse>;
+  /** / Validate a dataset (optionally with uncommitted changes) against SHACL shapes. */
+  validateShapes: handleUnaryCall<ValidateShapesRequest, ValidateShapesResponse>;
+  /** / Stream committed changes (with resume), filtered by graph access. */
+  subscribe: handleServerStreamingCall<SubscribeRequest, ChangeEvent>;
+  /** / Grant a user or group a level on a named graph. */
+  grantGraphAccess: handleUnaryCall<GrantGraphAccessRequest, GrantGraphAccessResponse>;
+  /** / Revoke a user's or group's grant on a named graph. */
+  revokeGraphAccess: handleUnaryCall<RevokeGraphAccessRequest, RevokeGraphAccessResponse>;
+  /** / A user's effective graph access. */
+  getGraphAccess: handleUnaryCall<GetGraphAccessRequest, GetGraphAccessResponse>;
   /** / Execute a conjunctive query and return all satisfying variable bindings. */
   query: handleUnaryCall<QueryRequest, QueryResponse>;
   /** / Insert or update a node's embedding vector in the HNSW index. */
@@ -12582,8 +19422,8 @@ export interface PolarGraphServiceServer extends UntypedServiceImplementation {
    */
   purgeOldBackups: handleUnaryCall<PurgeOldBackupsRequest, PurgeOldBackupsResponse>;
   /**
-   * / Scan all hexastore column families and delete triples whose
-   * / transaction time or valid-time window has expired per the supplied policy.
+   * / Scan all hexastore column families and delete superseded versions (and
+   * / triples whose valid-time windows have fully expired) per the policy.
    * / Triggers a full RocksDB compaction on any CF that had deletions.
    */
   runRetention: handleUnaryCall<RunRetentionRequest, RunRetentionResponse>;
@@ -12623,6 +19463,9 @@ export interface PolarGraphServiceServer extends UntypedServiceImplementation {
    */
   cypherQuery: handleUnaryCall<CypherQueryRequest, CypherQueryResponse>;
   /**
+   * / DEPRECATED — removed in the next release; write with ApplyChanges or
+   * / SPARQL Update (docs/upgrade-cypher-rdf.md). Responses carry a
+   * / `warning` header.
    * / Parse and execute a Cypher write statement (CREATE, MERGE, SET, DELETE).
    * / Executes atomically in a single MVCC transaction.
    * / Returns INVALID_ARGUMENT if the statement cannot be parsed or contains no
@@ -12668,6 +19511,11 @@ export interface PolarGraphServiceServer extends UntypedServiceImplementation {
    */
   getEdgeAnnotations: handleUnaryCall<GetEdgeAnnotationsRequest, GetEdgeAnnotationsResponse>;
   /**
+   * / Resolve the edge UUID(s) for a specific (subject, predicate, object) relation triple.
+   * / Used by the SPARQL-star executor to look up edge IDs before fetching annotations.
+   */
+  getEdgeIdsByTriple: handleUnaryCall<GetEdgeIdsByTripleRequest, GetEdgeIdsByTripleResponse>;
+  /**
    * / Add a new API key to the live key store. Takes effect immediately.
    * / Returns FAILED_PRECONDITION when the server was started without any
    * / keys (auth is disabled). Returns INVALID_ARGUMENT for an empty key.
@@ -12710,9 +19558,117 @@ export interface PolarGraphServiceServer extends UntypedServiceImplementation {
    * / their group memberships and HAS_ACCESS / HAS_ACCESS_TYPE triples.
    */
   getUserAccess: handleUnaryCall<GetUserAccessRequest, GetUserAccessResponse>;
+  /**
+   * / Return all historical versions of a node property, ordered newest-first
+   * / by transaction time. Scans the full SPO column family without MVCC
+   * / deduplication so every committed write is visible.
+   */
+  getPropertyHistory: handleUnaryCall<GetPropertyHistoryRequest, GetPropertyHistoryResponse>;
+  /**
+   * / Soft-delete triples for one or more subjects by closing their valid-time
+   * / window. Each live triple (vt_end == END_OF_TIME) matching the subject (and
+   * / optional predicate filter) receives a superseding entry with vt_end set to
+   * / the requested timestamp (or server clock when vt_end == 0).
+   * / Returns FAILED_PRECONDITION on a read replica.
+   */
+  deleteTriples: handleUnaryCall<DeleteTriplesRequest, DeleteTriplesResponse>;
+  /**
+   * / Run OWL 2 RL forward-chaining materialization to fixpoint.
+   * /
+   * / Derives new Relation triples according to the RDFS entailment and OWL
+   * / property characteristic rules and writes them to the DRV column family.
+   * / The DRV CF is separate from the base hexastore so derived triples can be
+   * / wiped and rebuilt cleanly without touching user data.
+   * /
+   * / Returns FAILED_PRECONDITION on a read replica.
+   */
+  runMaterialization: handleUnaryCall<RunMaterializationRequest, RunMaterializationResponse>;
 }
 
 export interface PolarGraphServiceClient extends Client {
+  /** / The vocabulary base, prefixes and legacy-conversion status. */
+  getVocabulary(
+    request: GetVocabularyRequest,
+    callback: (error: ServiceError | null, response: Vocabulary) => void,
+  ): ClientUnaryCall;
+  getVocabulary(
+    request: GetVocabularyRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: Vocabulary) => void,
+  ): ClientUnaryCall;
+  getVocabulary(
+    request: GetVocabularyRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: Vocabulary) => void,
+  ): ClientUnaryCall;
+  /** / Set the base IRI for bare names. */
+  setVocabularyBase(
+    request: SetVocabularyBaseRequest,
+    callback: (error: ServiceError | null, response: Vocabulary) => void,
+  ): ClientUnaryCall;
+  setVocabularyBase(
+    request: SetVocabularyBaseRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: Vocabulary) => void,
+  ): ClientUnaryCall;
+  setVocabularyBase(
+    request: SetVocabularyBaseRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: Vocabulary) => void,
+  ): ClientUnaryCall;
+  /** / Declare or re-point a prefix. */
+  putPrefix(
+    request: PutPrefixRequest,
+    callback: (error: ServiceError | null, response: Vocabulary) => void,
+  ): ClientUnaryCall;
+  putPrefix(
+    request: PutPrefixRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: Vocabulary) => void,
+  ): ClientUnaryCall;
+  putPrefix(
+    request: PutPrefixRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: Vocabulary) => void,
+  ): ClientUnaryCall;
+  /** / Remove a prefix (no-op if absent). */
+  removePrefix(
+    request: RemovePrefixRequest,
+    callback: (error: ServiceError | null, response: Vocabulary) => void,
+  ): ClientUnaryCall;
+  removePrefix(
+    request: RemovePrefixRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: Vocabulary) => void,
+  ): ClientUnaryCall;
+  removePrefix(
+    request: RemovePrefixRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: Vocabulary) => void,
+  ): ClientUnaryCall;
+  /**
+   * / One-time conversion of pre-vocabulary data: bare predicates → IRIs,
+   * / `__type` labels → `rdf:type`. Idempotent and resumable.
+   */
+  convertLegacyData(
+    request: ConvertLegacyDataRequest,
+    callback: (error: ServiceError | null, response: ConvertLegacyDataResponse) => void,
+  ): ClientUnaryCall;
+  convertLegacyData(
+    request: ConvertLegacyDataRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ConvertLegacyDataResponse) => void,
+  ): ClientUnaryCall;
+  convertLegacyData(
+    request: ConvertLegacyDataRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ConvertLegacyDataResponse) => void,
+  ): ClientUnaryCall;
   /**
    * / Insert one or more triples in a single atomic transaction.
    * / Returns ABORTED if a write-write conflict is detected.
@@ -12731,6 +19687,212 @@ export interface PolarGraphServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: InsertResponse) => void,
+  ): ClientUnaryCall;
+  /** / Map node IDs back to IRIs via the IRI dictionary. */
+  resolveIris(
+    request: ResolveIrisRequest,
+    callback: (error: ServiceError | null, response: ResolveIrisResponse) => void,
+  ): ClientUnaryCall;
+  resolveIris(
+    request: ResolveIrisRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ResolveIrisResponse) => void,
+  ): ClientUnaryCall;
+  resolveIris(
+    request: ResolveIrisRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ResolveIrisResponse) => void,
+  ): ClientUnaryCall;
+  /** / Register a named graph (idempotent) and set its metadata. */
+  createGraph(
+    request: CreateGraphRequest,
+    callback: (error: ServiceError | null, response: CreateGraphResponse) => void,
+  ): ClientUnaryCall;
+  createGraph(
+    request: CreateGraphRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: CreateGraphResponse) => void,
+  ): ClientUnaryCall;
+  createGraph(
+    request: CreateGraphRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: CreateGraphResponse) => void,
+  ): ClientUnaryCall;
+  /** / List named graphs with their metadata, optionally filtered. */
+  listGraphs(
+    request: ListGraphsRequest,
+    callback: (error: ServiceError | null, response: ListGraphsResponse) => void,
+  ): ClientUnaryCall;
+  listGraphs(
+    request: ListGraphsRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ListGraphsResponse) => void,
+  ): ClientUnaryCall;
+  listGraphs(
+    request: ListGraphsRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ListGraphsResponse) => void,
+  ): ClientUnaryCall;
+  /** / Live-quad count and last write time of one graph. */
+  graphStats(
+    request: GraphStatsRequest,
+    callback: (error: ServiceError | null, response: GraphStatsResponse) => void,
+  ): ClientUnaryCall;
+  graphStats(
+    request: GraphStatsRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: GraphStatsResponse) => void,
+  ): ClientUnaryCall;
+  graphStats(
+    request: GraphStatsRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: GraphStatsResponse) => void,
+  ): ClientUnaryCall;
+  /** / Copy a graph's live quads into another graph (COPY / ADD semantics). */
+  copyGraph(
+    request: CopyGraphRequest,
+    callback: (error: ServiceError | null, response: CopyGraphResponse) => void,
+  ): ClientUnaryCall;
+  copyGraph(
+    request: CopyGraphRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: CopyGraphResponse) => void,
+  ): ClientUnaryCall;
+  copyGraph(
+    request: CopyGraphRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: CopyGraphResponse) => void,
+  ): ClientUnaryCall;
+  /** / Copy into the target (replacing it), then drop the source. */
+  moveGraph(
+    request: MoveGraphRequest,
+    callback: (error: ServiceError | null, response: CopyGraphResponse) => void,
+  ): ClientUnaryCall;
+  moveGraph(
+    request: MoveGraphRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: CopyGraphResponse) => void,
+  ): ClientUnaryCall;
+  moveGraph(
+    request: MoveGraphRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: CopyGraphResponse) => void,
+  ): ClientUnaryCall;
+  /** / Close every live quad of a graph (bitemporal tombstones). */
+  dropGraph(
+    request: DropGraphRequest,
+    callback: (error: ServiceError | null, response: DropGraphResponse) => void,
+  ): ClientUnaryCall;
+  dropGraph(
+    request: DropGraphRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: DropGraphResponse) => void,
+  ): ClientUnaryCall;
+  dropGraph(
+    request: DropGraphRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: DropGraphResponse) => void,
+  ): ClientUnaryCall;
+  /** / Stream the live quads of one graph, or of the whole dataset. */
+  exportGraph(request: ExportGraphRequest, options?: Partial<CallOptions>): ClientReadableStream<ExportGraphChunk>;
+  exportGraph(
+    request: ExportGraphRequest,
+    metadata?: Metadata,
+    options?: Partial<CallOptions>,
+  ): ClientReadableStream<ExportGraphChunk>;
+  /** / Apply adds and retractions across graphs atomically. */
+  applyChanges(
+    request: ApplyChangesRequest,
+    callback: (error: ServiceError | null, response: ApplyChangesResponse) => void,
+  ): ClientUnaryCall;
+  applyChanges(
+    request: ApplyChangesRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ApplyChangesResponse) => void,
+  ): ClientUnaryCall;
+  applyChanges(
+    request: ApplyChangesRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ApplyChangesResponse) => void,
+  ): ClientUnaryCall;
+  /** / Validate a dataset (optionally with uncommitted changes) against SHACL shapes. */
+  validateShapes(
+    request: ValidateShapesRequest,
+    callback: (error: ServiceError | null, response: ValidateShapesResponse) => void,
+  ): ClientUnaryCall;
+  validateShapes(
+    request: ValidateShapesRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ValidateShapesResponse) => void,
+  ): ClientUnaryCall;
+  validateShapes(
+    request: ValidateShapesRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ValidateShapesResponse) => void,
+  ): ClientUnaryCall;
+  /** / Stream committed changes (with resume), filtered by graph access. */
+  subscribe(request: SubscribeRequest, options?: Partial<CallOptions>): ClientReadableStream<ChangeEvent>;
+  subscribe(
+    request: SubscribeRequest,
+    metadata?: Metadata,
+    options?: Partial<CallOptions>,
+  ): ClientReadableStream<ChangeEvent>;
+  /** / Grant a user or group a level on a named graph. */
+  grantGraphAccess(
+    request: GrantGraphAccessRequest,
+    callback: (error: ServiceError | null, response: GrantGraphAccessResponse) => void,
+  ): ClientUnaryCall;
+  grantGraphAccess(
+    request: GrantGraphAccessRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: GrantGraphAccessResponse) => void,
+  ): ClientUnaryCall;
+  grantGraphAccess(
+    request: GrantGraphAccessRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: GrantGraphAccessResponse) => void,
+  ): ClientUnaryCall;
+  /** / Revoke a user's or group's grant on a named graph. */
+  revokeGraphAccess(
+    request: RevokeGraphAccessRequest,
+    callback: (error: ServiceError | null, response: RevokeGraphAccessResponse) => void,
+  ): ClientUnaryCall;
+  revokeGraphAccess(
+    request: RevokeGraphAccessRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: RevokeGraphAccessResponse) => void,
+  ): ClientUnaryCall;
+  revokeGraphAccess(
+    request: RevokeGraphAccessRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: RevokeGraphAccessResponse) => void,
+  ): ClientUnaryCall;
+  /** / A user's effective graph access. */
+  getGraphAccess(
+    request: GetGraphAccessRequest,
+    callback: (error: ServiceError | null, response: GetGraphAccessResponse) => void,
+  ): ClientUnaryCall;
+  getGraphAccess(
+    request: GetGraphAccessRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: GetGraphAccessResponse) => void,
+  ): ClientUnaryCall;
+  getGraphAccess(
+    request: GetGraphAccessRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: GetGraphAccessResponse) => void,
   ): ClientUnaryCall;
   /** / Execute a conjunctive query and return all satisfying variable bindings. */
   query(
@@ -13104,8 +20266,8 @@ export interface PolarGraphServiceClient extends Client {
     callback: (error: ServiceError | null, response: PurgeOldBackupsResponse) => void,
   ): ClientUnaryCall;
   /**
-   * / Scan all hexastore column families and delete triples whose
-   * / transaction time or valid-time window has expired per the supplied policy.
+   * / Scan all hexastore column families and delete superseded versions (and
+   * / triples whose valid-time windows have fully expired) per the policy.
    * / Triggers a full RocksDB compaction on any CF that had deletions.
    */
   runRetention(
@@ -13234,6 +20396,9 @@ export interface PolarGraphServiceClient extends Client {
     callback: (error: ServiceError | null, response: CypherQueryResponse) => void,
   ): ClientUnaryCall;
   /**
+   * / DEPRECATED — removed in the next release; write with ApplyChanges or
+   * / SPARQL Update (docs/upgrade-cypher-rdf.md). Responses carry a
+   * / `warning` header.
    * / Parse and execute a Cypher write statement (CREATE, MERGE, SET, DELETE).
    * / Executes atomically in a single MVCC transaction.
    * / Returns INVALID_ARGUMENT if the statement cannot be parsed or contains no
@@ -13390,6 +20555,25 @@ export interface PolarGraphServiceClient extends Client {
     callback: (error: ServiceError | null, response: GetEdgeAnnotationsResponse) => void,
   ): ClientUnaryCall;
   /**
+   * / Resolve the edge UUID(s) for a specific (subject, predicate, object) relation triple.
+   * / Used by the SPARQL-star executor to look up edge IDs before fetching annotations.
+   */
+  getEdgeIdsByTriple(
+    request: GetEdgeIdsByTripleRequest,
+    callback: (error: ServiceError | null, response: GetEdgeIdsByTripleResponse) => void,
+  ): ClientUnaryCall;
+  getEdgeIdsByTriple(
+    request: GetEdgeIdsByTripleRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: GetEdgeIdsByTripleResponse) => void,
+  ): ClientUnaryCall;
+  getEdgeIdsByTriple(
+    request: GetEdgeIdsByTripleRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: GetEdgeIdsByTripleResponse) => void,
+  ): ClientUnaryCall;
+  /**
    * / Add a new API key to the live key store. Takes effect immediately.
    * / Returns FAILED_PRECONDITION when the server was started without any
    * / keys (auth is disabled). Returns INVALID_ARGUMENT for an empty key.
@@ -13529,6 +20713,73 @@ export interface PolarGraphServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: GetUserAccessResponse) => void,
+  ): ClientUnaryCall;
+  /**
+   * / Return all historical versions of a node property, ordered newest-first
+   * / by transaction time. Scans the full SPO column family without MVCC
+   * / deduplication so every committed write is visible.
+   */
+  getPropertyHistory(
+    request: GetPropertyHistoryRequest,
+    callback: (error: ServiceError | null, response: GetPropertyHistoryResponse) => void,
+  ): ClientUnaryCall;
+  getPropertyHistory(
+    request: GetPropertyHistoryRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: GetPropertyHistoryResponse) => void,
+  ): ClientUnaryCall;
+  getPropertyHistory(
+    request: GetPropertyHistoryRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: GetPropertyHistoryResponse) => void,
+  ): ClientUnaryCall;
+  /**
+   * / Soft-delete triples for one or more subjects by closing their valid-time
+   * / window. Each live triple (vt_end == END_OF_TIME) matching the subject (and
+   * / optional predicate filter) receives a superseding entry with vt_end set to
+   * / the requested timestamp (or server clock when vt_end == 0).
+   * / Returns FAILED_PRECONDITION on a read replica.
+   */
+  deleteTriples(
+    request: DeleteTriplesRequest,
+    callback: (error: ServiceError | null, response: DeleteTriplesResponse) => void,
+  ): ClientUnaryCall;
+  deleteTriples(
+    request: DeleteTriplesRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: DeleteTriplesResponse) => void,
+  ): ClientUnaryCall;
+  deleteTriples(
+    request: DeleteTriplesRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: DeleteTriplesResponse) => void,
+  ): ClientUnaryCall;
+  /**
+   * / Run OWL 2 RL forward-chaining materialization to fixpoint.
+   * /
+   * / Derives new Relation triples according to the RDFS entailment and OWL
+   * / property characteristic rules and writes them to the DRV column family.
+   * / The DRV CF is separate from the base hexastore so derived triples can be
+   * / wiped and rebuilt cleanly without touching user data.
+   * /
+   * / Returns FAILED_PRECONDITION on a read replica.
+   */
+  runMaterialization(
+    request: RunMaterializationRequest,
+    callback: (error: ServiceError | null, response: RunMaterializationResponse) => void,
+  ): ClientUnaryCall;
+  runMaterialization(
+    request: RunMaterializationRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: RunMaterializationResponse) => void,
+  ): ClientUnaryCall;
+  runMaterialization(
+    request: RunMaterializationRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: RunMaterializationResponse) => void,
   ): ClientUnaryCall;
 }
 

@@ -163,6 +163,14 @@ type GraphAccessState = Arc<RwLock<(Arc<polargraph_storage::GraphAccessIndex>, I
 /// How stale a replica's graph access index may get (grants arrive by WAL).
 const GRAPH_ACCESS_REFRESH: Duration = Duration::from_secs(5);
 
+/// Logged once per process on the first `CypherWrite`.
+const CYPHER_WRITE_DEPRECATION: &str = "CypherWrite (Cypher CREATE / MERGE / SET / DELETE) is \
+    deprecated and will be removed in the next release; write with ApplyChanges or SPARQL \
+    Update instead — see docs/upgrade-cypher-rdf.md";
+/// `warning` header on every `CypherWrite` response (RFC 7234 form).
+const CYPHER_WRITE_WARNING: &str =
+    "299 polargraph \"CypherWrite is deprecated; use ApplyChanges or SPARQL Update\"";
+
 /// How stale a replica's legacy-conversion status may get (the conversion
 /// runs on the primary).
 const LEGACY_STATUS_REFRESH: Duration = Duration::from_secs(60);
@@ -549,6 +557,208 @@ impl PolarGraphServer {
         }
         self.query_plan_cache.insert(key, Arc::new(plan.clone()));
         Ok(plan)
+    }
+
+    async fn cypher_write_impl(
+        &self,
+        request: Request<CypherWriteRequest>,
+    ) -> Result<Response<CypherWriteResponse>, Status> {
+        self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
+        let req = request.into_inner();
+        let author = resolve_user_id(&req.user_id, &meta_uid);
+        let access = self.caller_access(&author);
+
+        if req.cypher.is_empty() {
+            return Err(Status::invalid_argument(
+                "cypher write string must not be empty",
+            ));
+        }
+
+        let mut compiled = polargraph_query::cypher::parse_write(&req.cypher)
+            .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
+        // `graph` on the request acts like `USE GRAPH`; both must agree.
+        let graph_iri = match (compiled.graph.clone(), req.graph.as_str()) {
+            (Some(a), b) if !b.is_empty() && a != b => {
+                return Err(Status::invalid_argument(format!(
+                    "USE GRAPH <{a}> conflicts with request graph <{b}>"
+                )))
+            }
+            (Some(a), _) => Some(a),
+            (None, "") => None,
+            (None, b) => {
+                if let Some(mq) = &mut compiled.match_query {
+                    mq.scope_to(&polargraph_query::GraphTerm::Iri(b.to_string()));
+                }
+                Some(b.to_string())
+            }
+        };
+        // A user writes into a graph it can write — the default graph when
+        // none is named, in which case MERGE / DELETE also stay there.
+        let write_graph = match (&access, graph_iri.as_deref()) {
+            (None, iri) => iri.map(|iri| self.target_graph(iri)).transpose()?,
+            (Some(_), iri) => {
+                Some(self.graph_for(&access, iri.unwrap_or(""), GraphAccessLevel::Write, false)?)
+            }
+        };
+        reject_user_acl_writes(&access, write_predicates(&compiled.writes))?;
+
+        let map_write_err = |e: polargraph_query::cypher::CypherWriteError| match e {
+            polargraph_query::cypher::CypherWriteError::UnboundVariable(v) => {
+                Status::invalid_argument(format!("unbound variable '{v}'"))
+            }
+            polargraph_query::cypher::CypherWriteError::Storage(se) => storage_err_to_status(se),
+            polargraph_query::cypher::CypherWriteError::Parse(pe) => {
+                Status::invalid_argument(format!("cypher parse error: {pe}"))
+            }
+            polargraph_query::cypher::CypherWriteError::InvalidNodeId(v) => {
+                Status::invalid_argument(format!("'id' property must be a valid UUID string: {v}"))
+            }
+        };
+
+        // Helper closure to run the write ops given a mutable Transaction reference.
+        // Returns the WriteResult without committing.
+        let execute_writes =
+            |tx: &mut Transaction| -> Result<polargraph_query::cypher::WriteResult, Status> {
+                let snapshot = self.snapshot_for(tx.read_ts, &access);
+                if let Some(ref mq) = compiled.match_query {
+                    let raw = execute_query(&mq.query, &snapshot, None, None)
+                        .map_err(|e| Status::internal(format!("match query error: {e}")))?;
+                    let rows = polargraph_query::cypher::apply_value_filters(
+                        raw,
+                        &mq.value_filters,
+                        &snapshot,
+                    )
+                    .map_err(storage_err_to_status)?;
+                    let rows = polargraph_query::cypher::apply_text_filters(
+                        rows,
+                        &mq.text_filters,
+                        &snapshot,
+                    )
+                    .map_err(storage_err_to_status)?;
+                    let mut all_ids: Vec<NodeId> = Vec::new();
+                    let mut all_written: u64 = 0;
+                    let mut all_deleted: u64 = 0;
+                    for row in rows {
+                        let mut row_bindings = row;
+                        let r = polargraph_query::cypher::execute_write_ops_in(
+                            &compiled.writes,
+                            tx,
+                            &snapshot,
+                            &mut row_bindings,
+                            write_graph,
+                        )
+                        .map_err(&map_write_err)?;
+                        all_ids.extend(r.created_ids);
+                        all_written += r.triples_written;
+                        all_deleted += r.triples_deleted;
+                    }
+                    Ok(polargraph_query::cypher::WriteResult {
+                        created_ids: all_ids,
+                        triples_written: all_written,
+                        triples_deleted: all_deleted,
+                    })
+                } else {
+                    let mut bindings = HashMap::new();
+                    polargraph_query::cypher::execute_write_ops_in(
+                        &compiled.writes,
+                        tx,
+                        &snapshot,
+                        &mut bindings,
+                        write_graph,
+                    )
+                    .map_err(map_write_err)
+                }
+            };
+
+        // If tx_id is set, buffer writes into the open transaction without committing.
+        if !req.tx_id.is_empty() {
+            // Clone the Arc before awaiting to avoid holding a DashMap shard lock.
+            let open_arc = {
+                let entry = self.tx_map.get(&req.tx_id).ok_or_else(|| {
+                    Status::not_found(format!("unknown or expired transaction: {}", req.tx_id))
+                })?;
+                Arc::clone(entry.value())
+            };
+            let mut guard = open_arc.lock().await;
+            guard.tx.set_author(author.clone());
+            let result = execute_writes(&mut guard.tx)?;
+            guard.last_used = Instant::now();
+            debug!(
+                tx_id = %req.tx_id,
+                "cypher_write buffered: created={} written={} deleted={}",
+                result.created_ids.len(), result.triples_written, result.triples_deleted
+            );
+            return Ok(Response::new(CypherWriteResponse {
+                created_node_ids: result
+                    .created_ids
+                    .iter()
+                    .map(|id| id.as_bytes().to_vec())
+                    .collect(),
+                triples_written: result.triples_written,
+                triples_deleted: result.triples_deleted,
+            }));
+        }
+
+        // Auto-commit path.
+        let mut tx = self.store.begin();
+        tx.set_author(author.clone());
+        let result = execute_writes(&mut tx)?;
+
+        let commit_ts = tx.commit().map_err(storage_err_to_status)?;
+        debug!(
+            "cypher_write: created={} written={} deleted={} commit_ts={}",
+            result.created_ids.len(),
+            result.triples_written,
+            result.triples_deleted,
+            commit_ts.0
+        );
+
+        metrics::gauge!("polargraph_triples_total").increment(result.triples_written as f64);
+
+        Ok(Response::new(CypherWriteResponse {
+            created_node_ids: result
+                .created_ids
+                .iter()
+                .map(|id| id.as_bytes().to_vec())
+                .collect(),
+            triples_written: result.triples_written,
+            triples_deleted: result.triples_deleted,
+        }))
+    }
+
+    /// Resolve `RelationTriple.object_iri` (an IRI, `prefix:local` or a bare
+    /// vocabulary name) to the object node, returning the IRIs to record in
+    /// the IRI dictionary.
+    #[allow(clippy::result_large_err)]
+    fn resolve_object_iris<'a>(
+        &self,
+        triples: impl Iterator<Item = &'a mut crate::proto::Triple>,
+    ) -> Result<Vec<String>, Status> {
+        let vocab = self.store.vocabulary();
+        let mut iris = Vec::new();
+        for t in triples {
+            let Some(crate::proto::triple::Kind::Relation(r)) = &mut t.kind else {
+                continue;
+            };
+            if r.object_iri.is_empty() {
+                continue;
+            }
+            let iri = vocab.expand(&r.object_iri);
+            let node = convert::node_id_to_proto(polargraph_core::term::iri_to_node_id(&iri));
+            match &r.object {
+                Some(o) if *o != node => {
+                    return Err(Status::invalid_argument(format!(
+                        "relation object and object_iri <{iri}> name different nodes"
+                    )))
+                }
+                _ => r.object = Some(node),
+            }
+            if polargraph_core::term::needs_dictionary(&iri) {
+                iris.push(iri);
+            }
+        }
+        Ok(iris)
     }
 
     /// Checks shared by the vocabulary mutations.
@@ -1521,7 +1731,10 @@ impl PolarGraphService for PolarGraphServer {
     ) -> Result<Response<ApplyChangesResponse>, Status> {
         self.check_not_replica()?;
         let meta_uid = meta_user_id(request.metadata());
-        let req = request.into_inner();
+        let mut req = request.into_inner();
+        let resolved =
+            self.resolve_object_iris(req.adds.iter_mut().flat_map(|g| g.triples.iter_mut()))?;
+        req.iris.extend(resolved);
         let author = resolve_user_id(&req.user_id, &meta_uid);
         let access = self.caller_access(&author);
 
@@ -1696,7 +1909,12 @@ impl PolarGraphService for PolarGraphServer {
     ) -> Result<Response<ValidateShapesResponse>, Status> {
         use polargraph_shacl::{DataView, Obj, Overlay, Shapes};
         let meta_uid = meta_user_id(request.metadata());
-        let req = request.into_inner();
+        let mut req = request.into_inner();
+        self.resolve_object_iris(
+            req.overlay_adds
+                .iter_mut()
+                .flat_map(|g| g.triples.iter_mut()),
+        )?;
         let access = self.caller_access(&resolve_user_id(&req.user_id, &meta_uid));
         if req.shapes_graphs.is_empty() {
             return Err(Status::invalid_argument(
@@ -1994,7 +2212,9 @@ impl PolarGraphService for PolarGraphServer {
     ) -> Result<Response<InsertResponse>, Status> {
         self.check_not_replica()?;
         let meta_uid = meta_user_id(request.metadata());
-        let req = request.into_inner();
+        let mut req = request.into_inner();
+        let resolved = self.resolve_object_iris(req.triples.iter_mut())?;
+        req.iris.extend(resolved);
         let author = resolve_user_id(&req.user_id, &meta_uid);
         let access = self.caller_access(&author);
 
@@ -3639,172 +3859,25 @@ impl PolarGraphService for PolarGraphServer {
 
     /// Parse and execute a Cypher write statement (CREATE, MERGE, SET, DELETE),
     /// optionally preceded by a MATCH clause.
+    /// Deprecated (docs/upgrade-cypher-rdf.md): still executed for one
+    /// release, with a warning, a `warning` response header and the
+    /// `polargraph_deprecated_rpc_total{rpc="CypherWrite"}` counter. Use
+    /// `ApplyChanges` or SPARQL Update.
     async fn cypher_write(
         &self,
         request: Request<CypherWriteRequest>,
     ) -> Result<Response<CypherWriteResponse>, Status> {
-        self.check_not_replica()?;
-        let meta_uid = meta_user_id(request.metadata());
-        let req = request.into_inner();
-        let author = resolve_user_id(&req.user_id, &meta_uid);
-        let access = self.caller_access(&author);
-
-        if req.cypher.is_empty() {
-            return Err(Status::invalid_argument(
-                "cypher write string must not be empty",
-            ));
-        }
-
-        let mut compiled = polargraph_query::cypher::parse_write(&req.cypher)
-            .map_err(|e| Status::invalid_argument(format!("cypher parse error: {e}")))?;
-        // `graph` on the request acts like `USE GRAPH`; both must agree.
-        let graph_iri = match (compiled.graph.clone(), req.graph.as_str()) {
-            (Some(a), b) if !b.is_empty() && a != b => {
-                return Err(Status::invalid_argument(format!(
-                    "USE GRAPH <{a}> conflicts with request graph <{b}>"
-                )))
-            }
-            (Some(a), _) => Some(a),
-            (None, "") => None,
-            (None, b) => {
-                if let Some(mq) = &mut compiled.match_query {
-                    mq.scope_to(&polargraph_query::GraphTerm::Iri(b.to_string()));
-                }
-                Some(b.to_string())
-            }
-        };
-        // A user writes into a graph it can write — the default graph when
-        // none is named, in which case MERGE / DELETE also stay there.
-        let write_graph = match (&access, graph_iri.as_deref()) {
-            (None, iri) => iri.map(|iri| self.target_graph(iri)).transpose()?,
-            (Some(_), iri) => {
-                Some(self.graph_for(&access, iri.unwrap_or(""), GraphAccessLevel::Write, false)?)
-            }
-        };
-        reject_user_acl_writes(&access, write_predicates(&compiled.writes))?;
-
-        let map_write_err = |e: polargraph_query::cypher::CypherWriteError| match e {
-            polargraph_query::cypher::CypherWriteError::UnboundVariable(v) => {
-                Status::invalid_argument(format!("unbound variable '{v}'"))
-            }
-            polargraph_query::cypher::CypherWriteError::Storage(se) => storage_err_to_status(se),
-            polargraph_query::cypher::CypherWriteError::Parse(pe) => {
-                Status::invalid_argument(format!("cypher parse error: {pe}"))
-            }
-            polargraph_query::cypher::CypherWriteError::InvalidNodeId(v) => {
-                Status::invalid_argument(format!("'id' property must be a valid UUID string: {v}"))
-            }
-        };
-
-        // Helper closure to run the write ops given a mutable Transaction reference.
-        // Returns the WriteResult without committing.
-        let execute_writes =
-            |tx: &mut Transaction| -> Result<polargraph_query::cypher::WriteResult, Status> {
-                let snapshot = self.snapshot_for(tx.read_ts, &access);
-                if let Some(ref mq) = compiled.match_query {
-                    let raw = execute_query(&mq.query, &snapshot, None, None)
-                        .map_err(|e| Status::internal(format!("match query error: {e}")))?;
-                    let rows = polargraph_query::cypher::apply_value_filters(
-                        raw,
-                        &mq.value_filters,
-                        &snapshot,
-                    )
-                    .map_err(storage_err_to_status)?;
-                    let rows = polargraph_query::cypher::apply_text_filters(
-                        rows,
-                        &mq.text_filters,
-                        &snapshot,
-                    )
-                    .map_err(storage_err_to_status)?;
-                    let mut all_ids: Vec<NodeId> = Vec::new();
-                    let mut all_written: u64 = 0;
-                    let mut all_deleted: u64 = 0;
-                    for row in rows {
-                        let mut row_bindings = row;
-                        let r = polargraph_query::cypher::execute_write_ops_in(
-                            &compiled.writes,
-                            tx,
-                            &snapshot,
-                            &mut row_bindings,
-                            write_graph,
-                        )
-                        .map_err(&map_write_err)?;
-                        all_ids.extend(r.created_ids);
-                        all_written += r.triples_written;
-                        all_deleted += r.triples_deleted;
-                    }
-                    Ok(polargraph_query::cypher::WriteResult {
-                        created_ids: all_ids,
-                        triples_written: all_written,
-                        triples_deleted: all_deleted,
-                    })
-                } else {
-                    let mut bindings = HashMap::new();
-                    polargraph_query::cypher::execute_write_ops_in(
-                        &compiled.writes,
-                        tx,
-                        &snapshot,
-                        &mut bindings,
-                        write_graph,
-                    )
-                    .map_err(map_write_err)
-                }
-            };
-
-        // If tx_id is set, buffer writes into the open transaction without committing.
-        if !req.tx_id.is_empty() {
-            // Clone the Arc before awaiting to avoid holding a DashMap shard lock.
-            let open_arc = {
-                let entry = self.tx_map.get(&req.tx_id).ok_or_else(|| {
-                    Status::not_found(format!("unknown or expired transaction: {}", req.tx_id))
-                })?;
-                Arc::clone(entry.value())
-            };
-            let mut guard = open_arc.lock().await;
-            guard.tx.set_author(author.clone());
-            let result = execute_writes(&mut guard.tx)?;
-            guard.last_used = Instant::now();
-            debug!(
-                tx_id = %req.tx_id,
-                "cypher_write buffered: created={} written={} deleted={}",
-                result.created_ids.len(), result.triples_written, result.triples_deleted
-            );
-            return Ok(Response::new(CypherWriteResponse {
-                created_node_ids: result
-                    .created_ids
-                    .iter()
-                    .map(|id| id.as_bytes().to_vec())
-                    .collect(),
-                triples_written: result.triples_written,
-                triples_deleted: result.triples_deleted,
-            }));
-        }
-
-        // Auto-commit path.
-        let mut tx = self.store.begin();
-        tx.set_author(author.clone());
-        let result = execute_writes(&mut tx)?;
-
-        let commit_ts = tx.commit().map_err(storage_err_to_status)?;
-        debug!(
-            "cypher_write: created={} written={} deleted={} commit_ts={}",
-            result.created_ids.len(),
-            result.triples_written,
-            result.triples_deleted,
-            commit_ts.0
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            warn!("{CYPHER_WRITE_DEPRECATION}");
+        });
+        metrics::counter!("polargraph_deprecated_rpc_total", "rpc" => "CypherWrite").increment(1);
+        let mut response = self.cypher_write_impl(request).await?;
+        response.metadata_mut().insert(
+            "warning",
+            tonic::metadata::MetadataValue::from_static(CYPHER_WRITE_WARNING),
         );
-
-        metrics::gauge!("polargraph_triples_total").increment(result.triples_written as f64);
-
-        Ok(Response::new(CypherWriteResponse {
-            created_node_ids: result
-                .created_ids
-                .iter()
-                .map(|id| id.as_bytes().to_vec())
-                .collect(),
-            triples_written: result.triples_written,
-            triples_deleted: result.triples_deleted,
-        }))
+        Ok(response)
     }
 
     /// Stream WAL entries to a replica. Primary-only.

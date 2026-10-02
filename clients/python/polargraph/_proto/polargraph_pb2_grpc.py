@@ -26,9 +26,7 @@ if _version_not_supported:
 
 
 class PolarGraphServiceStub:
-    """── Service ───────────────────────────────────────────────────────────────────
-
-    """
+    """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
         """Constructor.
@@ -36,10 +34,105 @@ class PolarGraphServiceStub:
         Args:
             channel: A grpc.Channel.
         """
+        self.GetVocabulary = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/GetVocabulary',
+                request_serializer=polargraph__pb2.GetVocabularyRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.Vocabulary.FromString,
+                _registered_method=True)
+        self.SetVocabularyBase = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/SetVocabularyBase',
+                request_serializer=polargraph__pb2.SetVocabularyBaseRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.Vocabulary.FromString,
+                _registered_method=True)
+        self.PutPrefix = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/PutPrefix',
+                request_serializer=polargraph__pb2.PutPrefixRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.Vocabulary.FromString,
+                _registered_method=True)
+        self.RemovePrefix = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/RemovePrefix',
+                request_serializer=polargraph__pb2.RemovePrefixRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.Vocabulary.FromString,
+                _registered_method=True)
+        self.ConvertLegacyData = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/ConvertLegacyData',
+                request_serializer=polargraph__pb2.ConvertLegacyDataRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.ConvertLegacyDataResponse.FromString,
+                _registered_method=True)
         self.Insert = channel.unary_unary(
                 '/polargraph.v1.PolarGraphService/Insert',
                 request_serializer=polargraph__pb2.InsertRequest.SerializeToString,
                 response_deserializer=polargraph__pb2.InsertResponse.FromString,
+                _registered_method=True)
+        self.ResolveIris = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/ResolveIris',
+                request_serializer=polargraph__pb2.ResolveIrisRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.ResolveIrisResponse.FromString,
+                _registered_method=True)
+        self.CreateGraph = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/CreateGraph',
+                request_serializer=polargraph__pb2.CreateGraphRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.CreateGraphResponse.FromString,
+                _registered_method=True)
+        self.ListGraphs = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/ListGraphs',
+                request_serializer=polargraph__pb2.ListGraphsRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.ListGraphsResponse.FromString,
+                _registered_method=True)
+        self.GraphStats = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/GraphStats',
+                request_serializer=polargraph__pb2.GraphStatsRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.GraphStatsResponse.FromString,
+                _registered_method=True)
+        self.CopyGraph = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/CopyGraph',
+                request_serializer=polargraph__pb2.CopyGraphRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.CopyGraphResponse.FromString,
+                _registered_method=True)
+        self.MoveGraph = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/MoveGraph',
+                request_serializer=polargraph__pb2.MoveGraphRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.CopyGraphResponse.FromString,
+                _registered_method=True)
+        self.DropGraph = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/DropGraph',
+                request_serializer=polargraph__pb2.DropGraphRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.DropGraphResponse.FromString,
+                _registered_method=True)
+        self.ExportGraph = channel.unary_stream(
+                '/polargraph.v1.PolarGraphService/ExportGraph',
+                request_serializer=polargraph__pb2.ExportGraphRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.ExportGraphChunk.FromString,
+                _registered_method=True)
+        self.ApplyChanges = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/ApplyChanges',
+                request_serializer=polargraph__pb2.ApplyChangesRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.ApplyChangesResponse.FromString,
+                _registered_method=True)
+        self.ValidateShapes = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/ValidateShapes',
+                request_serializer=polargraph__pb2.ValidateShapesRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.ValidateShapesResponse.FromString,
+                _registered_method=True)
+        self.Subscribe = channel.unary_stream(
+                '/polargraph.v1.PolarGraphService/Subscribe',
+                request_serializer=polargraph__pb2.SubscribeRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.ChangeEvent.FromString,
+                _registered_method=True)
+        self.GrantGraphAccess = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/GrantGraphAccess',
+                request_serializer=polargraph__pb2.GrantGraphAccessRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.GrantGraphAccessResponse.FromString,
+                _registered_method=True)
+        self.RevokeGraphAccess = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/RevokeGraphAccess',
+                request_serializer=polargraph__pb2.RevokeGraphAccessRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.RevokeGraphAccessResponse.FromString,
+                _registered_method=True)
+        self.GetGraphAccess = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/GetGraphAccess',
+                request_serializer=polargraph__pb2.GetGraphAccessRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.GetGraphAccessResponse.FromString,
                 _registered_method=True)
         self.Query = channel.unary_unary(
                 '/polargraph.v1.PolarGraphService/Query',
@@ -105,6 +198,11 @@ class PolarGraphServiceStub:
                 '/polargraph.v1.PolarGraphService/ListPredicatesBetween',
                 request_serializer=polargraph__pb2.ListPredicatesBetweenRequest.SerializeToString,
                 response_deserializer=polargraph__pb2.ListPredicatesBetweenResponse.FromString,
+                _registered_method=True)
+        self.ValidateOntology = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/ValidateOntology',
+                request_serializer=polargraph__pb2.ValidateOntologyRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.ValidateOntologyResponse.FromString,
                 _registered_method=True)
         self.SearchVectorFiltered = channel.unary_unary(
                 '/polargraph.v1.PolarGraphService/SearchVectorFiltered',
@@ -191,16 +289,233 @@ class PolarGraphServiceStub:
                 request_serializer=polargraph__pb2.CypherQueryRequest.SerializeToString,
                 response_deserializer=polargraph__pb2.QueryStreamChunk.FromString,
                 _registered_method=True)
+        self.ShowIndexes = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/ShowIndexes',
+                request_serializer=polargraph__pb2.ShowIndexesRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.ShowIndexesResponse.FromString,
+                _registered_method=True)
+        self.ShowStats = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/ShowStats',
+                request_serializer=polargraph__pb2.ShowStatsRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.ShowStatsResponse.FromString,
+                _registered_method=True)
+        self.BeginTransaction = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/BeginTransaction',
+                request_serializer=polargraph__pb2.BeginTransactionRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.BeginTransactionResponse.FromString,
+                _registered_method=True)
+        self.CommitTransaction = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/CommitTransaction',
+                request_serializer=polargraph__pb2.CommitTransactionRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.CommitTransactionResponse.FromString,
+                _registered_method=True)
+        self.RollbackTransaction = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/RollbackTransaction',
+                request_serializer=polargraph__pb2.RollbackTransactionRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.RollbackTransactionResponse.FromString,
+                _registered_method=True)
+        self.GetEdgeAnnotations = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/GetEdgeAnnotations',
+                request_serializer=polargraph__pb2.GetEdgeAnnotationsRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.GetEdgeAnnotationsResponse.FromString,
+                _registered_method=True)
+        self.GetEdgeIdsByTriple = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/GetEdgeIdsByTriple',
+                request_serializer=polargraph__pb2.GetEdgeIdsByTripleRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.GetEdgeIdsByTripleResponse.FromString,
+                _registered_method=True)
+        self.AddApiKey = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/AddApiKey',
+                request_serializer=polargraph__pb2.AddApiKeyRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.AddApiKeyResponse.FromString,
+                _registered_method=True)
+        self.RevokeApiKey = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/RevokeApiKey',
+                request_serializer=polargraph__pb2.RevokeApiKeyRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.RevokeApiKeyResponse.FromString,
+                _registered_method=True)
+        self.ListApiKeys = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/ListApiKeys',
+                request_serializer=polargraph__pb2.ListApiKeysRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.ListApiKeysResponse.FromString,
+                _registered_method=True)
+        self.GrantAccess = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/GrantAccess',
+                request_serializer=polargraph__pb2.GrantAccessRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.GrantAccessResponse.FromString,
+                _registered_method=True)
+        self.RevokeAccess = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/RevokeAccess',
+                request_serializer=polargraph__pb2.RevokeAccessRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.RevokeAccessResponse.FromString,
+                _registered_method=True)
+        self.AddUserToGroup = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/AddUserToGroup',
+                request_serializer=polargraph__pb2.AddUserToGroupRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.AddUserToGroupResponse.FromString,
+                _registered_method=True)
+        self.GetUserAccess = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/GetUserAccess',
+                request_serializer=polargraph__pb2.GetUserAccessRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.GetUserAccessResponse.FromString,
+                _registered_method=True)
+        self.GetPropertyHistory = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/GetPropertyHistory',
+                request_serializer=polargraph__pb2.GetPropertyHistoryRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.GetPropertyHistoryResponse.FromString,
+                _registered_method=True)
+        self.DeleteTriples = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/DeleteTriples',
+                request_serializer=polargraph__pb2.DeleteTriplesRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.DeleteTriplesResponse.FromString,
+                _registered_method=True)
+        self.RunMaterialization = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/RunMaterialization',
+                request_serializer=polargraph__pb2.RunMaterializationRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.RunMaterializationResponse.FromString,
+                _registered_method=True)
 
 
 class PolarGraphServiceServicer:
-    """── Service ───────────────────────────────────────────────────────────────────
+    """Missing associated documentation comment in .proto file."""
 
-    """
+    def GetVocabulary(self, request, context):
+        """/ The vocabulary base, prefixes and legacy-conversion status.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SetVocabularyBase(self, request, context):
+        """/ Set the base IRI for bare names.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PutPrefix(self, request, context):
+        """/ Declare or re-point a prefix.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RemovePrefix(self, request, context):
+        """/ Remove a prefix (no-op if absent).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ConvertLegacyData(self, request, context):
+        """/ One-time conversion of pre-vocabulary data: bare predicates → IRIs,
+        / `__type` labels → `rdf:type`. Idempotent and resumable.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
 
     def Insert(self, request, context):
         """/ Insert one or more triples in a single atomic transaction.
         / Returns ABORTED if a write-write conflict is detected.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ResolveIris(self, request, context):
+        """/ Map node IDs back to IRIs via the IRI dictionary.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CreateGraph(self, request, context):
+        """/ Register a named graph (idempotent) and set its metadata.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListGraphs(self, request, context):
+        """/ List named graphs with their metadata, optionally filtered.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GraphStats(self, request, context):
+        """/ Live-quad count and last write time of one graph.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CopyGraph(self, request, context):
+        """/ Copy a graph's live quads into another graph (COPY / ADD semantics).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def MoveGraph(self, request, context):
+        """/ Copy into the target (replacing it), then drop the source.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DropGraph(self, request, context):
+        """/ Close every live quad of a graph (bitemporal tombstones).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ExportGraph(self, request, context):
+        """/ Stream the live quads of one graph, or of the whole dataset.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ApplyChanges(self, request, context):
+        """/ Apply adds and retractions across graphs atomically.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ValidateShapes(self, request, context):
+        """/ Validate a dataset (optionally with uncommitted changes) against SHACL shapes.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Subscribe(self, request, context):
+        """/ Stream committed changes (with resume), filtered by graph access.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GrantGraphAccess(self, request, context):
+        """/ Grant a user or group a level on a named graph.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RevokeGraphAccess(self, request, context):
+        """/ Revoke a user's or group's grant on a named graph.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetGraphAccess(self, request, context):
+        """/ A user's effective graph access.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -301,6 +616,17 @@ class PolarGraphServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ValidateOntology(self, request, context):
+        """/ Check the full ontology for consistency:
+        / - cardinality violations across all committed triples
+        / - missing inverse-predicate counterparts
+        / - cycles in the node type hierarchy (should not occur if RegisterNodeType
+        /   enforcement is in place, but this double-checks the live data)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def SearchVectorFiltered(self, request, context):
         """/ Vector search with a node-type or reachability filter.
         / Runs HNSW with a large candidate pool then post-filters to the allowed set.
@@ -358,8 +684,8 @@ class PolarGraphServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def RunRetention(self, request, context):
-        """/ Scan all hexastore column families and delete triples whose
-        / transaction time or valid-time window has expired per the supplied policy.
+        """/ Scan all hexastore column families and delete superseded versions (and
+        / triples whose valid-time windows have fully expired) per the policy.
         / Triggers a full RocksDB compaction on any CF that had deletions.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -420,7 +746,10 @@ class PolarGraphServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def CypherWrite(self, request, context):
-        """/ Parse and execute a Cypher write statement (CREATE, MERGE, SET, DELETE).
+        """/ DEPRECATED — removed in the next release; write with ApplyChanges or
+        / SPARQL Update (docs/upgrade-cypher-rdf.md). Responses carry a
+        / `warning` header.
+        / Parse and execute a Cypher write statement (CREATE, MERGE, SET, DELETE).
         / Executes atomically in a single MVCC transaction.
         / Returns INVALID_ARGUMENT if the statement cannot be parsed or contains no
         / write clause. Returns FAILED_PRECONDITION on a read replica.
@@ -446,13 +775,263 @@ class PolarGraphServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ShowIndexes(self, request, context):
+        """/ Return per-column-family key counts and sizes, plus HNSW space info.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ShowStats(self, request, context):
+        """/ Return server-wide storage and MVCC statistics.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def BeginTransaction(self, request, context):
+        """/ Open a new multi-RPC transaction. Returns an opaque tx_id.
+        / Pass tx_id to Insert, Query, CypherWrite, or CypherQuery to join the
+        / transaction. Returns FAILED_PRECONDITION on a read replica.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CommitTransaction(self, request, context):
+        """/ Commit an open transaction. Returns ABORTED on write-write conflict,
+        / NOT_FOUND if tx_id is unknown or has expired.
+        / Returns FAILED_PRECONDITION on a read replica.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RollbackTransaction(self, request, context):
+        """/ Roll back an open transaction, discarding all buffered writes.
+        / Returns NOT_FOUND if tx_id is unknown or has expired.
+        / Returns FAILED_PRECONDITION on a read replica.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetEdgeAnnotations(self, request, context):
+        """/ Return all RDF-star annotations on the edge identified by `edge_id`.
+        / Returns an empty list if the edge has no annotations or does not exist.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetEdgeIdsByTriple(self, request, context):
+        """/ Resolve the edge UUID(s) for a specific (subject, predicate, object) relation triple.
+        / Used by the SPARQL-star executor to look up edge IDs before fetching annotations.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AddApiKey(self, request, context):
+        """/ Add a new API key to the live key store. Takes effect immediately.
+        / Returns FAILED_PRECONDITION when the server was started without any
+        / keys (auth is disabled). Returns INVALID_ARGUMENT for an empty key.
+        / Returns FAILED_PRECONDITION on a read replica.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RevokeApiKey(self, request, context):
+        """/ Remove an API key from the live key store. The caller should immediately
+        / stop using the revoked key. Returns FAILED_PRECONDITION when auth is
+        / disabled. Returns FAILED_PRECONDITION on a read replica.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListApiKeys(self, request, context):
+        """/ List all configured API keys as masked prefixes (first 4 chars + "****").
+        / Never reveals full key values. Returns FAILED_PRECONDITION on a read
+        / replica.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GrantAccess(self, request, context):
+        """/ Grant a group access to a specific node or all nodes of a given type.
+        / Writes a HAS_ACCESS (or HAS_ACCESS_TYPE) triple and updates the
+        / in-memory access cache immediately.
+        / Returns FAILED_PRECONDITION on a read replica.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RevokeAccess(self, request, context):
+        """/ Revoke a group's access grant by closing the valid time of the
+        / HAS_ACCESS / HAS_ACCESS_TYPE triple and updating the cache.
+        / Returns FAILED_PRECONDITION on a read replica.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AddUserToGroup(self, request, context):
+        """/ Add a user to a group by writing a MEMBER_OF triple and updating
+        / the in-memory access cache.
+        / Returns FAILED_PRECONDITION on a read replica.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetUserAccess(self, request, context):
+        """/ Return all node IDs and type grants accessible to a user, derived from
+        / their group memberships and HAS_ACCESS / HAS_ACCESS_TYPE triples.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetPropertyHistory(self, request, context):
+        """/ Return all historical versions of a node property, ordered newest-first
+        / by transaction time. Scans the full SPO column family without MVCC
+        / deduplication so every committed write is visible.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteTriples(self, request, context):
+        """/ Soft-delete triples for one or more subjects by closing their valid-time
+        / window. Each live triple (vt_end == END_OF_TIME) matching the subject (and
+        / optional predicate filter) receives a superseding entry with vt_end set to
+        / the requested timestamp (or server clock when vt_end == 0).
+        / Returns FAILED_PRECONDITION on a read replica.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RunMaterialization(self, request, context):
+        """/ Run OWL 2 RL forward-chaining materialization to fixpoint.
+        /
+        / Derives new Relation triples according to the RDFS entailment and OWL
+        / property characteristic rules and writes them to the DRV column family.
+        / The DRV CF is separate from the base hexastore so derived triples can be
+        / wiped and rebuilt cleanly without touching user data.
+        /
+        / Returns FAILED_PRECONDITION on a read replica.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_PolarGraphServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
+            'GetVocabulary': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetVocabulary,
+                    request_deserializer=polargraph__pb2.GetVocabularyRequest.FromString,
+                    response_serializer=polargraph__pb2.Vocabulary.SerializeToString,
+            ),
+            'SetVocabularyBase': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetVocabularyBase,
+                    request_deserializer=polargraph__pb2.SetVocabularyBaseRequest.FromString,
+                    response_serializer=polargraph__pb2.Vocabulary.SerializeToString,
+            ),
+            'PutPrefix': grpc.unary_unary_rpc_method_handler(
+                    servicer.PutPrefix,
+                    request_deserializer=polargraph__pb2.PutPrefixRequest.FromString,
+                    response_serializer=polargraph__pb2.Vocabulary.SerializeToString,
+            ),
+            'RemovePrefix': grpc.unary_unary_rpc_method_handler(
+                    servicer.RemovePrefix,
+                    request_deserializer=polargraph__pb2.RemovePrefixRequest.FromString,
+                    response_serializer=polargraph__pb2.Vocabulary.SerializeToString,
+            ),
+            'ConvertLegacyData': grpc.unary_unary_rpc_method_handler(
+                    servicer.ConvertLegacyData,
+                    request_deserializer=polargraph__pb2.ConvertLegacyDataRequest.FromString,
+                    response_serializer=polargraph__pb2.ConvertLegacyDataResponse.SerializeToString,
+            ),
             'Insert': grpc.unary_unary_rpc_method_handler(
                     servicer.Insert,
                     request_deserializer=polargraph__pb2.InsertRequest.FromString,
                     response_serializer=polargraph__pb2.InsertResponse.SerializeToString,
+            ),
+            'ResolveIris': grpc.unary_unary_rpc_method_handler(
+                    servicer.ResolveIris,
+                    request_deserializer=polargraph__pb2.ResolveIrisRequest.FromString,
+                    response_serializer=polargraph__pb2.ResolveIrisResponse.SerializeToString,
+            ),
+            'CreateGraph': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateGraph,
+                    request_deserializer=polargraph__pb2.CreateGraphRequest.FromString,
+                    response_serializer=polargraph__pb2.CreateGraphResponse.SerializeToString,
+            ),
+            'ListGraphs': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListGraphs,
+                    request_deserializer=polargraph__pb2.ListGraphsRequest.FromString,
+                    response_serializer=polargraph__pb2.ListGraphsResponse.SerializeToString,
+            ),
+            'GraphStats': grpc.unary_unary_rpc_method_handler(
+                    servicer.GraphStats,
+                    request_deserializer=polargraph__pb2.GraphStatsRequest.FromString,
+                    response_serializer=polargraph__pb2.GraphStatsResponse.SerializeToString,
+            ),
+            'CopyGraph': grpc.unary_unary_rpc_method_handler(
+                    servicer.CopyGraph,
+                    request_deserializer=polargraph__pb2.CopyGraphRequest.FromString,
+                    response_serializer=polargraph__pb2.CopyGraphResponse.SerializeToString,
+            ),
+            'MoveGraph': grpc.unary_unary_rpc_method_handler(
+                    servicer.MoveGraph,
+                    request_deserializer=polargraph__pb2.MoveGraphRequest.FromString,
+                    response_serializer=polargraph__pb2.CopyGraphResponse.SerializeToString,
+            ),
+            'DropGraph': grpc.unary_unary_rpc_method_handler(
+                    servicer.DropGraph,
+                    request_deserializer=polargraph__pb2.DropGraphRequest.FromString,
+                    response_serializer=polargraph__pb2.DropGraphResponse.SerializeToString,
+            ),
+            'ExportGraph': grpc.unary_stream_rpc_method_handler(
+                    servicer.ExportGraph,
+                    request_deserializer=polargraph__pb2.ExportGraphRequest.FromString,
+                    response_serializer=polargraph__pb2.ExportGraphChunk.SerializeToString,
+            ),
+            'ApplyChanges': grpc.unary_unary_rpc_method_handler(
+                    servicer.ApplyChanges,
+                    request_deserializer=polargraph__pb2.ApplyChangesRequest.FromString,
+                    response_serializer=polargraph__pb2.ApplyChangesResponse.SerializeToString,
+            ),
+            'ValidateShapes': grpc.unary_unary_rpc_method_handler(
+                    servicer.ValidateShapes,
+                    request_deserializer=polargraph__pb2.ValidateShapesRequest.FromString,
+                    response_serializer=polargraph__pb2.ValidateShapesResponse.SerializeToString,
+            ),
+            'Subscribe': grpc.unary_stream_rpc_method_handler(
+                    servicer.Subscribe,
+                    request_deserializer=polargraph__pb2.SubscribeRequest.FromString,
+                    response_serializer=polargraph__pb2.ChangeEvent.SerializeToString,
+            ),
+            'GrantGraphAccess': grpc.unary_unary_rpc_method_handler(
+                    servicer.GrantGraphAccess,
+                    request_deserializer=polargraph__pb2.GrantGraphAccessRequest.FromString,
+                    response_serializer=polargraph__pb2.GrantGraphAccessResponse.SerializeToString,
+            ),
+            'RevokeGraphAccess': grpc.unary_unary_rpc_method_handler(
+                    servicer.RevokeGraphAccess,
+                    request_deserializer=polargraph__pb2.RevokeGraphAccessRequest.FromString,
+                    response_serializer=polargraph__pb2.RevokeGraphAccessResponse.SerializeToString,
+            ),
+            'GetGraphAccess': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetGraphAccess,
+                    request_deserializer=polargraph__pb2.GetGraphAccessRequest.FromString,
+                    response_serializer=polargraph__pb2.GetGraphAccessResponse.SerializeToString,
             ),
             'Query': grpc.unary_unary_rpc_method_handler(
                     servicer.Query,
@@ -518,6 +1097,11 @@ def add_PolarGraphServiceServicer_to_server(servicer, server):
                     servicer.ListPredicatesBetween,
                     request_deserializer=polargraph__pb2.ListPredicatesBetweenRequest.FromString,
                     response_serializer=polargraph__pb2.ListPredicatesBetweenResponse.SerializeToString,
+            ),
+            'ValidateOntology': grpc.unary_unary_rpc_method_handler(
+                    servicer.ValidateOntology,
+                    request_deserializer=polargraph__pb2.ValidateOntologyRequest.FromString,
+                    response_serializer=polargraph__pb2.ValidateOntologyResponse.SerializeToString,
             ),
             'SearchVectorFiltered': grpc.unary_unary_rpc_method_handler(
                     servicer.SearchVectorFiltered,
@@ -604,6 +1188,91 @@ def add_PolarGraphServiceServicer_to_server(servicer, server):
                     request_deserializer=polargraph__pb2.CypherQueryRequest.FromString,
                     response_serializer=polargraph__pb2.QueryStreamChunk.SerializeToString,
             ),
+            'ShowIndexes': grpc.unary_unary_rpc_method_handler(
+                    servicer.ShowIndexes,
+                    request_deserializer=polargraph__pb2.ShowIndexesRequest.FromString,
+                    response_serializer=polargraph__pb2.ShowIndexesResponse.SerializeToString,
+            ),
+            'ShowStats': grpc.unary_unary_rpc_method_handler(
+                    servicer.ShowStats,
+                    request_deserializer=polargraph__pb2.ShowStatsRequest.FromString,
+                    response_serializer=polargraph__pb2.ShowStatsResponse.SerializeToString,
+            ),
+            'BeginTransaction': grpc.unary_unary_rpc_method_handler(
+                    servicer.BeginTransaction,
+                    request_deserializer=polargraph__pb2.BeginTransactionRequest.FromString,
+                    response_serializer=polargraph__pb2.BeginTransactionResponse.SerializeToString,
+            ),
+            'CommitTransaction': grpc.unary_unary_rpc_method_handler(
+                    servicer.CommitTransaction,
+                    request_deserializer=polargraph__pb2.CommitTransactionRequest.FromString,
+                    response_serializer=polargraph__pb2.CommitTransactionResponse.SerializeToString,
+            ),
+            'RollbackTransaction': grpc.unary_unary_rpc_method_handler(
+                    servicer.RollbackTransaction,
+                    request_deserializer=polargraph__pb2.RollbackTransactionRequest.FromString,
+                    response_serializer=polargraph__pb2.RollbackTransactionResponse.SerializeToString,
+            ),
+            'GetEdgeAnnotations': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetEdgeAnnotations,
+                    request_deserializer=polargraph__pb2.GetEdgeAnnotationsRequest.FromString,
+                    response_serializer=polargraph__pb2.GetEdgeAnnotationsResponse.SerializeToString,
+            ),
+            'GetEdgeIdsByTriple': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetEdgeIdsByTriple,
+                    request_deserializer=polargraph__pb2.GetEdgeIdsByTripleRequest.FromString,
+                    response_serializer=polargraph__pb2.GetEdgeIdsByTripleResponse.SerializeToString,
+            ),
+            'AddApiKey': grpc.unary_unary_rpc_method_handler(
+                    servicer.AddApiKey,
+                    request_deserializer=polargraph__pb2.AddApiKeyRequest.FromString,
+                    response_serializer=polargraph__pb2.AddApiKeyResponse.SerializeToString,
+            ),
+            'RevokeApiKey': grpc.unary_unary_rpc_method_handler(
+                    servicer.RevokeApiKey,
+                    request_deserializer=polargraph__pb2.RevokeApiKeyRequest.FromString,
+                    response_serializer=polargraph__pb2.RevokeApiKeyResponse.SerializeToString,
+            ),
+            'ListApiKeys': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListApiKeys,
+                    request_deserializer=polargraph__pb2.ListApiKeysRequest.FromString,
+                    response_serializer=polargraph__pb2.ListApiKeysResponse.SerializeToString,
+            ),
+            'GrantAccess': grpc.unary_unary_rpc_method_handler(
+                    servicer.GrantAccess,
+                    request_deserializer=polargraph__pb2.GrantAccessRequest.FromString,
+                    response_serializer=polargraph__pb2.GrantAccessResponse.SerializeToString,
+            ),
+            'RevokeAccess': grpc.unary_unary_rpc_method_handler(
+                    servicer.RevokeAccess,
+                    request_deserializer=polargraph__pb2.RevokeAccessRequest.FromString,
+                    response_serializer=polargraph__pb2.RevokeAccessResponse.SerializeToString,
+            ),
+            'AddUserToGroup': grpc.unary_unary_rpc_method_handler(
+                    servicer.AddUserToGroup,
+                    request_deserializer=polargraph__pb2.AddUserToGroupRequest.FromString,
+                    response_serializer=polargraph__pb2.AddUserToGroupResponse.SerializeToString,
+            ),
+            'GetUserAccess': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetUserAccess,
+                    request_deserializer=polargraph__pb2.GetUserAccessRequest.FromString,
+                    response_serializer=polargraph__pb2.GetUserAccessResponse.SerializeToString,
+            ),
+            'GetPropertyHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPropertyHistory,
+                    request_deserializer=polargraph__pb2.GetPropertyHistoryRequest.FromString,
+                    response_serializer=polargraph__pb2.GetPropertyHistoryResponse.SerializeToString,
+            ),
+            'DeleteTriples': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteTriples,
+                    request_deserializer=polargraph__pb2.DeleteTriplesRequest.FromString,
+                    response_serializer=polargraph__pb2.DeleteTriplesResponse.SerializeToString,
+            ),
+            'RunMaterialization': grpc.unary_unary_rpc_method_handler(
+                    servicer.RunMaterialization,
+                    request_deserializer=polargraph__pb2.RunMaterializationRequest.FromString,
+                    response_serializer=polargraph__pb2.RunMaterializationResponse.SerializeToString,
+            ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
             'polargraph.v1.PolarGraphService', rpc_method_handlers)
@@ -613,9 +1282,142 @@ def add_PolarGraphServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class PolarGraphService:
-    """── Service ───────────────────────────────────────────────────────────────────
+    """Missing associated documentation comment in .proto file."""
 
-    """
+    @staticmethod
+    def GetVocabulary(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/GetVocabulary',
+            polargraph__pb2.GetVocabularyRequest.SerializeToString,
+            polargraph__pb2.Vocabulary.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetVocabularyBase(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/SetVocabularyBase',
+            polargraph__pb2.SetVocabularyBaseRequest.SerializeToString,
+            polargraph__pb2.Vocabulary.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PutPrefix(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/PutPrefix',
+            polargraph__pb2.PutPrefixRequest.SerializeToString,
+            polargraph__pb2.Vocabulary.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RemovePrefix(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/RemovePrefix',
+            polargraph__pb2.RemovePrefixRequest.SerializeToString,
+            polargraph__pb2.Vocabulary.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ConvertLegacyData(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/ConvertLegacyData',
+            polargraph__pb2.ConvertLegacyDataRequest.SerializeToString,
+            polargraph__pb2.ConvertLegacyDataResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
 
     @staticmethod
     def Insert(request,
@@ -634,6 +1436,384 @@ class PolarGraphService:
             '/polargraph.v1.PolarGraphService/Insert',
             polargraph__pb2.InsertRequest.SerializeToString,
             polargraph__pb2.InsertResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ResolveIris(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/ResolveIris',
+            polargraph__pb2.ResolveIrisRequest.SerializeToString,
+            polargraph__pb2.ResolveIrisResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CreateGraph(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/CreateGraph',
+            polargraph__pb2.CreateGraphRequest.SerializeToString,
+            polargraph__pb2.CreateGraphResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListGraphs(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/ListGraphs',
+            polargraph__pb2.ListGraphsRequest.SerializeToString,
+            polargraph__pb2.ListGraphsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GraphStats(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/GraphStats',
+            polargraph__pb2.GraphStatsRequest.SerializeToString,
+            polargraph__pb2.GraphStatsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CopyGraph(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/CopyGraph',
+            polargraph__pb2.CopyGraphRequest.SerializeToString,
+            polargraph__pb2.CopyGraphResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MoveGraph(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/MoveGraph',
+            polargraph__pb2.MoveGraphRequest.SerializeToString,
+            polargraph__pb2.CopyGraphResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DropGraph(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/DropGraph',
+            polargraph__pb2.DropGraphRequest.SerializeToString,
+            polargraph__pb2.DropGraphResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExportGraph(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/ExportGraph',
+            polargraph__pb2.ExportGraphRequest.SerializeToString,
+            polargraph__pb2.ExportGraphChunk.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ApplyChanges(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/ApplyChanges',
+            polargraph__pb2.ApplyChangesRequest.SerializeToString,
+            polargraph__pb2.ApplyChangesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ValidateShapes(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/ValidateShapes',
+            polargraph__pb2.ValidateShapesRequest.SerializeToString,
+            polargraph__pb2.ValidateShapesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Subscribe(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/Subscribe',
+            polargraph__pb2.SubscribeRequest.SerializeToString,
+            polargraph__pb2.ChangeEvent.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GrantGraphAccess(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/GrantGraphAccess',
+            polargraph__pb2.GrantGraphAccessRequest.SerializeToString,
+            polargraph__pb2.GrantGraphAccessResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RevokeGraphAccess(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/RevokeGraphAccess',
+            polargraph__pb2.RevokeGraphAccessRequest.SerializeToString,
+            polargraph__pb2.RevokeGraphAccessResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetGraphAccess(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/GetGraphAccess',
+            polargraph__pb2.GetGraphAccessRequest.SerializeToString,
+            polargraph__pb2.GetGraphAccessResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -985,6 +2165,33 @@ class PolarGraphService:
             '/polargraph.v1.PolarGraphService/ListPredicatesBetween',
             polargraph__pb2.ListPredicatesBetweenRequest.SerializeToString,
             polargraph__pb2.ListPredicatesBetweenResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ValidateOntology(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/ValidateOntology',
+            polargraph__pb2.ValidateOntologyRequest.SerializeToString,
+            polargraph__pb2.ValidateOntologyResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -1444,6 +2651,465 @@ class PolarGraphService:
             '/polargraph.v1.PolarGraphService/CypherQueryStream',
             polargraph__pb2.CypherQueryRequest.SerializeToString,
             polargraph__pb2.QueryStreamChunk.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ShowIndexes(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/ShowIndexes',
+            polargraph__pb2.ShowIndexesRequest.SerializeToString,
+            polargraph__pb2.ShowIndexesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ShowStats(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/ShowStats',
+            polargraph__pb2.ShowStatsRequest.SerializeToString,
+            polargraph__pb2.ShowStatsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def BeginTransaction(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/BeginTransaction',
+            polargraph__pb2.BeginTransactionRequest.SerializeToString,
+            polargraph__pb2.BeginTransactionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CommitTransaction(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/CommitTransaction',
+            polargraph__pb2.CommitTransactionRequest.SerializeToString,
+            polargraph__pb2.CommitTransactionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RollbackTransaction(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/RollbackTransaction',
+            polargraph__pb2.RollbackTransactionRequest.SerializeToString,
+            polargraph__pb2.RollbackTransactionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetEdgeAnnotations(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/GetEdgeAnnotations',
+            polargraph__pb2.GetEdgeAnnotationsRequest.SerializeToString,
+            polargraph__pb2.GetEdgeAnnotationsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetEdgeIdsByTriple(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/GetEdgeIdsByTriple',
+            polargraph__pb2.GetEdgeIdsByTripleRequest.SerializeToString,
+            polargraph__pb2.GetEdgeIdsByTripleResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AddApiKey(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/AddApiKey',
+            polargraph__pb2.AddApiKeyRequest.SerializeToString,
+            polargraph__pb2.AddApiKeyResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RevokeApiKey(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/RevokeApiKey',
+            polargraph__pb2.RevokeApiKeyRequest.SerializeToString,
+            polargraph__pb2.RevokeApiKeyResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListApiKeys(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/ListApiKeys',
+            polargraph__pb2.ListApiKeysRequest.SerializeToString,
+            polargraph__pb2.ListApiKeysResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GrantAccess(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/GrantAccess',
+            polargraph__pb2.GrantAccessRequest.SerializeToString,
+            polargraph__pb2.GrantAccessResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RevokeAccess(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/RevokeAccess',
+            polargraph__pb2.RevokeAccessRequest.SerializeToString,
+            polargraph__pb2.RevokeAccessResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AddUserToGroup(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/AddUserToGroup',
+            polargraph__pb2.AddUserToGroupRequest.SerializeToString,
+            polargraph__pb2.AddUserToGroupResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetUserAccess(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/GetUserAccess',
+            polargraph__pb2.GetUserAccessRequest.SerializeToString,
+            polargraph__pb2.GetUserAccessResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPropertyHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/GetPropertyHistory',
+            polargraph__pb2.GetPropertyHistoryRequest.SerializeToString,
+            polargraph__pb2.GetPropertyHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteTriples(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/DeleteTriples',
+            polargraph__pb2.DeleteTriplesRequest.SerializeToString,
+            polargraph__pb2.DeleteTriplesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RunMaterialization(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/RunMaterialization',
+            polargraph__pb2.RunMaterializationRequest.SerializeToString,
+            polargraph__pb2.RunMaterializationResponse.FromString,
             options,
             channel_credentials,
             insecure,

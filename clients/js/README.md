@@ -12,7 +12,7 @@ npm install @polargraph/client
 
 ```typescript
 import { randomUUID } from "crypto";
-import { PolarGraphClient } from "@polargraph/client";
+import { PolarGraphClient, RDF_TYPE } from "@polargraph/client";
 
 const client = new PolarGraphClient("localhost", 50051, { apiKey: "secret" });
 
@@ -37,9 +37,14 @@ const cyRows = await client.cypher(
   "MATCH (a:Person)-[:knows]->(b:Person) RETURN a, b LIMIT 10"
 );
 
-// Cypher write
-const result = await client.cypherWrite('CREATE (c:Company {name: "Acme"})');
-console.log(result.createdNodeIds);
+// Writes: one atomic changeset (cypherWrite is deprecated)
+const acmeId = randomUUID();
+const result = await client.applyChanges({ adds: { "": [
+  { subject: acmeId, predicate: RDF_TYPE, objectIri: "Company" },
+  { subject: acmeId, predicate: "name", value: "Acme" },
+  { subject: aliceId, predicate: "worksAt", object: acmeId },
+] } });
+console.log(result.commitTs);
 
 client.close();
 ```
@@ -59,7 +64,7 @@ everything into memory:
 
 ```typescript
 for await (const row of client.streamQuery([
-  { s: "?n", p: "__type", o: "?t" },
+  { s: "?n", p: RDF_TYPE, o: "?t" },
 ])) {
   console.log(row.n, row.t);
 }
@@ -112,11 +117,14 @@ const client = new PolarGraphClient("db.example.com", 50051, {
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `insertNode(nodeId, typeName, props?)` | `Promise<void>` | Insert node with `__type` and optional property triples |
+| `insertNode(nodeId, typeName, props?)` | `Promise<void>` | Insert a node typed `rdf:type <typeName>` (bare name, `prefix:local` or IRI, resolved by the server's vocabulary) and optional properties |
 | `insertEdge(subject, predicate, object, props?)` | `Promise<void>` | Insert directed relation triple |
 | `query(patterns, options?)` | `Promise<QueryResult[]>` | Conjunctive pattern query |
 | `cypher(query, options?)` | `Promise<CypherRow[]>` | Cypher read query |
-| `cypherWrite(query, txId?)` | `Promise<WriteResult>` | Cypher write (CREATE/MERGE/SET/DELETE) |
+| `cypherWrite(query, txId?)` | `Promise<WriteResult>` | **Deprecated** (removed in the next server release) — use `applyChanges` |
+| `applyChanges(changeSet)` | `Promise<ChangeResult>` | Atomic changeset: `adds` per graph (`{subject, predicate, object \| objectIri \| value, mode?}`), exact `retractions`, `readTs`, `strict` |
+| `getVocabulary()` / `setVocabularyBase(base)` / `putPrefix(name, ns)` / `removePrefix(name)` | `Promise<Vocabulary>` | Runtime vocabulary (base IRI for bare names, prefixes) |
+| `convertLegacyData(dryRun?)` | `Promise<ConversionReport>` | One-time conversion of pre-vocabulary data |
 | `searchVector(space, vector, k, options?)` | `Promise<SearchResult[]>` | k-NN vector search |
 | `streamQuery(patterns, options?)` | `AsyncIterable<QueryResult>` | Streaming pattern query |
 | `beginTx()` | `Promise<string>` | Open a wire transaction, returns `txId` |

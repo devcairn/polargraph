@@ -89,14 +89,16 @@ func (c *Client) ctx(ctx context.Context) context.Context {
 
 // ── Insert ───────────────────────────────────────────────────────────────────
 
-// InsertNode inserts a type label and optional properties for nodeID.
-// props values may be bool, int64, float64, string, []byte, or []float32.
+// InsertNode types nodeID as rdf:type typeName (a bare name under the
+// server's vocabulary base, prefix:local, or a full IRI) and adds optional
+// properties. props values may be bool, int64, float64, string, []byte, or
+// []float32.
 func (c *Client) InsertNode(ctx context.Context, nodeID, typeName string, props map[string]interface{}) error {
 	triples := []*pb.Triple{
-		{Kind: &pb.Triple_Property{Property: &pb.PropertyTriple{
+		{Kind: &pb.Triple_Relation{Relation: &pb.RelationTriple{
 			Subject:   nodeIDProto(nodeID),
-			Predicate: "__type",
-			Value:     encodeValue(typeName),
+			Predicate: RDFType,
+			ObjectIri: typeName,
 		}}},
 	}
 	for k, v := range props {
@@ -236,6 +238,9 @@ type WriteResult struct {
 }
 
 // CypherWrite executes a Cypher write statement (CREATE/MERGE/SET/DELETE).
+//
+// Deprecated: Cypher writes are removed in the next server release; use
+// ApplyChanges.
 func (c *Client) CypherWrite(ctx context.Context, query string) (*WriteResult, error) {
 	resp, err := c.stub.CypherWrite(c.ctx(ctx), &pb.CypherWriteRequest{Cypher: query})
 	if err != nil {

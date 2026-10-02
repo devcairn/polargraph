@@ -1,5 +1,12 @@
-export { PolarGraphClient, createClient } from "./client.js";
+export { PolarGraphClient, createClient, RDF_TYPE } from "./client.js";
 export type {
+  Change,
+  ChangeResult,
+  ChangeSet,
+  ConversionReport,
+  LegacyStatus,
+  Retraction,
+  Vocabulary,
   ClientOptions,
   PatternSpec,
   DatalogRule,

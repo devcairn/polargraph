@@ -80,6 +80,7 @@ fn rel(subject: NodeId, predicate: &str, object: NodeId) -> Triple {
             object: Some(object),
             vt_start: 0,
             vt_end: 0,
+            object_iri: String::new(),
             properties: vec![],
         })),
     }
@@ -210,6 +211,7 @@ async fn insert_bad_node_id_length_returns_invalid_argument() {
             }),
             vt_start: 0,
             vt_end: 0,
+            object_iri: String::new(),
             properties: vec![],
         })),
     };
@@ -2231,6 +2233,7 @@ fn rel_with_vt(
             object: Some(object),
             vt_start,
             vt_end,
+            object_iri: String::new(),
             properties: vec![],
         })),
     }
@@ -6551,6 +6554,7 @@ fn owl_rel(s: &NodeId, pred: &str, o: &NodeId) -> Triple {
                 object: Some(o.clone()),
                 vt_start: 0,
                 vt_end: i64::MAX,
+                object_iri: String::new(),
                 properties: vec![],
             },
         )),

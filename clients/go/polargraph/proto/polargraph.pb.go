@@ -21,6 +21,123 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// / A scalar property on a node.
+// / How a property write treats existing values of the same
+// / (subject, predicate, graph). See docs/design/v3-key-layout.md §6.
+type PropertyWriteMode int32
+
+const (
+	// / REPLACE for an open-ended value (vt_end unset / end of time), ADD for
+	// / a closing write. The default — matches pre-v3 behaviour.
+	PropertyWriteMode_PROPERTY_WRITE_MODE_AUTO PropertyWriteMode = 0
+	// / Close every other open value of (s, p, g), then write this one.
+	PropertyWriteMode_PROPERTY_WRITE_MODE_REPLACE PropertyWriteMode = 1
+	// / Write alongside existing values (multi-valued properties, RDF).
+	PropertyWriteMode_PROPERTY_WRITE_MODE_ADD PropertyWriteMode = 2
+)
+
+// Enum value maps for PropertyWriteMode.
+var (
+	PropertyWriteMode_name = map[int32]string{
+		0: "PROPERTY_WRITE_MODE_AUTO",
+		1: "PROPERTY_WRITE_MODE_REPLACE",
+		2: "PROPERTY_WRITE_MODE_ADD",
+	}
+	PropertyWriteMode_value = map[string]int32{
+		"PROPERTY_WRITE_MODE_AUTO":    0,
+		"PROPERTY_WRITE_MODE_REPLACE": 1,
+		"PROPERTY_WRITE_MODE_ADD":     2,
+	}
+)
+
+func (x PropertyWriteMode) Enum() *PropertyWriteMode {
+	p := new(PropertyWriteMode)
+	*p = x
+	return p
+}
+
+func (x PropertyWriteMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PropertyWriteMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_polargraph_proto_enumTypes[0].Descriptor()
+}
+
+func (PropertyWriteMode) Type() protoreflect.EnumType {
+	return &file_polargraph_proto_enumTypes[0]
+}
+
+func (x PropertyWriteMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PropertyWriteMode.Descriptor instead.
+func (PropertyWriteMode) EnumDescriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{0}
+}
+
+type ChangeKind int32
+
+const (
+	ChangeKind_CHANGE_KIND_UNSPECIFIED ChangeKind = 0
+	// / A quad version asserted (open-ended valid time).
+	ChangeKind_CHANGE_KIND_ASSERT ChangeKind = 1
+	// / A quad version closed (delete, replaced value, graph drop).
+	ChangeKind_CHANGE_KIND_CLOSE         ChangeKind = 2
+	ChangeKind_CHANGE_KIND_GRAPH_CREATED ChangeKind = 3
+	ChangeKind_CHANGE_KIND_GRAPH_DROPPED ChangeKind = 4
+	// / Quads of `source_graph` copied into `graph` (ADD / COPY / MOVE).
+	ChangeKind_CHANGE_KIND_GRAPH_COPIED ChangeKind = 5
+)
+
+// Enum value maps for ChangeKind.
+var (
+	ChangeKind_name = map[int32]string{
+		0: "CHANGE_KIND_UNSPECIFIED",
+		1: "CHANGE_KIND_ASSERT",
+		2: "CHANGE_KIND_CLOSE",
+		3: "CHANGE_KIND_GRAPH_CREATED",
+		4: "CHANGE_KIND_GRAPH_DROPPED",
+		5: "CHANGE_KIND_GRAPH_COPIED",
+	}
+	ChangeKind_value = map[string]int32{
+		"CHANGE_KIND_UNSPECIFIED":   0,
+		"CHANGE_KIND_ASSERT":        1,
+		"CHANGE_KIND_CLOSE":         2,
+		"CHANGE_KIND_GRAPH_CREATED": 3,
+		"CHANGE_KIND_GRAPH_DROPPED": 4,
+		"CHANGE_KIND_GRAPH_COPIED":  5,
+	}
+)
+
+func (x ChangeKind) Enum() *ChangeKind {
+	p := new(ChangeKind)
+	*p = x
+	return p
+}
+
+func (x ChangeKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ChangeKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_polargraph_proto_enumTypes[1].Descriptor()
+}
+
+func (ChangeKind) Type() protoreflect.EnumType {
+	return &file_polargraph_proto_enumTypes[1]
+}
+
+func (x ChangeKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ChangeKind.Descriptor instead.
+func (ChangeKind) EnumDescriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{1}
+}
+
 // / 16-byte UUID v7 (time-ordered). Always exactly 16 bytes.
 type NodeId struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -78,6 +195,8 @@ type Value struct {
 	//	*Value_TextVal
 	//	*Value_BlobVal
 	//	*Value_VecVal
+	//	*Value_LangText
+	//	*Value_Typed
 	Kind          isValue_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -183,6 +302,24 @@ func (x *Value) GetVecVal() *FloatArray {
 	return nil
 }
 
+func (x *Value) GetLangText() *LangText {
+	if x != nil {
+		if x, ok := x.Kind.(*Value_LangText); ok {
+			return x.LangText
+		}
+	}
+	return nil
+}
+
+func (x *Value) GetTyped() *TypedLiteral {
+	if x != nil {
+		if x, ok := x.Kind.(*Value_Typed); ok {
+			return x.Typed
+		}
+	}
+	return nil
+}
+
 type isValue_Kind interface {
 	isValue_Kind()
 }
@@ -215,6 +352,14 @@ type Value_VecVal struct {
 	VecVal *FloatArray `protobuf:"bytes,7,opt,name=vec_val,json=vecVal,proto3,oneof"`
 }
 
+type Value_LangText struct {
+	LangText *LangText `protobuf:"bytes,8,opt,name=lang_text,json=langText,proto3,oneof"`
+}
+
+type Value_Typed struct {
+	Typed *TypedLiteral `protobuf:"bytes,9,opt,name=typed,proto3,oneof"`
+}
+
 func (*Value_NullVal) isValue_Kind() {}
 
 func (*Value_BoolVal) isValue_Kind() {}
@@ -229,6 +374,118 @@ func (*Value_BlobVal) isValue_Kind() {}
 
 func (*Value_VecVal) isValue_Kind() {}
 
+func (*Value_LangText) isValue_Kind() {}
+
+func (*Value_Typed) isValue_Kind() {}
+
+// / A language-tagged string (rdf:langString), e.g. "Acme"@en.
+type LangText struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	Lang          string                 `protobuf:"bytes,2,opt,name=lang,proto3" json:"lang,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LangText) Reset() {
+	*x = LangText{}
+	mi := &file_polargraph_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LangText) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LangText) ProtoMessage() {}
+
+func (x *LangText) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LangText.ProtoReflect.Descriptor instead.
+func (*LangText) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *LangText) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *LangText) GetLang() string {
+	if x != nil {
+		return x.Lang
+	}
+	return ""
+}
+
+// / An RDF literal with a datatype that has no native Value kind,
+// / e.g. "2026-09-29"^^<http://www.w3.org/2001/XMLSchema#date>.
+type TypedLiteral struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Lexical string                 `protobuf:"bytes,1,opt,name=lexical,proto3" json:"lexical,omitempty"`
+	// / Full datatype IRI.
+	Datatype      string `protobuf:"bytes,2,opt,name=datatype,proto3" json:"datatype,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TypedLiteral) Reset() {
+	*x = TypedLiteral{}
+	mi := &file_polargraph_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TypedLiteral) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TypedLiteral) ProtoMessage() {}
+
+func (x *TypedLiteral) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TypedLiteral.ProtoReflect.Descriptor instead.
+func (*TypedLiteral) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *TypedLiteral) GetLexical() string {
+	if x != nil {
+		return x.Lexical
+	}
+	return ""
+}
+
+func (x *TypedLiteral) GetDatatype() string {
+	if x != nil {
+		return x.Datatype
+	}
+	return ""
+}
+
 // / A dense float32 embedding vector.
 type FloatArray struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -239,7 +496,7 @@ type FloatArray struct {
 
 func (x *FloatArray) Reset() {
 	*x = FloatArray{}
-	mi := &file_polargraph_proto_msgTypes[2]
+	mi := &file_polargraph_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -251,7 +508,7 @@ func (x *FloatArray) String() string {
 func (*FloatArray) ProtoMessage() {}
 
 func (x *FloatArray) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[2]
+	mi := &file_polargraph_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -264,7 +521,7 @@ func (x *FloatArray) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FloatArray.ProtoReflect.Descriptor instead.
 func (*FloatArray) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{2}
+	return file_polargraph_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *FloatArray) GetValues() []float32 {
@@ -285,7 +542,7 @@ type EdgeProperty struct {
 
 func (x *EdgeProperty) Reset() {
 	*x = EdgeProperty{}
-	mi := &file_polargraph_proto_msgTypes[3]
+	mi := &file_polargraph_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -297,7 +554,7 @@ func (x *EdgeProperty) String() string {
 func (*EdgeProperty) ProtoMessage() {}
 
 func (x *EdgeProperty) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[3]
+	mi := &file_polargraph_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -310,7 +567,7 @@ func (x *EdgeProperty) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EdgeProperty.ProtoReflect.Descriptor instead.
 func (*EdgeProperty) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{3}
+	return file_polargraph_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *EdgeProperty) GetName() string {
@@ -339,14 +596,18 @@ type RelationTriple struct {
 	VtEnd int64 `protobuf:"varint,5,opt,name=vt_end,json=vtEnd,proto3" json:"vt_end,omitempty"`
 	// / Optional scalar properties carried by this edge.
 	// / Each property is stored as a Property triple whose subject is the edge UUID.
-	Properties    []*EdgeProperty `protobuf:"bytes,6,rep,name=properties,proto3" json:"properties,omitempty"`
+	Properties []*EdgeProperty `protobuf:"bytes,6,rep,name=properties,proto3" json:"properties,omitempty"`
+	// / The object named by IRI instead of `object`: a full IRI, `prefix:local`
+	// / or a bare name (resolved through the vocabulary). The server maps it to
+	// / its node and records the IRI — e.g. `rdf:type` to a class by name.
+	ObjectIri     string `protobuf:"bytes,7,opt,name=object_iri,json=objectIri,proto3" json:"object_iri,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RelationTriple) Reset() {
 	*x = RelationTriple{}
-	mi := &file_polargraph_proto_msgTypes[4]
+	mi := &file_polargraph_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -358,7 +619,7 @@ func (x *RelationTriple) String() string {
 func (*RelationTriple) ProtoMessage() {}
 
 func (x *RelationTriple) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[4]
+	mi := &file_polargraph_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -371,7 +632,7 @@ func (x *RelationTriple) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RelationTriple.ProtoReflect.Descriptor instead.
 func (*RelationTriple) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{4}
+	return file_polargraph_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RelationTriple) GetSubject() *NodeId {
@@ -416,7 +677,13 @@ func (x *RelationTriple) GetProperties() []*EdgeProperty {
 	return nil
 }
 
-// / A scalar property on a node.
+func (x *RelationTriple) GetObjectIri() string {
+	if x != nil {
+		return x.ObjectIri
+	}
+	return ""
+}
+
 type PropertyTriple struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Subject       *NodeId                `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
@@ -424,13 +691,14 @@ type PropertyTriple struct {
 	Value         *Value                 `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
 	VtStart       int64                  `protobuf:"varint,4,opt,name=vt_start,json=vtStart,proto3" json:"vt_start,omitempty"`
 	VtEnd         int64                  `protobuf:"varint,5,opt,name=vt_end,json=vtEnd,proto3" json:"vt_end,omitempty"`
+	Mode          PropertyWriteMode      `protobuf:"varint,6,opt,name=mode,proto3,enum=polargraph.v1.PropertyWriteMode" json:"mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PropertyTriple) Reset() {
 	*x = PropertyTriple{}
-	mi := &file_polargraph_proto_msgTypes[5]
+	mi := &file_polargraph_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -442,7 +710,7 @@ func (x *PropertyTriple) String() string {
 func (*PropertyTriple) ProtoMessage() {}
 
 func (x *PropertyTriple) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[5]
+	mi := &file_polargraph_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -455,7 +723,7 @@ func (x *PropertyTriple) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PropertyTriple.ProtoReflect.Descriptor instead.
 func (*PropertyTriple) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{5}
+	return file_polargraph_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *PropertyTriple) GetSubject() *NodeId {
@@ -493,6 +761,13 @@ func (x *PropertyTriple) GetVtEnd() int64 {
 	return 0
 }
 
+func (x *PropertyTriple) GetMode() PropertyWriteMode {
+	if x != nil {
+		return x.Mode
+	}
+	return PropertyWriteMode_PROPERTY_WRITE_MODE_AUTO
+}
+
 type Triple struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Kind:
@@ -506,7 +781,7 @@ type Triple struct {
 
 func (x *Triple) Reset() {
 	*x = Triple{}
-	mi := &file_polargraph_proto_msgTypes[6]
+	mi := &file_polargraph_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -518,7 +793,7 @@ func (x *Triple) String() string {
 func (*Triple) ProtoMessage() {}
 
 func (x *Triple) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[6]
+	mi := &file_polargraph_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -531,7 +806,7 @@ func (x *Triple) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Triple.ProtoReflect.Descriptor instead.
 func (*Triple) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{6}
+	return file_polargraph_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Triple) GetKind() isTriple_Kind {
@@ -586,6 +861,7 @@ type Term struct {
 	//
 	//	*Term_Bound
 	//	*Term_Var
+	//	*Term_Literal
 	Kind          isTerm_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -593,7 +869,7 @@ type Term struct {
 
 func (x *Term) Reset() {
 	*x = Term{}
-	mi := &file_polargraph_proto_msgTypes[7]
+	mi := &file_polargraph_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -605,7 +881,7 @@ func (x *Term) String() string {
 func (*Term) ProtoMessage() {}
 
 func (x *Term) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[7]
+	mi := &file_polargraph_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -618,7 +894,7 @@ func (x *Term) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Term.ProtoReflect.Descriptor instead.
 func (*Term) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{7}
+	return file_polargraph_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Term) GetKind() isTerm_Kind {
@@ -646,6 +922,15 @@ func (x *Term) GetVar() string {
 	return ""
 }
 
+func (x *Term) GetLiteral() *Value {
+	if x != nil {
+		if x, ok := x.Kind.(*Term_Literal); ok {
+			return x.Literal
+		}
+	}
+	return nil
+}
+
 type isTerm_Kind interface {
 	isTerm_Kind()
 }
@@ -658,25 +943,39 @@ type Term_Var struct {
 	Var string `protobuf:"bytes,2,opt,name=var,proto3,oneof"`
 }
 
+type Term_Literal struct {
+	// / Object slot only: matches property triples whose value equals this.
+	Literal *Value `protobuf:"bytes,3,opt,name=literal,proto3,oneof"`
+}
+
 func (*Term_Bound) isTerm_Kind() {}
 
 func (*Term_Var) isTerm_Kind() {}
+
+func (*Term_Literal) isTerm_Kind() {}
 
 // / A triple pattern with variable slots.
 // /
 // / `predicate` is optional; empty string or omitted means "any predicate".
 type VarPattern struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Subject       *Term                  `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
-	Predicate     string                 `protobuf:"bytes,2,opt,name=predicate,proto3" json:"predicate,omitempty"`
-	Object        *Term                  `protobuf:"bytes,3,opt,name=object,proto3" json:"object,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Subject   *Term                  `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
+	Predicate string                 `protobuf:"bytes,2,opt,name=predicate,proto3" json:"predicate,omitempty"`
+	Object    *Term                  `protobuf:"bytes,3,opt,name=object,proto3" json:"object,omitempty"`
+	// / Optional variable name that receives the matched predicate string for
+	// / each binding (see `Binding.predicates`). Empty string or omitted means
+	// / the matched predicate is not captured.
+	PredicateVar string `protobuf:"bytes,4,opt,name=predicate_var,json=predicateVar,proto3" json:"predicate_var,omitempty"`
+	// / Which graph(s) the pattern matches in. Unset = every graph (union),
+	// / or the request's `graphs` dataset when one is given.
+	Graph         *GraphTerm `protobuf:"bytes,5,opt,name=graph,proto3" json:"graph,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *VarPattern) Reset() {
 	*x = VarPattern{}
-	mi := &file_polargraph_proto_msgTypes[8]
+	mi := &file_polargraph_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -688,7 +987,7 @@ func (x *VarPattern) String() string {
 func (*VarPattern) ProtoMessage() {}
 
 func (x *VarPattern) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[8]
+	mi := &file_polargraph_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -701,7 +1000,7 @@ func (x *VarPattern) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VarPattern.ProtoReflect.Descriptor instead.
 func (*VarPattern) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{8}
+	return file_polargraph_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *VarPattern) GetSubject() *Term {
@@ -721,6 +1020,184 @@ func (x *VarPattern) GetPredicate() string {
 func (x *VarPattern) GetObject() *Term {
 	if x != nil {
 		return x.Object
+	}
+	return nil
+}
+
+func (x *VarPattern) GetPredicateVar() string {
+	if x != nil {
+		return x.PredicateVar
+	}
+	return ""
+}
+
+func (x *VarPattern) GetGraph() *GraphTerm {
+	if x != nil {
+		return x.Graph
+	}
+	return nil
+}
+
+// / The graph slot of a pattern.
+type GraphTerm struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Kind:
+	//
+	//	*GraphTerm_DefaultGraph
+	//	*GraphTerm_Iri
+	//	*GraphTerm_Var
+	//	*GraphTerm_Set
+	Kind          isGraphTerm_Kind `protobuf_oneof:"kind"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GraphTerm) Reset() {
+	*x = GraphTerm{}
+	mi := &file_polargraph_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GraphTerm) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GraphTerm) ProtoMessage() {}
+
+func (x *GraphTerm) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GraphTerm.ProtoReflect.Descriptor instead.
+func (*GraphTerm) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *GraphTerm) GetKind() isGraphTerm_Kind {
+	if x != nil {
+		return x.Kind
+	}
+	return nil
+}
+
+func (x *GraphTerm) GetDefaultGraph() bool {
+	if x != nil {
+		if x, ok := x.Kind.(*GraphTerm_DefaultGraph); ok {
+			return x.DefaultGraph
+		}
+	}
+	return false
+}
+
+func (x *GraphTerm) GetIri() string {
+	if x != nil {
+		if x, ok := x.Kind.(*GraphTerm_Iri); ok {
+			return x.Iri
+		}
+	}
+	return ""
+}
+
+func (x *GraphTerm) GetVar() string {
+	if x != nil {
+		if x, ok := x.Kind.(*GraphTerm_Var); ok {
+			return x.Var
+		}
+	}
+	return ""
+}
+
+func (x *GraphTerm) GetSet() *GraphSet {
+	if x != nil {
+		if x, ok := x.Kind.(*GraphTerm_Set); ok {
+			return x.Set
+		}
+	}
+	return nil
+}
+
+type isGraphTerm_Kind interface {
+	isGraphTerm_Kind()
+}
+
+type GraphTerm_DefaultGraph struct {
+	// / true = only the default graph.
+	DefaultGraph bool `protobuf:"varint,1,opt,name=default_graph,json=defaultGraph,proto3,oneof"`
+}
+
+type GraphTerm_Iri struct {
+	// / One named graph, by IRI. An unknown IRI matches nothing.
+	Iri string `protobuf:"bytes,2,opt,name=iri,proto3,oneof"`
+}
+
+type GraphTerm_Var struct {
+	// / A graph variable: binds the IRI node of each match's named graph
+	// / (never the default graph); restricts the match when already bound.
+	Var string `protobuf:"bytes,3,opt,name=var,proto3,oneof"`
+}
+
+type GraphTerm_Set struct {
+	// / A set of named graphs, by IRI.
+	Set *GraphSet `protobuf:"bytes,4,opt,name=set,proto3,oneof"`
+}
+
+func (*GraphTerm_DefaultGraph) isGraphTerm_Kind() {}
+
+func (*GraphTerm_Iri) isGraphTerm_Kind() {}
+
+func (*GraphTerm_Var) isGraphTerm_Kind() {}
+
+func (*GraphTerm_Set) isGraphTerm_Kind() {}
+
+type GraphSet struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Iris          []string               `protobuf:"bytes,1,rep,name=iris,proto3" json:"iris,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GraphSet) Reset() {
+	*x = GraphSet{}
+	mi := &file_polargraph_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GraphSet) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GraphSet) ProtoMessage() {}
+
+func (x *GraphSet) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GraphSet.ProtoReflect.Descriptor instead.
+func (*GraphSet) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *GraphSet) GetIris() []string {
+	if x != nil {
+		return x.Iris
 	}
 	return nil
 }
@@ -746,7 +1223,7 @@ type DatalogRule struct {
 
 func (x *DatalogRule) Reset() {
 	*x = DatalogRule{}
-	mi := &file_polargraph_proto_msgTypes[9]
+	mi := &file_polargraph_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -758,7 +1235,7 @@ func (x *DatalogRule) String() string {
 func (*DatalogRule) ProtoMessage() {}
 
 func (x *DatalogRule) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[9]
+	mi := &file_polargraph_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -771,7 +1248,7 @@ func (x *DatalogRule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DatalogRule.ProtoReflect.Descriptor instead.
 func (*DatalogRule) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{9}
+	return file_polargraph_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DatalogRule) GetHeadPredicate() string {
@@ -802,16 +1279,335 @@ func (x *DatalogRule) GetBody() []*VarPattern {
 	return nil
 }
 
-type InsertRequest struct {
+// / An annotation on a relation triple (RDF-star / RDF*).
+// /
+// / `edge_id` is the 16-byte UUID of the relation triple to annotate — obtained
+// / from `InsertResponse.edge_ids`. `value` is either a scalar (`scalar`) or a
+// / reference to another node (`node_id`).
+type EdgeAnnotation struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	EdgeId    []byte                 `protobuf:"bytes,1,opt,name=edge_id,json=edgeId,proto3" json:"edge_id,omitempty"`
+	Predicate string                 `protobuf:"bytes,2,opt,name=predicate,proto3" json:"predicate,omitempty"`
+	// Types that are valid to be assigned to Value:
+	//
+	//	*EdgeAnnotation_NodeId
+	//	*EdgeAnnotation_Scalar
+	Value         isEdgeAnnotation_Value `protobuf_oneof:"value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EdgeAnnotation) Reset() {
+	*x = EdgeAnnotation{}
+	mi := &file_polargraph_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EdgeAnnotation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EdgeAnnotation) ProtoMessage() {}
+
+func (x *EdgeAnnotation) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EdgeAnnotation.ProtoReflect.Descriptor instead.
+func (*EdgeAnnotation) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *EdgeAnnotation) GetEdgeId() []byte {
+	if x != nil {
+		return x.EdgeId
+	}
+	return nil
+}
+
+func (x *EdgeAnnotation) GetPredicate() string {
+	if x != nil {
+		return x.Predicate
+	}
+	return ""
+}
+
+func (x *EdgeAnnotation) GetValue() isEdgeAnnotation_Value {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+func (x *EdgeAnnotation) GetNodeId() []byte {
+	if x != nil {
+		if x, ok := x.Value.(*EdgeAnnotation_NodeId); ok {
+			return x.NodeId
+		}
+	}
+	return nil
+}
+
+func (x *EdgeAnnotation) GetScalar() *Value {
+	if x != nil {
+		if x, ok := x.Value.(*EdgeAnnotation_Scalar); ok {
+			return x.Scalar
+		}
+	}
+	return nil
+}
+
+type isEdgeAnnotation_Value interface {
+	isEdgeAnnotation_Value()
+}
+
+type EdgeAnnotation_NodeId struct {
+	NodeId []byte `protobuf:"bytes,3,opt,name=node_id,json=nodeId,proto3,oneof"`
+}
+
+type EdgeAnnotation_Scalar struct {
+	Scalar *Value `protobuf:"bytes,4,opt,name=scalar,proto3,oneof"`
+}
+
+func (*EdgeAnnotation_NodeId) isEdgeAnnotation_Value() {}
+
+func (*EdgeAnnotation_Scalar) isEdgeAnnotation_Value() {}
+
+type GetEdgeAnnotationsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Triples       []*Triple              `protobuf:"bytes,1,rep,name=triples,proto3" json:"triples,omitempty"`
+	EdgeId        []byte                 `protobuf:"bytes,1,opt,name=edge_id,json=edgeId,proto3" json:"edge_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetEdgeAnnotationsRequest) Reset() {
+	*x = GetEdgeAnnotationsRequest{}
+	mi := &file_polargraph_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetEdgeAnnotationsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetEdgeAnnotationsRequest) ProtoMessage() {}
+
+func (x *GetEdgeAnnotationsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetEdgeAnnotationsRequest.ProtoReflect.Descriptor instead.
+func (*GetEdgeAnnotationsRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *GetEdgeAnnotationsRequest) GetEdgeId() []byte {
+	if x != nil {
+		return x.EdgeId
+	}
+	return nil
+}
+
+type GetEdgeAnnotationsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Annotations   []*EdgeAnnotation      `protobuf:"bytes,1,rep,name=annotations,proto3" json:"annotations,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetEdgeAnnotationsResponse) Reset() {
+	*x = GetEdgeAnnotationsResponse{}
+	mi := &file_polargraph_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetEdgeAnnotationsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetEdgeAnnotationsResponse) ProtoMessage() {}
+
+func (x *GetEdgeAnnotationsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetEdgeAnnotationsResponse.ProtoReflect.Descriptor instead.
+func (*GetEdgeAnnotationsResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *GetEdgeAnnotationsResponse) GetAnnotations() []*EdgeAnnotation {
+	if x != nil {
+		return x.Annotations
+	}
+	return nil
+}
+
+// / Resolve the edge UUID(s) for a specific (subject, predicate, object) relation triple.
+// / Returns one edge_id per MVCC version currently visible in the store. For most
+// / applications a single version is expected; SPARQL-star annotation lookup uses
+// / the most-recent entry.
+type GetEdgeIdsByTripleRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SubjectId     []byte                 `protobuf:"bytes,1,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	Predicate     string                 `protobuf:"bytes,2,opt,name=predicate,proto3" json:"predicate,omitempty"`
+	ObjectId      []byte                 `protobuf:"bytes,3,opt,name=object_id,json=objectId,proto3" json:"object_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetEdgeIdsByTripleRequest) Reset() {
+	*x = GetEdgeIdsByTripleRequest{}
+	mi := &file_polargraph_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetEdgeIdsByTripleRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetEdgeIdsByTripleRequest) ProtoMessage() {}
+
+func (x *GetEdgeIdsByTripleRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetEdgeIdsByTripleRequest.ProtoReflect.Descriptor instead.
+func (*GetEdgeIdsByTripleRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *GetEdgeIdsByTripleRequest) GetSubjectId() []byte {
+	if x != nil {
+		return x.SubjectId
+	}
+	return nil
+}
+
+func (x *GetEdgeIdsByTripleRequest) GetPredicate() string {
+	if x != nil {
+		return x.Predicate
+	}
+	return ""
+}
+
+func (x *GetEdgeIdsByTripleRequest) GetObjectId() []byte {
+	if x != nil {
+		return x.ObjectId
+	}
+	return nil
+}
+
+type GetEdgeIdsByTripleResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Each entry is a 16-byte UUID (big-endian) identifying one edge instance.
+	EdgeIds       [][]byte `protobuf:"bytes,1,rep,name=edge_ids,json=edgeIds,proto3" json:"edge_ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetEdgeIdsByTripleResponse) Reset() {
+	*x = GetEdgeIdsByTripleResponse{}
+	mi := &file_polargraph_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetEdgeIdsByTripleResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetEdgeIdsByTripleResponse) ProtoMessage() {}
+
+func (x *GetEdgeIdsByTripleResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetEdgeIdsByTripleResponse.ProtoReflect.Descriptor instead.
+func (*GetEdgeIdsByTripleResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *GetEdgeIdsByTripleResponse) GetEdgeIds() [][]byte {
+	if x != nil {
+		return x.EdgeIds
+	}
+	return nil
+}
+
+type InsertRequest struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Triples []*Triple              `protobuf:"bytes,1,rep,name=triples,proto3" json:"triples,omitempty"`
+	// / Optional open-transaction ID. When set, triples are buffered into the
+	// / named transaction rather than auto-committed.
+	TxId string `protobuf:"bytes,2,opt,name=tx_id,json=txId,proto3" json:"tx_id,omitempty"`
+	// / Optional RDF-star annotations to attach to relation triples in the same
+	// / atomic commit. Each annotation references an edge by its UUID bytes
+	// / (either from a previous insert or from a relation in `triples` above
+	// / where the edge UUID must be known in advance).
+	EdgeAnnotations []*EdgeAnnotation `protobuf:"bytes,3,rep,name=edge_annotations,json=edgeAnnotations,proto3" json:"edge_annotations,omitempty"`
+	// / IRIs of nodes written in this request, recorded in the IRI dictionary in
+	// / the same commit so export can render them. Each IRI names the node
+	// / `iri_to_node_id(iri)` (urn:uuid:<u> → u, otherwise xxHash3-128); urn:uuid
+	// / IRIs are accepted and ignored. A request may carry only IRIs.
+	Iris []string `protobuf:"bytes,4,rep,name=iris,proto3" json:"iris,omitempty"`
+	// / Named graph (IRI) every triple and annotation in this request goes to;
+	// / interned on first use. Empty = the default graph.
+	Graph string `protobuf:"bytes,5,opt,name=graph,proto3" json:"graph,omitempty"`
+	// / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+	// / graph ACL applies — see docs/design/graph-acl.md.
+	UserId        string `protobuf:"bytes,6,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *InsertRequest) Reset() {
 	*x = InsertRequest{}
-	mi := &file_polargraph_proto_msgTypes[10]
+	mi := &file_polargraph_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -823,7 +1619,7 @@ func (x *InsertRequest) String() string {
 func (*InsertRequest) ProtoMessage() {}
 
 func (x *InsertRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[10]
+	mi := &file_polargraph_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -836,7 +1632,7 @@ func (x *InsertRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InsertRequest.ProtoReflect.Descriptor instead.
 func (*InsertRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{10}
+	return file_polargraph_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *InsertRequest) GetTriples() []*Triple {
@@ -844,6 +1640,41 @@ func (x *InsertRequest) GetTriples() []*Triple {
 		return x.Triples
 	}
 	return nil
+}
+
+func (x *InsertRequest) GetTxId() string {
+	if x != nil {
+		return x.TxId
+	}
+	return ""
+}
+
+func (x *InsertRequest) GetEdgeAnnotations() []*EdgeAnnotation {
+	if x != nil {
+		return x.EdgeAnnotations
+	}
+	return nil
+}
+
+func (x *InsertRequest) GetIris() []string {
+	if x != nil {
+		return x.Iris
+	}
+	return nil
+}
+
+func (x *InsertRequest) GetGraph() string {
+	if x != nil {
+		return x.Graph
+	}
+	return ""
+}
+
+func (x *InsertRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
 }
 
 type InsertResponse struct {
@@ -859,7 +1690,7 @@ type InsertResponse struct {
 
 func (x *InsertResponse) Reset() {
 	*x = InsertResponse{}
-	mi := &file_polargraph_proto_msgTypes[11]
+	mi := &file_polargraph_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -871,7 +1702,7 @@ func (x *InsertResponse) String() string {
 func (*InsertResponse) ProtoMessage() {}
 
 func (x *InsertResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[11]
+	mi := &file_polargraph_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -884,7 +1715,7 @@ func (x *InsertResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InsertResponse.ProtoReflect.Descriptor instead.
 func (*InsertResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{11}
+	return file_polargraph_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *InsertResponse) GetCommitTs() int64 {
@@ -908,8 +1739,9 @@ type QueryRequest struct {
 	// / 0 or omitted means "latest committed state".
 	SnapshotTs int64 `protobuf:"varint,2,opt,name=snapshot_ts,json=snapshotTs,proto3" json:"snapshot_ts,omitempty"`
 	// / Valid-time point-in-time filter (unix microseconds).
-	// / When non-zero, only triples whose valid-time window [vt_start, vt_end)
-	// / contains this value are returned. 0 = no valid-time filter.
+	// / Only triples whose valid-time window [vt_start, vt_end) contains this
+	// / value are returned. 0 = now (current state; deleted/closed triples are
+	// / hidden). Set to a past timestamp for historical/time-travel queries.
 	AsOfValidTime int64 `protobuf:"varint,3,opt,name=as_of_valid_time,json=asOfValidTime,proto3" json:"as_of_valid_time,omitempty"`
 	// / Transaction-time point-in-time filter (unix microseconds).
 	// / When non-zero, overrides snapshot_ts — only triples committed at or
@@ -918,14 +1750,27 @@ type QueryRequest struct {
 	// / Optional Datalog rules. When non-empty the server runs the rules to a
 	// / fixed point (deriving IDB facts) then evaluates `patterns` against the
 	// / combined base + derived fact set.
-	Rules         []*DatalogRule `protobuf:"bytes,5,rep,name=rules,proto3" json:"rules,omitempty"`
+	Rules []*DatalogRule `protobuf:"bytes,5,rep,name=rules,proto3" json:"rules,omitempty"`
+	// / Optional open-transaction ID. When set, the query reads from the
+	// / transaction's snapshot (including its uncommitted write buffer).
+	TxId string `protobuf:"bytes,6,opt,name=tx_id,json=txId,proto3" json:"tx_id,omitempty"`
+	// / Optional identity for access-control filtering. When set and the server
+	// / has an access cache entry for this user, results are filtered to nodes
+	// / the user is allowed to see. Empty string = no filtering.
+	UserId string `protobuf:"bytes,7,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// / Named query parameters for use with `$param` syntax. Keys are parameter names
+	// / (without the `$`); values are JSON-encoded `Value` objects.
+	Params map[string]string `protobuf:"bytes,8,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// / Dataset: graph IRIs that patterns without their own `graph` term match
+	// / in (like SPARQL FROM). Empty = every graph.
+	Graphs        []string `protobuf:"bytes,9,rep,name=graphs,proto3" json:"graphs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *QueryRequest) Reset() {
 	*x = QueryRequest{}
-	mi := &file_polargraph_proto_msgTypes[12]
+	mi := &file_polargraph_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -937,7 +1782,7 @@ func (x *QueryRequest) String() string {
 func (*QueryRequest) ProtoMessage() {}
 
 func (x *QueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[12]
+	mi := &file_polargraph_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -950,7 +1795,7 @@ func (x *QueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryRequest.ProtoReflect.Descriptor instead.
 func (*QueryRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{12}
+	return file_polargraph_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *QueryRequest) GetPatterns() []*VarPattern {
@@ -988,17 +1833,48 @@ func (x *QueryRequest) GetRules() []*DatalogRule {
 	return nil
 }
 
+func (x *QueryRequest) GetTxId() string {
+	if x != nil {
+		return x.TxId
+	}
+	return ""
+}
+
+func (x *QueryRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *QueryRequest) GetParams() map[string]string {
+	if x != nil {
+		return x.Params
+	}
+	return nil
+}
+
+func (x *QueryRequest) GetGraphs() []string {
+	if x != nil {
+		return x.Graphs
+	}
+	return nil
+}
+
 // / One satisfying assignment of all variables in the query.
 type Binding struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Vars          map[string]*NodeId     `protobuf:"bytes,1,rep,name=vars,proto3" json:"vars,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Vars  map[string]*NodeId     `protobuf:"bytes,1,rep,name=vars,proto3" json:"vars,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// / Predicate strings bound via `VarPattern.predicate_var`, keyed by
+	// / variable name.
+	Predicates    map[string]string `protobuf:"bytes,2,rep,name=predicates,proto3" json:"predicates,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Binding) Reset() {
 	*x = Binding{}
-	mi := &file_polargraph_proto_msgTypes[13]
+	mi := &file_polargraph_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1010,7 +1886,7 @@ func (x *Binding) String() string {
 func (*Binding) ProtoMessage() {}
 
 func (x *Binding) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[13]
+	mi := &file_polargraph_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1023,12 +1899,19 @@ func (x *Binding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Binding.ProtoReflect.Descriptor instead.
 func (*Binding) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{13}
+	return file_polargraph_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Binding) GetVars() map[string]*NodeId {
 	if x != nil {
 		return x.Vars
+	}
+	return nil
+}
+
+func (x *Binding) GetPredicates() map[string]string {
+	if x != nil {
+		return x.Predicates
 	}
 	return nil
 }
@@ -1042,7 +1925,7 @@ type QueryResponse struct {
 
 func (x *QueryResponse) Reset() {
 	*x = QueryResponse{}
-	mi := &file_polargraph_proto_msgTypes[14]
+	mi := &file_polargraph_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1054,7 +1937,7 @@ func (x *QueryResponse) String() string {
 func (*QueryResponse) ProtoMessage() {}
 
 func (x *QueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[14]
+	mi := &file_polargraph_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1067,7 +1950,7 @@ func (x *QueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryResponse.ProtoReflect.Descriptor instead.
 func (*QueryResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{14}
+	return file_polargraph_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *QueryResponse) GetBindings() []*Binding {
@@ -1089,7 +1972,7 @@ type QueryResult struct {
 
 func (x *QueryResult) Reset() {
 	*x = QueryResult{}
-	mi := &file_polargraph_proto_msgTypes[15]
+	mi := &file_polargraph_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1101,7 +1984,7 @@ func (x *QueryResult) String() string {
 func (*QueryResult) ProtoMessage() {}
 
 func (x *QueryResult) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[15]
+	mi := &file_polargraph_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1114,7 +1997,7 @@ func (x *QueryResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryResult.ProtoReflect.Descriptor instead.
 func (*QueryResult) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{15}
+	return file_polargraph_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *QueryResult) GetVars() map[string]*NodeId {
@@ -1137,7 +2020,7 @@ type QueryStreamChunk struct {
 
 func (x *QueryStreamChunk) Reset() {
 	*x = QueryStreamChunk{}
-	mi := &file_polargraph_proto_msgTypes[16]
+	mi := &file_polargraph_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1149,7 +2032,7 @@ func (x *QueryStreamChunk) String() string {
 func (*QueryStreamChunk) ProtoMessage() {}
 
 func (x *QueryStreamChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[16]
+	mi := &file_polargraph_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1162,7 +2045,7 @@ func (x *QueryStreamChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryStreamChunk.ProtoReflect.Descriptor instead.
 func (*QueryStreamChunk) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{16}
+	return file_polargraph_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *QueryStreamChunk) GetResults() []*QueryResult {
@@ -1198,7 +2081,7 @@ type ReachableRequest struct {
 
 func (x *ReachableRequest) Reset() {
 	*x = ReachableRequest{}
-	mi := &file_polargraph_proto_msgTypes[17]
+	mi := &file_polargraph_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1210,7 +2093,7 @@ func (x *ReachableRequest) String() string {
 func (*ReachableRequest) ProtoMessage() {}
 
 func (x *ReachableRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[17]
+	mi := &file_polargraph_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1223,7 +2106,7 @@ func (x *ReachableRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReachableRequest.ProtoReflect.Descriptor instead.
 func (*ReachableRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{17}
+	return file_polargraph_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ReachableRequest) GetStart() *NodeId {
@@ -1256,7 +2139,7 @@ type ReachableResponse struct {
 
 func (x *ReachableResponse) Reset() {
 	*x = ReachableResponse{}
-	mi := &file_polargraph_proto_msgTypes[18]
+	mi := &file_polargraph_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1268,7 +2151,7 @@ func (x *ReachableResponse) String() string {
 func (*ReachableResponse) ProtoMessage() {}
 
 func (x *ReachableResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[18]
+	mi := &file_polargraph_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1281,7 +2164,7 @@ func (x *ReachableResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReachableResponse.ProtoReflect.Descriptor instead.
 func (*ReachableResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{18}
+	return file_polargraph_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ReachableResponse) GetNodeIds() []*NodeId {
@@ -1303,7 +2186,7 @@ type InsertVectorRequest struct {
 
 func (x *InsertVectorRequest) Reset() {
 	*x = InsertVectorRequest{}
-	mi := &file_polargraph_proto_msgTypes[19]
+	mi := &file_polargraph_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1315,7 +2198,7 @@ func (x *InsertVectorRequest) String() string {
 func (*InsertVectorRequest) ProtoMessage() {}
 
 func (x *InsertVectorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[19]
+	mi := &file_polargraph_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1328,7 +2211,7 @@ func (x *InsertVectorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InsertVectorRequest.ProtoReflect.Descriptor instead.
 func (*InsertVectorRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{19}
+	return file_polargraph_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *InsertVectorRequest) GetNodeId() *NodeId {
@@ -1360,7 +2243,7 @@ type InsertVectorResponse struct {
 
 func (x *InsertVectorResponse) Reset() {
 	*x = InsertVectorResponse{}
-	mi := &file_polargraph_proto_msgTypes[20]
+	mi := &file_polargraph_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1372,7 +2255,7 @@ func (x *InsertVectorResponse) String() string {
 func (*InsertVectorResponse) ProtoMessage() {}
 
 func (x *InsertVectorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[20]
+	mi := &file_polargraph_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1385,7 +2268,7 @@ func (x *InsertVectorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InsertVectorResponse.ProtoReflect.Descriptor instead.
 func (*InsertVectorResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{20}
+	return file_polargraph_proto_rawDescGZIP(), []int{29}
 }
 
 type SearchVectorRequest struct {
@@ -1404,7 +2287,7 @@ type SearchVectorRequest struct {
 
 func (x *SearchVectorRequest) Reset() {
 	*x = SearchVectorRequest{}
-	mi := &file_polargraph_proto_msgTypes[21]
+	mi := &file_polargraph_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1416,7 +2299,7 @@ func (x *SearchVectorRequest) String() string {
 func (*SearchVectorRequest) ProtoMessage() {}
 
 func (x *SearchVectorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[21]
+	mi := &file_polargraph_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1429,7 +2312,7 @@ func (x *SearchVectorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchVectorRequest.ProtoReflect.Descriptor instead.
 func (*SearchVectorRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{21}
+	return file_polargraph_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *SearchVectorRequest) GetQuery() []float32 {
@@ -1471,7 +2354,7 @@ type VectorSearchResult struct {
 
 func (x *VectorSearchResult) Reset() {
 	*x = VectorSearchResult{}
-	mi := &file_polargraph_proto_msgTypes[22]
+	mi := &file_polargraph_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1483,7 +2366,7 @@ func (x *VectorSearchResult) String() string {
 func (*VectorSearchResult) ProtoMessage() {}
 
 func (x *VectorSearchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[22]
+	mi := &file_polargraph_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1496,7 +2379,7 @@ func (x *VectorSearchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VectorSearchResult.ProtoReflect.Descriptor instead.
 func (*VectorSearchResult) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{22}
+	return file_polargraph_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *VectorSearchResult) GetNodeId() *NodeId {
@@ -1522,7 +2405,7 @@ type SearchVectorResponse struct {
 
 func (x *SearchVectorResponse) Reset() {
 	*x = SearchVectorResponse{}
-	mi := &file_polargraph_proto_msgTypes[23]
+	mi := &file_polargraph_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1534,7 +2417,7 @@ func (x *SearchVectorResponse) String() string {
 func (*SearchVectorResponse) ProtoMessage() {}
 
 func (x *SearchVectorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[23]
+	mi := &file_polargraph_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1547,7 +2430,7 @@ func (x *SearchVectorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchVectorResponse.ProtoReflect.Descriptor instead.
 func (*SearchVectorResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{23}
+	return file_polargraph_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *SearchVectorResponse) GetResults() []*VectorSearchResult {
@@ -1567,7 +2450,7 @@ type NodeTypeFilter struct {
 
 func (x *NodeTypeFilter) Reset() {
 	*x = NodeTypeFilter{}
-	mi := &file_polargraph_proto_msgTypes[24]
+	mi := &file_polargraph_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1579,7 +2462,7 @@ func (x *NodeTypeFilter) String() string {
 func (*NodeTypeFilter) ProtoMessage() {}
 
 func (x *NodeTypeFilter) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[24]
+	mi := &file_polargraph_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1592,7 +2475,7 @@ func (x *NodeTypeFilter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeTypeFilter.ProtoReflect.Descriptor instead.
 func (*NodeTypeFilter) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{24}
+	return file_polargraph_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *NodeTypeFilter) GetTypeName() string {
@@ -1615,7 +2498,7 @@ type ReachabilityFilter struct {
 
 func (x *ReachabilityFilter) Reset() {
 	*x = ReachabilityFilter{}
-	mi := &file_polargraph_proto_msgTypes[25]
+	mi := &file_polargraph_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1627,7 +2510,7 @@ func (x *ReachabilityFilter) String() string {
 func (*ReachabilityFilter) ProtoMessage() {}
 
 func (x *ReachabilityFilter) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[25]
+	mi := &file_polargraph_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1640,7 +2523,7 @@ func (x *ReachabilityFilter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReachabilityFilter.ProtoReflect.Descriptor instead.
 func (*ReachabilityFilter) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{25}
+	return file_polargraph_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ReachabilityFilter) GetFromNode() *NodeId {
@@ -1675,14 +2558,16 @@ type SearchVectorFilteredRequest struct {
 	//	*SearchVectorFilteredRequest_ReachabilityFilter
 	Filter isSearchVectorFilteredRequest_Filter `protobuf_oneof:"filter"`
 	// / HNSW exploration factor. 0 = use server default.
-	Ef            uint32 `protobuf:"varint,6,opt,name=ef,proto3" json:"ef,omitempty"`
+	Ef uint32 `protobuf:"varint,6,opt,name=ef,proto3" json:"ef,omitempty"`
+	// / Optional identity for access-control filtering.
+	UserId        string `protobuf:"bytes,7,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SearchVectorFilteredRequest) Reset() {
 	*x = SearchVectorFilteredRequest{}
-	mi := &file_polargraph_proto_msgTypes[26]
+	mi := &file_polargraph_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1694,7 +2579,7 @@ func (x *SearchVectorFilteredRequest) String() string {
 func (*SearchVectorFilteredRequest) ProtoMessage() {}
 
 func (x *SearchVectorFilteredRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[26]
+	mi := &file_polargraph_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1707,7 +2592,7 @@ func (x *SearchVectorFilteredRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchVectorFilteredRequest.ProtoReflect.Descriptor instead.
 func (*SearchVectorFilteredRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{26}
+	return file_polargraph_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *SearchVectorFilteredRequest) GetSpace() string {
@@ -1763,6 +2648,13 @@ func (x *SearchVectorFilteredRequest) GetEf() uint32 {
 	return 0
 }
 
+func (x *SearchVectorFilteredRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
 type isSearchVectorFilteredRequest_Filter interface {
 	isSearchVectorFilteredRequest_Filter()
 }
@@ -1788,7 +2680,7 @@ type SearchVectorFilteredResponse struct {
 
 func (x *SearchVectorFilteredResponse) Reset() {
 	*x = SearchVectorFilteredResponse{}
-	mi := &file_polargraph_proto_msgTypes[27]
+	mi := &file_polargraph_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1800,7 +2692,7 @@ func (x *SearchVectorFilteredResponse) String() string {
 func (*SearchVectorFilteredResponse) ProtoMessage() {}
 
 func (x *SearchVectorFilteredResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[27]
+	mi := &file_polargraph_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1813,7 +2705,7 @@ func (x *SearchVectorFilteredResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchVectorFilteredResponse.ProtoReflect.Descriptor instead.
 func (*SearchVectorFilteredResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{27}
+	return file_polargraph_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *SearchVectorFilteredResponse) GetResults() []*VectorSearchResult {
@@ -1835,7 +2727,7 @@ type SearchVectorInSetRequest struct {
 
 func (x *SearchVectorInSetRequest) Reset() {
 	*x = SearchVectorInSetRequest{}
-	mi := &file_polargraph_proto_msgTypes[28]
+	mi := &file_polargraph_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1847,7 +2739,7 @@ func (x *SearchVectorInSetRequest) String() string {
 func (*SearchVectorInSetRequest) ProtoMessage() {}
 
 func (x *SearchVectorInSetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[28]
+	mi := &file_polargraph_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1860,7 +2752,7 @@ func (x *SearchVectorInSetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchVectorInSetRequest.ProtoReflect.Descriptor instead.
 func (*SearchVectorInSetRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{28}
+	return file_polargraph_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *SearchVectorInSetRequest) GetSpace() string {
@@ -1900,7 +2792,7 @@ type SearchVectorInSetResponse struct {
 
 func (x *SearchVectorInSetResponse) Reset() {
 	*x = SearchVectorInSetResponse{}
-	mi := &file_polargraph_proto_msgTypes[29]
+	mi := &file_polargraph_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1912,7 +2804,7 @@ func (x *SearchVectorInSetResponse) String() string {
 func (*SearchVectorInSetResponse) ProtoMessage() {}
 
 func (x *SearchVectorInSetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[29]
+	mi := &file_polargraph_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1925,7 +2817,7 @@ func (x *SearchVectorInSetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchVectorInSetResponse.ProtoReflect.Descriptor instead.
 func (*SearchVectorInSetResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{29}
+	return file_polargraph_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *SearchVectorInSetResponse) GetResults() []*VectorSearchResult {
@@ -1945,7 +2837,7 @@ type VectorItem struct {
 
 func (x *VectorItem) Reset() {
 	*x = VectorItem{}
-	mi := &file_polargraph_proto_msgTypes[30]
+	mi := &file_polargraph_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1957,7 +2849,7 @@ func (x *VectorItem) String() string {
 func (*VectorItem) ProtoMessage() {}
 
 func (x *VectorItem) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[30]
+	mi := &file_polargraph_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1970,7 +2862,7 @@ func (x *VectorItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VectorItem.ProtoReflect.Descriptor instead.
 func (*VectorItem) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{30}
+	return file_polargraph_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *VectorItem) GetNodeId() *NodeId {
@@ -1997,7 +2889,7 @@ type BatchInsertError struct {
 
 func (x *BatchInsertError) Reset() {
 	*x = BatchInsertError{}
-	mi := &file_polargraph_proto_msgTypes[31]
+	mi := &file_polargraph_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2009,7 +2901,7 @@ func (x *BatchInsertError) String() string {
 func (*BatchInsertError) ProtoMessage() {}
 
 func (x *BatchInsertError) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[31]
+	mi := &file_polargraph_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2022,7 +2914,7 @@ func (x *BatchInsertError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchInsertError.ProtoReflect.Descriptor instead.
 func (*BatchInsertError) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{31}
+	return file_polargraph_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *BatchInsertError) GetIndex() uint32 {
@@ -2049,7 +2941,7 @@ type BatchInsertVectorsRequest struct {
 
 func (x *BatchInsertVectorsRequest) Reset() {
 	*x = BatchInsertVectorsRequest{}
-	mi := &file_polargraph_proto_msgTypes[32]
+	mi := &file_polargraph_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2061,7 +2953,7 @@ func (x *BatchInsertVectorsRequest) String() string {
 func (*BatchInsertVectorsRequest) ProtoMessage() {}
 
 func (x *BatchInsertVectorsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[32]
+	mi := &file_polargraph_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2074,7 +2966,7 @@ func (x *BatchInsertVectorsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchInsertVectorsRequest.ProtoReflect.Descriptor instead.
 func (*BatchInsertVectorsRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{32}
+	return file_polargraph_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *BatchInsertVectorsRequest) GetSpace() string {
@@ -2101,7 +2993,7 @@ type BatchInsertVectorsResponse struct {
 
 func (x *BatchInsertVectorsResponse) Reset() {
 	*x = BatchInsertVectorsResponse{}
-	mi := &file_polargraph_proto_msgTypes[33]
+	mi := &file_polargraph_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2113,7 +3005,7 @@ func (x *BatchInsertVectorsResponse) String() string {
 func (*BatchInsertVectorsResponse) ProtoMessage() {}
 
 func (x *BatchInsertVectorsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[33]
+	mi := &file_polargraph_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2126,7 +3018,7 @@ func (x *BatchInsertVectorsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchInsertVectorsResponse.ProtoReflect.Descriptor instead.
 func (*BatchInsertVectorsResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{33}
+	return file_polargraph_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *BatchInsertVectorsResponse) GetCountInserted() uint32 {
@@ -2156,7 +3048,7 @@ type FieldDef struct {
 
 func (x *FieldDef) Reset() {
 	*x = FieldDef{}
-	mi := &file_polargraph_proto_msgTypes[34]
+	mi := &file_polargraph_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2168,7 +3060,7 @@ func (x *FieldDef) String() string {
 func (*FieldDef) ProtoMessage() {}
 
 func (x *FieldDef) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[34]
+	mi := &file_polargraph_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2181,7 +3073,7 @@ func (x *FieldDef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FieldDef.ProtoReflect.Descriptor instead.
 func (*FieldDef) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{34}
+	return file_polargraph_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *FieldDef) GetFieldName() string {
@@ -2223,7 +3115,7 @@ type VectorSpaceDef struct {
 
 func (x *VectorSpaceDef) Reset() {
 	*x = VectorSpaceDef{}
-	mi := &file_polargraph_proto_msgTypes[35]
+	mi := &file_polargraph_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2235,7 +3127,7 @@ func (x *VectorSpaceDef) String() string {
 func (*VectorSpaceDef) ProtoMessage() {}
 
 func (x *VectorSpaceDef) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[35]
+	mi := &file_polargraph_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2248,7 +3140,7 @@ func (x *VectorSpaceDef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VectorSpaceDef.ProtoReflect.Descriptor instead.
 func (*VectorSpaceDef) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{35}
+	return file_polargraph_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *VectorSpaceDef) GetSpaceName() string {
@@ -2285,14 +3177,16 @@ type NodeTypeDef struct {
 	TypeName string                 `protobuf:"bytes,1,opt,name=type_name,json=typeName,proto3" json:"type_name,omitempty"`
 	Fields   []*FieldDef            `protobuf:"bytes,2,rep,name=fields,proto3" json:"fields,omitempty"`
 	// / Optional vector space definition. Absent if the type has no vector space.
-	VectorSpace   *VectorSpaceDef `protobuf:"bytes,3,opt,name=vector_space,json=vectorSpace,proto3" json:"vector_space,omitempty"`
+	VectorSpace *VectorSpaceDef `protobuf:"bytes,3,opt,name=vector_space,json=vectorSpace,proto3" json:"vector_space,omitempty"`
+	// / Parent type names. This type inherits all fields declared by each parent.
+	ParentTypes   []string `protobuf:"bytes,4,rep,name=parent_types,json=parentTypes,proto3" json:"parent_types,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NodeTypeDef) Reset() {
 	*x = NodeTypeDef{}
-	mi := &file_polargraph_proto_msgTypes[36]
+	mi := &file_polargraph_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2304,7 +3198,7 @@ func (x *NodeTypeDef) String() string {
 func (*NodeTypeDef) ProtoMessage() {}
 
 func (x *NodeTypeDef) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[36]
+	mi := &file_polargraph_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2317,7 +3211,7 @@ func (x *NodeTypeDef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeTypeDef.ProtoReflect.Descriptor instead.
 func (*NodeTypeDef) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{36}
+	return file_polargraph_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *NodeTypeDef) GetTypeName() string {
@@ -2341,6 +3235,13 @@ func (x *NodeTypeDef) GetVectorSpace() *VectorSpaceDef {
 	return nil
 }
 
+func (x *NodeTypeDef) GetParentTypes() []string {
+	if x != nil {
+		return x.ParentTypes
+	}
+	return nil
+}
+
 type RegisterNodeTypeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Definition    *NodeTypeDef           `protobuf:"bytes,1,opt,name=definition,proto3" json:"definition,omitempty"`
@@ -2350,7 +3251,7 @@ type RegisterNodeTypeRequest struct {
 
 func (x *RegisterNodeTypeRequest) Reset() {
 	*x = RegisterNodeTypeRequest{}
-	mi := &file_polargraph_proto_msgTypes[37]
+	mi := &file_polargraph_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2362,7 +3263,7 @@ func (x *RegisterNodeTypeRequest) String() string {
 func (*RegisterNodeTypeRequest) ProtoMessage() {}
 
 func (x *RegisterNodeTypeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[37]
+	mi := &file_polargraph_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2375,7 +3276,7 @@ func (x *RegisterNodeTypeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterNodeTypeRequest.ProtoReflect.Descriptor instead.
 func (*RegisterNodeTypeRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{37}
+	return file_polargraph_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *RegisterNodeTypeRequest) GetDefinition() *NodeTypeDef {
@@ -2393,7 +3294,7 @@ type RegisterNodeTypeResponse struct {
 
 func (x *RegisterNodeTypeResponse) Reset() {
 	*x = RegisterNodeTypeResponse{}
-	mi := &file_polargraph_proto_msgTypes[38]
+	mi := &file_polargraph_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2405,7 +3306,7 @@ func (x *RegisterNodeTypeResponse) String() string {
 func (*RegisterNodeTypeResponse) ProtoMessage() {}
 
 func (x *RegisterNodeTypeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[38]
+	mi := &file_polargraph_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2418,7 +3319,7 @@ func (x *RegisterNodeTypeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterNodeTypeResponse.ProtoReflect.Descriptor instead.
 func (*RegisterNodeTypeResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{38}
+	return file_polargraph_proto_rawDescGZIP(), []int{47}
 }
 
 type GetNodeTypeRequest struct {
@@ -2430,7 +3331,7 @@ type GetNodeTypeRequest struct {
 
 func (x *GetNodeTypeRequest) Reset() {
 	*x = GetNodeTypeRequest{}
-	mi := &file_polargraph_proto_msgTypes[39]
+	mi := &file_polargraph_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2442,7 +3343,7 @@ func (x *GetNodeTypeRequest) String() string {
 func (*GetNodeTypeRequest) ProtoMessage() {}
 
 func (x *GetNodeTypeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[39]
+	mi := &file_polargraph_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2455,7 +3356,7 @@ func (x *GetNodeTypeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetNodeTypeRequest.ProtoReflect.Descriptor instead.
 func (*GetNodeTypeRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{39}
+	return file_polargraph_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *GetNodeTypeRequest) GetTypeName() string {
@@ -2475,7 +3376,7 @@ type GetNodeTypeResponse struct {
 
 func (x *GetNodeTypeResponse) Reset() {
 	*x = GetNodeTypeResponse{}
-	mi := &file_polargraph_proto_msgTypes[40]
+	mi := &file_polargraph_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2487,7 +3388,7 @@ func (x *GetNodeTypeResponse) String() string {
 func (*GetNodeTypeResponse) ProtoMessage() {}
 
 func (x *GetNodeTypeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[40]
+	mi := &file_polargraph_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2500,7 +3401,7 @@ func (x *GetNodeTypeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetNodeTypeResponse.ProtoReflect.Descriptor instead.
 func (*GetNodeTypeResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{40}
+	return file_polargraph_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *GetNodeTypeResponse) GetDefinition() *NodeTypeDef {
@@ -2518,7 +3419,7 @@ type ListNodeTypesRequest struct {
 
 func (x *ListNodeTypesRequest) Reset() {
 	*x = ListNodeTypesRequest{}
-	mi := &file_polargraph_proto_msgTypes[41]
+	mi := &file_polargraph_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2530,7 +3431,7 @@ func (x *ListNodeTypesRequest) String() string {
 func (*ListNodeTypesRequest) ProtoMessage() {}
 
 func (x *ListNodeTypesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[41]
+	mi := &file_polargraph_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2543,7 +3444,7 @@ func (x *ListNodeTypesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListNodeTypesRequest.ProtoReflect.Descriptor instead.
 func (*ListNodeTypesRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{41}
+	return file_polargraph_proto_rawDescGZIP(), []int{50}
 }
 
 type ListNodeTypesResponse struct {
@@ -2555,7 +3456,7 @@ type ListNodeTypesResponse struct {
 
 func (x *ListNodeTypesResponse) Reset() {
 	*x = ListNodeTypesResponse{}
-	mi := &file_polargraph_proto_msgTypes[42]
+	mi := &file_polargraph_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2567,7 +3468,7 @@ func (x *ListNodeTypesResponse) String() string {
 func (*ListNodeTypesResponse) ProtoMessage() {}
 
 func (x *ListNodeTypesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[42]
+	mi := &file_polargraph_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2580,7 +3481,7 @@ func (x *ListNodeTypesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListNodeTypesResponse.ProtoReflect.Descriptor instead.
 func (*ListNodeTypesResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{42}
+	return file_polargraph_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *ListNodeTypesResponse) GetDefinitions() []*NodeTypeDef {
@@ -2601,7 +3502,7 @@ type ValidateNodeRequest struct {
 
 func (x *ValidateNodeRequest) Reset() {
 	*x = ValidateNodeRequest{}
-	mi := &file_polargraph_proto_msgTypes[43]
+	mi := &file_polargraph_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2613,7 +3514,7 @@ func (x *ValidateNodeRequest) String() string {
 func (*ValidateNodeRequest) ProtoMessage() {}
 
 func (x *ValidateNodeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[43]
+	mi := &file_polargraph_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2626,7 +3527,7 @@ func (x *ValidateNodeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateNodeRequest.ProtoReflect.Descriptor instead.
 func (*ValidateNodeRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{43}
+	return file_polargraph_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *ValidateNodeRequest) GetTypeName() string {
@@ -2653,7 +3554,7 @@ type ValidateNodeResponse struct {
 
 func (x *ValidateNodeResponse) Reset() {
 	*x = ValidateNodeResponse{}
-	mi := &file_polargraph_proto_msgTypes[44]
+	mi := &file_polargraph_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2665,7 +3566,7 @@ func (x *ValidateNodeResponse) String() string {
 func (*ValidateNodeResponse) ProtoMessage() {}
 
 func (x *ValidateNodeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[44]
+	mi := &file_polargraph_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2678,7 +3579,7 @@ func (x *ValidateNodeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateNodeResponse.ProtoReflect.Descriptor instead.
 func (*ValidateNodeResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{44}
+	return file_polargraph_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *ValidateNodeResponse) GetValid() bool {
@@ -2703,15 +3604,22 @@ type EdgeTypeDef struct {
 	// / Expected node type for the subject. Empty string means unconstrained.
 	Domain string `protobuf:"bytes,2,opt,name=domain,proto3" json:"domain,omitempty"`
 	// / Expected node type for the object. Empty string means unconstrained.
-	Range         string      `protobuf:"bytes,3,opt,name=range,proto3" json:"range,omitempty"`
-	Fields        []*FieldDef `protobuf:"bytes,4,rep,name=fields,proto3" json:"fields,omitempty"`
+	Range  string      `protobuf:"bytes,3,opt,name=range,proto3" json:"range,omitempty"`
+	Fields []*FieldDef `protobuf:"bytes,4,rep,name=fields,proto3" json:"fields,omitempty"`
+	// / Cardinality constraint. One of: "many" (default), "one_to_many",
+	// / "many_to_one", "one_to_one". Empty string is treated as "many".
+	Cardinality string `protobuf:"bytes,5,opt,name=cardinality,proto3" json:"cardinality,omitempty"`
+	// / Inverse predicate name. If set, every (A, predicate, B) triple must
+	// / have a corresponding (B, inverse_of, A) triple. Advisory — not
+	// / enforced in storage, checked on insert and via ValidateOntology.
+	InverseOf     string `protobuf:"bytes,6,opt,name=inverse_of,json=inverseOf,proto3" json:"inverse_of,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EdgeTypeDef) Reset() {
 	*x = EdgeTypeDef{}
-	mi := &file_polargraph_proto_msgTypes[45]
+	mi := &file_polargraph_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2723,7 +3631,7 @@ func (x *EdgeTypeDef) String() string {
 func (*EdgeTypeDef) ProtoMessage() {}
 
 func (x *EdgeTypeDef) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[45]
+	mi := &file_polargraph_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2736,7 +3644,7 @@ func (x *EdgeTypeDef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EdgeTypeDef.ProtoReflect.Descriptor instead.
 func (*EdgeTypeDef) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{45}
+	return file_polargraph_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *EdgeTypeDef) GetPredicate() string {
@@ -2767,6 +3675,20 @@ func (x *EdgeTypeDef) GetFields() []*FieldDef {
 	return nil
 }
 
+func (x *EdgeTypeDef) GetCardinality() string {
+	if x != nil {
+		return x.Cardinality
+	}
+	return ""
+}
+
+func (x *EdgeTypeDef) GetInverseOf() string {
+	if x != nil {
+		return x.InverseOf
+	}
+	return ""
+}
+
 type RegisterEdgeTypeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Definition    *EdgeTypeDef           `protobuf:"bytes,1,opt,name=definition,proto3" json:"definition,omitempty"`
@@ -2776,7 +3698,7 @@ type RegisterEdgeTypeRequest struct {
 
 func (x *RegisterEdgeTypeRequest) Reset() {
 	*x = RegisterEdgeTypeRequest{}
-	mi := &file_polargraph_proto_msgTypes[46]
+	mi := &file_polargraph_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2788,7 +3710,7 @@ func (x *RegisterEdgeTypeRequest) String() string {
 func (*RegisterEdgeTypeRequest) ProtoMessage() {}
 
 func (x *RegisterEdgeTypeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[46]
+	mi := &file_polargraph_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2801,7 +3723,7 @@ func (x *RegisterEdgeTypeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterEdgeTypeRequest.ProtoReflect.Descriptor instead.
 func (*RegisterEdgeTypeRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{46}
+	return file_polargraph_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *RegisterEdgeTypeRequest) GetDefinition() *EdgeTypeDef {
@@ -2819,7 +3741,7 @@ type RegisterEdgeTypeResponse struct {
 
 func (x *RegisterEdgeTypeResponse) Reset() {
 	*x = RegisterEdgeTypeResponse{}
-	mi := &file_polargraph_proto_msgTypes[47]
+	mi := &file_polargraph_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2831,7 +3753,7 @@ func (x *RegisterEdgeTypeResponse) String() string {
 func (*RegisterEdgeTypeResponse) ProtoMessage() {}
 
 func (x *RegisterEdgeTypeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[47]
+	mi := &file_polargraph_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2844,7 +3766,7 @@ func (x *RegisterEdgeTypeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterEdgeTypeResponse.ProtoReflect.Descriptor instead.
 func (*RegisterEdgeTypeResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{47}
+	return file_polargraph_proto_rawDescGZIP(), []int{56}
 }
 
 type GetEdgeTypeRequest struct {
@@ -2856,7 +3778,7 @@ type GetEdgeTypeRequest struct {
 
 func (x *GetEdgeTypeRequest) Reset() {
 	*x = GetEdgeTypeRequest{}
-	mi := &file_polargraph_proto_msgTypes[48]
+	mi := &file_polargraph_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2868,7 +3790,7 @@ func (x *GetEdgeTypeRequest) String() string {
 func (*GetEdgeTypeRequest) ProtoMessage() {}
 
 func (x *GetEdgeTypeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[48]
+	mi := &file_polargraph_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2881,7 +3803,7 @@ func (x *GetEdgeTypeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetEdgeTypeRequest.ProtoReflect.Descriptor instead.
 func (*GetEdgeTypeRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{48}
+	return file_polargraph_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *GetEdgeTypeRequest) GetPredicate() string {
@@ -2901,7 +3823,7 @@ type GetEdgeTypeResponse struct {
 
 func (x *GetEdgeTypeResponse) Reset() {
 	*x = GetEdgeTypeResponse{}
-	mi := &file_polargraph_proto_msgTypes[49]
+	mi := &file_polargraph_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2913,7 +3835,7 @@ func (x *GetEdgeTypeResponse) String() string {
 func (*GetEdgeTypeResponse) ProtoMessage() {}
 
 func (x *GetEdgeTypeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[49]
+	mi := &file_polargraph_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2926,7 +3848,7 @@ func (x *GetEdgeTypeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetEdgeTypeResponse.ProtoReflect.Descriptor instead.
 func (*GetEdgeTypeResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{49}
+	return file_polargraph_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *GetEdgeTypeResponse) GetDefinition() *EdgeTypeDef {
@@ -2944,7 +3866,7 @@ type ListEdgeTypesRequest struct {
 
 func (x *ListEdgeTypesRequest) Reset() {
 	*x = ListEdgeTypesRequest{}
-	mi := &file_polargraph_proto_msgTypes[50]
+	mi := &file_polargraph_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2956,7 +3878,7 @@ func (x *ListEdgeTypesRequest) String() string {
 func (*ListEdgeTypesRequest) ProtoMessage() {}
 
 func (x *ListEdgeTypesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[50]
+	mi := &file_polargraph_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2969,7 +3891,7 @@ func (x *ListEdgeTypesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEdgeTypesRequest.ProtoReflect.Descriptor instead.
 func (*ListEdgeTypesRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{50}
+	return file_polargraph_proto_rawDescGZIP(), []int{59}
 }
 
 type ListEdgeTypesResponse struct {
@@ -2981,7 +3903,7 @@ type ListEdgeTypesResponse struct {
 
 func (x *ListEdgeTypesResponse) Reset() {
 	*x = ListEdgeTypesResponse{}
-	mi := &file_polargraph_proto_msgTypes[51]
+	mi := &file_polargraph_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2993,7 +3915,7 @@ func (x *ListEdgeTypesResponse) String() string {
 func (*ListEdgeTypesResponse) ProtoMessage() {}
 
 func (x *ListEdgeTypesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[51]
+	mi := &file_polargraph_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3006,7 +3928,7 @@ func (x *ListEdgeTypesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEdgeTypesResponse.ProtoReflect.Descriptor instead.
 func (*ListEdgeTypesResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{51}
+	return file_polargraph_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *ListEdgeTypesResponse) GetDefinitions() []*EdgeTypeDef {
@@ -3031,7 +3953,7 @@ type ValidateEdgeRequest struct {
 
 func (x *ValidateEdgeRequest) Reset() {
 	*x = ValidateEdgeRequest{}
-	mi := &file_polargraph_proto_msgTypes[52]
+	mi := &file_polargraph_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3043,7 +3965,7 @@ func (x *ValidateEdgeRequest) String() string {
 func (*ValidateEdgeRequest) ProtoMessage() {}
 
 func (x *ValidateEdgeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[52]
+	mi := &file_polargraph_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3056,7 +3978,7 @@ func (x *ValidateEdgeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateEdgeRequest.ProtoReflect.Descriptor instead.
 func (*ValidateEdgeRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{52}
+	return file_polargraph_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *ValidateEdgeRequest) GetPredicate() string {
@@ -3097,7 +4019,7 @@ type ValidateEdgeResponse struct {
 
 func (x *ValidateEdgeResponse) Reset() {
 	*x = ValidateEdgeResponse{}
-	mi := &file_polargraph_proto_msgTypes[53]
+	mi := &file_polargraph_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3109,7 +4031,7 @@ func (x *ValidateEdgeResponse) String() string {
 func (*ValidateEdgeResponse) ProtoMessage() {}
 
 func (x *ValidateEdgeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[53]
+	mi := &file_polargraph_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3122,7 +4044,7 @@ func (x *ValidateEdgeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateEdgeResponse.ProtoReflect.Descriptor instead.
 func (*ValidateEdgeResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{53}
+	return file_polargraph_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *ValidateEdgeResponse) GetValid() bool {
@@ -3139,6 +4061,156 @@ func (x *ValidateEdgeResponse) GetErrors() []string {
 	return nil
 }
 
+type ValidateOntologyRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ValidateOntologyRequest) Reset() {
+	*x = ValidateOntologyRequest{}
+	mi := &file_polargraph_proto_msgTypes[63]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidateOntologyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidateOntologyRequest) ProtoMessage() {}
+
+func (x *ValidateOntologyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[63]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidateOntologyRequest.ProtoReflect.Descriptor instead.
+func (*ValidateOntologyRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{63}
+}
+
+type OntologyViolation struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / One of: "cardinality", "inverse", "cycle".
+	ViolationType string `protobuf:"bytes,1,opt,name=violation_type,json=violationType,proto3" json:"violation_type,omitempty"`
+	// / Predicate or type name involved in the violation.
+	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Message       string `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OntologyViolation) Reset() {
+	*x = OntologyViolation{}
+	mi := &file_polargraph_proto_msgTypes[64]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OntologyViolation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OntologyViolation) ProtoMessage() {}
+
+func (x *OntologyViolation) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[64]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OntologyViolation.ProtoReflect.Descriptor instead.
+func (*OntologyViolation) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{64}
+}
+
+func (x *OntologyViolation) GetViolationType() string {
+	if x != nil {
+		return x.ViolationType
+	}
+	return ""
+}
+
+func (x *OntologyViolation) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *OntologyViolation) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type ValidateOntologyResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Valid         bool                   `protobuf:"varint,1,opt,name=valid,proto3" json:"valid,omitempty"`
+	Violations    []*OntologyViolation   `protobuf:"bytes,2,rep,name=violations,proto3" json:"violations,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ValidateOntologyResponse) Reset() {
+	*x = ValidateOntologyResponse{}
+	mi := &file_polargraph_proto_msgTypes[65]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidateOntologyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidateOntologyResponse) ProtoMessage() {}
+
+func (x *ValidateOntologyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[65]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidateOntologyResponse.ProtoReflect.Descriptor instead.
+func (*ValidateOntologyResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{65}
+}
+
+func (x *ValidateOntologyResponse) GetValid() bool {
+	if x != nil {
+		return x.Valid
+	}
+	return false
+}
+
+func (x *ValidateOntologyResponse) GetViolations() []*OntologyViolation {
+	if x != nil {
+		return x.Violations
+	}
+	return nil
+}
+
 type ListPredicatesBetweenRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	DomainType    string                 `protobuf:"bytes,1,opt,name=domain_type,json=domainType,proto3" json:"domain_type,omitempty"`
@@ -3149,7 +4221,7 @@ type ListPredicatesBetweenRequest struct {
 
 func (x *ListPredicatesBetweenRequest) Reset() {
 	*x = ListPredicatesBetweenRequest{}
-	mi := &file_polargraph_proto_msgTypes[54]
+	mi := &file_polargraph_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3161,7 +4233,7 @@ func (x *ListPredicatesBetweenRequest) String() string {
 func (*ListPredicatesBetweenRequest) ProtoMessage() {}
 
 func (x *ListPredicatesBetweenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[54]
+	mi := &file_polargraph_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3174,7 +4246,7 @@ func (x *ListPredicatesBetweenRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPredicatesBetweenRequest.ProtoReflect.Descriptor instead.
 func (*ListPredicatesBetweenRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{54}
+	return file_polargraph_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *ListPredicatesBetweenRequest) GetDomainType() string {
@@ -3200,7 +4272,7 @@ type ListPredicatesBetweenResponse struct {
 
 func (x *ListPredicatesBetweenResponse) Reset() {
 	*x = ListPredicatesBetweenResponse{}
-	mi := &file_polargraph_proto_msgTypes[55]
+	mi := &file_polargraph_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3212,7 +4284,7 @@ func (x *ListPredicatesBetweenResponse) String() string {
 func (*ListPredicatesBetweenResponse) ProtoMessage() {}
 
 func (x *ListPredicatesBetweenResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[55]
+	mi := &file_polargraph_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3225,7 +4297,7 @@ func (x *ListPredicatesBetweenResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPredicatesBetweenResponse.ProtoReflect.Descriptor instead.
 func (*ListPredicatesBetweenResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{55}
+	return file_polargraph_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *ListPredicatesBetweenResponse) GetPredicates() []string {
@@ -3249,7 +4321,7 @@ type ScoredBinding struct {
 
 func (x *ScoredBinding) Reset() {
 	*x = ScoredBinding{}
-	mi := &file_polargraph_proto_msgTypes[56]
+	mi := &file_polargraph_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3261,7 +4333,7 @@ func (x *ScoredBinding) String() string {
 func (*ScoredBinding) ProtoMessage() {}
 
 func (x *ScoredBinding) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[56]
+	mi := &file_polargraph_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3274,7 +4346,7 @@ func (x *ScoredBinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScoredBinding.ProtoReflect.Descriptor instead.
 func (*ScoredBinding) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{56}
+	return file_polargraph_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *ScoredBinding) GetVars() map[string]*NodeId {
@@ -3317,14 +4389,19 @@ type VectorSeedQueryRequest struct {
 	//	*VectorSeedQueryRequest_ReachabilityFilter
 	Filter isVectorSeedQueryRequest_Filter `protobuf_oneof:"filter"`
 	// / HNSW exploration factor. 0 = use server default.
-	Ef            uint32 `protobuf:"varint,9,opt,name=ef,proto3" json:"ef,omitempty"`
+	Ef uint32 `protobuf:"varint,9,opt,name=ef,proto3" json:"ef,omitempty"`
+	// / Optional identity for access-control filtering.
+	UserId string `protobuf:"bytes,10,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// / Named query parameters for `$param` substitution. Keys are parameter names
+	// / (without the `$`); values are JSON-encoded `Value` objects.
+	Params        map[string]string `protobuf:"bytes,11,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *VectorSeedQueryRequest) Reset() {
 	*x = VectorSeedQueryRequest{}
-	mi := &file_polargraph_proto_msgTypes[57]
+	mi := &file_polargraph_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3336,7 +4413,7 @@ func (x *VectorSeedQueryRequest) String() string {
 func (*VectorSeedQueryRequest) ProtoMessage() {}
 
 func (x *VectorSeedQueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[57]
+	mi := &file_polargraph_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3349,7 +4426,7 @@ func (x *VectorSeedQueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VectorSeedQueryRequest.ProtoReflect.Descriptor instead.
 func (*VectorSeedQueryRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{57}
+	return file_polargraph_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *VectorSeedQueryRequest) GetSpace() string {
@@ -3426,6 +4503,20 @@ func (x *VectorSeedQueryRequest) GetEf() uint32 {
 	return 0
 }
 
+func (x *VectorSeedQueryRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *VectorSeedQueryRequest) GetParams() map[string]string {
+	if x != nil {
+		return x.Params
+	}
+	return nil
+}
+
 type isVectorSeedQueryRequest_Filter interface {
 	isVectorSeedQueryRequest_Filter()
 }
@@ -3451,7 +4542,7 @@ type VectorSeedQueryResponse struct {
 
 func (x *VectorSeedQueryResponse) Reset() {
 	*x = VectorSeedQueryResponse{}
-	mi := &file_polargraph_proto_msgTypes[58]
+	mi := &file_polargraph_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3463,7 +4554,7 @@ func (x *VectorSeedQueryResponse) String() string {
 func (*VectorSeedQueryResponse) ProtoMessage() {}
 
 func (x *VectorSeedQueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[58]
+	mi := &file_polargraph_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3476,7 +4567,7 @@ func (x *VectorSeedQueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VectorSeedQueryResponse.ProtoReflect.Descriptor instead.
 func (*VectorSeedQueryResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{58}
+	return file_polargraph_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *VectorSeedQueryResponse) GetBindings() []*ScoredBinding {
@@ -3500,7 +4591,7 @@ type BackupInfo struct {
 
 func (x *BackupInfo) Reset() {
 	*x = BackupInfo{}
-	mi := &file_polargraph_proto_msgTypes[59]
+	mi := &file_polargraph_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3512,7 +4603,7 @@ func (x *BackupInfo) String() string {
 func (*BackupInfo) ProtoMessage() {}
 
 func (x *BackupInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[59]
+	mi := &file_polargraph_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3525,7 +4616,7 @@ func (x *BackupInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackupInfo.ProtoReflect.Descriptor instead.
 func (*BackupInfo) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{59}
+	return file_polargraph_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *BackupInfo) GetBackupId() uint32 {
@@ -3564,7 +4655,7 @@ type CreateBackupRequest struct {
 
 func (x *CreateBackupRequest) Reset() {
 	*x = CreateBackupRequest{}
-	mi := &file_polargraph_proto_msgTypes[60]
+	mi := &file_polargraph_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3576,7 +4667,7 @@ func (x *CreateBackupRequest) String() string {
 func (*CreateBackupRequest) ProtoMessage() {}
 
 func (x *CreateBackupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[60]
+	mi := &file_polargraph_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3589,7 +4680,7 @@ func (x *CreateBackupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateBackupRequest.ProtoReflect.Descriptor instead.
 func (*CreateBackupRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{60}
+	return file_polargraph_proto_rawDescGZIP(), []int{72}
 }
 
 type CreateBackupResponse struct {
@@ -3604,7 +4695,7 @@ type CreateBackupResponse struct {
 
 func (x *CreateBackupResponse) Reset() {
 	*x = CreateBackupResponse{}
-	mi := &file_polargraph_proto_msgTypes[61]
+	mi := &file_polargraph_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3616,7 +4707,7 @@ func (x *CreateBackupResponse) String() string {
 func (*CreateBackupResponse) ProtoMessage() {}
 
 func (x *CreateBackupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[61]
+	mi := &file_polargraph_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3629,7 +4720,7 @@ func (x *CreateBackupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateBackupResponse.ProtoReflect.Descriptor instead.
 func (*CreateBackupResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{61}
+	return file_polargraph_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *CreateBackupResponse) GetBackupId() uint32 {
@@ -3661,7 +4752,7 @@ type ListBackupsRequest struct {
 
 func (x *ListBackupsRequest) Reset() {
 	*x = ListBackupsRequest{}
-	mi := &file_polargraph_proto_msgTypes[62]
+	mi := &file_polargraph_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3673,7 +4764,7 @@ func (x *ListBackupsRequest) String() string {
 func (*ListBackupsRequest) ProtoMessage() {}
 
 func (x *ListBackupsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[62]
+	mi := &file_polargraph_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3686,7 +4777,7 @@ func (x *ListBackupsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListBackupsRequest.ProtoReflect.Descriptor instead.
 func (*ListBackupsRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{62}
+	return file_polargraph_proto_rawDescGZIP(), []int{74}
 }
 
 type ListBackupsResponse struct {
@@ -3698,7 +4789,7 @@ type ListBackupsResponse struct {
 
 func (x *ListBackupsResponse) Reset() {
 	*x = ListBackupsResponse{}
-	mi := &file_polargraph_proto_msgTypes[63]
+	mi := &file_polargraph_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3710,7 +4801,7 @@ func (x *ListBackupsResponse) String() string {
 func (*ListBackupsResponse) ProtoMessage() {}
 
 func (x *ListBackupsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[63]
+	mi := &file_polargraph_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3723,7 +4814,7 @@ func (x *ListBackupsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListBackupsResponse.ProtoReflect.Descriptor instead.
 func (*ListBackupsResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{63}
+	return file_polargraph_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *ListBackupsResponse) GetBackups() []*BackupInfo {
@@ -3743,7 +4834,7 @@ type PurgeOldBackupsRequest struct {
 
 func (x *PurgeOldBackupsRequest) Reset() {
 	*x = PurgeOldBackupsRequest{}
-	mi := &file_polargraph_proto_msgTypes[64]
+	mi := &file_polargraph_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3755,7 +4846,7 @@ func (x *PurgeOldBackupsRequest) String() string {
 func (*PurgeOldBackupsRequest) ProtoMessage() {}
 
 func (x *PurgeOldBackupsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[64]
+	mi := &file_polargraph_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3768,7 +4859,7 @@ func (x *PurgeOldBackupsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PurgeOldBackupsRequest.ProtoReflect.Descriptor instead.
 func (*PurgeOldBackupsRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{64}
+	return file_polargraph_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *PurgeOldBackupsRequest) GetKeepN() uint32 {
@@ -3787,7 +4878,7 @@ type PurgeOldBackupsResponse struct {
 
 func (x *PurgeOldBackupsResponse) Reset() {
 	*x = PurgeOldBackupsResponse{}
-	mi := &file_polargraph_proto_msgTypes[65]
+	mi := &file_polargraph_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3799,7 +4890,7 @@ func (x *PurgeOldBackupsResponse) String() string {
 func (*PurgeOldBackupsResponse) ProtoMessage() {}
 
 func (x *PurgeOldBackupsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[65]
+	mi := &file_polargraph_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3812,7 +4903,7 @@ func (x *PurgeOldBackupsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PurgeOldBackupsResponse.ProtoReflect.Descriptor instead.
 func (*PurgeOldBackupsResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{65}
+	return file_polargraph_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *PurgeOldBackupsResponse) GetDeletedCount() uint32 {
@@ -3824,10 +4915,12 @@ func (x *PurgeOldBackupsResponse) GetDeletedCount() uint32 {
 
 type RunRetentionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// / Delete triples whose transaction time is older than this many seconds.
+	// / Delete versions superseded (corrected or deleted) more than this many
+	// / seconds ago. The current version of a triple is never deleted.
 	TxAgeSecs uint64 `protobuf:"varint,1,opt,name=tx_age_secs,json=txAgeSecs,proto3" json:"tx_age_secs,omitempty"`
-	// / Also delete triples whose vt_end is more than this many seconds in the
-	// / past. Set to 0 to disable valid-time lookback (keep all valid-time history).
+	// / Also delete a triple entirely once all of its versions have a vt_end more
+	// / than this many seconds in the past. Set to 0 to disable valid-time
+	// / lookback (keep all valid-time history).
 	VtLookbackSecs uint64 `protobuf:"varint,2,opt,name=vt_lookback_secs,json=vtLookbackSecs,proto3" json:"vt_lookback_secs,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -3835,7 +4928,7 @@ type RunRetentionRequest struct {
 
 func (x *RunRetentionRequest) Reset() {
 	*x = RunRetentionRequest{}
-	mi := &file_polargraph_proto_msgTypes[66]
+	mi := &file_polargraph_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3847,7 +4940,7 @@ func (x *RunRetentionRequest) String() string {
 func (*RunRetentionRequest) ProtoMessage() {}
 
 func (x *RunRetentionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[66]
+	mi := &file_polargraph_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3860,7 +4953,7 @@ func (x *RunRetentionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunRetentionRequest.ProtoReflect.Descriptor instead.
 func (*RunRetentionRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{66}
+	return file_polargraph_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *RunRetentionRequest) GetTxAgeSecs() uint64 {
@@ -3888,7 +4981,7 @@ type RunRetentionResponse struct {
 
 func (x *RunRetentionResponse) Reset() {
 	*x = RunRetentionResponse{}
-	mi := &file_polargraph_proto_msgTypes[67]
+	mi := &file_polargraph_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3900,7 +4993,7 @@ func (x *RunRetentionResponse) String() string {
 func (*RunRetentionResponse) ProtoMessage() {}
 
 func (x *RunRetentionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[67]
+	mi := &file_polargraph_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3913,7 +5006,7 @@ func (x *RunRetentionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunRetentionResponse.ProtoReflect.Descriptor instead.
 func (*RunRetentionResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{67}
+	return file_polargraph_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *RunRetentionResponse) GetTriplesScanned() uint64 {
@@ -3948,7 +5041,7 @@ type StreamWalRequest struct {
 
 func (x *StreamWalRequest) Reset() {
 	*x = StreamWalRequest{}
-	mi := &file_polargraph_proto_msgTypes[68]
+	mi := &file_polargraph_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3960,7 +5053,7 @@ func (x *StreamWalRequest) String() string {
 func (*StreamWalRequest) ProtoMessage() {}
 
 func (x *StreamWalRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[68]
+	mi := &file_polargraph_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3973,7 +5066,7 @@ func (x *StreamWalRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamWalRequest.ProtoReflect.Descriptor instead.
 func (*StreamWalRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{68}
+	return file_polargraph_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *StreamWalRequest) GetSinceSeq() uint64 {
@@ -3995,7 +5088,7 @@ type WalEntry struct {
 
 func (x *WalEntry) Reset() {
 	*x = WalEntry{}
-	mi := &file_polargraph_proto_msgTypes[69]
+	mi := &file_polargraph_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4007,7 +5100,7 @@ func (x *WalEntry) String() string {
 func (*WalEntry) ProtoMessage() {}
 
 func (x *WalEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[69]
+	mi := &file_polargraph_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4020,7 +5113,7 @@ func (x *WalEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WalEntry.ProtoReflect.Descriptor instead.
 func (*WalEntry) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{69}
+	return file_polargraph_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *WalEntry) GetSequenceNumber() uint64 {
@@ -4045,7 +5138,7 @@ type ReplicaStatusRequest struct {
 
 func (x *ReplicaStatusRequest) Reset() {
 	*x = ReplicaStatusRequest{}
-	mi := &file_polargraph_proto_msgTypes[70]
+	mi := &file_polargraph_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4057,7 +5150,7 @@ func (x *ReplicaStatusRequest) String() string {
 func (*ReplicaStatusRequest) ProtoMessage() {}
 
 func (x *ReplicaStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[70]
+	mi := &file_polargraph_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4070,7 +5163,7 @@ func (x *ReplicaStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaStatusRequest.ProtoReflect.Descriptor instead.
 func (*ReplicaStatusRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{70}
+	return file_polargraph_proto_rawDescGZIP(), []int{82}
 }
 
 type ReplicaStatusResponse struct {
@@ -4093,7 +5186,7 @@ type ReplicaStatusResponse struct {
 
 func (x *ReplicaStatusResponse) Reset() {
 	*x = ReplicaStatusResponse{}
-	mi := &file_polargraph_proto_msgTypes[71]
+	mi := &file_polargraph_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4105,7 +5198,7 @@ func (x *ReplicaStatusResponse) String() string {
 func (*ReplicaStatusResponse) ProtoMessage() {}
 
 func (x *ReplicaStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[71]
+	mi := &file_polargraph_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4118,7 +5211,7 @@ func (x *ReplicaStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaStatusResponse.ProtoReflect.Descriptor instead.
 func (*ReplicaStatusResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{71}
+	return file_polargraph_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *ReplicaStatusResponse) GetIsReplica() bool {
@@ -4173,7 +5266,7 @@ type MigrateRequest struct {
 
 func (x *MigrateRequest) Reset() {
 	*x = MigrateRequest{}
-	mi := &file_polargraph_proto_msgTypes[72]
+	mi := &file_polargraph_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4185,7 +5278,7 @@ func (x *MigrateRequest) String() string {
 func (*MigrateRequest) ProtoMessage() {}
 
 func (x *MigrateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[72]
+	mi := &file_polargraph_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4198,7 +5291,7 @@ func (x *MigrateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrateRequest.ProtoReflect.Descriptor instead.
 func (*MigrateRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{72}
+	return file_polargraph_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *MigrateRequest) GetDryRun() bool {
@@ -4219,7 +5312,7 @@ type MigrateResponse struct {
 
 func (x *MigrateResponse) Reset() {
 	*x = MigrateResponse{}
-	mi := &file_polargraph_proto_msgTypes[73]
+	mi := &file_polargraph_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4231,7 +5324,7 @@ func (x *MigrateResponse) String() string {
 func (*MigrateResponse) ProtoMessage() {}
 
 func (x *MigrateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[73]
+	mi := &file_polargraph_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4244,7 +5337,7 @@ func (x *MigrateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrateResponse.ProtoReflect.Descriptor instead.
 func (*MigrateResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{73}
+	return file_polargraph_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *MigrateResponse) GetAppliedVersions() []uint32 {
@@ -4276,7 +5369,7 @@ type MigrationStatusRequest struct {
 
 func (x *MigrationStatusRequest) Reset() {
 	*x = MigrationStatusRequest{}
-	mi := &file_polargraph_proto_msgTypes[74]
+	mi := &file_polargraph_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4288,7 +5381,7 @@ func (x *MigrationStatusRequest) String() string {
 func (*MigrationStatusRequest) ProtoMessage() {}
 
 func (x *MigrationStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[74]
+	mi := &file_polargraph_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4301,7 +5394,7 @@ func (x *MigrationStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationStatusRequest.ProtoReflect.Descriptor instead.
 func (*MigrationStatusRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{74}
+	return file_polargraph_proto_rawDescGZIP(), []int{86}
 }
 
 type MigrationStatusResponse struct {
@@ -4315,7 +5408,7 @@ type MigrationStatusResponse struct {
 
 func (x *MigrationStatusResponse) Reset() {
 	*x = MigrationStatusResponse{}
-	mi := &file_polargraph_proto_msgTypes[75]
+	mi := &file_polargraph_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4327,7 +5420,7 @@ func (x *MigrationStatusResponse) String() string {
 func (*MigrationStatusResponse) ProtoMessage() {}
 
 func (x *MigrationStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[75]
+	mi := &file_polargraph_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4340,7 +5433,7 @@ func (x *MigrationStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationStatusResponse.ProtoReflect.Descriptor instead.
 func (*MigrationStatusResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{75}
+	return file_polargraph_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *MigrationStatusResponse) GetCurrentVersion() uint32 {
@@ -4375,7 +5468,7 @@ type AppliedMigrationInfo struct {
 
 func (x *AppliedMigrationInfo) Reset() {
 	*x = AppliedMigrationInfo{}
-	mi := &file_polargraph_proto_msgTypes[76]
+	mi := &file_polargraph_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4387,7 +5480,7 @@ func (x *AppliedMigrationInfo) String() string {
 func (*AppliedMigrationInfo) ProtoMessage() {}
 
 func (x *AppliedMigrationInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[76]
+	mi := &file_polargraph_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4400,7 +5493,7 @@ func (x *AppliedMigrationInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppliedMigrationInfo.ProtoReflect.Descriptor instead.
 func (*AppliedMigrationInfo) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{76}
+	return file_polargraph_proto_rawDescGZIP(), []int{88}
 }
 
 func (x *AppliedMigrationInfo) GetVersion() uint32 {
@@ -4424,6 +5517,409 @@ func (x *AppliedMigrationInfo) GetAppliedAtTxTime() int64 {
 	return 0
 }
 
+type ShowIndexesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShowIndexesRequest) Reset() {
+	*x = ShowIndexesRequest{}
+	mi := &file_polargraph_proto_msgTypes[89]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShowIndexesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShowIndexesRequest) ProtoMessage() {}
+
+func (x *ShowIndexesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[89]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShowIndexesRequest.ProtoReflect.Descriptor instead.
+func (*ShowIndexesRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{89}
+}
+
+type ColumnFamilyInfo struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Name            string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	ApproxKeyCount  uint64                 `protobuf:"varint,2,opt,name=approx_key_count,json=approxKeyCount,proto3" json:"approx_key_count,omitempty"`
+	ApproxSizeBytes uint64                 `protobuf:"varint,3,opt,name=approx_size_bytes,json=approxSizeBytes,proto3" json:"approx_size_bytes,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ColumnFamilyInfo) Reset() {
+	*x = ColumnFamilyInfo{}
+	mi := &file_polargraph_proto_msgTypes[90]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ColumnFamilyInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ColumnFamilyInfo) ProtoMessage() {}
+
+func (x *ColumnFamilyInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[90]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ColumnFamilyInfo.ProtoReflect.Descriptor instead.
+func (*ColumnFamilyInfo) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{90}
+}
+
+func (x *ColumnFamilyInfo) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ColumnFamilyInfo) GetApproxKeyCount() uint64 {
+	if x != nil {
+		return x.ApproxKeyCount
+	}
+	return 0
+}
+
+func (x *ColumnFamilyInfo) GetApproxSizeBytes() uint64 {
+	if x != nil {
+		return x.ApproxSizeBytes
+	}
+	return 0
+}
+
+type VectorSpaceInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Dimensions    uint32                 `protobuf:"varint,2,opt,name=dimensions,proto3" json:"dimensions,omitempty"`
+	NodeCount     uint64                 `protobuf:"varint,3,opt,name=node_count,json=nodeCount,proto3" json:"node_count,omitempty"`
+	StorageMode   string                 `protobuf:"bytes,4,opt,name=storage_mode,json=storageMode,proto3" json:"storage_mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VectorSpaceInfo) Reset() {
+	*x = VectorSpaceInfo{}
+	mi := &file_polargraph_proto_msgTypes[91]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VectorSpaceInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VectorSpaceInfo) ProtoMessage() {}
+
+func (x *VectorSpaceInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[91]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VectorSpaceInfo.ProtoReflect.Descriptor instead.
+func (*VectorSpaceInfo) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{91}
+}
+
+func (x *VectorSpaceInfo) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *VectorSpaceInfo) GetDimensions() uint32 {
+	if x != nil {
+		return x.Dimensions
+	}
+	return 0
+}
+
+func (x *VectorSpaceInfo) GetNodeCount() uint64 {
+	if x != nil {
+		return x.NodeCount
+	}
+	return 0
+}
+
+func (x *VectorSpaceInfo) GetStorageMode() string {
+	if x != nil {
+		return x.StorageMode
+	}
+	return ""
+}
+
+type ShowIndexesResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	ColumnFamilies []*ColumnFamilyInfo    `protobuf:"bytes,1,rep,name=column_families,json=columnFamilies,proto3" json:"column_families,omitempty"`
+	VectorSpaces   []*VectorSpaceInfo     `protobuf:"bytes,2,rep,name=vector_spaces,json=vectorSpaces,proto3" json:"vector_spaces,omitempty"`
+	PredicateCount uint32                 `protobuf:"varint,3,opt,name=predicate_count,json=predicateCount,proto3" json:"predicate_count,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ShowIndexesResponse) Reset() {
+	*x = ShowIndexesResponse{}
+	mi := &file_polargraph_proto_msgTypes[92]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShowIndexesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShowIndexesResponse) ProtoMessage() {}
+
+func (x *ShowIndexesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[92]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShowIndexesResponse.ProtoReflect.Descriptor instead.
+func (*ShowIndexesResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{92}
+}
+
+func (x *ShowIndexesResponse) GetColumnFamilies() []*ColumnFamilyInfo {
+	if x != nil {
+		return x.ColumnFamilies
+	}
+	return nil
+}
+
+func (x *ShowIndexesResponse) GetVectorSpaces() []*VectorSpaceInfo {
+	if x != nil {
+		return x.VectorSpaces
+	}
+	return nil
+}
+
+func (x *ShowIndexesResponse) GetPredicateCount() uint32 {
+	if x != nil {
+		return x.PredicateCount
+	}
+	return 0
+}
+
+type ShowStatsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShowStatsRequest) Reset() {
+	*x = ShowStatsRequest{}
+	mi := &file_polargraph_proto_msgTypes[93]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShowStatsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShowStatsRequest) ProtoMessage() {}
+
+func (x *ShowStatsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[93]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShowStatsRequest.ProtoReflect.Descriptor instead.
+func (*ShowStatsRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{93}
+}
+
+type ShowStatsResponse struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	LiveSstFiles         uint64                 `protobuf:"varint,1,opt,name=live_sst_files,json=liveSstFiles,proto3" json:"live_sst_files,omitempty"`
+	TotalSstSizeBytes    uint64                 `protobuf:"varint,2,opt,name=total_sst_size_bytes,json=totalSstSizeBytes,proto3" json:"total_sst_size_bytes,omitempty"`
+	MemtableSizeBytes    uint64                 `protobuf:"varint,3,opt,name=memtable_size_bytes,json=memtableSizeBytes,proto3" json:"memtable_size_bytes,omitempty"`
+	MvccOracleTs         uint64                 `protobuf:"varint,4,opt,name=mvcc_oracle_ts,json=mvccOracleTs,proto3" json:"mvcc_oracle_ts,omitempty"`
+	PredicateInternCount uint32                 `protobuf:"varint,5,opt,name=predicate_intern_count,json=predicateInternCount,proto3" json:"predicate_intern_count,omitempty"`
+	OpenTransactionCount uint32                 `protobuf:"varint,6,opt,name=open_transaction_count,json=openTransactionCount,proto3" json:"open_transaction_count,omitempty"`
+	Mode                 string                 `protobuf:"bytes,7,opt,name=mode,proto3" json:"mode,omitempty"`
+	// / Query plan cache statistics.
+	QueryCacheHits   uint64 `protobuf:"varint,8,opt,name=query_cache_hits,json=queryCacheHits,proto3" json:"query_cache_hits,omitempty"`
+	QueryCacheMisses uint64 `protobuf:"varint,9,opt,name=query_cache_misses,json=queryCacheMisses,proto3" json:"query_cache_misses,omitempty"`
+	QueryCacheSize   uint32 `protobuf:"varint,10,opt,name=query_cache_size,json=queryCacheSize,proto3" json:"query_cache_size,omitempty"`
+	// / Pre-vocabulary data still awaiting `ConvertLegacyData`
+	// / (docs/upgrade-cypher-rdf.md).
+	LegacyConversionPending bool   `protobuf:"varint,11,opt,name=legacy_conversion_pending,json=legacyConversionPending,proto3" json:"legacy_conversion_pending,omitempty"`
+	LegacyBarePredicates    uint32 `protobuf:"varint,12,opt,name=legacy_bare_predicates,json=legacyBarePredicates,proto3" json:"legacy_bare_predicates,omitempty"`
+	LegacyTypeLabels        uint64 `protobuf:"varint,13,opt,name=legacy_type_labels,json=legacyTypeLabels,proto3" json:"legacy_type_labels,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *ShowStatsResponse) Reset() {
+	*x = ShowStatsResponse{}
+	mi := &file_polargraph_proto_msgTypes[94]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShowStatsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShowStatsResponse) ProtoMessage() {}
+
+func (x *ShowStatsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[94]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShowStatsResponse.ProtoReflect.Descriptor instead.
+func (*ShowStatsResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{94}
+}
+
+func (x *ShowStatsResponse) GetLiveSstFiles() uint64 {
+	if x != nil {
+		return x.LiveSstFiles
+	}
+	return 0
+}
+
+func (x *ShowStatsResponse) GetTotalSstSizeBytes() uint64 {
+	if x != nil {
+		return x.TotalSstSizeBytes
+	}
+	return 0
+}
+
+func (x *ShowStatsResponse) GetMemtableSizeBytes() uint64 {
+	if x != nil {
+		return x.MemtableSizeBytes
+	}
+	return 0
+}
+
+func (x *ShowStatsResponse) GetMvccOracleTs() uint64 {
+	if x != nil {
+		return x.MvccOracleTs
+	}
+	return 0
+}
+
+func (x *ShowStatsResponse) GetPredicateInternCount() uint32 {
+	if x != nil {
+		return x.PredicateInternCount
+	}
+	return 0
+}
+
+func (x *ShowStatsResponse) GetOpenTransactionCount() uint32 {
+	if x != nil {
+		return x.OpenTransactionCount
+	}
+	return 0
+}
+
+func (x *ShowStatsResponse) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
+func (x *ShowStatsResponse) GetQueryCacheHits() uint64 {
+	if x != nil {
+		return x.QueryCacheHits
+	}
+	return 0
+}
+
+func (x *ShowStatsResponse) GetQueryCacheMisses() uint64 {
+	if x != nil {
+		return x.QueryCacheMisses
+	}
+	return 0
+}
+
+func (x *ShowStatsResponse) GetQueryCacheSize() uint32 {
+	if x != nil {
+		return x.QueryCacheSize
+	}
+	return 0
+}
+
+func (x *ShowStatsResponse) GetLegacyConversionPending() bool {
+	if x != nil {
+		return x.LegacyConversionPending
+	}
+	return false
+}
+
+func (x *ShowStatsResponse) GetLegacyBarePredicates() uint32 {
+	if x != nil {
+		return x.LegacyBarePredicates
+	}
+	return 0
+}
+
+func (x *ShowStatsResponse) GetLegacyTypeLabels() uint64 {
+	if x != nil {
+		return x.LegacyTypeLabels
+	}
+	return 0
+}
+
 // / Execute a query written in the supported Cypher subset.
 // /
 // / The Cypher string is parsed and compiled to the internal Datalog IR, then
@@ -4440,7 +5936,8 @@ type CypherQueryRequest struct {
 	// /   ORDER BY n DESC
 	// /   SKIP 0 LIMIT 10
 	Cypher string `protobuf:"bytes,1,opt,name=cypher,proto3" json:"cypher,omitempty"`
-	// / Valid-time point-in-time filter (unix microseconds). 0 = no filter.
+	// / Valid-time point-in-time filter (unix microseconds). 0 = now (current
+	// / state; deleted/closed triples are hidden). Past timestamp = time-travel.
 	AsOfValidTime int64 `protobuf:"varint,2,opt,name=as_of_valid_time,json=asOfValidTime,proto3" json:"as_of_valid_time,omitempty"`
 	// / Transaction-time snapshot override (unix microseconds). 0 = latest.
 	AsOfTxTime int64 `protobuf:"varint,3,opt,name=as_of_tx_time,json=asOfTxTime,proto3" json:"as_of_tx_time,omitempty"`
@@ -4448,14 +5945,24 @@ type CypherQueryRequest struct {
 	// / contains VECTOR_NEAR(var, "space", k) in the WHERE clause; ignored otherwise.
 	Vector []float32 `protobuf:"fixed32,4,rep,packed,name=vector,proto3" json:"vector,omitempty"`
 	// / HNSW exploration factor for VECTOR_NEAR. 0 = use server default.
-	Ef            uint32 `protobuf:"varint,5,opt,name=ef,proto3" json:"ef,omitempty"`
+	Ef uint32 `protobuf:"varint,5,opt,name=ef,proto3" json:"ef,omitempty"`
+	// / Optional open-transaction ID. Reads from the transaction's snapshot.
+	TxId string `protobuf:"bytes,6,opt,name=tx_id,json=txId,proto3" json:"tx_id,omitempty"`
+	// / Optional identity for access-control filtering.
+	UserId string `protobuf:"bytes,7,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// / Named query parameters for `$param` substitution. Keys are parameter names
+	// / (without the `$`); values are JSON-encoded `Value` objects.
+	Params map[string]string `protobuf:"bytes,8,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// / Dataset: graph IRIs the MATCH patterns read (unknown IRIs match
+	// / nothing). Empty = every graph. A `USE GRAPH` clause takes precedence.
+	Graphs        []string `protobuf:"bytes,9,rep,name=graphs,proto3" json:"graphs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CypherQueryRequest) Reset() {
 	*x = CypherQueryRequest{}
-	mi := &file_polargraph_proto_msgTypes[77]
+	mi := &file_polargraph_proto_msgTypes[95]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4467,7 +5974,7 @@ func (x *CypherQueryRequest) String() string {
 func (*CypherQueryRequest) ProtoMessage() {}
 
 func (x *CypherQueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[77]
+	mi := &file_polargraph_proto_msgTypes[95]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4480,7 +5987,7 @@ func (x *CypherQueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CypherQueryRequest.ProtoReflect.Descriptor instead.
 func (*CypherQueryRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{77}
+	return file_polargraph_proto_rawDescGZIP(), []int{95}
 }
 
 func (x *CypherQueryRequest) GetCypher() string {
@@ -4518,6 +6025,34 @@ func (x *CypherQueryRequest) GetEf() uint32 {
 	return 0
 }
 
+func (x *CypherQueryRequest) GetTxId() string {
+	if x != nil {
+		return x.TxId
+	}
+	return ""
+}
+
+func (x *CypherQueryRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *CypherQueryRequest) GetParams() map[string]string {
+	if x != nil {
+		return x.Params
+	}
+	return nil
+}
+
+func (x *CypherQueryRequest) GetGraphs() []string {
+	if x != nil {
+		return x.Graphs
+	}
+	return nil
+}
+
 // / One result row from a CypherQuery.
 // /
 // / For plain RETURN (no aggregations) `nodes` carries all bound variables and
@@ -4536,7 +6071,7 @@ type CypherBinding struct {
 
 func (x *CypherBinding) Reset() {
 	*x = CypherBinding{}
-	mi := &file_polargraph_proto_msgTypes[78]
+	mi := &file_polargraph_proto_msgTypes[96]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4548,7 +6083,7 @@ func (x *CypherBinding) String() string {
 func (*CypherBinding) ProtoMessage() {}
 
 func (x *CypherBinding) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[78]
+	mi := &file_polargraph_proto_msgTypes[96]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4561,7 +6096,7 @@ func (x *CypherBinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CypherBinding.ProtoReflect.Descriptor instead.
 func (*CypherBinding) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{78}
+	return file_polargraph_proto_rawDescGZIP(), []int{96}
 }
 
 func (x *CypherBinding) GetNodes() map[string]*NodeId {
@@ -4588,7 +6123,7 @@ type CypherQueryResponse struct {
 
 func (x *CypherQueryResponse) Reset() {
 	*x = CypherQueryResponse{}
-	mi := &file_polargraph_proto_msgTypes[79]
+	mi := &file_polargraph_proto_msgTypes[97]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4600,7 +6135,7 @@ func (x *CypherQueryResponse) String() string {
 func (*CypherQueryResponse) ProtoMessage() {}
 
 func (x *CypherQueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[79]
+	mi := &file_polargraph_proto_msgTypes[97]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4613,7 +6148,7 @@ func (x *CypherQueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CypherQueryResponse.ProtoReflect.Descriptor instead.
 func (*CypherQueryResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{79}
+	return file_polargraph_proto_rawDescGZIP(), []int{97}
 }
 
 func (x *CypherQueryResponse) GetRows() []*CypherBinding {
@@ -4631,14 +6166,24 @@ type CypherWriteRequest struct {
 	// /   MERGE (c:Company {name: "Acme"})
 	// /   SET a.active = true
 	// /   DELETE a
-	Cypher        string `protobuf:"bytes,1,opt,name=cypher,proto3" json:"cypher,omitempty"`
+	Cypher string `protobuf:"bytes,1,opt,name=cypher,proto3" json:"cypher,omitempty"`
+	// / Optional open-transaction ID. When set, writes are buffered into the
+	// / named transaction rather than auto-committed.
+	TxId string `protobuf:"bytes,2,opt,name=tx_id,json=txId,proto3" json:"tx_id,omitempty"`
+	// / Graph IRI to write to and to MATCH in (interned on first use), as
+	// / `USE GRAPH <iri>`. Empty = the default graph for writes and every
+	// / graph for MATCH / MERGE / DELETE.
+	Graph string `protobuf:"bytes,3,opt,name=graph,proto3" json:"graph,omitempty"`
+	// / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+	// / graph ACL applies — see docs/design/graph-acl.md.
+	UserId        string `protobuf:"bytes,4,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CypherWriteRequest) Reset() {
 	*x = CypherWriteRequest{}
-	mi := &file_polargraph_proto_msgTypes[80]
+	mi := &file_polargraph_proto_msgTypes[98]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4650,7 +6195,7 @@ func (x *CypherWriteRequest) String() string {
 func (*CypherWriteRequest) ProtoMessage() {}
 
 func (x *CypherWriteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[80]
+	mi := &file_polargraph_proto_msgTypes[98]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4663,12 +6208,33 @@ func (x *CypherWriteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CypherWriteRequest.ProtoReflect.Descriptor instead.
 func (*CypherWriteRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{80}
+	return file_polargraph_proto_rawDescGZIP(), []int{98}
 }
 
 func (x *CypherWriteRequest) GetCypher() string {
 	if x != nil {
 		return x.Cypher
+	}
+	return ""
+}
+
+func (x *CypherWriteRequest) GetTxId() string {
+	if x != nil {
+		return x.TxId
+	}
+	return ""
+}
+
+func (x *CypherWriteRequest) GetGraph() string {
+	if x != nil {
+		return x.Graph
+	}
+	return ""
+}
+
+func (x *CypherWriteRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
 	}
 	return ""
 }
@@ -4687,7 +6253,7 @@ type CypherWriteResponse struct {
 
 func (x *CypherWriteResponse) Reset() {
 	*x = CypherWriteResponse{}
-	mi := &file_polargraph_proto_msgTypes[81]
+	mi := &file_polargraph_proto_msgTypes[99]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4699,7 +6265,7 @@ func (x *CypherWriteResponse) String() string {
 func (*CypherWriteResponse) ProtoMessage() {}
 
 func (x *CypherWriteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[81]
+	mi := &file_polargraph_proto_msgTypes[99]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4712,7 +6278,7 @@ func (x *CypherWriteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CypherWriteResponse.ProtoReflect.Descriptor instead.
 func (*CypherWriteResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{81}
+	return file_polargraph_proto_rawDescGZIP(), []int{99}
 }
 
 func (x *CypherWriteResponse) GetCreatedNodeIds() [][]byte {
@@ -4749,7 +6315,7 @@ type ExplainResponse struct {
 
 func (x *ExplainResponse) Reset() {
 	*x = ExplainResponse{}
-	mi := &file_polargraph_proto_msgTypes[82]
+	mi := &file_polargraph_proto_msgTypes[100]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4761,7 +6327,7 @@ func (x *ExplainResponse) String() string {
 func (*ExplainResponse) ProtoMessage() {}
 
 func (x *ExplainResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[82]
+	mi := &file_polargraph_proto_msgTypes[100]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4774,7 +6340,7 @@ func (x *ExplainResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExplainResponse.ProtoReflect.Descriptor instead.
 func (*ExplainResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{82}
+	return file_polargraph_proto_rawDescGZIP(), []int{100}
 }
 
 func (x *ExplainResponse) GetPlanText() string {
@@ -4808,7 +6374,7 @@ type PlanNode struct {
 
 func (x *PlanNode) Reset() {
 	*x = PlanNode{}
-	mi := &file_polargraph_proto_msgTypes[83]
+	mi := &file_polargraph_proto_msgTypes[101]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4820,7 +6386,7 @@ func (x *PlanNode) String() string {
 func (*PlanNode) ProtoMessage() {}
 
 func (x *PlanNode) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[83]
+	mi := &file_polargraph_proto_msgTypes[101]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4833,7 +6399,7 @@ func (x *PlanNode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanNode.ProtoReflect.Descriptor instead.
 func (*PlanNode) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{83}
+	return file_polargraph_proto_rawDescGZIP(), []int{101}
 }
 
 func (x *PlanNode) GetNodeType() string {
@@ -4864,13 +6430,4162 @@ func (x *PlanNode) GetChildren() []*PlanNode {
 	return nil
 }
 
+type BeginTransactionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BeginTransactionRequest) Reset() {
+	*x = BeginTransactionRequest{}
+	mi := &file_polargraph_proto_msgTypes[102]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginTransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginTransactionRequest) ProtoMessage() {}
+
+func (x *BeginTransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[102]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginTransactionRequest.ProtoReflect.Descriptor instead.
+func (*BeginTransactionRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{102}
+}
+
+type BeginTransactionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Opaque transaction identifier. Pass this in subsequent Insert, Query,
+	// / CypherWrite, and CypherQuery RPCs to join the open transaction.
+	TxId          string `protobuf:"bytes,1,opt,name=tx_id,json=txId,proto3" json:"tx_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BeginTransactionResponse) Reset() {
+	*x = BeginTransactionResponse{}
+	mi := &file_polargraph_proto_msgTypes[103]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginTransactionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginTransactionResponse) ProtoMessage() {}
+
+func (x *BeginTransactionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[103]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginTransactionResponse.ProtoReflect.Descriptor instead.
+func (*BeginTransactionResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{103}
+}
+
+func (x *BeginTransactionResponse) GetTxId() string {
+	if x != nil {
+		return x.TxId
+	}
+	return ""
+}
+
+type CommitTransactionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TxId          string                 `protobuf:"bytes,1,opt,name=tx_id,json=txId,proto3" json:"tx_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommitTransactionRequest) Reset() {
+	*x = CommitTransactionRequest{}
+	mi := &file_polargraph_proto_msgTypes[104]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommitTransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommitTransactionRequest) ProtoMessage() {}
+
+func (x *CommitTransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[104]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommitTransactionRequest.ProtoReflect.Descriptor instead.
+func (*CommitTransactionRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{104}
+}
+
+func (x *CommitTransactionRequest) GetTxId() string {
+	if x != nil {
+		return x.TxId
+	}
+	return ""
+}
+
+type CommitTransactionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Total number of triples written (relation + property) in this transaction.
+	TriplesWritten uint64 `protobuf:"varint,1,opt,name=triples_written,json=triplesWritten,proto3" json:"triples_written,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *CommitTransactionResponse) Reset() {
+	*x = CommitTransactionResponse{}
+	mi := &file_polargraph_proto_msgTypes[105]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommitTransactionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommitTransactionResponse) ProtoMessage() {}
+
+func (x *CommitTransactionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[105]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommitTransactionResponse.ProtoReflect.Descriptor instead.
+func (*CommitTransactionResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{105}
+}
+
+func (x *CommitTransactionResponse) GetTriplesWritten() uint64 {
+	if x != nil {
+		return x.TriplesWritten
+	}
+	return 0
+}
+
+type RollbackTransactionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TxId          string                 `protobuf:"bytes,1,opt,name=tx_id,json=txId,proto3" json:"tx_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RollbackTransactionRequest) Reset() {
+	*x = RollbackTransactionRequest{}
+	mi := &file_polargraph_proto_msgTypes[106]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RollbackTransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RollbackTransactionRequest) ProtoMessage() {}
+
+func (x *RollbackTransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[106]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RollbackTransactionRequest.ProtoReflect.Descriptor instead.
+func (*RollbackTransactionRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{106}
+}
+
+func (x *RollbackTransactionRequest) GetTxId() string {
+	if x != nil {
+		return x.TxId
+	}
+	return ""
+}
+
+type RollbackTransactionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RollbackTransactionResponse) Reset() {
+	*x = RollbackTransactionResponse{}
+	mi := &file_polargraph_proto_msgTypes[107]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RollbackTransactionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RollbackTransactionResponse) ProtoMessage() {}
+
+func (x *RollbackTransactionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[107]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RollbackTransactionResponse.ProtoReflect.Descriptor instead.
+func (*RollbackTransactionResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{107}
+}
+
+type AddApiKeyRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddApiKeyRequest) Reset() {
+	*x = AddApiKeyRequest{}
+	mi := &file_polargraph_proto_msgTypes[108]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddApiKeyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddApiKeyRequest) ProtoMessage() {}
+
+func (x *AddApiKeyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[108]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddApiKeyRequest.ProtoReflect.Descriptor instead.
+func (*AddApiKeyRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{108}
+}
+
+func (x *AddApiKeyRequest) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+type AddApiKeyResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Total number of keys now configured (including the newly added one).
+	TotalKeys     uint32 `protobuf:"varint,1,opt,name=total_keys,json=totalKeys,proto3" json:"total_keys,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddApiKeyResponse) Reset() {
+	*x = AddApiKeyResponse{}
+	mi := &file_polargraph_proto_msgTypes[109]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddApiKeyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddApiKeyResponse) ProtoMessage() {}
+
+func (x *AddApiKeyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[109]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddApiKeyResponse.ProtoReflect.Descriptor instead.
+func (*AddApiKeyResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{109}
+}
+
+func (x *AddApiKeyResponse) GetTotalKeys() uint32 {
+	if x != nil {
+		return x.TotalKeys
+	}
+	return 0
+}
+
+type RevokeApiKeyRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeApiKeyRequest) Reset() {
+	*x = RevokeApiKeyRequest{}
+	mi := &file_polargraph_proto_msgTypes[110]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeApiKeyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeApiKeyRequest) ProtoMessage() {}
+
+func (x *RevokeApiKeyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[110]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeApiKeyRequest.ProtoReflect.Descriptor instead.
+func (*RevokeApiKeyRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{110}
+}
+
+func (x *RevokeApiKeyRequest) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+type RevokeApiKeyResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / True when the key was present and has been removed.
+	Found bool `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
+	// / Total number of keys remaining after the revocation.
+	TotalKeys     uint32 `protobuf:"varint,2,opt,name=total_keys,json=totalKeys,proto3" json:"total_keys,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeApiKeyResponse) Reset() {
+	*x = RevokeApiKeyResponse{}
+	mi := &file_polargraph_proto_msgTypes[111]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeApiKeyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeApiKeyResponse) ProtoMessage() {}
+
+func (x *RevokeApiKeyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[111]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeApiKeyResponse.ProtoReflect.Descriptor instead.
+func (*RevokeApiKeyResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{111}
+}
+
+func (x *RevokeApiKeyResponse) GetFound() bool {
+	if x != nil {
+		return x.Found
+	}
+	return false
+}
+
+func (x *RevokeApiKeyResponse) GetTotalKeys() uint32 {
+	if x != nil {
+		return x.TotalKeys
+	}
+	return 0
+}
+
+type ListApiKeysRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListApiKeysRequest) Reset() {
+	*x = ListApiKeysRequest{}
+	mi := &file_polargraph_proto_msgTypes[112]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListApiKeysRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListApiKeysRequest) ProtoMessage() {}
+
+func (x *ListApiKeysRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[112]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListApiKeysRequest.ProtoReflect.Descriptor instead.
+func (*ListApiKeysRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{112}
+}
+
+type ListApiKeysResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / First 4 characters of each key followed by "****". Full values are
+	// / never returned.
+	KeyPrefixes   []string `protobuf:"bytes,1,rep,name=key_prefixes,json=keyPrefixes,proto3" json:"key_prefixes,omitempty"`
+	TotalKeys     uint32   `protobuf:"varint,2,opt,name=total_keys,json=totalKeys,proto3" json:"total_keys,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListApiKeysResponse) Reset() {
+	*x = ListApiKeysResponse{}
+	mi := &file_polargraph_proto_msgTypes[113]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListApiKeysResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListApiKeysResponse) ProtoMessage() {}
+
+func (x *ListApiKeysResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[113]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListApiKeysResponse.ProtoReflect.Descriptor instead.
+func (*ListApiKeysResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{113}
+}
+
+func (x *ListApiKeysResponse) GetKeyPrefixes() []string {
+	if x != nil {
+		return x.KeyPrefixes
+	}
+	return nil
+}
+
+func (x *ListApiKeysResponse) GetTotalKeys() uint32 {
+	if x != nil {
+		return x.TotalKeys
+	}
+	return 0
+}
+
+// / Grant a group access to a specific node or all nodes of a given type.
+type GrantAccessRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / 16-byte UUID of the Group node.
+	GroupId []byte `protobuf:"bytes,1,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`
+	// Types that are valid to be assigned to Target:
+	//
+	//	*GrantAccessRequest_NodeId
+	//	*GrantAccessRequest_TypeName
+	Target        isGrantAccessRequest_Target `protobuf_oneof:"target"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GrantAccessRequest) Reset() {
+	*x = GrantAccessRequest{}
+	mi := &file_polargraph_proto_msgTypes[114]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GrantAccessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GrantAccessRequest) ProtoMessage() {}
+
+func (x *GrantAccessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[114]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GrantAccessRequest.ProtoReflect.Descriptor instead.
+func (*GrantAccessRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{114}
+}
+
+func (x *GrantAccessRequest) GetGroupId() []byte {
+	if x != nil {
+		return x.GroupId
+	}
+	return nil
+}
+
+func (x *GrantAccessRequest) GetTarget() isGrantAccessRequest_Target {
+	if x != nil {
+		return x.Target
+	}
+	return nil
+}
+
+func (x *GrantAccessRequest) GetNodeId() []byte {
+	if x != nil {
+		if x, ok := x.Target.(*GrantAccessRequest_NodeId); ok {
+			return x.NodeId
+		}
+	}
+	return nil
+}
+
+func (x *GrantAccessRequest) GetTypeName() string {
+	if x != nil {
+		if x, ok := x.Target.(*GrantAccessRequest_TypeName); ok {
+			return x.TypeName
+		}
+	}
+	return ""
+}
+
+type isGrantAccessRequest_Target interface {
+	isGrantAccessRequest_Target()
+}
+
+type GrantAccessRequest_NodeId struct {
+	// / Grant access to a specific node (16-byte NodeId UUID).
+	NodeId []byte `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3,oneof"`
+}
+
+type GrantAccessRequest_TypeName struct {
+	// / Grant access to all nodes of this registered type (e.g. "Service").
+	TypeName string `protobuf:"bytes,3,opt,name=type_name,json=typeName,proto3,oneof"`
+}
+
+func (*GrantAccessRequest_NodeId) isGrantAccessRequest_Target() {}
+
+func (*GrantAccessRequest_TypeName) isGrantAccessRequest_Target() {}
+
+type GrantAccessResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GrantAccessResponse) Reset() {
+	*x = GrantAccessResponse{}
+	mi := &file_polargraph_proto_msgTypes[115]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GrantAccessResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GrantAccessResponse) ProtoMessage() {}
+
+func (x *GrantAccessResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[115]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GrantAccessResponse.ProtoReflect.Descriptor instead.
+func (*GrantAccessResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{115}
+}
+
+// / Revoke a group's access grant (closes valid time on the HAS_ACCESS triple).
+type RevokeAccessRequest struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	GroupId []byte                 `protobuf:"bytes,1,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`
+	// Types that are valid to be assigned to Target:
+	//
+	//	*RevokeAccessRequest_NodeId
+	//	*RevokeAccessRequest_TypeName
+	Target        isRevokeAccessRequest_Target `protobuf_oneof:"target"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeAccessRequest) Reset() {
+	*x = RevokeAccessRequest{}
+	mi := &file_polargraph_proto_msgTypes[116]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeAccessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeAccessRequest) ProtoMessage() {}
+
+func (x *RevokeAccessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[116]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeAccessRequest.ProtoReflect.Descriptor instead.
+func (*RevokeAccessRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{116}
+}
+
+func (x *RevokeAccessRequest) GetGroupId() []byte {
+	if x != nil {
+		return x.GroupId
+	}
+	return nil
+}
+
+func (x *RevokeAccessRequest) GetTarget() isRevokeAccessRequest_Target {
+	if x != nil {
+		return x.Target
+	}
+	return nil
+}
+
+func (x *RevokeAccessRequest) GetNodeId() []byte {
+	if x != nil {
+		if x, ok := x.Target.(*RevokeAccessRequest_NodeId); ok {
+			return x.NodeId
+		}
+	}
+	return nil
+}
+
+func (x *RevokeAccessRequest) GetTypeName() string {
+	if x != nil {
+		if x, ok := x.Target.(*RevokeAccessRequest_TypeName); ok {
+			return x.TypeName
+		}
+	}
+	return ""
+}
+
+type isRevokeAccessRequest_Target interface {
+	isRevokeAccessRequest_Target()
+}
+
+type RevokeAccessRequest_NodeId struct {
+	NodeId []byte `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3,oneof"`
+}
+
+type RevokeAccessRequest_TypeName struct {
+	TypeName string `protobuf:"bytes,3,opt,name=type_name,json=typeName,proto3,oneof"`
+}
+
+func (*RevokeAccessRequest_NodeId) isRevokeAccessRequest_Target() {}
+
+func (*RevokeAccessRequest_TypeName) isRevokeAccessRequest_Target() {}
+
+type RevokeAccessResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeAccessResponse) Reset() {
+	*x = RevokeAccessResponse{}
+	mi := &file_polargraph_proto_msgTypes[117]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeAccessResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeAccessResponse) ProtoMessage() {}
+
+func (x *RevokeAccessResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[117]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeAccessResponse.ProtoReflect.Descriptor instead.
+func (*RevokeAccessResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{117}
+}
+
+// / Add a user to a group (writes a MEMBER_OF triple).
+type AddUserToGroupRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / 16-byte UUID of the User node.
+	UserId []byte `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// / 16-byte UUID of the Group node.
+	GroupId       []byte `protobuf:"bytes,2,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddUserToGroupRequest) Reset() {
+	*x = AddUserToGroupRequest{}
+	mi := &file_polargraph_proto_msgTypes[118]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddUserToGroupRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddUserToGroupRequest) ProtoMessage() {}
+
+func (x *AddUserToGroupRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[118]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddUserToGroupRequest.ProtoReflect.Descriptor instead.
+func (*AddUserToGroupRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{118}
+}
+
+func (x *AddUserToGroupRequest) GetUserId() []byte {
+	if x != nil {
+		return x.UserId
+	}
+	return nil
+}
+
+func (x *AddUserToGroupRequest) GetGroupId() []byte {
+	if x != nil {
+		return x.GroupId
+	}
+	return nil
+}
+
+type AddUserToGroupResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddUserToGroupResponse) Reset() {
+	*x = AddUserToGroupResponse{}
+	mi := &file_polargraph_proto_msgTypes[119]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddUserToGroupResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddUserToGroupResponse) ProtoMessage() {}
+
+func (x *AddUserToGroupResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[119]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddUserToGroupResponse.ProtoReflect.Descriptor instead.
+func (*AddUserToGroupResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{119}
+}
+
+// / Return all nodes and type grants accessible to a user.
+type GetUserAccessRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / 16-byte UUID of the User node.
+	UserId        []byte `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetUserAccessRequest) Reset() {
+	*x = GetUserAccessRequest{}
+	mi := &file_polargraph_proto_msgTypes[120]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetUserAccessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetUserAccessRequest) ProtoMessage() {}
+
+func (x *GetUserAccessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[120]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetUserAccessRequest.ProtoReflect.Descriptor instead.
+func (*GetUserAccessRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{120}
+}
+
+func (x *GetUserAccessRequest) GetUserId() []byte {
+	if x != nil {
+		return x.UserId
+	}
+	return nil
+}
+
+type GetUserAccessResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Node IDs of all explicitly accessible nodes (expanded from all groups).
+	NodeIds [][]byte `protobuf:"bytes,1,rep,name=node_ids,json=nodeIds,proto3" json:"node_ids,omitempty"`
+	// / Type names whose all-nodes the user has access to.
+	TypeGrants    []string `protobuf:"bytes,2,rep,name=type_grants,json=typeGrants,proto3" json:"type_grants,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetUserAccessResponse) Reset() {
+	*x = GetUserAccessResponse{}
+	mi := &file_polargraph_proto_msgTypes[121]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetUserAccessResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetUserAccessResponse) ProtoMessage() {}
+
+func (x *GetUserAccessResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[121]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetUserAccessResponse.ProtoReflect.Descriptor instead.
+func (*GetUserAccessResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{121}
+}
+
+func (x *GetUserAccessResponse) GetNodeIds() [][]byte {
+	if x != nil {
+		return x.NodeIds
+	}
+	return nil
+}
+
+func (x *GetUserAccessResponse) GetTypeGrants() []string {
+	if x != nil {
+		return x.TypeGrants
+	}
+	return nil
+}
+
+type GetPropertyHistoryRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / 16-byte NodeId of the subject node.
+	SubjectId []byte `protobuf:"bytes,1,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	// / Predicate name (interned on first use).
+	Predicate string `protobuf:"bytes,2,opt,name=predicate,proto3" json:"predicate,omitempty"`
+	// / Maximum number of versions to return. 0 = default (50).
+	Limit         uint32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetPropertyHistoryRequest) Reset() {
+	*x = GetPropertyHistoryRequest{}
+	mi := &file_polargraph_proto_msgTypes[122]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPropertyHistoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPropertyHistoryRequest) ProtoMessage() {}
+
+func (x *GetPropertyHistoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[122]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPropertyHistoryRequest.ProtoReflect.Descriptor instead.
+func (*GetPropertyHistoryRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{122}
+}
+
+func (x *GetPropertyHistoryRequest) GetSubjectId() []byte {
+	if x != nil {
+		return x.SubjectId
+	}
+	return nil
+}
+
+func (x *GetPropertyHistoryRequest) GetPredicate() string {
+	if x != nil {
+		return x.Predicate
+	}
+	return ""
+}
+
+func (x *GetPropertyHistoryRequest) GetLimit() uint32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+// / One historical version of a node property.
+type PropertyVersion struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / JSON-encoded Value (matches the Value wire format used elsewhere).
+	ValueJson string `protobuf:"bytes,1,opt,name=value_json,json=valueJson,proto3" json:"value_json,omitempty"`
+	// / Transaction time of this write, microseconds since Unix epoch.
+	TransactionTime int64 `protobuf:"varint,2,opt,name=transaction_time,json=transactionTime,proto3" json:"transaction_time,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *PropertyVersion) Reset() {
+	*x = PropertyVersion{}
+	mi := &file_polargraph_proto_msgTypes[123]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PropertyVersion) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PropertyVersion) ProtoMessage() {}
+
+func (x *PropertyVersion) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[123]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PropertyVersion.ProtoReflect.Descriptor instead.
+func (*PropertyVersion) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{123}
+}
+
+func (x *PropertyVersion) GetValueJson() string {
+	if x != nil {
+		return x.ValueJson
+	}
+	return ""
+}
+
+func (x *PropertyVersion) GetTransactionTime() int64 {
+	if x != nil {
+		return x.TransactionTime
+	}
+	return 0
+}
+
+type GetPropertyHistoryResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Versions ordered newest-first by transaction time.
+	Versions      []*PropertyVersion `protobuf:"bytes,1,rep,name=versions,proto3" json:"versions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetPropertyHistoryResponse) Reset() {
+	*x = GetPropertyHistoryResponse{}
+	mi := &file_polargraph_proto_msgTypes[124]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPropertyHistoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPropertyHistoryResponse) ProtoMessage() {}
+
+func (x *GetPropertyHistoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[124]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPropertyHistoryResponse.ProtoReflect.Descriptor instead.
+func (*GetPropertyHistoryResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{124}
+}
+
+func (x *GetPropertyHistoryResponse) GetVersions() []*PropertyVersion {
+	if x != nil {
+		return x.Versions
+	}
+	return nil
+}
+
+// / Soft-delete request: closes the valid-time window of live triples by writing
+// / a superseding triple with vt_end set to the requested timestamp.
+type DeleteTriplesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / 16-byte UUID subject IDs to soft-delete triples for.
+	SubjectIds [][]byte `protobuf:"bytes,1,rep,name=subject_ids,json=subjectIds,proto3" json:"subject_ids,omitempty"`
+	// / Optional predicate filter — if empty, all predicates for each subject are closed.
+	Predicate string `protobuf:"bytes,2,opt,name=predicate,proto3" json:"predicate,omitempty"`
+	// / Explicit vt_end in microseconds since Unix epoch; 0 means use server clock.
+	VtEnd int64 `protobuf:"varint,3,opt,name=vt_end,json=vtEnd,proto3" json:"vt_end,omitempty"`
+	// / Optional 16-byte object NodeId: only relations to this object are closed
+	// / (properties are left alone). Empty means any object.
+	ObjectId []byte `protobuf:"bytes,4,opt,name=object_id,json=objectId,proto3" json:"object_id,omitempty"`
+	// / Optional property value: only properties with exactly this value are
+	// / closed (relations are left alone). Unset means any value.
+	Value *Value `protobuf:"bytes,5,opt,name=value,proto3" json:"value,omitempty"`
+	// / Graphs to close the triples in: unset = every graph; `default_graph`,
+	// / `iri` or `set` restrict it (a graph variable is invalid). An unknown
+	// / IRI is NOT_FOUND.
+	Graph *GraphTerm `protobuf:"bytes,6,opt,name=graph,proto3" json:"graph,omitempty"`
+	// / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+	// / graph ACL applies — see docs/design/graph-acl.md.
+	UserId        string `protobuf:"bytes,7,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteTriplesRequest) Reset() {
+	*x = DeleteTriplesRequest{}
+	mi := &file_polargraph_proto_msgTypes[125]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteTriplesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteTriplesRequest) ProtoMessage() {}
+
+func (x *DeleteTriplesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[125]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteTriplesRequest.ProtoReflect.Descriptor instead.
+func (*DeleteTriplesRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{125}
+}
+
+func (x *DeleteTriplesRequest) GetSubjectIds() [][]byte {
+	if x != nil {
+		return x.SubjectIds
+	}
+	return nil
+}
+
+func (x *DeleteTriplesRequest) GetPredicate() string {
+	if x != nil {
+		return x.Predicate
+	}
+	return ""
+}
+
+func (x *DeleteTriplesRequest) GetVtEnd() int64 {
+	if x != nil {
+		return x.VtEnd
+	}
+	return 0
+}
+
+func (x *DeleteTriplesRequest) GetObjectId() []byte {
+	if x != nil {
+		return x.ObjectId
+	}
+	return nil
+}
+
+func (x *DeleteTriplesRequest) GetValue() *Value {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+func (x *DeleteTriplesRequest) GetGraph() *GraphTerm {
+	if x != nil {
+		return x.Graph
+	}
+	return nil
+}
+
+func (x *DeleteTriplesRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type DeleteTriplesResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Number of triple versions that were closed.
+	DeletedCount  uint64 `protobuf:"varint,1,opt,name=deleted_count,json=deletedCount,proto3" json:"deleted_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteTriplesResponse) Reset() {
+	*x = DeleteTriplesResponse{}
+	mi := &file_polargraph_proto_msgTypes[126]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteTriplesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteTriplesResponse) ProtoMessage() {}
+
+func (x *DeleteTriplesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[126]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteTriplesResponse.ProtoReflect.Descriptor instead.
+func (*DeleteTriplesResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{126}
+}
+
+func (x *DeleteTriplesResponse) GetDeletedCount() uint64 {
+	if x != nil {
+		return x.DeletedCount
+	}
+	return 0
+}
+
+// / Request to run OWL 2 RL forward-chaining materialization.
+type RunMaterializationRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / When true (default), clear the DRV column family before re-materializing.
+	// / When false, perform an incremental run starting from current DRV state.
+	ClearFirst    bool `protobuf:"varint,1,opt,name=clear_first,json=clearFirst,proto3" json:"clear_first,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunMaterializationRequest) Reset() {
+	*x = RunMaterializationRequest{}
+	mi := &file_polargraph_proto_msgTypes[127]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunMaterializationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunMaterializationRequest) ProtoMessage() {}
+
+func (x *RunMaterializationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[127]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunMaterializationRequest.ProtoReflect.Descriptor instead.
+func (*RunMaterializationRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{127}
+}
+
+func (x *RunMaterializationRequest) GetClearFirst() bool {
+	if x != nil {
+		return x.ClearFirst
+	}
+	return false
+}
+
+// / Statistics from a materialization run.
+type RunMaterializationResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Number of new derived triples inserted across all fixpoint iterations.
+	RulesFired uint64 `protobuf:"varint,1,opt,name=rules_fired,json=rulesFired,proto3" json:"rules_fired,omitempty"`
+	// / Total unique derived triples now in the DRV CF (approximate).
+	DerivedTriples uint64 `protobuf:"varint,2,opt,name=derived_triples,json=derivedTriples,proto3" json:"derived_triples,omitempty"`
+	// / Number of fixpoint iterations performed before convergence.
+	Iterations    uint32 `protobuf:"varint,3,opt,name=iterations,proto3" json:"iterations,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunMaterializationResponse) Reset() {
+	*x = RunMaterializationResponse{}
+	mi := &file_polargraph_proto_msgTypes[128]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunMaterializationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunMaterializationResponse) ProtoMessage() {}
+
+func (x *RunMaterializationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[128]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunMaterializationResponse.ProtoReflect.Descriptor instead.
+func (*RunMaterializationResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{128}
+}
+
+func (x *RunMaterializationResponse) GetRulesFired() uint64 {
+	if x != nil {
+		return x.RulesFired
+	}
+	return 0
+}
+
+func (x *RunMaterializationResponse) GetDerivedTriples() uint64 {
+	if x != nil {
+		return x.DerivedTriples
+	}
+	return 0
+}
+
+func (x *RunMaterializationResponse) GetIterations() uint32 {
+	if x != nil {
+		return x.Iterations
+	}
+	return 0
+}
+
+// / One metadata property of a graph (stored in the system graph
+// / `urn:pg:graph:meta` as a property of the graph's IRI node).
+type GraphMetadata struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Predicate     string                 `protobuf:"bytes,1,opt,name=predicate,proto3" json:"predicate,omitempty"`
+	Value         *Value                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GraphMetadata) Reset() {
+	*x = GraphMetadata{}
+	mi := &file_polargraph_proto_msgTypes[129]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GraphMetadata) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GraphMetadata) ProtoMessage() {}
+
+func (x *GraphMetadata) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[129]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GraphMetadata.ProtoReflect.Descriptor instead.
+func (*GraphMetadata) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{129}
+}
+
+func (x *GraphMetadata) GetPredicate() string {
+	if x != nil {
+		return x.Predicate
+	}
+	return ""
+}
+
+func (x *GraphMetadata) GetValue() *Value {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+type GraphInfo struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Iri   string                 `protobuf:"bytes,1,opt,name=iri,proto3" json:"iri,omitempty"`
+	// / Interned id (0 = default graph, which has no IRI).
+	Id            uint32           `protobuf:"varint,2,opt,name=id,proto3" json:"id,omitempty"`
+	Metadata      []*GraphMetadata `protobuf:"bytes,3,rep,name=metadata,proto3" json:"metadata,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GraphInfo) Reset() {
+	*x = GraphInfo{}
+	mi := &file_polargraph_proto_msgTypes[130]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GraphInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GraphInfo) ProtoMessage() {}
+
+func (x *GraphInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[130]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GraphInfo.ProtoReflect.Descriptor instead.
+func (*GraphInfo) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{130}
+}
+
+func (x *GraphInfo) GetIri() string {
+	if x != nil {
+		return x.Iri
+	}
+	return ""
+}
+
+func (x *GraphInfo) GetId() uint32 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *GraphInfo) GetMetadata() []*GraphMetadata {
+	if x != nil {
+		return x.Metadata
+	}
+	return nil
+}
+
+type CreateGraphRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Iri   string                 `protobuf:"bytes,1,opt,name=iri,proto3" json:"iri,omitempty"`
+	// / Set (replace) these metadata properties.
+	Metadata []*GraphMetadata `protobuf:"bytes,2,rep,name=metadata,proto3" json:"metadata,omitempty"`
+	// / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+	// / graph ACL applies — see docs/design/graph-acl.md.
+	UserId        string `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateGraphRequest) Reset() {
+	*x = CreateGraphRequest{}
+	mi := &file_polargraph_proto_msgTypes[131]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateGraphRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateGraphRequest) ProtoMessage() {}
+
+func (x *CreateGraphRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[131]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateGraphRequest.ProtoReflect.Descriptor instead.
+func (*CreateGraphRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{131}
+}
+
+func (x *CreateGraphRequest) GetIri() string {
+	if x != nil {
+		return x.Iri
+	}
+	return ""
+}
+
+func (x *CreateGraphRequest) GetMetadata() []*GraphMetadata {
+	if x != nil {
+		return x.Metadata
+	}
+	return nil
+}
+
+func (x *CreateGraphRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type CreateGraphResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Graph         *GraphInfo             `protobuf:"bytes,1,opt,name=graph,proto3" json:"graph,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateGraphResponse) Reset() {
+	*x = CreateGraphResponse{}
+	mi := &file_polargraph_proto_msgTypes[132]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateGraphResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateGraphResponse) ProtoMessage() {}
+
+func (x *CreateGraphResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[132]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateGraphResponse.ProtoReflect.Descriptor instead.
+func (*CreateGraphResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{132}
+}
+
+func (x *CreateGraphResponse) GetGraph() *GraphInfo {
+	if x != nil {
+		return x.Graph
+	}
+	return nil
+}
+
+type ListGraphsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Only graphs whose metadata has every one of these (predicate, value)
+	// / pairs. Empty = all named graphs.
+	Filter []*GraphMetadata `protobuf:"bytes,1,rep,name=filter,proto3" json:"filter,omitempty"`
+	// / Include the system graph `urn:pg:graph:meta`.
+	IncludeSystem bool `protobuf:"varint,2,opt,name=include_system,json=includeSystem,proto3" json:"include_system,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListGraphsRequest) Reset() {
+	*x = ListGraphsRequest{}
+	mi := &file_polargraph_proto_msgTypes[133]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListGraphsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListGraphsRequest) ProtoMessage() {}
+
+func (x *ListGraphsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[133]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListGraphsRequest.ProtoReflect.Descriptor instead.
+func (*ListGraphsRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{133}
+}
+
+func (x *ListGraphsRequest) GetFilter() []*GraphMetadata {
+	if x != nil {
+		return x.Filter
+	}
+	return nil
+}
+
+func (x *ListGraphsRequest) GetIncludeSystem() bool {
+	if x != nil {
+		return x.IncludeSystem
+	}
+	return false
+}
+
+type ListGraphsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Graphs        []*GraphInfo           `protobuf:"bytes,1,rep,name=graphs,proto3" json:"graphs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListGraphsResponse) Reset() {
+	*x = ListGraphsResponse{}
+	mi := &file_polargraph_proto_msgTypes[134]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListGraphsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListGraphsResponse) ProtoMessage() {}
+
+func (x *ListGraphsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[134]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListGraphsResponse.ProtoReflect.Descriptor instead.
+func (*ListGraphsResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{134}
+}
+
+func (x *ListGraphsResponse) GetGraphs() []*GraphInfo {
+	if x != nil {
+		return x.Graphs
+	}
+	return nil
+}
+
+type GraphStatsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Graph IRI; empty = the default graph.
+	Iri           string `protobuf:"bytes,1,opt,name=iri,proto3" json:"iri,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GraphStatsRequest) Reset() {
+	*x = GraphStatsRequest{}
+	mi := &file_polargraph_proto_msgTypes[135]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GraphStatsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GraphStatsRequest) ProtoMessage() {}
+
+func (x *GraphStatsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[135]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GraphStatsRequest.ProtoReflect.Descriptor instead.
+func (*GraphStatsRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{135}
+}
+
+func (x *GraphStatsRequest) GetIri() string {
+	if x != nil {
+		return x.Iri
+	}
+	return ""
+}
+
+type GraphStatsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Iri   string                 `protobuf:"bytes,1,opt,name=iri,proto3" json:"iri,omitempty"`
+	// / Quads valid now.
+	LiveQuads uint64 `protobuf:"varint,2,opt,name=live_quads,json=liveQuads,proto3" json:"live_quads,omitempty"`
+	// / Latest transaction time among live quads (µs since epoch); 0 if none.
+	LastWriteTt   int64 `protobuf:"varint,3,opt,name=last_write_tt,json=lastWriteTt,proto3" json:"last_write_tt,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GraphStatsResponse) Reset() {
+	*x = GraphStatsResponse{}
+	mi := &file_polargraph_proto_msgTypes[136]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GraphStatsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GraphStatsResponse) ProtoMessage() {}
+
+func (x *GraphStatsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[136]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GraphStatsResponse.ProtoReflect.Descriptor instead.
+func (*GraphStatsResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{136}
+}
+
+func (x *GraphStatsResponse) GetIri() string {
+	if x != nil {
+		return x.Iri
+	}
+	return ""
+}
+
+func (x *GraphStatsResponse) GetLiveQuads() uint64 {
+	if x != nil {
+		return x.LiveQuads
+	}
+	return 0
+}
+
+func (x *GraphStatsResponse) GetLastWriteTt() int64 {
+	if x != nil {
+		return x.LastWriteTt
+	}
+	return 0
+}
+
+type CopyGraphRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Source / target graph IRIs; empty = the default graph.
+	Source string `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	Target string `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	// / true: drop the target's quads first (SPARQL COPY); false: add (ADD).
+	ClearTarget bool `protobuf:"varint,3,opt,name=clear_target,json=clearTarget,proto3" json:"clear_target,omitempty"`
+	// / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+	// / graph ACL applies — see docs/design/graph-acl.md.
+	UserId        string `protobuf:"bytes,4,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CopyGraphRequest) Reset() {
+	*x = CopyGraphRequest{}
+	mi := &file_polargraph_proto_msgTypes[137]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CopyGraphRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CopyGraphRequest) ProtoMessage() {}
+
+func (x *CopyGraphRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[137]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CopyGraphRequest.ProtoReflect.Descriptor instead.
+func (*CopyGraphRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{137}
+}
+
+func (x *CopyGraphRequest) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *CopyGraphRequest) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *CopyGraphRequest) GetClearTarget() bool {
+	if x != nil {
+		return x.ClearTarget
+	}
+	return false
+}
+
+func (x *CopyGraphRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type CopyGraphResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Quads         uint64                 `protobuf:"varint,1,opt,name=quads,proto3" json:"quads,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CopyGraphResponse) Reset() {
+	*x = CopyGraphResponse{}
+	mi := &file_polargraph_proto_msgTypes[138]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CopyGraphResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CopyGraphResponse) ProtoMessage() {}
+
+func (x *CopyGraphResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[138]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CopyGraphResponse.ProtoReflect.Descriptor instead.
+func (*CopyGraphResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{138}
+}
+
+func (x *CopyGraphResponse) GetQuads() uint64 {
+	if x != nil {
+		return x.Quads
+	}
+	return 0
+}
+
+type MoveGraphRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Source string                 `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	Target string                 `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	// / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+	// / graph ACL applies — see docs/design/graph-acl.md.
+	UserId        string `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MoveGraphRequest) Reset() {
+	*x = MoveGraphRequest{}
+	mi := &file_polargraph_proto_msgTypes[139]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MoveGraphRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MoveGraphRequest) ProtoMessage() {}
+
+func (x *MoveGraphRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[139]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MoveGraphRequest.ProtoReflect.Descriptor instead.
+func (*MoveGraphRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{139}
+}
+
+func (x *MoveGraphRequest) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *MoveGraphRequest) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *MoveGraphRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type DropGraphRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Graph IRI; empty = the default graph.
+	Iri string `protobuf:"bytes,1,opt,name=iri,proto3" json:"iri,omitempty"`
+	// / Caller identity (optional; also `x-polargraph-user-id`). When set, the
+	// / graph ACL applies — see docs/design/graph-acl.md.
+	UserId        string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DropGraphRequest) Reset() {
+	*x = DropGraphRequest{}
+	mi := &file_polargraph_proto_msgTypes[140]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DropGraphRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DropGraphRequest) ProtoMessage() {}
+
+func (x *DropGraphRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[140]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DropGraphRequest.ProtoReflect.Descriptor instead.
+func (*DropGraphRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{140}
+}
+
+func (x *DropGraphRequest) GetIri() string {
+	if x != nil {
+		return x.Iri
+	}
+	return ""
+}
+
+func (x *DropGraphRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type DropGraphResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Quads closed (bitemporal: history remains queryable).
+	QuadsClosed   uint64 `protobuf:"varint,1,opt,name=quads_closed,json=quadsClosed,proto3" json:"quads_closed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DropGraphResponse) Reset() {
+	*x = DropGraphResponse{}
+	mi := &file_polargraph_proto_msgTypes[141]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DropGraphResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DropGraphResponse) ProtoMessage() {}
+
+func (x *DropGraphResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[141]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DropGraphResponse.ProtoReflect.Descriptor instead.
+func (*DropGraphResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{141}
+}
+
+func (x *DropGraphResponse) GetQuadsClosed() uint64 {
+	if x != nil {
+		return x.QuadsClosed
+	}
+	return 0
+}
+
+// / Triples to add to one graph.
+type GraphTriples struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Graph IRI ("" = default graph).
+	Graph         string    `protobuf:"bytes,1,opt,name=graph,proto3" json:"graph,omitempty"`
+	Triples       []*Triple `protobuf:"bytes,2,rep,name=triples,proto3" json:"triples,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GraphTriples) Reset() {
+	*x = GraphTriples{}
+	mi := &file_polargraph_proto_msgTypes[142]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GraphTriples) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GraphTriples) ProtoMessage() {}
+
+func (x *GraphTriples) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[142]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GraphTriples.ProtoReflect.Descriptor instead.
+func (*GraphTriples) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{142}
+}
+
+func (x *GraphTriples) GetGraph() string {
+	if x != nil {
+		return x.Graph
+	}
+	return ""
+}
+
+func (x *GraphTriples) GetTriples() []*Triple {
+	if x != nil {
+		return x.Triples
+	}
+	return nil
+}
+
+// / One exact quad, e.g. to retract.
+type QuadRef struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Subject   *NodeId                `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
+	Predicate string                 `protobuf:"bytes,2,opt,name=predicate,proto3" json:"predicate,omitempty"`
+	// Types that are valid to be assigned to Object:
+	//
+	//	*QuadRef_Node
+	//	*QuadRef_Value
+	Object isQuadRef_Object `protobuf_oneof:"object"`
+	// / Graph IRI ("" = default graph).
+	Graph         string `protobuf:"bytes,5,opt,name=graph,proto3" json:"graph,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QuadRef) Reset() {
+	*x = QuadRef{}
+	mi := &file_polargraph_proto_msgTypes[143]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QuadRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QuadRef) ProtoMessage() {}
+
+func (x *QuadRef) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[143]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QuadRef.ProtoReflect.Descriptor instead.
+func (*QuadRef) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{143}
+}
+
+func (x *QuadRef) GetSubject() *NodeId {
+	if x != nil {
+		return x.Subject
+	}
+	return nil
+}
+
+func (x *QuadRef) GetPredicate() string {
+	if x != nil {
+		return x.Predicate
+	}
+	return ""
+}
+
+func (x *QuadRef) GetObject() isQuadRef_Object {
+	if x != nil {
+		return x.Object
+	}
+	return nil
+}
+
+func (x *QuadRef) GetNode() *NodeId {
+	if x != nil {
+		if x, ok := x.Object.(*QuadRef_Node); ok {
+			return x.Node
+		}
+	}
+	return nil
+}
+
+func (x *QuadRef) GetValue() *Value {
+	if x != nil {
+		if x, ok := x.Object.(*QuadRef_Value); ok {
+			return x.Value
+		}
+	}
+	return nil
+}
+
+func (x *QuadRef) GetGraph() string {
+	if x != nil {
+		return x.Graph
+	}
+	return ""
+}
+
+type isQuadRef_Object interface {
+	isQuadRef_Object()
+}
+
+type QuadRef_Node struct {
+	Node *NodeId `protobuf:"bytes,3,opt,name=node,proto3,oneof"`
+}
+
+type QuadRef_Value struct {
+	Value *Value `protobuf:"bytes,4,opt,name=value,proto3,oneof"`
+}
+
+func (*QuadRef_Node) isQuadRef_Object() {}
+
+func (*QuadRef_Value) isQuadRef_Object() {}
+
+type ApplyChangesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Adds  []*GraphTriples        `protobuf:"bytes,1,rep,name=adds,proto3" json:"adds,omitempty"`
+	// / Live quads to close (valid time ends now).
+	Retractions []*QuadRef `protobuf:"bytes,2,rep,name=retractions,proto3" json:"retractions,omitempty"`
+	// / The commit time the changes were based on (0 = none). If any quad the
+	// / changeset adds or retracts — or any value of a single-valued property
+	// / it replaces — was committed after it, nothing is applied (ABORTED).
+	ReadTs int64 `protobuf:"varint,3,opt,name=read_ts,json=readTs,proto3" json:"read_ts,omitempty"`
+	// / Fail (FAILED_PRECONDITION, nothing applied) if a retraction matches no
+	// / live quad; otherwise such retractions are only counted.
+	Strict bool `protobuf:"varint,4,opt,name=strict,proto3" json:"strict,omitempty"`
+	// / IRIs to record in the IRI dictionary.
+	Iris []string `protobuf:"bytes,5,rep,name=iris,proto3" json:"iris,omitempty"`
+	// / Caller identity (optional; also `x-polargraph-user-id`): author of the
+	// / change, and the graph ACL applies (write on every graph touched).
+	UserId        string `protobuf:"bytes,6,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApplyChangesRequest) Reset() {
+	*x = ApplyChangesRequest{}
+	mi := &file_polargraph_proto_msgTypes[144]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApplyChangesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApplyChangesRequest) ProtoMessage() {}
+
+func (x *ApplyChangesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[144]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApplyChangesRequest.ProtoReflect.Descriptor instead.
+func (*ApplyChangesRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{144}
+}
+
+func (x *ApplyChangesRequest) GetAdds() []*GraphTriples {
+	if x != nil {
+		return x.Adds
+	}
+	return nil
+}
+
+func (x *ApplyChangesRequest) GetRetractions() []*QuadRef {
+	if x != nil {
+		return x.Retractions
+	}
+	return nil
+}
+
+func (x *ApplyChangesRequest) GetReadTs() int64 {
+	if x != nil {
+		return x.ReadTs
+	}
+	return 0
+}
+
+func (x *ApplyChangesRequest) GetStrict() bool {
+	if x != nil {
+		return x.Strict
+	}
+	return false
+}
+
+func (x *ApplyChangesRequest) GetIris() []string {
+	if x != nil {
+		return x.Iris
+	}
+	return nil
+}
+
+func (x *ApplyChangesRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type ApplyChangesResponse struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	CommitTs            int64                  `protobuf:"varint,1,opt,name=commit_ts,json=commitTs,proto3" json:"commit_ts,omitempty"`
+	Added               uint64                 `protobuf:"varint,2,opt,name=added,proto3" json:"added,omitempty"`
+	Retracted           uint64                 `protobuf:"varint,3,opt,name=retracted,proto3" json:"retracted,omitempty"`
+	RetractionsNotFound uint64                 `protobuf:"varint,4,opt,name=retractions_not_found,json=retractionsNotFound,proto3" json:"retractions_not_found,omitempty"`
+	// / Edge ids of added relations, in request order.
+	EdgeIds       [][]byte `protobuf:"bytes,5,rep,name=edge_ids,json=edgeIds,proto3" json:"edge_ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApplyChangesResponse) Reset() {
+	*x = ApplyChangesResponse{}
+	mi := &file_polargraph_proto_msgTypes[145]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApplyChangesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApplyChangesResponse) ProtoMessage() {}
+
+func (x *ApplyChangesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[145]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApplyChangesResponse.ProtoReflect.Descriptor instead.
+func (*ApplyChangesResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{145}
+}
+
+func (x *ApplyChangesResponse) GetCommitTs() int64 {
+	if x != nil {
+		return x.CommitTs
+	}
+	return 0
+}
+
+func (x *ApplyChangesResponse) GetAdded() uint64 {
+	if x != nil {
+		return x.Added
+	}
+	return 0
+}
+
+func (x *ApplyChangesResponse) GetRetracted() uint64 {
+	if x != nil {
+		return x.Retracted
+	}
+	return 0
+}
+
+func (x *ApplyChangesResponse) GetRetractionsNotFound() uint64 {
+	if x != nil {
+		return x.RetractionsNotFound
+	}
+	return 0
+}
+
+func (x *ApplyChangesResponse) GetEdgeIds() [][]byte {
+	if x != nil {
+		return x.EdgeIds
+	}
+	return nil
+}
+
+type ValidateShapesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Graphs holding the shapes (at least one).
+	ShapesGraphs []string `protobuf:"bytes,1,rep,name=shapes_graphs,json=shapesGraphs,proto3" json:"shapes_graphs,omitempty"`
+	// / Dataset to validate ("" = default graph); empty = every readable graph.
+	DataGraphs []string `protobuf:"bytes,2,rep,name=data_graphs,json=dataGraphs,proto3" json:"data_graphs,omitempty"`
+	// / Uncommitted changes to validate as if applied.
+	OverlayAdds        []*GraphTriples `protobuf:"bytes,3,rep,name=overlay_adds,json=overlayAdds,proto3" json:"overlay_adds,omitempty"`
+	OverlayRetractions []*QuadRef      `protobuf:"bytes,4,rep,name=overlay_retractions,json=overlayRetractions,proto3" json:"overlay_retractions,omitempty"`
+	// / Read point (0 = latest).
+	ReadTs int64 `protobuf:"varint,5,opt,name=read_ts,json=readTs,proto3" json:"read_ts,omitempty"`
+	// / Caller identity (optional; also `x-polargraph-user-id`); shapes and
+	// / data graphs must be readable.
+	UserId string `protobuf:"bytes,6,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// / With an overlay, only nodes it touches are validated unless this is set.
+	AllFocusNodes bool `protobuf:"varint,7,opt,name=all_focus_nodes,json=allFocusNodes,proto3" json:"all_focus_nodes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ValidateShapesRequest) Reset() {
+	*x = ValidateShapesRequest{}
+	mi := &file_polargraph_proto_msgTypes[146]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidateShapesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidateShapesRequest) ProtoMessage() {}
+
+func (x *ValidateShapesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[146]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidateShapesRequest.ProtoReflect.Descriptor instead.
+func (*ValidateShapesRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{146}
+}
+
+func (x *ValidateShapesRequest) GetShapesGraphs() []string {
+	if x != nil {
+		return x.ShapesGraphs
+	}
+	return nil
+}
+
+func (x *ValidateShapesRequest) GetDataGraphs() []string {
+	if x != nil {
+		return x.DataGraphs
+	}
+	return nil
+}
+
+func (x *ValidateShapesRequest) GetOverlayAdds() []*GraphTriples {
+	if x != nil {
+		return x.OverlayAdds
+	}
+	return nil
+}
+
+func (x *ValidateShapesRequest) GetOverlayRetractions() []*QuadRef {
+	if x != nil {
+		return x.OverlayRetractions
+	}
+	return nil
+}
+
+func (x *ValidateShapesRequest) GetReadTs() int64 {
+	if x != nil {
+		return x.ReadTs
+	}
+	return 0
+}
+
+func (x *ValidateShapesRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *ValidateShapesRequest) GetAllFocusNodes() bool {
+	if x != nil {
+		return x.AllFocusNodes
+	}
+	return false
+}
+
+type ValidationResult struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Focus node IRI, or unset with `focus_literal` for a literal focus.
+	FocusNode    string `protobuf:"bytes,1,opt,name=focus_node,json=focusNode,proto3" json:"focus_node,omitempty"`
+	FocusLiteral *Value `protobuf:"bytes,2,opt,name=focus_literal,json=focusLiteral,proto3" json:"focus_literal,omitempty"`
+	// / Result path in SPARQL property-path syntax (`<p>`, `^<p>`, `<a>/<b>`).
+	Path string `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
+	// / Offending value: IRI in `value_node` or a literal in `value_literal`.
+	ValueNode    string `protobuf:"bytes,4,opt,name=value_node,json=valueNode,proto3" json:"value_node,omitempty"`
+	ValueLiteral *Value `protobuf:"bytes,5,opt,name=value_literal,json=valueLiteral,proto3" json:"value_literal,omitempty"`
+	SourceShape  string `protobuf:"bytes,6,opt,name=source_shape,json=sourceShape,proto3" json:"source_shape,omitempty"`
+	// / Full constraint component IRI.
+	ConstraintComponent string `protobuf:"bytes,7,opt,name=constraint_component,json=constraintComponent,proto3" json:"constraint_component,omitempty"`
+	// / `sh:Violation`, `sh:Warning` or `sh:Info` (full IRI).
+	Severity      string `protobuf:"bytes,8,opt,name=severity,proto3" json:"severity,omitempty"`
+	Message       string `protobuf:"bytes,9,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ValidationResult) Reset() {
+	*x = ValidationResult{}
+	mi := &file_polargraph_proto_msgTypes[147]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidationResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidationResult) ProtoMessage() {}
+
+func (x *ValidationResult) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[147]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidationResult.ProtoReflect.Descriptor instead.
+func (*ValidationResult) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{147}
+}
+
+func (x *ValidationResult) GetFocusNode() string {
+	if x != nil {
+		return x.FocusNode
+	}
+	return ""
+}
+
+func (x *ValidationResult) GetFocusLiteral() *Value {
+	if x != nil {
+		return x.FocusLiteral
+	}
+	return nil
+}
+
+func (x *ValidationResult) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ValidationResult) GetValueNode() string {
+	if x != nil {
+		return x.ValueNode
+	}
+	return ""
+}
+
+func (x *ValidationResult) GetValueLiteral() *Value {
+	if x != nil {
+		return x.ValueLiteral
+	}
+	return nil
+}
+
+func (x *ValidationResult) GetSourceShape() string {
+	if x != nil {
+		return x.SourceShape
+	}
+	return ""
+}
+
+func (x *ValidationResult) GetConstraintComponent() string {
+	if x != nil {
+		return x.ConstraintComponent
+	}
+	return ""
+}
+
+func (x *ValidationResult) GetSeverity() string {
+	if x != nil {
+		return x.Severity
+	}
+	return ""
+}
+
+func (x *ValidationResult) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type ValidateShapesResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / `sh:conforms` — no results of any severity.
+	Conforms bool `protobuf:"varint,1,opt,name=conforms,proto3" json:"conforms,omitempty"`
+	// / No results of severity sh:Violation.
+	NoViolations  bool                `protobuf:"varint,2,opt,name=no_violations,json=noViolations,proto3" json:"no_violations,omitempty"`
+	Results       []*ValidationResult `protobuf:"bytes,3,rep,name=results,proto3" json:"results,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ValidateShapesResponse) Reset() {
+	*x = ValidateShapesResponse{}
+	mi := &file_polargraph_proto_msgTypes[148]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidateShapesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidateShapesResponse) ProtoMessage() {}
+
+func (x *ValidateShapesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[148]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidateShapesResponse.ProtoReflect.Descriptor instead.
+func (*ValidateShapesResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{148}
+}
+
+func (x *ValidateShapesResponse) GetConforms() bool {
+	if x != nil {
+		return x.Conforms
+	}
+	return false
+}
+
+func (x *ValidateShapesResponse) GetNoViolations() bool {
+	if x != nil {
+		return x.NoViolations
+	}
+	return false
+}
+
+func (x *ValidateShapesResponse) GetResults() []*ValidationResult {
+	if x != nil {
+		return x.Results
+	}
+	return nil
+}
+
+type SubscribeRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Graph IRIs to follow (empty = every graph the caller can read; "" is
+	// / the default graph).
+	Graphs []string `protobuf:"bytes,1,rep,name=graphs,proto3" json:"graphs,omitempty"`
+	// / Only quads with these predicates (empty = all). Graph events always pass.
+	Predicates []string `protobuf:"bytes,2,rep,name=predicates,proto3" json:"predicates,omitempty"`
+	// / Only quads whose subject currently has one of these `__type`s.
+	Types []string `protobuf:"bytes,3,rep,name=types,proto3" json:"types,omitempty"`
+	// / Deliver commits after this transaction time; 0 = from now. Older than
+	// / the retained log → OUT_OF_RANGE (re-sync, then subscribe from now).
+	ResumeAfterTs int64 `protobuf:"varint,4,opt,name=resume_after_ts,json=resumeAfterTs,proto3" json:"resume_after_ts,omitempty"`
+	// / Include property values (otherwise property quads carry no value).
+	IncludeValues bool `protobuf:"varint,5,opt,name=include_values,json=includeValues,proto3" json:"include_values,omitempty"`
+	// / Caller identity (optional; also `x-polargraph-user-id`). Events in
+	// / graphs the caller can't read are never sent.
+	UserId        string `protobuf:"bytes,6,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SubscribeRequest) Reset() {
+	*x = SubscribeRequest{}
+	mi := &file_polargraph_proto_msgTypes[149]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubscribeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubscribeRequest) ProtoMessage() {}
+
+func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[149]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubscribeRequest.ProtoReflect.Descriptor instead.
+func (*SubscribeRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{149}
+}
+
+func (x *SubscribeRequest) GetGraphs() []string {
+	if x != nil {
+		return x.Graphs
+	}
+	return nil
+}
+
+func (x *SubscribeRequest) GetPredicates() []string {
+	if x != nil {
+		return x.Predicates
+	}
+	return nil
+}
+
+func (x *SubscribeRequest) GetTypes() []string {
+	if x != nil {
+		return x.Types
+	}
+	return nil
+}
+
+func (x *SubscribeRequest) GetResumeAfterTs() int64 {
+	if x != nil {
+		return x.ResumeAfterTs
+	}
+	return 0
+}
+
+func (x *SubscribeRequest) GetIncludeValues() bool {
+	if x != nil {
+		return x.IncludeValues
+	}
+	return false
+}
+
+func (x *SubscribeRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type ChangeEvent struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Commit transaction time — the resume token.
+	CommitTs int64 `protobuf:"varint,1,opt,name=commit_ts,json=commitTs,proto3" json:"commit_ts,omitempty"`
+	// / Graph IRI ("" = default graph).
+	Graph string     `protobuf:"bytes,2,opt,name=graph,proto3" json:"graph,omitempty"`
+	Kind  ChangeKind `protobuf:"varint,3,opt,name=kind,proto3,enum=polargraph.v1.ChangeKind" json:"kind,omitempty"`
+	// / The quad version (assert / close events).
+	Quad *Triple `protobuf:"bytes,4,opt,name=quad,proto3" json:"quad,omitempty"`
+	// / The relation's edge id (relation quads).
+	EdgeId []byte `protobuf:"bytes,5,opt,name=edge_id,json=edgeId,proto3" json:"edge_id,omitempty"`
+	// / User id that made the change ("" = service call).
+	Author string `protobuf:"bytes,6,opt,name=author,proto3" json:"author,omitempty"`
+	// / Source graph of a GRAPH_COPIED event.
+	SourceGraph   string `protobuf:"bytes,7,opt,name=source_graph,json=sourceGraph,proto3" json:"source_graph,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChangeEvent) Reset() {
+	*x = ChangeEvent{}
+	mi := &file_polargraph_proto_msgTypes[150]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChangeEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChangeEvent) ProtoMessage() {}
+
+func (x *ChangeEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[150]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChangeEvent.ProtoReflect.Descriptor instead.
+func (*ChangeEvent) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{150}
+}
+
+func (x *ChangeEvent) GetCommitTs() int64 {
+	if x != nil {
+		return x.CommitTs
+	}
+	return 0
+}
+
+func (x *ChangeEvent) GetGraph() string {
+	if x != nil {
+		return x.Graph
+	}
+	return ""
+}
+
+func (x *ChangeEvent) GetKind() ChangeKind {
+	if x != nil {
+		return x.Kind
+	}
+	return ChangeKind_CHANGE_KIND_UNSPECIFIED
+}
+
+func (x *ChangeEvent) GetQuad() *Triple {
+	if x != nil {
+		return x.Quad
+	}
+	return nil
+}
+
+func (x *ChangeEvent) GetEdgeId() []byte {
+	if x != nil {
+		return x.EdgeId
+	}
+	return nil
+}
+
+func (x *ChangeEvent) GetAuthor() string {
+	if x != nil {
+		return x.Author
+	}
+	return ""
+}
+
+func (x *ChangeEvent) GetSourceGraph() string {
+	if x != nil {
+		return x.SourceGraph
+	}
+	return ""
+}
+
+type GrantGraphAccessRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / User or group receiving the grant.
+	Principal string `protobuf:"bytes,1,opt,name=principal,proto3" json:"principal,omitempty"`
+	// / Named graph IRI.
+	Graph string `protobuf:"bytes,2,opt,name=graph,proto3" json:"graph,omitempty"`
+	// / `read`, `propose`, `write` or `admin`; replaces an earlier level.
+	Level string `protobuf:"bytes,3,opt,name=level,proto3" json:"level,omitempty"`
+	// / Caller identity (optional).
+	UserId        string `protobuf:"bytes,4,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GrantGraphAccessRequest) Reset() {
+	*x = GrantGraphAccessRequest{}
+	mi := &file_polargraph_proto_msgTypes[151]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GrantGraphAccessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GrantGraphAccessRequest) ProtoMessage() {}
+
+func (x *GrantGraphAccessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[151]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GrantGraphAccessRequest.ProtoReflect.Descriptor instead.
+func (*GrantGraphAccessRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{151}
+}
+
+func (x *GrantGraphAccessRequest) GetPrincipal() string {
+	if x != nil {
+		return x.Principal
+	}
+	return ""
+}
+
+func (x *GrantGraphAccessRequest) GetGraph() string {
+	if x != nil {
+		return x.Graph
+	}
+	return ""
+}
+
+func (x *GrantGraphAccessRequest) GetLevel() string {
+	if x != nil {
+		return x.Level
+	}
+	return ""
+}
+
+func (x *GrantGraphAccessRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type GrantGraphAccessResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GrantGraphAccessResponse) Reset() {
+	*x = GrantGraphAccessResponse{}
+	mi := &file_polargraph_proto_msgTypes[152]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GrantGraphAccessResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GrantGraphAccessResponse) ProtoMessage() {}
+
+func (x *GrantGraphAccessResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[152]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GrantGraphAccessResponse.ProtoReflect.Descriptor instead.
+func (*GrantGraphAccessResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{152}
+}
+
+type RevokeGraphAccessRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Principal     string                 `protobuf:"bytes,1,opt,name=principal,proto3" json:"principal,omitempty"`
+	Graph         string                 `protobuf:"bytes,2,opt,name=graph,proto3" json:"graph,omitempty"`
+	UserId        string                 `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeGraphAccessRequest) Reset() {
+	*x = RevokeGraphAccessRequest{}
+	mi := &file_polargraph_proto_msgTypes[153]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeGraphAccessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeGraphAccessRequest) ProtoMessage() {}
+
+func (x *RevokeGraphAccessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[153]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeGraphAccessRequest.ProtoReflect.Descriptor instead.
+func (*RevokeGraphAccessRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{153}
+}
+
+func (x *RevokeGraphAccessRequest) GetPrincipal() string {
+	if x != nil {
+		return x.Principal
+	}
+	return ""
+}
+
+func (x *RevokeGraphAccessRequest) GetGraph() string {
+	if x != nil {
+		return x.Graph
+	}
+	return ""
+}
+
+func (x *RevokeGraphAccessRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type RevokeGraphAccessResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Whether a live grant was revoked.
+	Revoked       bool `protobuf:"varint,1,opt,name=revoked,proto3" json:"revoked,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeGraphAccessResponse) Reset() {
+	*x = RevokeGraphAccessResponse{}
+	mi := &file_polargraph_proto_msgTypes[154]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeGraphAccessResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeGraphAccessResponse) ProtoMessage() {}
+
+func (x *RevokeGraphAccessResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[154]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeGraphAccessResponse.ProtoReflect.Descriptor instead.
+func (*RevokeGraphAccessResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{154}
+}
+
+func (x *RevokeGraphAccessResponse) GetRevoked() bool {
+	if x != nil {
+		return x.Revoked
+	}
+	return false
+}
+
+type GetGraphAccessRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / User whose effective access (own + group grants) to list.
+	Principal string `protobuf:"bytes,1,opt,name=principal,proto3" json:"principal,omitempty"`
+	// / Caller identity (optional); a caller other than `principal` only sees
+	// / graphs it administers.
+	UserId        string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetGraphAccessRequest) Reset() {
+	*x = GetGraphAccessRequest{}
+	mi := &file_polargraph_proto_msgTypes[155]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetGraphAccessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetGraphAccessRequest) ProtoMessage() {}
+
+func (x *GetGraphAccessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[155]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetGraphAccessRequest.ProtoReflect.Descriptor instead.
+func (*GetGraphAccessRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{155}
+}
+
+func (x *GetGraphAccessRequest) GetPrincipal() string {
+	if x != nil {
+		return x.Principal
+	}
+	return ""
+}
+
+func (x *GetGraphAccessRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type GraphAccessEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Graph         string                 `protobuf:"bytes,1,opt,name=graph,proto3" json:"graph,omitempty"`
+	Level         string                 `protobuf:"bytes,2,opt,name=level,proto3" json:"level,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GraphAccessEntry) Reset() {
+	*x = GraphAccessEntry{}
+	mi := &file_polargraph_proto_msgTypes[156]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GraphAccessEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GraphAccessEntry) ProtoMessage() {}
+
+func (x *GraphAccessEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[156]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GraphAccessEntry.ProtoReflect.Descriptor instead.
+func (*GraphAccessEntry) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{156}
+}
+
+func (x *GraphAccessEntry) GetGraph() string {
+	if x != nil {
+		return x.Graph
+	}
+	return ""
+}
+
+func (x *GraphAccessEntry) GetLevel() string {
+	if x != nil {
+		return x.Level
+	}
+	return ""
+}
+
+type GetGraphAccessResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Named graphs the principal can access (the default graph is open to
+	// / everyone and not listed).
+	Graphs        []*GraphAccessEntry `protobuf:"bytes,1,rep,name=graphs,proto3" json:"graphs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetGraphAccessResponse) Reset() {
+	*x = GetGraphAccessResponse{}
+	mi := &file_polargraph_proto_msgTypes[157]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetGraphAccessResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetGraphAccessResponse) ProtoMessage() {}
+
+func (x *GetGraphAccessResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[157]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetGraphAccessResponse.ProtoReflect.Descriptor instead.
+func (*GetGraphAccessResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{157}
+}
+
+func (x *GetGraphAccessResponse) GetGraphs() []*GraphAccessEntry {
+	if x != nil {
+		return x.Graphs
+	}
+	return nil
+}
+
+type ExportGraphRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Graph IRI; empty = the default graph.
+	Iri string `protobuf:"bytes,1,opt,name=iri,proto3" json:"iri,omitempty"`
+	// / Export the default graph and every named graph (not the system
+	// / graph); `iri` is ignored.
+	AllGraphs     bool `protobuf:"varint,2,opt,name=all_graphs,json=allGraphs,proto3" json:"all_graphs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExportGraphRequest) Reset() {
+	*x = ExportGraphRequest{}
+	mi := &file_polargraph_proto_msgTypes[158]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExportGraphRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExportGraphRequest) ProtoMessage() {}
+
+func (x *ExportGraphRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[158]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExportGraphRequest.ProtoReflect.Descriptor instead.
+func (*ExportGraphRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{158}
+}
+
+func (x *ExportGraphRequest) GetIri() string {
+	if x != nil {
+		return x.Iri
+	}
+	return ""
+}
+
+func (x *ExportGraphRequest) GetAllGraphs() bool {
+	if x != nil {
+		return x.AllGraphs
+	}
+	return false
+}
+
+// / One live quad. Relation quads set `node`, property quads set `value`.
+type ExportedQuad struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Subject   *NodeId                `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
+	Predicate string                 `protobuf:"bytes,2,opt,name=predicate,proto3" json:"predicate,omitempty"`
+	// Types that are valid to be assigned to Object:
+	//
+	//	*ExportedQuad_Node
+	//	*ExportedQuad_Value
+	Object isExportedQuad_Object `protobuf_oneof:"object"`
+	// / Graph IRI; empty = the default graph.
+	Graph         string `protobuf:"bytes,5,opt,name=graph,proto3" json:"graph,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExportedQuad) Reset() {
+	*x = ExportedQuad{}
+	mi := &file_polargraph_proto_msgTypes[159]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExportedQuad) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExportedQuad) ProtoMessage() {}
+
+func (x *ExportedQuad) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[159]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExportedQuad.ProtoReflect.Descriptor instead.
+func (*ExportedQuad) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{159}
+}
+
+func (x *ExportedQuad) GetSubject() *NodeId {
+	if x != nil {
+		return x.Subject
+	}
+	return nil
+}
+
+func (x *ExportedQuad) GetPredicate() string {
+	if x != nil {
+		return x.Predicate
+	}
+	return ""
+}
+
+func (x *ExportedQuad) GetObject() isExportedQuad_Object {
+	if x != nil {
+		return x.Object
+	}
+	return nil
+}
+
+func (x *ExportedQuad) GetNode() *NodeId {
+	if x != nil {
+		if x, ok := x.Object.(*ExportedQuad_Node); ok {
+			return x.Node
+		}
+	}
+	return nil
+}
+
+func (x *ExportedQuad) GetValue() *Value {
+	if x != nil {
+		if x, ok := x.Object.(*ExportedQuad_Value); ok {
+			return x.Value
+		}
+	}
+	return nil
+}
+
+func (x *ExportedQuad) GetGraph() string {
+	if x != nil {
+		return x.Graph
+	}
+	return ""
+}
+
+type isExportedQuad_Object interface {
+	isExportedQuad_Object()
+}
+
+type ExportedQuad_Node struct {
+	Node *NodeId `protobuf:"bytes,3,opt,name=node,proto3,oneof"`
+}
+
+type ExportedQuad_Value struct {
+	Value *Value `protobuf:"bytes,4,opt,name=value,proto3,oneof"`
+}
+
+func (*ExportedQuad_Node) isExportedQuad_Object() {}
+
+func (*ExportedQuad_Value) isExportedQuad_Object() {}
+
+type ExportGraphChunk struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Quads         []*ExportedQuad        `protobuf:"bytes,1,rep,name=quads,proto3" json:"quads,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExportGraphChunk) Reset() {
+	*x = ExportGraphChunk{}
+	mi := &file_polargraph_proto_msgTypes[160]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExportGraphChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExportGraphChunk) ProtoMessage() {}
+
+func (x *ExportGraphChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[160]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExportGraphChunk.ProtoReflect.Descriptor instead.
+func (*ExportGraphChunk) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{160}
+}
+
+func (x *ExportGraphChunk) GetQuads() []*ExportedQuad {
+	if x != nil {
+		return x.Quads
+	}
+	return nil
+}
+
+type ResolveIrisRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Nodes to name. At most 10 000 per request.
+	Nodes         []*NodeId `protobuf:"bytes,1,rep,name=nodes,proto3" json:"nodes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveIrisRequest) Reset() {
+	*x = ResolveIrisRequest{}
+	mi := &file_polargraph_proto_msgTypes[161]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveIrisRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveIrisRequest) ProtoMessage() {}
+
+func (x *ResolveIrisRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[161]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveIrisRequest.ProtoReflect.Descriptor instead.
+func (*ResolveIrisRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{161}
+}
+
+func (x *ResolveIrisRequest) GetNodes() []*NodeId {
+	if x != nil {
+		return x.Nodes
+	}
+	return nil
+}
+
+type ResolveIrisResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / One IRI per requested node, in request order: the stored IRI, or
+	// / `urn:uuid:<id>` when the node has no dictionary entry.
+	Iris          []string `protobuf:"bytes,1,rep,name=iris,proto3" json:"iris,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveIrisResponse) Reset() {
+	*x = ResolveIrisResponse{}
+	mi := &file_polargraph_proto_msgTypes[162]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveIrisResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveIrisResponse) ProtoMessage() {}
+
+func (x *ResolveIrisResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[162]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveIrisResponse.ProtoReflect.Descriptor instead.
+func (*ResolveIrisResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{162}
+}
+
+func (x *ResolveIrisResponse) GetIris() []string {
+	if x != nil {
+		return x.Iris
+	}
+	return nil
+}
+
+type VocabularyPrefix struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Namespace     string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VocabularyPrefix) Reset() {
+	*x = VocabularyPrefix{}
+	mi := &file_polargraph_proto_msgTypes[163]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VocabularyPrefix) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VocabularyPrefix) ProtoMessage() {}
+
+func (x *VocabularyPrefix) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[163]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VocabularyPrefix.ProtoReflect.Descriptor instead.
+func (*VocabularyPrefix) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{163}
+}
+
+func (x *VocabularyPrefix) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *VocabularyPrefix) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+type LegacyStatus struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Pre-vocabulary data remains; run ConvertLegacyData.
+	ConversionPending bool `protobuf:"varint,1,opt,name=conversion_pending,json=conversionPending,proto3" json:"conversion_pending,omitempty"`
+	// / Predicates still stored under a bare name.
+	BarePredicates []string `protobuf:"bytes,2,rep,name=bare_predicates,json=barePredicates,proto3" json:"bare_predicates,omitempty"`
+	// / Live `__type` label properties.
+	TypeLabels uint64 `protobuf:"varint,3,opt,name=type_labels,json=typeLabels,proto3" json:"type_labels,omitempty"`
+	// / Bare predicates whose IRI already existed, with quads left to merge.
+	PendingMerges []string `protobuf:"bytes,4,rep,name=pending_merges,json=pendingMerges,proto3" json:"pending_merges,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LegacyStatus) Reset() {
+	*x = LegacyStatus{}
+	mi := &file_polargraph_proto_msgTypes[164]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LegacyStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LegacyStatus) ProtoMessage() {}
+
+func (x *LegacyStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[164]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LegacyStatus.ProtoReflect.Descriptor instead.
+func (*LegacyStatus) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{164}
+}
+
+func (x *LegacyStatus) GetConversionPending() bool {
+	if x != nil {
+		return x.ConversionPending
+	}
+	return false
+}
+
+func (x *LegacyStatus) GetBarePredicates() []string {
+	if x != nil {
+		return x.BarePredicates
+	}
+	return nil
+}
+
+func (x *LegacyStatus) GetTypeLabels() uint64 {
+	if x != nil {
+		return x.TypeLabels
+	}
+	return 0
+}
+
+func (x *LegacyStatus) GetPendingMerges() []string {
+	if x != nil {
+		return x.PendingMerges
+	}
+	return nil
+}
+
+type Vocabulary struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Base          string                 `protobuf:"bytes,1,opt,name=base,proto3" json:"base,omitempty"`
+	Prefixes      []*VocabularyPrefix    `protobuf:"bytes,2,rep,name=prefixes,proto3" json:"prefixes,omitempty"`
+	Legacy        *LegacyStatus          `protobuf:"bytes,3,opt,name=legacy,proto3" json:"legacy,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Vocabulary) Reset() {
+	*x = Vocabulary{}
+	mi := &file_polargraph_proto_msgTypes[165]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Vocabulary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Vocabulary) ProtoMessage() {}
+
+func (x *Vocabulary) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[165]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Vocabulary.ProtoReflect.Descriptor instead.
+func (*Vocabulary) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{165}
+}
+
+func (x *Vocabulary) GetBase() string {
+	if x != nil {
+		return x.Base
+	}
+	return ""
+}
+
+func (x *Vocabulary) GetPrefixes() []*VocabularyPrefix {
+	if x != nil {
+		return x.Prefixes
+	}
+	return nil
+}
+
+func (x *Vocabulary) GetLegacy() *LegacyStatus {
+	if x != nil {
+		return x.Legacy
+	}
+	return nil
+}
+
+type GetVocabularyRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetVocabularyRequest) Reset() {
+	*x = GetVocabularyRequest{}
+	mi := &file_polargraph_proto_msgTypes[166]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetVocabularyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetVocabularyRequest) ProtoMessage() {}
+
+func (x *GetVocabularyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[166]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetVocabularyRequest.ProtoReflect.Descriptor instead.
+func (*GetVocabularyRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{166}
+}
+
+type SetVocabularyBaseRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Absolute IRI, e.g. `https://example.com/ns/`. Affects names resolved
+	// / from now on; stored IRIs are never rewritten.
+	Base          string `protobuf:"bytes,1,opt,name=base,proto3" json:"base,omitempty"`
+	UserId        string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetVocabularyBaseRequest) Reset() {
+	*x = SetVocabularyBaseRequest{}
+	mi := &file_polargraph_proto_msgTypes[167]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetVocabularyBaseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetVocabularyBaseRequest) ProtoMessage() {}
+
+func (x *SetVocabularyBaseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[167]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetVocabularyBaseRequest.ProtoReflect.Descriptor instead.
+func (*SetVocabularyBaseRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{167}
+}
+
+func (x *SetVocabularyBaseRequest) GetBase() string {
+	if x != nil {
+		return x.Base
+	}
+	return ""
+}
+
+func (x *SetVocabularyBaseRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type PutPrefixRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Namespace     string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	UserId        string                 `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PutPrefixRequest) Reset() {
+	*x = PutPrefixRequest{}
+	mi := &file_polargraph_proto_msgTypes[168]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PutPrefixRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PutPrefixRequest) ProtoMessage() {}
+
+func (x *PutPrefixRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[168]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PutPrefixRequest.ProtoReflect.Descriptor instead.
+func (*PutPrefixRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{168}
+}
+
+func (x *PutPrefixRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *PutPrefixRequest) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *PutPrefixRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type RemovePrefixRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	UserId        string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemovePrefixRequest) Reset() {
+	*x = RemovePrefixRequest{}
+	mi := &file_polargraph_proto_msgTypes[169]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemovePrefixRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemovePrefixRequest) ProtoMessage() {}
+
+func (x *RemovePrefixRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[169]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemovePrefixRequest.ProtoReflect.Descriptor instead.
+func (*RemovePrefixRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{169}
+}
+
+func (x *RemovePrefixRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *RemovePrefixRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type ConvertLegacyDataRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Report what would change; change nothing.
+	DryRun        bool   `protobuf:"varint,1,opt,name=dry_run,json=dryRun,proto3" json:"dry_run,omitempty"`
+	UserId        string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConvertLegacyDataRequest) Reset() {
+	*x = ConvertLegacyDataRequest{}
+	mi := &file_polargraph_proto_msgTypes[170]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConvertLegacyDataRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConvertLegacyDataRequest) ProtoMessage() {}
+
+func (x *ConvertLegacyDataRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[170]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConvertLegacyDataRequest.ProtoReflect.Descriptor instead.
+func (*ConvertLegacyDataRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{170}
+}
+
+func (x *ConvertLegacyDataRequest) GetDryRun() bool {
+	if x != nil {
+		return x.DryRun
+	}
+	return false
+}
+
+func (x *ConvertLegacyDataRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type PredicateConversion struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / The bare name.
+	From string `protobuf:"bytes,1,opt,name=from,proto3" json:"from,omitempty"`
+	// / Its IRI under the vocabulary base.
+	To string `protobuf:"bytes,2,opt,name=to,proto3" json:"to,omitempty"`
+	// / The IRI already existed: live quads were moved (count) and the bare
+	// / entry kept as `__legacy__/<name>`; otherwise a metadata-only rename.
+	Merged        bool   `protobuf:"varint,3,opt,name=merged,proto3" json:"merged,omitempty"`
+	QuadsMoved    uint64 `protobuf:"varint,4,opt,name=quads_moved,json=quadsMoved,proto3" json:"quads_moved,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PredicateConversion) Reset() {
+	*x = PredicateConversion{}
+	mi := &file_polargraph_proto_msgTypes[171]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PredicateConversion) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PredicateConversion) ProtoMessage() {}
+
+func (x *PredicateConversion) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[171]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PredicateConversion.ProtoReflect.Descriptor instead.
+func (*PredicateConversion) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{171}
+}
+
+func (x *PredicateConversion) GetFrom() string {
+	if x != nil {
+		return x.From
+	}
+	return ""
+}
+
+func (x *PredicateConversion) GetTo() string {
+	if x != nil {
+		return x.To
+	}
+	return ""
+}
+
+func (x *PredicateConversion) GetMerged() bool {
+	if x != nil {
+		return x.Merged
+	}
+	return false
+}
+
+func (x *PredicateConversion) GetQuadsMoved() uint64 {
+	if x != nil {
+		return x.QuadsMoved
+	}
+	return 0
+}
+
+type ConvertLegacyDataResponse struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	DryRun     bool                   `protobuf:"varint,1,opt,name=dry_run,json=dryRun,proto3" json:"dry_run,omitempty"`
+	Predicates []*PredicateConversion `protobuf:"bytes,2,rep,name=predicates,proto3" json:"predicates,omitempty"`
+	// / `__type` labels converted to `rdf:type`.
+	LabelsConverted uint64 `protobuf:"varint,3,opt,name=labels_converted,json=labelsConverted,proto3" json:"labels_converted,omitempty"`
+	// / Status after the run.
+	Legacy        *LegacyStatus `protobuf:"bytes,4,opt,name=legacy,proto3" json:"legacy,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConvertLegacyDataResponse) Reset() {
+	*x = ConvertLegacyDataResponse{}
+	mi := &file_polargraph_proto_msgTypes[172]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConvertLegacyDataResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConvertLegacyDataResponse) ProtoMessage() {}
+
+func (x *ConvertLegacyDataResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[172]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConvertLegacyDataResponse.ProtoReflect.Descriptor instead.
+func (*ConvertLegacyDataResponse) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{172}
+}
+
+func (x *ConvertLegacyDataResponse) GetDryRun() bool {
+	if x != nil {
+		return x.DryRun
+	}
+	return false
+}
+
+func (x *ConvertLegacyDataResponse) GetPredicates() []*PredicateConversion {
+	if x != nil {
+		return x.Predicates
+	}
+	return nil
+}
+
+func (x *ConvertLegacyDataResponse) GetLabelsConverted() uint64 {
+	if x != nil {
+		return x.LabelsConverted
+	}
+	return 0
+}
+
+func (x *ConvertLegacyDataResponse) GetLegacy() *LegacyStatus {
+	if x != nil {
+		return x.Legacy
+	}
+	return nil
+}
+
 var File_polargraph_proto protoreflect.FileDescriptor
 
 const file_polargraph_proto_rawDesc = "" +
 	"\n" +
 	"\x10polargraph.proto\x12\rpolargraph.v1\"\x1e\n" +
 	"\x06NodeId\x12\x14\n" +
-	"\x05bytes\x18\x01 \x01(\fR\x05bytes\"\xf3\x01\n" +
+	"\x05bytes\x18\x01 \x01(\fR\x05bytes\"\xe0\x02\n" +
 	"\x05Value\x12\x1b\n" +
 	"\bnull_val\x18\x01 \x01(\bH\x00R\anullVal\x12\x1b\n" +
 	"\bbool_val\x18\x02 \x01(\bH\x00R\aboolVal\x12\x19\n" +
@@ -4878,14 +10593,22 @@ const file_polargraph_proto_rawDesc = "" +
 	"\tfloat_val\x18\x04 \x01(\x01H\x00R\bfloatVal\x12\x1b\n" +
 	"\btext_val\x18\x05 \x01(\tH\x00R\atextVal\x12\x1b\n" +
 	"\bblob_val\x18\x06 \x01(\fH\x00R\ablobVal\x124\n" +
-	"\avec_val\x18\a \x01(\v2\x19.polargraph.v1.FloatArrayH\x00R\x06vecValB\x06\n" +
-	"\x04kind\"$\n" +
+	"\avec_val\x18\a \x01(\v2\x19.polargraph.v1.FloatArrayH\x00R\x06vecVal\x126\n" +
+	"\tlang_text\x18\b \x01(\v2\x17.polargraph.v1.LangTextH\x00R\blangText\x123\n" +
+	"\x05typed\x18\t \x01(\v2\x1b.polargraph.v1.TypedLiteralH\x00R\x05typedB\x06\n" +
+	"\x04kind\"2\n" +
+	"\bLangText\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\x12\x12\n" +
+	"\x04lang\x18\x02 \x01(\tR\x04lang\"D\n" +
+	"\fTypedLiteral\x12\x18\n" +
+	"\alexical\x18\x01 \x01(\tR\alexical\x12\x1a\n" +
+	"\bdatatype\x18\x02 \x01(\tR\bdatatype\"$\n" +
 	"\n" +
 	"FloatArray\x12\x16\n" +
 	"\x06values\x18\x01 \x03(\x02R\x06values\"N\n" +
 	"\fEdgeProperty\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12*\n" +
-	"\x05value\x18\x02 \x01(\v2\x14.polargraph.v1.ValueR\x05value\"\xfd\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\x14.polargraph.v1.ValueR\x05value\"\x9c\x02\n" +
 	"\x0eRelationTriple\x12/\n" +
 	"\asubject\x18\x01 \x01(\v2\x15.polargraph.v1.NodeIdR\asubject\x12\x1c\n" +
 	"\tpredicate\x18\x02 \x01(\tR\tpredicate\x12-\n" +
@@ -4894,36 +10617,72 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x06vt_end\x18\x05 \x01(\x03R\x05vtEnd\x12;\n" +
 	"\n" +
 	"properties\x18\x06 \x03(\v2\x1b.polargraph.v1.EdgePropertyR\n" +
-	"properties\"\xbd\x01\n" +
+	"properties\x12\x1d\n" +
+	"\n" +
+	"object_iri\x18\a \x01(\tR\tobjectIri\"\xf3\x01\n" +
 	"\x0ePropertyTriple\x12/\n" +
 	"\asubject\x18\x01 \x01(\v2\x15.polargraph.v1.NodeIdR\asubject\x12\x1c\n" +
 	"\tpredicate\x18\x02 \x01(\tR\tpredicate\x12*\n" +
 	"\x05value\x18\x03 \x01(\v2\x14.polargraph.v1.ValueR\x05value\x12\x19\n" +
 	"\bvt_start\x18\x04 \x01(\x03R\avtStart\x12\x15\n" +
-	"\x06vt_end\x18\x05 \x01(\x03R\x05vtEnd\"\x8a\x01\n" +
+	"\x06vt_end\x18\x05 \x01(\x03R\x05vtEnd\x124\n" +
+	"\x04mode\x18\x06 \x01(\x0e2 .polargraph.v1.PropertyWriteModeR\x04mode\"\x8a\x01\n" +
 	"\x06Triple\x12;\n" +
 	"\brelation\x18\x01 \x01(\v2\x1d.polargraph.v1.RelationTripleH\x00R\brelation\x12;\n" +
 	"\bproperty\x18\x02 \x01(\v2\x1d.polargraph.v1.PropertyTripleH\x00R\bpropertyB\x06\n" +
-	"\x04kind\"Q\n" +
+	"\x04kind\"\x83\x01\n" +
 	"\x04Term\x12-\n" +
 	"\x05bound\x18\x01 \x01(\v2\x15.polargraph.v1.NodeIdH\x00R\x05bound\x12\x12\n" +
-	"\x03var\x18\x02 \x01(\tH\x00R\x03varB\x06\n" +
-	"\x04kind\"\x86\x01\n" +
+	"\x03var\x18\x02 \x01(\tH\x00R\x03var\x120\n" +
+	"\aliteral\x18\x03 \x01(\v2\x14.polargraph.v1.ValueH\x00R\aliteralB\x06\n" +
+	"\x04kind\"\xdb\x01\n" +
 	"\n" +
 	"VarPattern\x12-\n" +
 	"\asubject\x18\x01 \x01(\v2\x13.polargraph.v1.TermR\asubject\x12\x1c\n" +
 	"\tpredicate\x18\x02 \x01(\tR\tpredicate\x12+\n" +
-	"\x06object\x18\x03 \x01(\v2\x13.polargraph.v1.TermR\x06object\"\xb5\x01\n" +
+	"\x06object\x18\x03 \x01(\v2\x13.polargraph.v1.TermR\x06object\x12#\n" +
+	"\rpredicate_var\x18\x04 \x01(\tR\fpredicateVar\x12.\n" +
+	"\x05graph\x18\x05 \x01(\v2\x18.polargraph.v1.GraphTermR\x05graph\"\x8f\x01\n" +
+	"\tGraphTerm\x12%\n" +
+	"\rdefault_graph\x18\x01 \x01(\bH\x00R\fdefaultGraph\x12\x12\n" +
+	"\x03iri\x18\x02 \x01(\tH\x00R\x03iri\x12\x12\n" +
+	"\x03var\x18\x03 \x01(\tH\x00R\x03var\x12+\n" +
+	"\x03set\x18\x04 \x01(\v2\x17.polargraph.v1.GraphSetH\x00R\x03setB\x06\n" +
+	"\x04kind\"\x1e\n" +
+	"\bGraphSet\x12\x12\n" +
+	"\x04iris\x18\x01 \x03(\tR\x04iris\"\xb5\x01\n" +
 	"\vDatalogRule\x12%\n" +
 	"\x0ehead_predicate\x18\x01 \x01(\tR\rheadPredicate\x12(\n" +
 	"\x10head_subject_var\x18\x02 \x01(\tR\x0eheadSubjectVar\x12&\n" +
 	"\x0fhead_object_var\x18\x03 \x01(\tR\rheadObjectVar\x12-\n" +
-	"\x04body\x18\x04 \x03(\v2\x19.polargraph.v1.VarPatternR\x04body\"@\n" +
+	"\x04body\x18\x04 \x03(\v2\x19.polargraph.v1.VarPatternR\x04body\"\x9b\x01\n" +
+	"\x0eEdgeAnnotation\x12\x17\n" +
+	"\aedge_id\x18\x01 \x01(\fR\x06edgeId\x12\x1c\n" +
+	"\tpredicate\x18\x02 \x01(\tR\tpredicate\x12\x19\n" +
+	"\anode_id\x18\x03 \x01(\fH\x00R\x06nodeId\x12.\n" +
+	"\x06scalar\x18\x04 \x01(\v2\x14.polargraph.v1.ValueH\x00R\x06scalarB\a\n" +
+	"\x05value\"4\n" +
+	"\x19GetEdgeAnnotationsRequest\x12\x17\n" +
+	"\aedge_id\x18\x01 \x01(\fR\x06edgeId\"]\n" +
+	"\x1aGetEdgeAnnotationsResponse\x12?\n" +
+	"\vannotations\x18\x01 \x03(\v2\x1d.polargraph.v1.EdgeAnnotationR\vannotations\"u\n" +
+	"\x19GetEdgeIdsByTripleRequest\x12\x1d\n" +
+	"\n" +
+	"subject_id\x18\x01 \x01(\fR\tsubjectId\x12\x1c\n" +
+	"\tpredicate\x18\x02 \x01(\tR\tpredicate\x12\x1b\n" +
+	"\tobject_id\x18\x03 \x01(\fR\bobjectId\"7\n" +
+	"\x1aGetEdgeIdsByTripleResponse\x12\x19\n" +
+	"\bedge_ids\x18\x01 \x03(\fR\aedgeIds\"\xe2\x01\n" +
 	"\rInsertRequest\x12/\n" +
-	"\atriples\x18\x01 \x03(\v2\x15.polargraph.v1.TripleR\atriples\"H\n" +
+	"\atriples\x18\x01 \x03(\v2\x15.polargraph.v1.TripleR\atriples\x12\x13\n" +
+	"\x05tx_id\x18\x02 \x01(\tR\x04txId\x12H\n" +
+	"\x10edge_annotations\x18\x03 \x03(\v2\x1d.polargraph.v1.EdgeAnnotationR\x0fedgeAnnotations\x12\x12\n" +
+	"\x04iris\x18\x04 \x03(\tR\x04iris\x12\x14\n" +
+	"\x05graph\x18\x05 \x01(\tR\x05graph\x12\x17\n" +
+	"\auser_id\x18\x06 \x01(\tR\x06userId\"H\n" +
 	"\x0eInsertResponse\x12\x1b\n" +
 	"\tcommit_ts\x18\x01 \x01(\x03R\bcommitTs\x12\x19\n" +
-	"\bedge_ids\x18\x02 \x03(\fR\aedgeIds\"\xe4\x01\n" +
+	"\bedge_ids\x18\x02 \x03(\fR\aedgeIds\"\xa6\x03\n" +
 	"\fQueryRequest\x125\n" +
 	"\bpatterns\x18\x01 \x03(\v2\x19.polargraph.v1.VarPatternR\bpatterns\x12\x1f\n" +
 	"\vsnapshot_ts\x18\x02 \x01(\x03R\n" +
@@ -4931,12 +10690,25 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x10as_of_valid_time\x18\x03 \x01(\x03R\rasOfValidTime\x12!\n" +
 	"\ras_of_tx_time\x18\x04 \x01(\x03R\n" +
 	"asOfTxTime\x120\n" +
-	"\x05rules\x18\x05 \x03(\v2\x1a.polargraph.v1.DatalogRuleR\x05rules\"\x8f\x01\n" +
+	"\x05rules\x18\x05 \x03(\v2\x1a.polargraph.v1.DatalogRuleR\x05rules\x12\x13\n" +
+	"\x05tx_id\x18\x06 \x01(\tR\x04txId\x12\x17\n" +
+	"\auser_id\x18\a \x01(\tR\x06userId\x12?\n" +
+	"\x06params\x18\b \x03(\v2'.polargraph.v1.QueryRequest.ParamsEntryR\x06params\x12\x16\n" +
+	"\x06graphs\x18\t \x03(\tR\x06graphs\x1a9\n" +
+	"\vParamsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x96\x02\n" +
 	"\aBinding\x124\n" +
-	"\x04vars\x18\x01 \x03(\v2 .polargraph.v1.Binding.VarsEntryR\x04vars\x1aN\n" +
+	"\x04vars\x18\x01 \x03(\v2 .polargraph.v1.Binding.VarsEntryR\x04vars\x12F\n" +
+	"\n" +
+	"predicates\x18\x02 \x03(\v2&.polargraph.v1.Binding.PredicatesEntryR\n" +
+	"predicates\x1aN\n" +
 	"\tVarsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12+\n" +
-	"\x05value\x18\x02 \x01(\v2\x15.polargraph.v1.NodeIdR\x05value:\x028\x01\"C\n" +
+	"\x05value\x18\x02 \x01(\v2\x15.polargraph.v1.NodeIdR\x05value:\x028\x01\x1a=\n" +
+	"\x0fPredicatesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"C\n" +
 	"\rQueryResponse\x122\n" +
 	"\bbindings\x18\x01 \x03(\v2\x16.polargraph.v1.BindingR\bbindings\"\x97\x01\n" +
 	"\vQueryResult\x128\n" +
@@ -4977,14 +10749,15 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x12ReachabilityFilter\x122\n" +
 	"\tfrom_node\x18\x01 \x01(\v2\x15.polargraph.v1.NodeIdR\bfromNode\x12\x1c\n" +
 	"\tpredicate\x18\x02 \x01(\tR\tpredicate\x12\x19\n" +
-	"\bmax_hops\x18\x03 \x01(\rR\amaxHops\"\x92\x02\n" +
+	"\bmax_hops\x18\x03 \x01(\rR\amaxHops\"\xab\x02\n" +
 	"\x1bSearchVectorFilteredRequest\x12\x14\n" +
 	"\x05space\x18\x01 \x01(\tR\x05space\x12\x14\n" +
 	"\x05query\x18\x02 \x03(\x02R\x05query\x12\f\n" +
 	"\x01k\x18\x03 \x01(\rR\x01k\x12I\n" +
 	"\x10node_type_filter\x18\x04 \x01(\v2\x1d.polargraph.v1.NodeTypeFilterH\x00R\x0enodeTypeFilter\x12T\n" +
 	"\x13reachability_filter\x18\x05 \x01(\v2!.polargraph.v1.ReachabilityFilterH\x00R\x12reachabilityFilter\x12\x0e\n" +
-	"\x02ef\x18\x06 \x01(\rR\x02efB\b\n" +
+	"\x02ef\x18\x06 \x01(\rR\x02ef\x12\x17\n" +
+	"\auser_id\x18\a \x01(\tR\x06userIdB\b\n" +
 	"\x06filter\"[\n" +
 	"\x1cSearchVectorFilteredResponse\x12;\n" +
 	"\aresults\x18\x01 \x03(\v2!.polargraph.v1.VectorSearchResultR\aresults\"\x86\x01\n" +
@@ -5020,11 +10793,12 @@ const file_polargraph_proto_rawDesc = "" +
 	"dimensions\x18\x02 \x01(\rR\n" +
 	"dimensions\x12'\n" +
 	"\x0fembedding_model\x18\x03 \x01(\tR\x0eembeddingModel\x12!\n" +
-	"\fstorage_mode\x18\x04 \x01(\tR\vstorageMode\"\x9d\x01\n" +
+	"\fstorage_mode\x18\x04 \x01(\tR\vstorageMode\"\xc0\x01\n" +
 	"\vNodeTypeDef\x12\x1b\n" +
 	"\ttype_name\x18\x01 \x01(\tR\btypeName\x12/\n" +
 	"\x06fields\x18\x02 \x03(\v2\x17.polargraph.v1.FieldDefR\x06fields\x12@\n" +
-	"\fvector_space\x18\x03 \x01(\v2\x1d.polargraph.v1.VectorSpaceDefR\vvectorSpace\"U\n" +
+	"\fvector_space\x18\x03 \x01(\v2\x1d.polargraph.v1.VectorSpaceDefR\vvectorSpace\x12!\n" +
+	"\fparent_types\x18\x04 \x03(\tR\vparentTypes\"U\n" +
 	"\x17RegisterNodeTypeRequest\x12:\n" +
 	"\n" +
 	"definition\x18\x01 \x01(\v2\x1a.polargraph.v1.NodeTypeDefR\n" +
@@ -5049,12 +10823,15 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\v2\x14.polargraph.v1.ValueR\x05value:\x028\x01\"D\n" +
 	"\x14ValidateNodeResponse\x12\x14\n" +
 	"\x05valid\x18\x01 \x01(\bR\x05valid\x12\x16\n" +
-	"\x06errors\x18\x02 \x03(\tR\x06errors\"\x8a\x01\n" +
+	"\x06errors\x18\x02 \x03(\tR\x06errors\"\xcb\x01\n" +
 	"\vEdgeTypeDef\x12\x1c\n" +
 	"\tpredicate\x18\x01 \x01(\tR\tpredicate\x12\x16\n" +
 	"\x06domain\x18\x02 \x01(\tR\x06domain\x12\x14\n" +
 	"\x05range\x18\x03 \x01(\tR\x05range\x12/\n" +
-	"\x06fields\x18\x04 \x03(\v2\x17.polargraph.v1.FieldDefR\x06fields\"U\n" +
+	"\x06fields\x18\x04 \x03(\v2\x17.polargraph.v1.FieldDefR\x06fields\x12 \n" +
+	"\vcardinality\x18\x05 \x01(\tR\vcardinality\x12\x1d\n" +
+	"\n" +
+	"inverse_of\x18\x06 \x01(\tR\tinverseOf\"U\n" +
 	"\x17RegisterEdgeTypeRequest\x12:\n" +
 	"\n" +
 	"definition\x18\x01 \x01(\v2\x1a.polargraph.v1.EdgeTypeDefR\n" +
@@ -5082,7 +10859,17 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\v2\x14.polargraph.v1.ValueR\x05value:\x028\x01\"D\n" +
 	"\x14ValidateEdgeResponse\x12\x14\n" +
 	"\x05valid\x18\x01 \x01(\bR\x05valid\x12\x16\n" +
-	"\x06errors\x18\x02 \x03(\tR\x06errors\"^\n" +
+	"\x06errors\x18\x02 \x03(\tR\x06errors\"\x19\n" +
+	"\x17ValidateOntologyRequest\"h\n" +
+	"\x11OntologyViolation\x12%\n" +
+	"\x0eviolation_type\x18\x01 \x01(\tR\rviolationType\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"r\n" +
+	"\x18ValidateOntologyResponse\x12\x14\n" +
+	"\x05valid\x18\x01 \x01(\bR\x05valid\x12@\n" +
+	"\n" +
+	"violations\x18\x02 \x03(\v2 .polargraph.v1.OntologyViolationR\n" +
+	"violations\"^\n" +
 	"\x1cListPredicatesBetweenRequest\x12\x1f\n" +
 	"\vdomain_type\x18\x01 \x01(\tR\n" +
 	"domainType\x12\x1d\n" +
@@ -5097,7 +10884,7 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x05score\x18\x02 \x01(\x02R\x05score\x1aN\n" +
 	"\tVarsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12+\n" +
-	"\x05value\x18\x02 \x01(\v2\x15.polargraph.v1.NodeIdR\x05value:\x028\x01\"\x97\x03\n" +
+	"\x05value\x18\x02 \x01(\v2\x15.polargraph.v1.NodeIdR\x05value:\x028\x01\"\xb6\x04\n" +
 	"\x16VectorSeedQueryRequest\x12\x14\n" +
 	"\x05space\x18\x01 \x01(\tR\x05space\x12!\n" +
 	"\fquery_vector\x18\x02 \x03(\x02R\vqueryVector\x12\f\n" +
@@ -5108,7 +10895,13 @@ const file_polargraph_proto_rawDesc = "" +
 	"snapshotTs\x12I\n" +
 	"\x10node_type_filter\x18\a \x01(\v2\x1d.polargraph.v1.NodeTypeFilterH\x00R\x0enodeTypeFilter\x12T\n" +
 	"\x13reachability_filter\x18\b \x01(\v2!.polargraph.v1.ReachabilityFilterH\x00R\x12reachabilityFilter\x12\x0e\n" +
-	"\x02ef\x18\t \x01(\rR\x02efB\b\n" +
+	"\x02ef\x18\t \x01(\rR\x02ef\x12\x17\n" +
+	"\auser_id\x18\n" +
+	" \x01(\tR\x06userId\x12I\n" +
+	"\x06params\x18\v \x03(\v21.polargraph.v1.VectorSeedQueryRequest.ParamsEntryR\x06params\x1a9\n" +
+	"\vParamsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\b\n" +
 	"\x06filter\"S\n" +
 	"\x17VectorSeedQueryResponse\x128\n" +
 	"\bbindings\x18\x01 \x03(\v2\x1c.polargraph.v1.ScoredBindingR\bbindings\"\x83\x01\n" +
@@ -5170,14 +10963,54 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x14AppliedMigrationInfo\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12+\n" +
-	"\x12applied_at_tx_time\x18\x03 \x01(\x03R\x0fappliedAtTxTime\"\xa0\x01\n" +
+	"\x12applied_at_tx_time\x18\x03 \x01(\x03R\x0fappliedAtTxTime\"\x14\n" +
+	"\x12ShowIndexesRequest\"|\n" +
+	"\x10ColumnFamilyInfo\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12(\n" +
+	"\x10approx_key_count\x18\x02 \x01(\x04R\x0eapproxKeyCount\x12*\n" +
+	"\x11approx_size_bytes\x18\x03 \x01(\x04R\x0fapproxSizeBytes\"\x87\x01\n" +
+	"\x0fVectorSpaceInfo\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1e\n" +
+	"\n" +
+	"dimensions\x18\x02 \x01(\rR\n" +
+	"dimensions\x12\x1d\n" +
+	"\n" +
+	"node_count\x18\x03 \x01(\x04R\tnodeCount\x12!\n" +
+	"\fstorage_mode\x18\x04 \x01(\tR\vstorageMode\"\xcd\x01\n" +
+	"\x13ShowIndexesResponse\x12H\n" +
+	"\x0fcolumn_families\x18\x01 \x03(\v2\x1f.polargraph.v1.ColumnFamilyInfoR\x0ecolumnFamilies\x12C\n" +
+	"\rvector_spaces\x18\x02 \x03(\v2\x1e.polargraph.v1.VectorSpaceInfoR\fvectorSpaces\x12'\n" +
+	"\x0fpredicate_count\x18\x03 \x01(\rR\x0epredicateCount\"\x12\n" +
+	"\x10ShowStatsRequest\"\xe2\x04\n" +
+	"\x11ShowStatsResponse\x12$\n" +
+	"\x0elive_sst_files\x18\x01 \x01(\x04R\fliveSstFiles\x12/\n" +
+	"\x14total_sst_size_bytes\x18\x02 \x01(\x04R\x11totalSstSizeBytes\x12.\n" +
+	"\x13memtable_size_bytes\x18\x03 \x01(\x04R\x11memtableSizeBytes\x12$\n" +
+	"\x0emvcc_oracle_ts\x18\x04 \x01(\x04R\fmvccOracleTs\x124\n" +
+	"\x16predicate_intern_count\x18\x05 \x01(\rR\x14predicateInternCount\x124\n" +
+	"\x16open_transaction_count\x18\x06 \x01(\rR\x14openTransactionCount\x12\x12\n" +
+	"\x04mode\x18\a \x01(\tR\x04mode\x12(\n" +
+	"\x10query_cache_hits\x18\b \x01(\x04R\x0equeryCacheHits\x12,\n" +
+	"\x12query_cache_misses\x18\t \x01(\x04R\x10queryCacheMisses\x12(\n" +
+	"\x10query_cache_size\x18\n" +
+	" \x01(\rR\x0equeryCacheSize\x12:\n" +
+	"\x19legacy_conversion_pending\x18\v \x01(\bR\x17legacyConversionPending\x124\n" +
+	"\x16legacy_bare_predicates\x18\f \x01(\rR\x14legacyBarePredicates\x12,\n" +
+	"\x12legacy_type_labels\x18\r \x01(\x04R\x10legacyTypeLabels\"\xe8\x02\n" +
 	"\x12CypherQueryRequest\x12\x16\n" +
 	"\x06cypher\x18\x01 \x01(\tR\x06cypher\x12'\n" +
 	"\x10as_of_valid_time\x18\x02 \x01(\x03R\rasOfValidTime\x12!\n" +
 	"\ras_of_tx_time\x18\x03 \x01(\x03R\n" +
 	"asOfTxTime\x12\x16\n" +
 	"\x06vector\x18\x04 \x03(\x02R\x06vector\x12\x0e\n" +
-	"\x02ef\x18\x05 \x01(\rR\x02ef\"\xb2\x02\n" +
+	"\x02ef\x18\x05 \x01(\rR\x02ef\x12\x13\n" +
+	"\x05tx_id\x18\x06 \x01(\tR\x04txId\x12\x17\n" +
+	"\auser_id\x18\a \x01(\tR\x06userId\x12E\n" +
+	"\x06params\x18\b \x03(\v2-.polargraph.v1.CypherQueryRequest.ParamsEntryR\x06params\x12\x16\n" +
+	"\x06graphs\x18\t \x03(\tR\x06graphs\x1a9\n" +
+	"\vParamsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb2\x02\n" +
 	"\rCypherBinding\x12=\n" +
 	"\x05nodes\x18\x01 \x03(\v2'.polargraph.v1.CypherBinding.NodesEntryR\x05nodes\x12@\n" +
 	"\x06values\x18\x02 \x03(\v2(.polargraph.v1.CypherBinding.ValuesEntryR\x06values\x1aO\n" +
@@ -5189,9 +11022,12 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12*\n" +
 	"\x05value\x18\x02 \x01(\v2\x14.polargraph.v1.ValueR\x05value:\x028\x01\"G\n" +
 	"\x13CypherQueryResponse\x120\n" +
-	"\x04rows\x18\x01 \x03(\v2\x1c.polargraph.v1.CypherBindingR\x04rows\",\n" +
+	"\x04rows\x18\x01 \x03(\v2\x1c.polargraph.v1.CypherBindingR\x04rows\"p\n" +
 	"\x12CypherWriteRequest\x12\x16\n" +
-	"\x06cypher\x18\x01 \x01(\tR\x06cypher\"\x91\x01\n" +
+	"\x06cypher\x18\x01 \x01(\tR\x06cypher\x12\x13\n" +
+	"\x05tx_id\x18\x02 \x01(\tR\x04txId\x12\x14\n" +
+	"\x05graph\x18\x03 \x01(\tR\x05graph\x12\x17\n" +
+	"\auser_id\x18\x04 \x01(\tR\x06userId\"\x91\x01\n" +
 	"\x13CypherWriteResponse\x12(\n" +
 	"\x10created_node_ids\x18\x01 \x03(\fR\x0ecreatedNodeIds\x12'\n" +
 	"\x0ftriples_written\x18\x02 \x01(\x04R\x0etriplesWritten\x12'\n" +
@@ -5204,9 +11040,306 @@ const file_polargraph_proto_rawDesc = "" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1d\n" +
 	"\n" +
 	"index_used\x18\x03 \x01(\tR\tindexUsed\x123\n" +
-	"\bchildren\x18\x04 \x03(\v2\x17.polargraph.v1.PlanNodeR\bchildren2\xfe\x15\n" +
-	"\x11PolarGraphService\x12E\n" +
-	"\x06Insert\x12\x1c.polargraph.v1.InsertRequest\x1a\x1d.polargraph.v1.InsertResponse\x12B\n" +
+	"\bchildren\x18\x04 \x03(\v2\x17.polargraph.v1.PlanNodeR\bchildren\"\x19\n" +
+	"\x17BeginTransactionRequest\"/\n" +
+	"\x18BeginTransactionResponse\x12\x13\n" +
+	"\x05tx_id\x18\x01 \x01(\tR\x04txId\"/\n" +
+	"\x18CommitTransactionRequest\x12\x13\n" +
+	"\x05tx_id\x18\x01 \x01(\tR\x04txId\"D\n" +
+	"\x19CommitTransactionResponse\x12'\n" +
+	"\x0ftriples_written\x18\x01 \x01(\x04R\x0etriplesWritten\"1\n" +
+	"\x1aRollbackTransactionRequest\x12\x13\n" +
+	"\x05tx_id\x18\x01 \x01(\tR\x04txId\"\x1d\n" +
+	"\x1bRollbackTransactionResponse\"$\n" +
+	"\x10AddApiKeyRequest\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\"2\n" +
+	"\x11AddApiKeyResponse\x12\x1d\n" +
+	"\n" +
+	"total_keys\x18\x01 \x01(\rR\ttotalKeys\"'\n" +
+	"\x13RevokeApiKeyRequest\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\"K\n" +
+	"\x14RevokeApiKeyResponse\x12\x14\n" +
+	"\x05found\x18\x01 \x01(\bR\x05found\x12\x1d\n" +
+	"\n" +
+	"total_keys\x18\x02 \x01(\rR\ttotalKeys\"\x14\n" +
+	"\x12ListApiKeysRequest\"W\n" +
+	"\x13ListApiKeysResponse\x12!\n" +
+	"\fkey_prefixes\x18\x01 \x03(\tR\vkeyPrefixes\x12\x1d\n" +
+	"\n" +
+	"total_keys\x18\x02 \x01(\rR\ttotalKeys\"s\n" +
+	"\x12GrantAccessRequest\x12\x19\n" +
+	"\bgroup_id\x18\x01 \x01(\fR\agroupId\x12\x19\n" +
+	"\anode_id\x18\x02 \x01(\fH\x00R\x06nodeId\x12\x1d\n" +
+	"\ttype_name\x18\x03 \x01(\tH\x00R\btypeNameB\b\n" +
+	"\x06target\"\x15\n" +
+	"\x13GrantAccessResponse\"t\n" +
+	"\x13RevokeAccessRequest\x12\x19\n" +
+	"\bgroup_id\x18\x01 \x01(\fR\agroupId\x12\x19\n" +
+	"\anode_id\x18\x02 \x01(\fH\x00R\x06nodeId\x12\x1d\n" +
+	"\ttype_name\x18\x03 \x01(\tH\x00R\btypeNameB\b\n" +
+	"\x06target\"\x16\n" +
+	"\x14RevokeAccessResponse\"K\n" +
+	"\x15AddUserToGroupRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\fR\x06userId\x12\x19\n" +
+	"\bgroup_id\x18\x02 \x01(\fR\agroupId\"\x18\n" +
+	"\x16AddUserToGroupResponse\"/\n" +
+	"\x14GetUserAccessRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\fR\x06userId\"S\n" +
+	"\x15GetUserAccessResponse\x12\x19\n" +
+	"\bnode_ids\x18\x01 \x03(\fR\anodeIds\x12\x1f\n" +
+	"\vtype_grants\x18\x02 \x03(\tR\n" +
+	"typeGrants\"n\n" +
+	"\x19GetPropertyHistoryRequest\x12\x1d\n" +
+	"\n" +
+	"subject_id\x18\x01 \x01(\fR\tsubjectId\x12\x1c\n" +
+	"\tpredicate\x18\x02 \x01(\tR\tpredicate\x12\x14\n" +
+	"\x05limit\x18\x03 \x01(\rR\x05limit\"[\n" +
+	"\x0fPropertyVersion\x12\x1d\n" +
+	"\n" +
+	"value_json\x18\x01 \x01(\tR\tvalueJson\x12)\n" +
+	"\x10transaction_time\x18\x02 \x01(\x03R\x0ftransactionTime\"X\n" +
+	"\x1aGetPropertyHistoryResponse\x12:\n" +
+	"\bversions\x18\x01 \x03(\v2\x1e.polargraph.v1.PropertyVersionR\bversions\"\xfe\x01\n" +
+	"\x14DeleteTriplesRequest\x12\x1f\n" +
+	"\vsubject_ids\x18\x01 \x03(\fR\n" +
+	"subjectIds\x12\x1c\n" +
+	"\tpredicate\x18\x02 \x01(\tR\tpredicate\x12\x15\n" +
+	"\x06vt_end\x18\x03 \x01(\x03R\x05vtEnd\x12\x1b\n" +
+	"\tobject_id\x18\x04 \x01(\fR\bobjectId\x12*\n" +
+	"\x05value\x18\x05 \x01(\v2\x14.polargraph.v1.ValueR\x05value\x12.\n" +
+	"\x05graph\x18\x06 \x01(\v2\x18.polargraph.v1.GraphTermR\x05graph\x12\x17\n" +
+	"\auser_id\x18\a \x01(\tR\x06userId\"<\n" +
+	"\x15DeleteTriplesResponse\x12#\n" +
+	"\rdeleted_count\x18\x01 \x01(\x04R\fdeletedCount\"<\n" +
+	"\x19RunMaterializationRequest\x12\x1f\n" +
+	"\vclear_first\x18\x01 \x01(\bR\n" +
+	"clearFirst\"\x86\x01\n" +
+	"\x1aRunMaterializationResponse\x12\x1f\n" +
+	"\vrules_fired\x18\x01 \x01(\x04R\n" +
+	"rulesFired\x12'\n" +
+	"\x0fderived_triples\x18\x02 \x01(\x04R\x0ederivedTriples\x12\x1e\n" +
+	"\n" +
+	"iterations\x18\x03 \x01(\rR\n" +
+	"iterations\"Y\n" +
+	"\rGraphMetadata\x12\x1c\n" +
+	"\tpredicate\x18\x01 \x01(\tR\tpredicate\x12*\n" +
+	"\x05value\x18\x02 \x01(\v2\x14.polargraph.v1.ValueR\x05value\"g\n" +
+	"\tGraphInfo\x12\x10\n" +
+	"\x03iri\x18\x01 \x01(\tR\x03iri\x12\x0e\n" +
+	"\x02id\x18\x02 \x01(\rR\x02id\x128\n" +
+	"\bmetadata\x18\x03 \x03(\v2\x1c.polargraph.v1.GraphMetadataR\bmetadata\"y\n" +
+	"\x12CreateGraphRequest\x12\x10\n" +
+	"\x03iri\x18\x01 \x01(\tR\x03iri\x128\n" +
+	"\bmetadata\x18\x02 \x03(\v2\x1c.polargraph.v1.GraphMetadataR\bmetadata\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\"E\n" +
+	"\x13CreateGraphResponse\x12.\n" +
+	"\x05graph\x18\x01 \x01(\v2\x18.polargraph.v1.GraphInfoR\x05graph\"p\n" +
+	"\x11ListGraphsRequest\x124\n" +
+	"\x06filter\x18\x01 \x03(\v2\x1c.polargraph.v1.GraphMetadataR\x06filter\x12%\n" +
+	"\x0einclude_system\x18\x02 \x01(\bR\rincludeSystem\"F\n" +
+	"\x12ListGraphsResponse\x120\n" +
+	"\x06graphs\x18\x01 \x03(\v2\x18.polargraph.v1.GraphInfoR\x06graphs\"%\n" +
+	"\x11GraphStatsRequest\x12\x10\n" +
+	"\x03iri\x18\x01 \x01(\tR\x03iri\"i\n" +
+	"\x12GraphStatsResponse\x12\x10\n" +
+	"\x03iri\x18\x01 \x01(\tR\x03iri\x12\x1d\n" +
+	"\n" +
+	"live_quads\x18\x02 \x01(\x04R\tliveQuads\x12\"\n" +
+	"\rlast_write_tt\x18\x03 \x01(\x03R\vlastWriteTt\"~\n" +
+	"\x10CopyGraphRequest\x12\x16\n" +
+	"\x06source\x18\x01 \x01(\tR\x06source\x12\x16\n" +
+	"\x06target\x18\x02 \x01(\tR\x06target\x12!\n" +
+	"\fclear_target\x18\x03 \x01(\bR\vclearTarget\x12\x17\n" +
+	"\auser_id\x18\x04 \x01(\tR\x06userId\")\n" +
+	"\x11CopyGraphResponse\x12\x14\n" +
+	"\x05quads\x18\x01 \x01(\x04R\x05quads\"[\n" +
+	"\x10MoveGraphRequest\x12\x16\n" +
+	"\x06source\x18\x01 \x01(\tR\x06source\x12\x16\n" +
+	"\x06target\x18\x02 \x01(\tR\x06target\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\"=\n" +
+	"\x10DropGraphRequest\x12\x10\n" +
+	"\x03iri\x18\x01 \x01(\tR\x03iri\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\"6\n" +
+	"\x11DropGraphResponse\x12!\n" +
+	"\fquads_closed\x18\x01 \x01(\x04R\vquadsClosed\"U\n" +
+	"\fGraphTriples\x12\x14\n" +
+	"\x05graph\x18\x01 \x01(\tR\x05graph\x12/\n" +
+	"\atriples\x18\x02 \x03(\v2\x15.polargraph.v1.TripleR\atriples\"\xd3\x01\n" +
+	"\aQuadRef\x12/\n" +
+	"\asubject\x18\x01 \x01(\v2\x15.polargraph.v1.NodeIdR\asubject\x12\x1c\n" +
+	"\tpredicate\x18\x02 \x01(\tR\tpredicate\x12+\n" +
+	"\x04node\x18\x03 \x01(\v2\x15.polargraph.v1.NodeIdH\x00R\x04node\x12,\n" +
+	"\x05value\x18\x04 \x01(\v2\x14.polargraph.v1.ValueH\x00R\x05value\x12\x14\n" +
+	"\x05graph\x18\x05 \x01(\tR\x05graphB\b\n" +
+	"\x06object\"\xde\x01\n" +
+	"\x13ApplyChangesRequest\x12/\n" +
+	"\x04adds\x18\x01 \x03(\v2\x1b.polargraph.v1.GraphTriplesR\x04adds\x128\n" +
+	"\vretractions\x18\x02 \x03(\v2\x16.polargraph.v1.QuadRefR\vretractions\x12\x17\n" +
+	"\aread_ts\x18\x03 \x01(\x03R\x06readTs\x12\x16\n" +
+	"\x06strict\x18\x04 \x01(\bR\x06strict\x12\x12\n" +
+	"\x04iris\x18\x05 \x03(\tR\x04iris\x12\x17\n" +
+	"\auser_id\x18\x06 \x01(\tR\x06userId\"\xb6\x01\n" +
+	"\x14ApplyChangesResponse\x12\x1b\n" +
+	"\tcommit_ts\x18\x01 \x01(\x03R\bcommitTs\x12\x14\n" +
+	"\x05added\x18\x02 \x01(\x04R\x05added\x12\x1c\n" +
+	"\tretracted\x18\x03 \x01(\x04R\tretracted\x122\n" +
+	"\x15retractions_not_found\x18\x04 \x01(\x04R\x13retractionsNotFound\x12\x19\n" +
+	"\bedge_ids\x18\x05 \x03(\fR\aedgeIds\"\xc0\x02\n" +
+	"\x15ValidateShapesRequest\x12#\n" +
+	"\rshapes_graphs\x18\x01 \x03(\tR\fshapesGraphs\x12\x1f\n" +
+	"\vdata_graphs\x18\x02 \x03(\tR\n" +
+	"dataGraphs\x12>\n" +
+	"\foverlay_adds\x18\x03 \x03(\v2\x1b.polargraph.v1.GraphTriplesR\voverlayAdds\x12G\n" +
+	"\x13overlay_retractions\x18\x04 \x03(\v2\x16.polargraph.v1.QuadRefR\x12overlayRetractions\x12\x17\n" +
+	"\aread_ts\x18\x05 \x01(\x03R\x06readTs\x12\x17\n" +
+	"\auser_id\x18\x06 \x01(\tR\x06userId\x12&\n" +
+	"\x0fall_focus_nodes\x18\a \x01(\bR\rallFocusNodes\"\xe6\x02\n" +
+	"\x10ValidationResult\x12\x1d\n" +
+	"\n" +
+	"focus_node\x18\x01 \x01(\tR\tfocusNode\x129\n" +
+	"\rfocus_literal\x18\x02 \x01(\v2\x14.polargraph.v1.ValueR\ffocusLiteral\x12\x12\n" +
+	"\x04path\x18\x03 \x01(\tR\x04path\x12\x1d\n" +
+	"\n" +
+	"value_node\x18\x04 \x01(\tR\tvalueNode\x129\n" +
+	"\rvalue_literal\x18\x05 \x01(\v2\x14.polargraph.v1.ValueR\fvalueLiteral\x12!\n" +
+	"\fsource_shape\x18\x06 \x01(\tR\vsourceShape\x121\n" +
+	"\x14constraint_component\x18\a \x01(\tR\x13constraintComponent\x12\x1a\n" +
+	"\bseverity\x18\b \x01(\tR\bseverity\x12\x18\n" +
+	"\amessage\x18\t \x01(\tR\amessage\"\x94\x01\n" +
+	"\x16ValidateShapesResponse\x12\x1a\n" +
+	"\bconforms\x18\x01 \x01(\bR\bconforms\x12#\n" +
+	"\rno_violations\x18\x02 \x01(\bR\fnoViolations\x129\n" +
+	"\aresults\x18\x03 \x03(\v2\x1f.polargraph.v1.ValidationResultR\aresults\"\xc8\x01\n" +
+	"\x10SubscribeRequest\x12\x16\n" +
+	"\x06graphs\x18\x01 \x03(\tR\x06graphs\x12\x1e\n" +
+	"\n" +
+	"predicates\x18\x02 \x03(\tR\n" +
+	"predicates\x12\x14\n" +
+	"\x05types\x18\x03 \x03(\tR\x05types\x12&\n" +
+	"\x0fresume_after_ts\x18\x04 \x01(\x03R\rresumeAfterTs\x12%\n" +
+	"\x0einclude_values\x18\x05 \x01(\bR\rincludeValues\x12\x17\n" +
+	"\auser_id\x18\x06 \x01(\tR\x06userId\"\xee\x01\n" +
+	"\vChangeEvent\x12\x1b\n" +
+	"\tcommit_ts\x18\x01 \x01(\x03R\bcommitTs\x12\x14\n" +
+	"\x05graph\x18\x02 \x01(\tR\x05graph\x12-\n" +
+	"\x04kind\x18\x03 \x01(\x0e2\x19.polargraph.v1.ChangeKindR\x04kind\x12)\n" +
+	"\x04quad\x18\x04 \x01(\v2\x15.polargraph.v1.TripleR\x04quad\x12\x17\n" +
+	"\aedge_id\x18\x05 \x01(\fR\x06edgeId\x12\x16\n" +
+	"\x06author\x18\x06 \x01(\tR\x06author\x12!\n" +
+	"\fsource_graph\x18\a \x01(\tR\vsourceGraph\"|\n" +
+	"\x17GrantGraphAccessRequest\x12\x1c\n" +
+	"\tprincipal\x18\x01 \x01(\tR\tprincipal\x12\x14\n" +
+	"\x05graph\x18\x02 \x01(\tR\x05graph\x12\x14\n" +
+	"\x05level\x18\x03 \x01(\tR\x05level\x12\x17\n" +
+	"\auser_id\x18\x04 \x01(\tR\x06userId\"\x1a\n" +
+	"\x18GrantGraphAccessResponse\"g\n" +
+	"\x18RevokeGraphAccessRequest\x12\x1c\n" +
+	"\tprincipal\x18\x01 \x01(\tR\tprincipal\x12\x14\n" +
+	"\x05graph\x18\x02 \x01(\tR\x05graph\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\"5\n" +
+	"\x19RevokeGraphAccessResponse\x12\x18\n" +
+	"\arevoked\x18\x01 \x01(\bR\arevoked\"N\n" +
+	"\x15GetGraphAccessRequest\x12\x1c\n" +
+	"\tprincipal\x18\x01 \x01(\tR\tprincipal\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\">\n" +
+	"\x10GraphAccessEntry\x12\x14\n" +
+	"\x05graph\x18\x01 \x01(\tR\x05graph\x12\x14\n" +
+	"\x05level\x18\x02 \x01(\tR\x05level\"Q\n" +
+	"\x16GetGraphAccessResponse\x127\n" +
+	"\x06graphs\x18\x01 \x03(\v2\x1f.polargraph.v1.GraphAccessEntryR\x06graphs\"E\n" +
+	"\x12ExportGraphRequest\x12\x10\n" +
+	"\x03iri\x18\x01 \x01(\tR\x03iri\x12\x1d\n" +
+	"\n" +
+	"all_graphs\x18\x02 \x01(\bR\tallGraphs\"\xd8\x01\n" +
+	"\fExportedQuad\x12/\n" +
+	"\asubject\x18\x01 \x01(\v2\x15.polargraph.v1.NodeIdR\asubject\x12\x1c\n" +
+	"\tpredicate\x18\x02 \x01(\tR\tpredicate\x12+\n" +
+	"\x04node\x18\x03 \x01(\v2\x15.polargraph.v1.NodeIdH\x00R\x04node\x12,\n" +
+	"\x05value\x18\x04 \x01(\v2\x14.polargraph.v1.ValueH\x00R\x05value\x12\x14\n" +
+	"\x05graph\x18\x05 \x01(\tR\x05graphB\b\n" +
+	"\x06object\"E\n" +
+	"\x10ExportGraphChunk\x121\n" +
+	"\x05quads\x18\x01 \x03(\v2\x1b.polargraph.v1.ExportedQuadR\x05quads\"A\n" +
+	"\x12ResolveIrisRequest\x12+\n" +
+	"\x05nodes\x18\x01 \x03(\v2\x15.polargraph.v1.NodeIdR\x05nodes\")\n" +
+	"\x13ResolveIrisResponse\x12\x12\n" +
+	"\x04iris\x18\x01 \x03(\tR\x04iris\"D\n" +
+	"\x10VocabularyPrefix\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1c\n" +
+	"\tnamespace\x18\x02 \x01(\tR\tnamespace\"\xae\x01\n" +
+	"\fLegacyStatus\x12-\n" +
+	"\x12conversion_pending\x18\x01 \x01(\bR\x11conversionPending\x12'\n" +
+	"\x0fbare_predicates\x18\x02 \x03(\tR\x0ebarePredicates\x12\x1f\n" +
+	"\vtype_labels\x18\x03 \x01(\x04R\n" +
+	"typeLabels\x12%\n" +
+	"\x0epending_merges\x18\x04 \x03(\tR\rpendingMerges\"\x92\x01\n" +
+	"\n" +
+	"Vocabulary\x12\x12\n" +
+	"\x04base\x18\x01 \x01(\tR\x04base\x12;\n" +
+	"\bprefixes\x18\x02 \x03(\v2\x1f.polargraph.v1.VocabularyPrefixR\bprefixes\x123\n" +
+	"\x06legacy\x18\x03 \x01(\v2\x1b.polargraph.v1.LegacyStatusR\x06legacy\"\x16\n" +
+	"\x14GetVocabularyRequest\"G\n" +
+	"\x18SetVocabularyBaseRequest\x12\x12\n" +
+	"\x04base\x18\x01 \x01(\tR\x04base\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\"]\n" +
+	"\x10PutPrefixRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1c\n" +
+	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\"B\n" +
+	"\x13RemovePrefixRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\"L\n" +
+	"\x18ConvertLegacyDataRequest\x12\x17\n" +
+	"\adry_run\x18\x01 \x01(\bR\x06dryRun\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\"r\n" +
+	"\x13PredicateConversion\x12\x12\n" +
+	"\x04from\x18\x01 \x01(\tR\x04from\x12\x0e\n" +
+	"\x02to\x18\x02 \x01(\tR\x02to\x12\x16\n" +
+	"\x06merged\x18\x03 \x01(\bR\x06merged\x12\x1f\n" +
+	"\vquads_moved\x18\x04 \x01(\x04R\n" +
+	"quadsMoved\"\xd8\x01\n" +
+	"\x19ConvertLegacyDataResponse\x12\x17\n" +
+	"\adry_run\x18\x01 \x01(\bR\x06dryRun\x12B\n" +
+	"\n" +
+	"predicates\x18\x02 \x03(\v2\".polargraph.v1.PredicateConversionR\n" +
+	"predicates\x12)\n" +
+	"\x10labels_converted\x18\x03 \x01(\x04R\x0flabelsConverted\x123\n" +
+	"\x06legacy\x18\x04 \x01(\v2\x1b.polargraph.v1.LegacyStatusR\x06legacy*o\n" +
+	"\x11PropertyWriteMode\x12\x1c\n" +
+	"\x18PROPERTY_WRITE_MODE_AUTO\x10\x00\x12\x1f\n" +
+	"\x1bPROPERTY_WRITE_MODE_REPLACE\x10\x01\x12\x1b\n" +
+	"\x17PROPERTY_WRITE_MODE_ADD\x10\x02*\xb4\x01\n" +
+	"\n" +
+	"ChangeKind\x12\x1b\n" +
+	"\x17CHANGE_KIND_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12CHANGE_KIND_ASSERT\x10\x01\x12\x15\n" +
+	"\x11CHANGE_KIND_CLOSE\x10\x02\x12\x1d\n" +
+	"\x19CHANGE_KIND_GRAPH_CREATED\x10\x03\x12\x1d\n" +
+	"\x19CHANGE_KIND_GRAPH_DROPPED\x10\x04\x12\x1c\n" +
+	"\x18CHANGE_KIND_GRAPH_COPIED\x10\x052\xa60\n" +
+	"\x11PolarGraphService\x12O\n" +
+	"\rGetVocabulary\x12#.polargraph.v1.GetVocabularyRequest\x1a\x19.polargraph.v1.Vocabulary\x12W\n" +
+	"\x11SetVocabularyBase\x12'.polargraph.v1.SetVocabularyBaseRequest\x1a\x19.polargraph.v1.Vocabulary\x12G\n" +
+	"\tPutPrefix\x12\x1f.polargraph.v1.PutPrefixRequest\x1a\x19.polargraph.v1.Vocabulary\x12M\n" +
+	"\fRemovePrefix\x12\".polargraph.v1.RemovePrefixRequest\x1a\x19.polargraph.v1.Vocabulary\x12f\n" +
+	"\x11ConvertLegacyData\x12'.polargraph.v1.ConvertLegacyDataRequest\x1a(.polargraph.v1.ConvertLegacyDataResponse\x12E\n" +
+	"\x06Insert\x12\x1c.polargraph.v1.InsertRequest\x1a\x1d.polargraph.v1.InsertResponse\x12T\n" +
+	"\vResolveIris\x12!.polargraph.v1.ResolveIrisRequest\x1a\".polargraph.v1.ResolveIrisResponse\x12T\n" +
+	"\vCreateGraph\x12!.polargraph.v1.CreateGraphRequest\x1a\".polargraph.v1.CreateGraphResponse\x12Q\n" +
+	"\n" +
+	"ListGraphs\x12 .polargraph.v1.ListGraphsRequest\x1a!.polargraph.v1.ListGraphsResponse\x12Q\n" +
+	"\n" +
+	"GraphStats\x12 .polargraph.v1.GraphStatsRequest\x1a!.polargraph.v1.GraphStatsResponse\x12N\n" +
+	"\tCopyGraph\x12\x1f.polargraph.v1.CopyGraphRequest\x1a .polargraph.v1.CopyGraphResponse\x12N\n" +
+	"\tMoveGraph\x12\x1f.polargraph.v1.MoveGraphRequest\x1a .polargraph.v1.CopyGraphResponse\x12N\n" +
+	"\tDropGraph\x12\x1f.polargraph.v1.DropGraphRequest\x1a .polargraph.v1.DropGraphResponse\x12S\n" +
+	"\vExportGraph\x12!.polargraph.v1.ExportGraphRequest\x1a\x1f.polargraph.v1.ExportGraphChunk0\x01\x12W\n" +
+	"\fApplyChanges\x12\".polargraph.v1.ApplyChangesRequest\x1a#.polargraph.v1.ApplyChangesResponse\x12]\n" +
+	"\x0eValidateShapes\x12$.polargraph.v1.ValidateShapesRequest\x1a%.polargraph.v1.ValidateShapesResponse\x12J\n" +
+	"\tSubscribe\x12\x1f.polargraph.v1.SubscribeRequest\x1a\x1a.polargraph.v1.ChangeEvent0\x01\x12c\n" +
+	"\x10GrantGraphAccess\x12&.polargraph.v1.GrantGraphAccessRequest\x1a'.polargraph.v1.GrantGraphAccessResponse\x12f\n" +
+	"\x11RevokeGraphAccess\x12'.polargraph.v1.RevokeGraphAccessRequest\x1a(.polargraph.v1.RevokeGraphAccessResponse\x12]\n" +
+	"\x0eGetGraphAccess\x12$.polargraph.v1.GetGraphAccessRequest\x1a%.polargraph.v1.GetGraphAccessResponse\x12B\n" +
 	"\x05Query\x12\x1b.polargraph.v1.QueryRequest\x1a\x1c.polargraph.v1.QueryResponse\x12W\n" +
 	"\fInsertVector\x12\".polargraph.v1.InsertVectorRequest\x1a#.polargraph.v1.InsertVectorResponse\x12W\n" +
 	"\fSearchVector\x12\".polargraph.v1.SearchVectorRequest\x1a#.polargraph.v1.SearchVectorResponse\x12N\n" +
@@ -5219,7 +11352,8 @@ const file_polargraph_proto_rawDesc = "" +
 	"\vGetEdgeType\x12!.polargraph.v1.GetEdgeTypeRequest\x1a\".polargraph.v1.GetEdgeTypeResponse\x12Z\n" +
 	"\rListEdgeTypes\x12#.polargraph.v1.ListEdgeTypesRequest\x1a$.polargraph.v1.ListEdgeTypesResponse\x12W\n" +
 	"\fValidateEdge\x12\".polargraph.v1.ValidateEdgeRequest\x1a#.polargraph.v1.ValidateEdgeResponse\x12r\n" +
-	"\x15ListPredicatesBetween\x12+.polargraph.v1.ListPredicatesBetweenRequest\x1a,.polargraph.v1.ListPredicatesBetweenResponse\x12o\n" +
+	"\x15ListPredicatesBetween\x12+.polargraph.v1.ListPredicatesBetweenRequest\x1a,.polargraph.v1.ListPredicatesBetweenResponse\x12c\n" +
+	"\x10ValidateOntology\x12&.polargraph.v1.ValidateOntologyRequest\x1a'.polargraph.v1.ValidateOntologyResponse\x12o\n" +
 	"\x14SearchVectorFiltered\x12*.polargraph.v1.SearchVectorFilteredRequest\x1a+.polargraph.v1.SearchVectorFilteredResponse\x12f\n" +
 	"\x11SearchVectorInSet\x12'.polargraph.v1.SearchVectorInSetRequest\x1a(.polargraph.v1.SearchVectorInSetResponse\x12i\n" +
 	"\x12BatchInsertVectors\x12(.polargraph.v1.BatchInsertVectorsRequest\x1a).polargraph.v1.BatchInsertVectorsResponse\x12`\n" +
@@ -5236,7 +11370,24 @@ const file_polargraph_proto_rawDesc = "" +
 	"\vCypherQuery\x12!.polargraph.v1.CypherQueryRequest\x1a\".polargraph.v1.CypherQueryResponse\x12T\n" +
 	"\vCypherWrite\x12!.polargraph.v1.CypherWriteRequest\x1a\".polargraph.v1.CypherWriteResponse\x12M\n" +
 	"\vQueryStream\x12\x1b.polargraph.v1.QueryRequest\x1a\x1f.polargraph.v1.QueryStreamChunk0\x01\x12Y\n" +
-	"\x11CypherQueryStream\x12!.polargraph.v1.CypherQueryRequest\x1a\x1f.polargraph.v1.QueryStreamChunk0\x01b\x06proto3"
+	"\x11CypherQueryStream\x12!.polargraph.v1.CypherQueryRequest\x1a\x1f.polargraph.v1.QueryStreamChunk0\x01\x12T\n" +
+	"\vShowIndexes\x12!.polargraph.v1.ShowIndexesRequest\x1a\".polargraph.v1.ShowIndexesResponse\x12N\n" +
+	"\tShowStats\x12\x1f.polargraph.v1.ShowStatsRequest\x1a .polargraph.v1.ShowStatsResponse\x12c\n" +
+	"\x10BeginTransaction\x12&.polargraph.v1.BeginTransactionRequest\x1a'.polargraph.v1.BeginTransactionResponse\x12f\n" +
+	"\x11CommitTransaction\x12'.polargraph.v1.CommitTransactionRequest\x1a(.polargraph.v1.CommitTransactionResponse\x12l\n" +
+	"\x13RollbackTransaction\x12).polargraph.v1.RollbackTransactionRequest\x1a*.polargraph.v1.RollbackTransactionResponse\x12i\n" +
+	"\x12GetEdgeAnnotations\x12(.polargraph.v1.GetEdgeAnnotationsRequest\x1a).polargraph.v1.GetEdgeAnnotationsResponse\x12i\n" +
+	"\x12GetEdgeIdsByTriple\x12(.polargraph.v1.GetEdgeIdsByTripleRequest\x1a).polargraph.v1.GetEdgeIdsByTripleResponse\x12N\n" +
+	"\tAddApiKey\x12\x1f.polargraph.v1.AddApiKeyRequest\x1a .polargraph.v1.AddApiKeyResponse\x12W\n" +
+	"\fRevokeApiKey\x12\".polargraph.v1.RevokeApiKeyRequest\x1a#.polargraph.v1.RevokeApiKeyResponse\x12T\n" +
+	"\vListApiKeys\x12!.polargraph.v1.ListApiKeysRequest\x1a\".polargraph.v1.ListApiKeysResponse\x12T\n" +
+	"\vGrantAccess\x12!.polargraph.v1.GrantAccessRequest\x1a\".polargraph.v1.GrantAccessResponse\x12W\n" +
+	"\fRevokeAccess\x12\".polargraph.v1.RevokeAccessRequest\x1a#.polargraph.v1.RevokeAccessResponse\x12]\n" +
+	"\x0eAddUserToGroup\x12$.polargraph.v1.AddUserToGroupRequest\x1a%.polargraph.v1.AddUserToGroupResponse\x12Z\n" +
+	"\rGetUserAccess\x12#.polargraph.v1.GetUserAccessRequest\x1a$.polargraph.v1.GetUserAccessResponse\x12i\n" +
+	"\x12GetPropertyHistory\x12(.polargraph.v1.GetPropertyHistoryRequest\x1a).polargraph.v1.GetPropertyHistoryResponse\x12Z\n" +
+	"\rDeleteTriples\x12#.polargraph.v1.DeleteTriplesRequest\x1a$.polargraph.v1.DeleteTriplesResponse\x12i\n" +
+	"\x12RunMaterialization\x12(.polargraph.v1.RunMaterializationRequest\x1a).polargraph.v1.RunMaterializationResponseb\x06proto3"
 
 var (
 	file_polargraph_proto_rawDescOnce sync.Once
@@ -5250,232 +11401,450 @@ func file_polargraph_proto_rawDescGZIP() []byte {
 	return file_polargraph_proto_rawDescData
 }
 
-var file_polargraph_proto_msgTypes = make([]protoimpl.MessageInfo, 91)
+var file_polargraph_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_polargraph_proto_msgTypes = make([]protoimpl.MessageInfo, 184)
 var file_polargraph_proto_goTypes = []any{
-	(*NodeId)(nil),                        // 0: polargraph.v1.NodeId
-	(*Value)(nil),                         // 1: polargraph.v1.Value
-	(*FloatArray)(nil),                    // 2: polargraph.v1.FloatArray
-	(*EdgeProperty)(nil),                  // 3: polargraph.v1.EdgeProperty
-	(*RelationTriple)(nil),                // 4: polargraph.v1.RelationTriple
-	(*PropertyTriple)(nil),                // 5: polargraph.v1.PropertyTriple
-	(*Triple)(nil),                        // 6: polargraph.v1.Triple
-	(*Term)(nil),                          // 7: polargraph.v1.Term
-	(*VarPattern)(nil),                    // 8: polargraph.v1.VarPattern
-	(*DatalogRule)(nil),                   // 9: polargraph.v1.DatalogRule
-	(*InsertRequest)(nil),                 // 10: polargraph.v1.InsertRequest
-	(*InsertResponse)(nil),                // 11: polargraph.v1.InsertResponse
-	(*QueryRequest)(nil),                  // 12: polargraph.v1.QueryRequest
-	(*Binding)(nil),                       // 13: polargraph.v1.Binding
-	(*QueryResponse)(nil),                 // 14: polargraph.v1.QueryResponse
-	(*QueryResult)(nil),                   // 15: polargraph.v1.QueryResult
-	(*QueryStreamChunk)(nil),              // 16: polargraph.v1.QueryStreamChunk
-	(*ReachableRequest)(nil),              // 17: polargraph.v1.ReachableRequest
-	(*ReachableResponse)(nil),             // 18: polargraph.v1.ReachableResponse
-	(*InsertVectorRequest)(nil),           // 19: polargraph.v1.InsertVectorRequest
-	(*InsertVectorResponse)(nil),          // 20: polargraph.v1.InsertVectorResponse
-	(*SearchVectorRequest)(nil),           // 21: polargraph.v1.SearchVectorRequest
-	(*VectorSearchResult)(nil),            // 22: polargraph.v1.VectorSearchResult
-	(*SearchVectorResponse)(nil),          // 23: polargraph.v1.SearchVectorResponse
-	(*NodeTypeFilter)(nil),                // 24: polargraph.v1.NodeTypeFilter
-	(*ReachabilityFilter)(nil),            // 25: polargraph.v1.ReachabilityFilter
-	(*SearchVectorFilteredRequest)(nil),   // 26: polargraph.v1.SearchVectorFilteredRequest
-	(*SearchVectorFilteredResponse)(nil),  // 27: polargraph.v1.SearchVectorFilteredResponse
-	(*SearchVectorInSetRequest)(nil),      // 28: polargraph.v1.SearchVectorInSetRequest
-	(*SearchVectorInSetResponse)(nil),     // 29: polargraph.v1.SearchVectorInSetResponse
-	(*VectorItem)(nil),                    // 30: polargraph.v1.VectorItem
-	(*BatchInsertError)(nil),              // 31: polargraph.v1.BatchInsertError
-	(*BatchInsertVectorsRequest)(nil),     // 32: polargraph.v1.BatchInsertVectorsRequest
-	(*BatchInsertVectorsResponse)(nil),    // 33: polargraph.v1.BatchInsertVectorsResponse
-	(*FieldDef)(nil),                      // 34: polargraph.v1.FieldDef
-	(*VectorSpaceDef)(nil),                // 35: polargraph.v1.VectorSpaceDef
-	(*NodeTypeDef)(nil),                   // 36: polargraph.v1.NodeTypeDef
-	(*RegisterNodeTypeRequest)(nil),       // 37: polargraph.v1.RegisterNodeTypeRequest
-	(*RegisterNodeTypeResponse)(nil),      // 38: polargraph.v1.RegisterNodeTypeResponse
-	(*GetNodeTypeRequest)(nil),            // 39: polargraph.v1.GetNodeTypeRequest
-	(*GetNodeTypeResponse)(nil),           // 40: polargraph.v1.GetNodeTypeResponse
-	(*ListNodeTypesRequest)(nil),          // 41: polargraph.v1.ListNodeTypesRequest
-	(*ListNodeTypesResponse)(nil),         // 42: polargraph.v1.ListNodeTypesResponse
-	(*ValidateNodeRequest)(nil),           // 43: polargraph.v1.ValidateNodeRequest
-	(*ValidateNodeResponse)(nil),          // 44: polargraph.v1.ValidateNodeResponse
-	(*EdgeTypeDef)(nil),                   // 45: polargraph.v1.EdgeTypeDef
-	(*RegisterEdgeTypeRequest)(nil),       // 46: polargraph.v1.RegisterEdgeTypeRequest
-	(*RegisterEdgeTypeResponse)(nil),      // 47: polargraph.v1.RegisterEdgeTypeResponse
-	(*GetEdgeTypeRequest)(nil),            // 48: polargraph.v1.GetEdgeTypeRequest
-	(*GetEdgeTypeResponse)(nil),           // 49: polargraph.v1.GetEdgeTypeResponse
-	(*ListEdgeTypesRequest)(nil),          // 50: polargraph.v1.ListEdgeTypesRequest
-	(*ListEdgeTypesResponse)(nil),         // 51: polargraph.v1.ListEdgeTypesResponse
-	(*ValidateEdgeRequest)(nil),           // 52: polargraph.v1.ValidateEdgeRequest
-	(*ValidateEdgeResponse)(nil),          // 53: polargraph.v1.ValidateEdgeResponse
-	(*ListPredicatesBetweenRequest)(nil),  // 54: polargraph.v1.ListPredicatesBetweenRequest
-	(*ListPredicatesBetweenResponse)(nil), // 55: polargraph.v1.ListPredicatesBetweenResponse
-	(*ScoredBinding)(nil),                 // 56: polargraph.v1.ScoredBinding
-	(*VectorSeedQueryRequest)(nil),        // 57: polargraph.v1.VectorSeedQueryRequest
-	(*VectorSeedQueryResponse)(nil),       // 58: polargraph.v1.VectorSeedQueryResponse
-	(*BackupInfo)(nil),                    // 59: polargraph.v1.BackupInfo
-	(*CreateBackupRequest)(nil),           // 60: polargraph.v1.CreateBackupRequest
-	(*CreateBackupResponse)(nil),          // 61: polargraph.v1.CreateBackupResponse
-	(*ListBackupsRequest)(nil),            // 62: polargraph.v1.ListBackupsRequest
-	(*ListBackupsResponse)(nil),           // 63: polargraph.v1.ListBackupsResponse
-	(*PurgeOldBackupsRequest)(nil),        // 64: polargraph.v1.PurgeOldBackupsRequest
-	(*PurgeOldBackupsResponse)(nil),       // 65: polargraph.v1.PurgeOldBackupsResponse
-	(*RunRetentionRequest)(nil),           // 66: polargraph.v1.RunRetentionRequest
-	(*RunRetentionResponse)(nil),          // 67: polargraph.v1.RunRetentionResponse
-	(*StreamWalRequest)(nil),              // 68: polargraph.v1.StreamWalRequest
-	(*WalEntry)(nil),                      // 69: polargraph.v1.WalEntry
-	(*ReplicaStatusRequest)(nil),          // 70: polargraph.v1.ReplicaStatusRequest
-	(*ReplicaStatusResponse)(nil),         // 71: polargraph.v1.ReplicaStatusResponse
-	(*MigrateRequest)(nil),                // 72: polargraph.v1.MigrateRequest
-	(*MigrateResponse)(nil),               // 73: polargraph.v1.MigrateResponse
-	(*MigrationStatusRequest)(nil),        // 74: polargraph.v1.MigrationStatusRequest
-	(*MigrationStatusResponse)(nil),       // 75: polargraph.v1.MigrationStatusResponse
-	(*AppliedMigrationInfo)(nil),          // 76: polargraph.v1.AppliedMigrationInfo
-	(*CypherQueryRequest)(nil),            // 77: polargraph.v1.CypherQueryRequest
-	(*CypherBinding)(nil),                 // 78: polargraph.v1.CypherBinding
-	(*CypherQueryResponse)(nil),           // 79: polargraph.v1.CypherQueryResponse
-	(*CypherWriteRequest)(nil),            // 80: polargraph.v1.CypherWriteRequest
-	(*CypherWriteResponse)(nil),           // 81: polargraph.v1.CypherWriteResponse
-	(*ExplainResponse)(nil),               // 82: polargraph.v1.ExplainResponse
-	(*PlanNode)(nil),                      // 83: polargraph.v1.PlanNode
-	nil,                                   // 84: polargraph.v1.Binding.VarsEntry
-	nil,                                   // 85: polargraph.v1.QueryResult.VarsEntry
-	nil,                                   // 86: polargraph.v1.ValidateNodeRequest.PropertiesEntry
-	nil,                                   // 87: polargraph.v1.ValidateEdgeRequest.PropertiesEntry
-	nil,                                   // 88: polargraph.v1.ScoredBinding.VarsEntry
-	nil,                                   // 89: polargraph.v1.CypherBinding.NodesEntry
-	nil,                                   // 90: polargraph.v1.CypherBinding.ValuesEntry
+	(PropertyWriteMode)(0),                // 0: polargraph.v1.PropertyWriteMode
+	(ChangeKind)(0),                       // 1: polargraph.v1.ChangeKind
+	(*NodeId)(nil),                        // 2: polargraph.v1.NodeId
+	(*Value)(nil),                         // 3: polargraph.v1.Value
+	(*LangText)(nil),                      // 4: polargraph.v1.LangText
+	(*TypedLiteral)(nil),                  // 5: polargraph.v1.TypedLiteral
+	(*FloatArray)(nil),                    // 6: polargraph.v1.FloatArray
+	(*EdgeProperty)(nil),                  // 7: polargraph.v1.EdgeProperty
+	(*RelationTriple)(nil),                // 8: polargraph.v1.RelationTriple
+	(*PropertyTriple)(nil),                // 9: polargraph.v1.PropertyTriple
+	(*Triple)(nil),                        // 10: polargraph.v1.Triple
+	(*Term)(nil),                          // 11: polargraph.v1.Term
+	(*VarPattern)(nil),                    // 12: polargraph.v1.VarPattern
+	(*GraphTerm)(nil),                     // 13: polargraph.v1.GraphTerm
+	(*GraphSet)(nil),                      // 14: polargraph.v1.GraphSet
+	(*DatalogRule)(nil),                   // 15: polargraph.v1.DatalogRule
+	(*EdgeAnnotation)(nil),                // 16: polargraph.v1.EdgeAnnotation
+	(*GetEdgeAnnotationsRequest)(nil),     // 17: polargraph.v1.GetEdgeAnnotationsRequest
+	(*GetEdgeAnnotationsResponse)(nil),    // 18: polargraph.v1.GetEdgeAnnotationsResponse
+	(*GetEdgeIdsByTripleRequest)(nil),     // 19: polargraph.v1.GetEdgeIdsByTripleRequest
+	(*GetEdgeIdsByTripleResponse)(nil),    // 20: polargraph.v1.GetEdgeIdsByTripleResponse
+	(*InsertRequest)(nil),                 // 21: polargraph.v1.InsertRequest
+	(*InsertResponse)(nil),                // 22: polargraph.v1.InsertResponse
+	(*QueryRequest)(nil),                  // 23: polargraph.v1.QueryRequest
+	(*Binding)(nil),                       // 24: polargraph.v1.Binding
+	(*QueryResponse)(nil),                 // 25: polargraph.v1.QueryResponse
+	(*QueryResult)(nil),                   // 26: polargraph.v1.QueryResult
+	(*QueryStreamChunk)(nil),              // 27: polargraph.v1.QueryStreamChunk
+	(*ReachableRequest)(nil),              // 28: polargraph.v1.ReachableRequest
+	(*ReachableResponse)(nil),             // 29: polargraph.v1.ReachableResponse
+	(*InsertVectorRequest)(nil),           // 30: polargraph.v1.InsertVectorRequest
+	(*InsertVectorResponse)(nil),          // 31: polargraph.v1.InsertVectorResponse
+	(*SearchVectorRequest)(nil),           // 32: polargraph.v1.SearchVectorRequest
+	(*VectorSearchResult)(nil),            // 33: polargraph.v1.VectorSearchResult
+	(*SearchVectorResponse)(nil),          // 34: polargraph.v1.SearchVectorResponse
+	(*NodeTypeFilter)(nil),                // 35: polargraph.v1.NodeTypeFilter
+	(*ReachabilityFilter)(nil),            // 36: polargraph.v1.ReachabilityFilter
+	(*SearchVectorFilteredRequest)(nil),   // 37: polargraph.v1.SearchVectorFilteredRequest
+	(*SearchVectorFilteredResponse)(nil),  // 38: polargraph.v1.SearchVectorFilteredResponse
+	(*SearchVectorInSetRequest)(nil),      // 39: polargraph.v1.SearchVectorInSetRequest
+	(*SearchVectorInSetResponse)(nil),     // 40: polargraph.v1.SearchVectorInSetResponse
+	(*VectorItem)(nil),                    // 41: polargraph.v1.VectorItem
+	(*BatchInsertError)(nil),              // 42: polargraph.v1.BatchInsertError
+	(*BatchInsertVectorsRequest)(nil),     // 43: polargraph.v1.BatchInsertVectorsRequest
+	(*BatchInsertVectorsResponse)(nil),    // 44: polargraph.v1.BatchInsertVectorsResponse
+	(*FieldDef)(nil),                      // 45: polargraph.v1.FieldDef
+	(*VectorSpaceDef)(nil),                // 46: polargraph.v1.VectorSpaceDef
+	(*NodeTypeDef)(nil),                   // 47: polargraph.v1.NodeTypeDef
+	(*RegisterNodeTypeRequest)(nil),       // 48: polargraph.v1.RegisterNodeTypeRequest
+	(*RegisterNodeTypeResponse)(nil),      // 49: polargraph.v1.RegisterNodeTypeResponse
+	(*GetNodeTypeRequest)(nil),            // 50: polargraph.v1.GetNodeTypeRequest
+	(*GetNodeTypeResponse)(nil),           // 51: polargraph.v1.GetNodeTypeResponse
+	(*ListNodeTypesRequest)(nil),          // 52: polargraph.v1.ListNodeTypesRequest
+	(*ListNodeTypesResponse)(nil),         // 53: polargraph.v1.ListNodeTypesResponse
+	(*ValidateNodeRequest)(nil),           // 54: polargraph.v1.ValidateNodeRequest
+	(*ValidateNodeResponse)(nil),          // 55: polargraph.v1.ValidateNodeResponse
+	(*EdgeTypeDef)(nil),                   // 56: polargraph.v1.EdgeTypeDef
+	(*RegisterEdgeTypeRequest)(nil),       // 57: polargraph.v1.RegisterEdgeTypeRequest
+	(*RegisterEdgeTypeResponse)(nil),      // 58: polargraph.v1.RegisterEdgeTypeResponse
+	(*GetEdgeTypeRequest)(nil),            // 59: polargraph.v1.GetEdgeTypeRequest
+	(*GetEdgeTypeResponse)(nil),           // 60: polargraph.v1.GetEdgeTypeResponse
+	(*ListEdgeTypesRequest)(nil),          // 61: polargraph.v1.ListEdgeTypesRequest
+	(*ListEdgeTypesResponse)(nil),         // 62: polargraph.v1.ListEdgeTypesResponse
+	(*ValidateEdgeRequest)(nil),           // 63: polargraph.v1.ValidateEdgeRequest
+	(*ValidateEdgeResponse)(nil),          // 64: polargraph.v1.ValidateEdgeResponse
+	(*ValidateOntologyRequest)(nil),       // 65: polargraph.v1.ValidateOntologyRequest
+	(*OntologyViolation)(nil),             // 66: polargraph.v1.OntologyViolation
+	(*ValidateOntologyResponse)(nil),      // 67: polargraph.v1.ValidateOntologyResponse
+	(*ListPredicatesBetweenRequest)(nil),  // 68: polargraph.v1.ListPredicatesBetweenRequest
+	(*ListPredicatesBetweenResponse)(nil), // 69: polargraph.v1.ListPredicatesBetweenResponse
+	(*ScoredBinding)(nil),                 // 70: polargraph.v1.ScoredBinding
+	(*VectorSeedQueryRequest)(nil),        // 71: polargraph.v1.VectorSeedQueryRequest
+	(*VectorSeedQueryResponse)(nil),       // 72: polargraph.v1.VectorSeedQueryResponse
+	(*BackupInfo)(nil),                    // 73: polargraph.v1.BackupInfo
+	(*CreateBackupRequest)(nil),           // 74: polargraph.v1.CreateBackupRequest
+	(*CreateBackupResponse)(nil),          // 75: polargraph.v1.CreateBackupResponse
+	(*ListBackupsRequest)(nil),            // 76: polargraph.v1.ListBackupsRequest
+	(*ListBackupsResponse)(nil),           // 77: polargraph.v1.ListBackupsResponse
+	(*PurgeOldBackupsRequest)(nil),        // 78: polargraph.v1.PurgeOldBackupsRequest
+	(*PurgeOldBackupsResponse)(nil),       // 79: polargraph.v1.PurgeOldBackupsResponse
+	(*RunRetentionRequest)(nil),           // 80: polargraph.v1.RunRetentionRequest
+	(*RunRetentionResponse)(nil),          // 81: polargraph.v1.RunRetentionResponse
+	(*StreamWalRequest)(nil),              // 82: polargraph.v1.StreamWalRequest
+	(*WalEntry)(nil),                      // 83: polargraph.v1.WalEntry
+	(*ReplicaStatusRequest)(nil),          // 84: polargraph.v1.ReplicaStatusRequest
+	(*ReplicaStatusResponse)(nil),         // 85: polargraph.v1.ReplicaStatusResponse
+	(*MigrateRequest)(nil),                // 86: polargraph.v1.MigrateRequest
+	(*MigrateResponse)(nil),               // 87: polargraph.v1.MigrateResponse
+	(*MigrationStatusRequest)(nil),        // 88: polargraph.v1.MigrationStatusRequest
+	(*MigrationStatusResponse)(nil),       // 89: polargraph.v1.MigrationStatusResponse
+	(*AppliedMigrationInfo)(nil),          // 90: polargraph.v1.AppliedMigrationInfo
+	(*ShowIndexesRequest)(nil),            // 91: polargraph.v1.ShowIndexesRequest
+	(*ColumnFamilyInfo)(nil),              // 92: polargraph.v1.ColumnFamilyInfo
+	(*VectorSpaceInfo)(nil),               // 93: polargraph.v1.VectorSpaceInfo
+	(*ShowIndexesResponse)(nil),           // 94: polargraph.v1.ShowIndexesResponse
+	(*ShowStatsRequest)(nil),              // 95: polargraph.v1.ShowStatsRequest
+	(*ShowStatsResponse)(nil),             // 96: polargraph.v1.ShowStatsResponse
+	(*CypherQueryRequest)(nil),            // 97: polargraph.v1.CypherQueryRequest
+	(*CypherBinding)(nil),                 // 98: polargraph.v1.CypherBinding
+	(*CypherQueryResponse)(nil),           // 99: polargraph.v1.CypherQueryResponse
+	(*CypherWriteRequest)(nil),            // 100: polargraph.v1.CypherWriteRequest
+	(*CypherWriteResponse)(nil),           // 101: polargraph.v1.CypherWriteResponse
+	(*ExplainResponse)(nil),               // 102: polargraph.v1.ExplainResponse
+	(*PlanNode)(nil),                      // 103: polargraph.v1.PlanNode
+	(*BeginTransactionRequest)(nil),       // 104: polargraph.v1.BeginTransactionRequest
+	(*BeginTransactionResponse)(nil),      // 105: polargraph.v1.BeginTransactionResponse
+	(*CommitTransactionRequest)(nil),      // 106: polargraph.v1.CommitTransactionRequest
+	(*CommitTransactionResponse)(nil),     // 107: polargraph.v1.CommitTransactionResponse
+	(*RollbackTransactionRequest)(nil),    // 108: polargraph.v1.RollbackTransactionRequest
+	(*RollbackTransactionResponse)(nil),   // 109: polargraph.v1.RollbackTransactionResponse
+	(*AddApiKeyRequest)(nil),              // 110: polargraph.v1.AddApiKeyRequest
+	(*AddApiKeyResponse)(nil),             // 111: polargraph.v1.AddApiKeyResponse
+	(*RevokeApiKeyRequest)(nil),           // 112: polargraph.v1.RevokeApiKeyRequest
+	(*RevokeApiKeyResponse)(nil),          // 113: polargraph.v1.RevokeApiKeyResponse
+	(*ListApiKeysRequest)(nil),            // 114: polargraph.v1.ListApiKeysRequest
+	(*ListApiKeysResponse)(nil),           // 115: polargraph.v1.ListApiKeysResponse
+	(*GrantAccessRequest)(nil),            // 116: polargraph.v1.GrantAccessRequest
+	(*GrantAccessResponse)(nil),           // 117: polargraph.v1.GrantAccessResponse
+	(*RevokeAccessRequest)(nil),           // 118: polargraph.v1.RevokeAccessRequest
+	(*RevokeAccessResponse)(nil),          // 119: polargraph.v1.RevokeAccessResponse
+	(*AddUserToGroupRequest)(nil),         // 120: polargraph.v1.AddUserToGroupRequest
+	(*AddUserToGroupResponse)(nil),        // 121: polargraph.v1.AddUserToGroupResponse
+	(*GetUserAccessRequest)(nil),          // 122: polargraph.v1.GetUserAccessRequest
+	(*GetUserAccessResponse)(nil),         // 123: polargraph.v1.GetUserAccessResponse
+	(*GetPropertyHistoryRequest)(nil),     // 124: polargraph.v1.GetPropertyHistoryRequest
+	(*PropertyVersion)(nil),               // 125: polargraph.v1.PropertyVersion
+	(*GetPropertyHistoryResponse)(nil),    // 126: polargraph.v1.GetPropertyHistoryResponse
+	(*DeleteTriplesRequest)(nil),          // 127: polargraph.v1.DeleteTriplesRequest
+	(*DeleteTriplesResponse)(nil),         // 128: polargraph.v1.DeleteTriplesResponse
+	(*RunMaterializationRequest)(nil),     // 129: polargraph.v1.RunMaterializationRequest
+	(*RunMaterializationResponse)(nil),    // 130: polargraph.v1.RunMaterializationResponse
+	(*GraphMetadata)(nil),                 // 131: polargraph.v1.GraphMetadata
+	(*GraphInfo)(nil),                     // 132: polargraph.v1.GraphInfo
+	(*CreateGraphRequest)(nil),            // 133: polargraph.v1.CreateGraphRequest
+	(*CreateGraphResponse)(nil),           // 134: polargraph.v1.CreateGraphResponse
+	(*ListGraphsRequest)(nil),             // 135: polargraph.v1.ListGraphsRequest
+	(*ListGraphsResponse)(nil),            // 136: polargraph.v1.ListGraphsResponse
+	(*GraphStatsRequest)(nil),             // 137: polargraph.v1.GraphStatsRequest
+	(*GraphStatsResponse)(nil),            // 138: polargraph.v1.GraphStatsResponse
+	(*CopyGraphRequest)(nil),              // 139: polargraph.v1.CopyGraphRequest
+	(*CopyGraphResponse)(nil),             // 140: polargraph.v1.CopyGraphResponse
+	(*MoveGraphRequest)(nil),              // 141: polargraph.v1.MoveGraphRequest
+	(*DropGraphRequest)(nil),              // 142: polargraph.v1.DropGraphRequest
+	(*DropGraphResponse)(nil),             // 143: polargraph.v1.DropGraphResponse
+	(*GraphTriples)(nil),                  // 144: polargraph.v1.GraphTriples
+	(*QuadRef)(nil),                       // 145: polargraph.v1.QuadRef
+	(*ApplyChangesRequest)(nil),           // 146: polargraph.v1.ApplyChangesRequest
+	(*ApplyChangesResponse)(nil),          // 147: polargraph.v1.ApplyChangesResponse
+	(*ValidateShapesRequest)(nil),         // 148: polargraph.v1.ValidateShapesRequest
+	(*ValidationResult)(nil),              // 149: polargraph.v1.ValidationResult
+	(*ValidateShapesResponse)(nil),        // 150: polargraph.v1.ValidateShapesResponse
+	(*SubscribeRequest)(nil),              // 151: polargraph.v1.SubscribeRequest
+	(*ChangeEvent)(nil),                   // 152: polargraph.v1.ChangeEvent
+	(*GrantGraphAccessRequest)(nil),       // 153: polargraph.v1.GrantGraphAccessRequest
+	(*GrantGraphAccessResponse)(nil),      // 154: polargraph.v1.GrantGraphAccessResponse
+	(*RevokeGraphAccessRequest)(nil),      // 155: polargraph.v1.RevokeGraphAccessRequest
+	(*RevokeGraphAccessResponse)(nil),     // 156: polargraph.v1.RevokeGraphAccessResponse
+	(*GetGraphAccessRequest)(nil),         // 157: polargraph.v1.GetGraphAccessRequest
+	(*GraphAccessEntry)(nil),              // 158: polargraph.v1.GraphAccessEntry
+	(*GetGraphAccessResponse)(nil),        // 159: polargraph.v1.GetGraphAccessResponse
+	(*ExportGraphRequest)(nil),            // 160: polargraph.v1.ExportGraphRequest
+	(*ExportedQuad)(nil),                  // 161: polargraph.v1.ExportedQuad
+	(*ExportGraphChunk)(nil),              // 162: polargraph.v1.ExportGraphChunk
+	(*ResolveIrisRequest)(nil),            // 163: polargraph.v1.ResolveIrisRequest
+	(*ResolveIrisResponse)(nil),           // 164: polargraph.v1.ResolveIrisResponse
+	(*VocabularyPrefix)(nil),              // 165: polargraph.v1.VocabularyPrefix
+	(*LegacyStatus)(nil),                  // 166: polargraph.v1.LegacyStatus
+	(*Vocabulary)(nil),                    // 167: polargraph.v1.Vocabulary
+	(*GetVocabularyRequest)(nil),          // 168: polargraph.v1.GetVocabularyRequest
+	(*SetVocabularyBaseRequest)(nil),      // 169: polargraph.v1.SetVocabularyBaseRequest
+	(*PutPrefixRequest)(nil),              // 170: polargraph.v1.PutPrefixRequest
+	(*RemovePrefixRequest)(nil),           // 171: polargraph.v1.RemovePrefixRequest
+	(*ConvertLegacyDataRequest)(nil),      // 172: polargraph.v1.ConvertLegacyDataRequest
+	(*PredicateConversion)(nil),           // 173: polargraph.v1.PredicateConversion
+	(*ConvertLegacyDataResponse)(nil),     // 174: polargraph.v1.ConvertLegacyDataResponse
+	nil,                                   // 175: polargraph.v1.QueryRequest.ParamsEntry
+	nil,                                   // 176: polargraph.v1.Binding.VarsEntry
+	nil,                                   // 177: polargraph.v1.Binding.PredicatesEntry
+	nil,                                   // 178: polargraph.v1.QueryResult.VarsEntry
+	nil,                                   // 179: polargraph.v1.ValidateNodeRequest.PropertiesEntry
+	nil,                                   // 180: polargraph.v1.ValidateEdgeRequest.PropertiesEntry
+	nil,                                   // 181: polargraph.v1.ScoredBinding.VarsEntry
+	nil,                                   // 182: polargraph.v1.VectorSeedQueryRequest.ParamsEntry
+	nil,                                   // 183: polargraph.v1.CypherQueryRequest.ParamsEntry
+	nil,                                   // 184: polargraph.v1.CypherBinding.NodesEntry
+	nil,                                   // 185: polargraph.v1.CypherBinding.ValuesEntry
 }
 var file_polargraph_proto_depIdxs = []int32{
-	2,  // 0: polargraph.v1.Value.vec_val:type_name -> polargraph.v1.FloatArray
-	1,  // 1: polargraph.v1.EdgeProperty.value:type_name -> polargraph.v1.Value
-	0,  // 2: polargraph.v1.RelationTriple.subject:type_name -> polargraph.v1.NodeId
-	0,  // 3: polargraph.v1.RelationTriple.object:type_name -> polargraph.v1.NodeId
-	3,  // 4: polargraph.v1.RelationTriple.properties:type_name -> polargraph.v1.EdgeProperty
-	0,  // 5: polargraph.v1.PropertyTriple.subject:type_name -> polargraph.v1.NodeId
-	1,  // 6: polargraph.v1.PropertyTriple.value:type_name -> polargraph.v1.Value
-	4,  // 7: polargraph.v1.Triple.relation:type_name -> polargraph.v1.RelationTriple
-	5,  // 8: polargraph.v1.Triple.property:type_name -> polargraph.v1.PropertyTriple
-	0,  // 9: polargraph.v1.Term.bound:type_name -> polargraph.v1.NodeId
-	7,  // 10: polargraph.v1.VarPattern.subject:type_name -> polargraph.v1.Term
-	7,  // 11: polargraph.v1.VarPattern.object:type_name -> polargraph.v1.Term
-	8,  // 12: polargraph.v1.DatalogRule.body:type_name -> polargraph.v1.VarPattern
-	6,  // 13: polargraph.v1.InsertRequest.triples:type_name -> polargraph.v1.Triple
-	8,  // 14: polargraph.v1.QueryRequest.patterns:type_name -> polargraph.v1.VarPattern
-	9,  // 15: polargraph.v1.QueryRequest.rules:type_name -> polargraph.v1.DatalogRule
-	84, // 16: polargraph.v1.Binding.vars:type_name -> polargraph.v1.Binding.VarsEntry
-	13, // 17: polargraph.v1.QueryResponse.bindings:type_name -> polargraph.v1.Binding
-	85, // 18: polargraph.v1.QueryResult.vars:type_name -> polargraph.v1.QueryResult.VarsEntry
-	15, // 19: polargraph.v1.QueryStreamChunk.results:type_name -> polargraph.v1.QueryResult
-	0,  // 20: polargraph.v1.ReachableRequest.start:type_name -> polargraph.v1.NodeId
-	0,  // 21: polargraph.v1.ReachableResponse.node_ids:type_name -> polargraph.v1.NodeId
-	0,  // 22: polargraph.v1.InsertVectorRequest.node_id:type_name -> polargraph.v1.NodeId
-	0,  // 23: polargraph.v1.VectorSearchResult.node_id:type_name -> polargraph.v1.NodeId
-	22, // 24: polargraph.v1.SearchVectorResponse.results:type_name -> polargraph.v1.VectorSearchResult
-	0,  // 25: polargraph.v1.ReachabilityFilter.from_node:type_name -> polargraph.v1.NodeId
-	24, // 26: polargraph.v1.SearchVectorFilteredRequest.node_type_filter:type_name -> polargraph.v1.NodeTypeFilter
-	25, // 27: polargraph.v1.SearchVectorFilteredRequest.reachability_filter:type_name -> polargraph.v1.ReachabilityFilter
-	22, // 28: polargraph.v1.SearchVectorFilteredResponse.results:type_name -> polargraph.v1.VectorSearchResult
-	0,  // 29: polargraph.v1.SearchVectorInSetRequest.node_ids:type_name -> polargraph.v1.NodeId
-	22, // 30: polargraph.v1.SearchVectorInSetResponse.results:type_name -> polargraph.v1.VectorSearchResult
-	0,  // 31: polargraph.v1.VectorItem.node_id:type_name -> polargraph.v1.NodeId
-	30, // 32: polargraph.v1.BatchInsertVectorsRequest.items:type_name -> polargraph.v1.VectorItem
-	31, // 33: polargraph.v1.BatchInsertVectorsResponse.errors:type_name -> polargraph.v1.BatchInsertError
-	34, // 34: polargraph.v1.NodeTypeDef.fields:type_name -> polargraph.v1.FieldDef
-	35, // 35: polargraph.v1.NodeTypeDef.vector_space:type_name -> polargraph.v1.VectorSpaceDef
-	36, // 36: polargraph.v1.RegisterNodeTypeRequest.definition:type_name -> polargraph.v1.NodeTypeDef
-	36, // 37: polargraph.v1.GetNodeTypeResponse.definition:type_name -> polargraph.v1.NodeTypeDef
-	36, // 38: polargraph.v1.ListNodeTypesResponse.definitions:type_name -> polargraph.v1.NodeTypeDef
-	86, // 39: polargraph.v1.ValidateNodeRequest.properties:type_name -> polargraph.v1.ValidateNodeRequest.PropertiesEntry
-	34, // 40: polargraph.v1.EdgeTypeDef.fields:type_name -> polargraph.v1.FieldDef
-	45, // 41: polargraph.v1.RegisterEdgeTypeRequest.definition:type_name -> polargraph.v1.EdgeTypeDef
-	45, // 42: polargraph.v1.GetEdgeTypeResponse.definition:type_name -> polargraph.v1.EdgeTypeDef
-	45, // 43: polargraph.v1.ListEdgeTypesResponse.definitions:type_name -> polargraph.v1.EdgeTypeDef
-	87, // 44: polargraph.v1.ValidateEdgeRequest.properties:type_name -> polargraph.v1.ValidateEdgeRequest.PropertiesEntry
-	88, // 45: polargraph.v1.ScoredBinding.vars:type_name -> polargraph.v1.ScoredBinding.VarsEntry
-	8,  // 46: polargraph.v1.VectorSeedQueryRequest.patterns:type_name -> polargraph.v1.VarPattern
-	24, // 47: polargraph.v1.VectorSeedQueryRequest.node_type_filter:type_name -> polargraph.v1.NodeTypeFilter
-	25, // 48: polargraph.v1.VectorSeedQueryRequest.reachability_filter:type_name -> polargraph.v1.ReachabilityFilter
-	56, // 49: polargraph.v1.VectorSeedQueryResponse.bindings:type_name -> polargraph.v1.ScoredBinding
-	59, // 50: polargraph.v1.ListBackupsResponse.backups:type_name -> polargraph.v1.BackupInfo
-	76, // 51: polargraph.v1.MigrationStatusResponse.applied:type_name -> polargraph.v1.AppliedMigrationInfo
-	89, // 52: polargraph.v1.CypherBinding.nodes:type_name -> polargraph.v1.CypherBinding.NodesEntry
-	90, // 53: polargraph.v1.CypherBinding.values:type_name -> polargraph.v1.CypherBinding.ValuesEntry
-	78, // 54: polargraph.v1.CypherQueryResponse.rows:type_name -> polargraph.v1.CypherBinding
-	83, // 55: polargraph.v1.ExplainResponse.nodes:type_name -> polargraph.v1.PlanNode
-	83, // 56: polargraph.v1.PlanNode.children:type_name -> polargraph.v1.PlanNode
-	0,  // 57: polargraph.v1.Binding.VarsEntry.value:type_name -> polargraph.v1.NodeId
-	0,  // 58: polargraph.v1.QueryResult.VarsEntry.value:type_name -> polargraph.v1.NodeId
-	1,  // 59: polargraph.v1.ValidateNodeRequest.PropertiesEntry.value:type_name -> polargraph.v1.Value
-	1,  // 60: polargraph.v1.ValidateEdgeRequest.PropertiesEntry.value:type_name -> polargraph.v1.Value
-	0,  // 61: polargraph.v1.ScoredBinding.VarsEntry.value:type_name -> polargraph.v1.NodeId
-	0,  // 62: polargraph.v1.CypherBinding.NodesEntry.value:type_name -> polargraph.v1.NodeId
-	1,  // 63: polargraph.v1.CypherBinding.ValuesEntry.value:type_name -> polargraph.v1.Value
-	10, // 64: polargraph.v1.PolarGraphService.Insert:input_type -> polargraph.v1.InsertRequest
-	12, // 65: polargraph.v1.PolarGraphService.Query:input_type -> polargraph.v1.QueryRequest
-	19, // 66: polargraph.v1.PolarGraphService.InsertVector:input_type -> polargraph.v1.InsertVectorRequest
-	21, // 67: polargraph.v1.PolarGraphService.SearchVector:input_type -> polargraph.v1.SearchVectorRequest
-	17, // 68: polargraph.v1.PolarGraphService.Reachable:input_type -> polargraph.v1.ReachableRequest
-	37, // 69: polargraph.v1.PolarGraphService.RegisterNodeType:input_type -> polargraph.v1.RegisterNodeTypeRequest
-	39, // 70: polargraph.v1.PolarGraphService.GetNodeType:input_type -> polargraph.v1.GetNodeTypeRequest
-	41, // 71: polargraph.v1.PolarGraphService.ListNodeTypes:input_type -> polargraph.v1.ListNodeTypesRequest
-	43, // 72: polargraph.v1.PolarGraphService.ValidateNode:input_type -> polargraph.v1.ValidateNodeRequest
-	46, // 73: polargraph.v1.PolarGraphService.RegisterEdgeType:input_type -> polargraph.v1.RegisterEdgeTypeRequest
-	48, // 74: polargraph.v1.PolarGraphService.GetEdgeType:input_type -> polargraph.v1.GetEdgeTypeRequest
-	50, // 75: polargraph.v1.PolarGraphService.ListEdgeTypes:input_type -> polargraph.v1.ListEdgeTypesRequest
-	52, // 76: polargraph.v1.PolarGraphService.ValidateEdge:input_type -> polargraph.v1.ValidateEdgeRequest
-	54, // 77: polargraph.v1.PolarGraphService.ListPredicatesBetween:input_type -> polargraph.v1.ListPredicatesBetweenRequest
-	26, // 78: polargraph.v1.PolarGraphService.SearchVectorFiltered:input_type -> polargraph.v1.SearchVectorFilteredRequest
-	28, // 79: polargraph.v1.PolarGraphService.SearchVectorInSet:input_type -> polargraph.v1.SearchVectorInSetRequest
-	32, // 80: polargraph.v1.PolarGraphService.BatchInsertVectors:input_type -> polargraph.v1.BatchInsertVectorsRequest
-	57, // 81: polargraph.v1.PolarGraphService.VectorSeedQuery:input_type -> polargraph.v1.VectorSeedQueryRequest
-	60, // 82: polargraph.v1.PolarGraphService.CreateBackup:input_type -> polargraph.v1.CreateBackupRequest
-	62, // 83: polargraph.v1.PolarGraphService.ListBackups:input_type -> polargraph.v1.ListBackupsRequest
-	64, // 84: polargraph.v1.PolarGraphService.PurgeOldBackups:input_type -> polargraph.v1.PurgeOldBackupsRequest
-	66, // 85: polargraph.v1.PolarGraphService.RunRetention:input_type -> polargraph.v1.RunRetentionRequest
-	70, // 86: polargraph.v1.PolarGraphService.ReplicaStatus:input_type -> polargraph.v1.ReplicaStatusRequest
-	68, // 87: polargraph.v1.PolarGraphService.StreamWal:input_type -> polargraph.v1.StreamWalRequest
-	12, // 88: polargraph.v1.PolarGraphService.ExplainQuery:input_type -> polargraph.v1.QueryRequest
-	72, // 89: polargraph.v1.PolarGraphService.MigrateSchema:input_type -> polargraph.v1.MigrateRequest
-	74, // 90: polargraph.v1.PolarGraphService.MigrationStatus:input_type -> polargraph.v1.MigrationStatusRequest
-	77, // 91: polargraph.v1.PolarGraphService.CypherQuery:input_type -> polargraph.v1.CypherQueryRequest
-	80, // 92: polargraph.v1.PolarGraphService.CypherWrite:input_type -> polargraph.v1.CypherWriteRequest
-	12, // 93: polargraph.v1.PolarGraphService.QueryStream:input_type -> polargraph.v1.QueryRequest
-	77, // 94: polargraph.v1.PolarGraphService.CypherQueryStream:input_type -> polargraph.v1.CypherQueryRequest
-	11, // 95: polargraph.v1.PolarGraphService.Insert:output_type -> polargraph.v1.InsertResponse
-	14, // 96: polargraph.v1.PolarGraphService.Query:output_type -> polargraph.v1.QueryResponse
-	20, // 97: polargraph.v1.PolarGraphService.InsertVector:output_type -> polargraph.v1.InsertVectorResponse
-	23, // 98: polargraph.v1.PolarGraphService.SearchVector:output_type -> polargraph.v1.SearchVectorResponse
-	18, // 99: polargraph.v1.PolarGraphService.Reachable:output_type -> polargraph.v1.ReachableResponse
-	38, // 100: polargraph.v1.PolarGraphService.RegisterNodeType:output_type -> polargraph.v1.RegisterNodeTypeResponse
-	40, // 101: polargraph.v1.PolarGraphService.GetNodeType:output_type -> polargraph.v1.GetNodeTypeResponse
-	42, // 102: polargraph.v1.PolarGraphService.ListNodeTypes:output_type -> polargraph.v1.ListNodeTypesResponse
-	44, // 103: polargraph.v1.PolarGraphService.ValidateNode:output_type -> polargraph.v1.ValidateNodeResponse
-	47, // 104: polargraph.v1.PolarGraphService.RegisterEdgeType:output_type -> polargraph.v1.RegisterEdgeTypeResponse
-	49, // 105: polargraph.v1.PolarGraphService.GetEdgeType:output_type -> polargraph.v1.GetEdgeTypeResponse
-	51, // 106: polargraph.v1.PolarGraphService.ListEdgeTypes:output_type -> polargraph.v1.ListEdgeTypesResponse
-	53, // 107: polargraph.v1.PolarGraphService.ValidateEdge:output_type -> polargraph.v1.ValidateEdgeResponse
-	55, // 108: polargraph.v1.PolarGraphService.ListPredicatesBetween:output_type -> polargraph.v1.ListPredicatesBetweenResponse
-	27, // 109: polargraph.v1.PolarGraphService.SearchVectorFiltered:output_type -> polargraph.v1.SearchVectorFilteredResponse
-	29, // 110: polargraph.v1.PolarGraphService.SearchVectorInSet:output_type -> polargraph.v1.SearchVectorInSetResponse
-	33, // 111: polargraph.v1.PolarGraphService.BatchInsertVectors:output_type -> polargraph.v1.BatchInsertVectorsResponse
-	58, // 112: polargraph.v1.PolarGraphService.VectorSeedQuery:output_type -> polargraph.v1.VectorSeedQueryResponse
-	61, // 113: polargraph.v1.PolarGraphService.CreateBackup:output_type -> polargraph.v1.CreateBackupResponse
-	63, // 114: polargraph.v1.PolarGraphService.ListBackups:output_type -> polargraph.v1.ListBackupsResponse
-	65, // 115: polargraph.v1.PolarGraphService.PurgeOldBackups:output_type -> polargraph.v1.PurgeOldBackupsResponse
-	67, // 116: polargraph.v1.PolarGraphService.RunRetention:output_type -> polargraph.v1.RunRetentionResponse
-	71, // 117: polargraph.v1.PolarGraphService.ReplicaStatus:output_type -> polargraph.v1.ReplicaStatusResponse
-	69, // 118: polargraph.v1.PolarGraphService.StreamWal:output_type -> polargraph.v1.WalEntry
-	82, // 119: polargraph.v1.PolarGraphService.ExplainQuery:output_type -> polargraph.v1.ExplainResponse
-	73, // 120: polargraph.v1.PolarGraphService.MigrateSchema:output_type -> polargraph.v1.MigrateResponse
-	75, // 121: polargraph.v1.PolarGraphService.MigrationStatus:output_type -> polargraph.v1.MigrationStatusResponse
-	79, // 122: polargraph.v1.PolarGraphService.CypherQuery:output_type -> polargraph.v1.CypherQueryResponse
-	81, // 123: polargraph.v1.PolarGraphService.CypherWrite:output_type -> polargraph.v1.CypherWriteResponse
-	16, // 124: polargraph.v1.PolarGraphService.QueryStream:output_type -> polargraph.v1.QueryStreamChunk
-	16, // 125: polargraph.v1.PolarGraphService.CypherQueryStream:output_type -> polargraph.v1.QueryStreamChunk
-	95, // [95:126] is the sub-list for method output_type
-	64, // [64:95] is the sub-list for method input_type
-	64, // [64:64] is the sub-list for extension type_name
-	64, // [64:64] is the sub-list for extension extendee
-	0,  // [0:64] is the sub-list for field type_name
+	6,   // 0: polargraph.v1.Value.vec_val:type_name -> polargraph.v1.FloatArray
+	4,   // 1: polargraph.v1.Value.lang_text:type_name -> polargraph.v1.LangText
+	5,   // 2: polargraph.v1.Value.typed:type_name -> polargraph.v1.TypedLiteral
+	3,   // 3: polargraph.v1.EdgeProperty.value:type_name -> polargraph.v1.Value
+	2,   // 4: polargraph.v1.RelationTriple.subject:type_name -> polargraph.v1.NodeId
+	2,   // 5: polargraph.v1.RelationTriple.object:type_name -> polargraph.v1.NodeId
+	7,   // 6: polargraph.v1.RelationTriple.properties:type_name -> polargraph.v1.EdgeProperty
+	2,   // 7: polargraph.v1.PropertyTriple.subject:type_name -> polargraph.v1.NodeId
+	3,   // 8: polargraph.v1.PropertyTriple.value:type_name -> polargraph.v1.Value
+	0,   // 9: polargraph.v1.PropertyTriple.mode:type_name -> polargraph.v1.PropertyWriteMode
+	8,   // 10: polargraph.v1.Triple.relation:type_name -> polargraph.v1.RelationTriple
+	9,   // 11: polargraph.v1.Triple.property:type_name -> polargraph.v1.PropertyTriple
+	2,   // 12: polargraph.v1.Term.bound:type_name -> polargraph.v1.NodeId
+	3,   // 13: polargraph.v1.Term.literal:type_name -> polargraph.v1.Value
+	11,  // 14: polargraph.v1.VarPattern.subject:type_name -> polargraph.v1.Term
+	11,  // 15: polargraph.v1.VarPattern.object:type_name -> polargraph.v1.Term
+	13,  // 16: polargraph.v1.VarPattern.graph:type_name -> polargraph.v1.GraphTerm
+	14,  // 17: polargraph.v1.GraphTerm.set:type_name -> polargraph.v1.GraphSet
+	12,  // 18: polargraph.v1.DatalogRule.body:type_name -> polargraph.v1.VarPattern
+	3,   // 19: polargraph.v1.EdgeAnnotation.scalar:type_name -> polargraph.v1.Value
+	16,  // 20: polargraph.v1.GetEdgeAnnotationsResponse.annotations:type_name -> polargraph.v1.EdgeAnnotation
+	10,  // 21: polargraph.v1.InsertRequest.triples:type_name -> polargraph.v1.Triple
+	16,  // 22: polargraph.v1.InsertRequest.edge_annotations:type_name -> polargraph.v1.EdgeAnnotation
+	12,  // 23: polargraph.v1.QueryRequest.patterns:type_name -> polargraph.v1.VarPattern
+	15,  // 24: polargraph.v1.QueryRequest.rules:type_name -> polargraph.v1.DatalogRule
+	175, // 25: polargraph.v1.QueryRequest.params:type_name -> polargraph.v1.QueryRequest.ParamsEntry
+	176, // 26: polargraph.v1.Binding.vars:type_name -> polargraph.v1.Binding.VarsEntry
+	177, // 27: polargraph.v1.Binding.predicates:type_name -> polargraph.v1.Binding.PredicatesEntry
+	24,  // 28: polargraph.v1.QueryResponse.bindings:type_name -> polargraph.v1.Binding
+	178, // 29: polargraph.v1.QueryResult.vars:type_name -> polargraph.v1.QueryResult.VarsEntry
+	26,  // 30: polargraph.v1.QueryStreamChunk.results:type_name -> polargraph.v1.QueryResult
+	2,   // 31: polargraph.v1.ReachableRequest.start:type_name -> polargraph.v1.NodeId
+	2,   // 32: polargraph.v1.ReachableResponse.node_ids:type_name -> polargraph.v1.NodeId
+	2,   // 33: polargraph.v1.InsertVectorRequest.node_id:type_name -> polargraph.v1.NodeId
+	2,   // 34: polargraph.v1.VectorSearchResult.node_id:type_name -> polargraph.v1.NodeId
+	33,  // 35: polargraph.v1.SearchVectorResponse.results:type_name -> polargraph.v1.VectorSearchResult
+	2,   // 36: polargraph.v1.ReachabilityFilter.from_node:type_name -> polargraph.v1.NodeId
+	35,  // 37: polargraph.v1.SearchVectorFilteredRequest.node_type_filter:type_name -> polargraph.v1.NodeTypeFilter
+	36,  // 38: polargraph.v1.SearchVectorFilteredRequest.reachability_filter:type_name -> polargraph.v1.ReachabilityFilter
+	33,  // 39: polargraph.v1.SearchVectorFilteredResponse.results:type_name -> polargraph.v1.VectorSearchResult
+	2,   // 40: polargraph.v1.SearchVectorInSetRequest.node_ids:type_name -> polargraph.v1.NodeId
+	33,  // 41: polargraph.v1.SearchVectorInSetResponse.results:type_name -> polargraph.v1.VectorSearchResult
+	2,   // 42: polargraph.v1.VectorItem.node_id:type_name -> polargraph.v1.NodeId
+	41,  // 43: polargraph.v1.BatchInsertVectorsRequest.items:type_name -> polargraph.v1.VectorItem
+	42,  // 44: polargraph.v1.BatchInsertVectorsResponse.errors:type_name -> polargraph.v1.BatchInsertError
+	45,  // 45: polargraph.v1.NodeTypeDef.fields:type_name -> polargraph.v1.FieldDef
+	46,  // 46: polargraph.v1.NodeTypeDef.vector_space:type_name -> polargraph.v1.VectorSpaceDef
+	47,  // 47: polargraph.v1.RegisterNodeTypeRequest.definition:type_name -> polargraph.v1.NodeTypeDef
+	47,  // 48: polargraph.v1.GetNodeTypeResponse.definition:type_name -> polargraph.v1.NodeTypeDef
+	47,  // 49: polargraph.v1.ListNodeTypesResponse.definitions:type_name -> polargraph.v1.NodeTypeDef
+	179, // 50: polargraph.v1.ValidateNodeRequest.properties:type_name -> polargraph.v1.ValidateNodeRequest.PropertiesEntry
+	45,  // 51: polargraph.v1.EdgeTypeDef.fields:type_name -> polargraph.v1.FieldDef
+	56,  // 52: polargraph.v1.RegisterEdgeTypeRequest.definition:type_name -> polargraph.v1.EdgeTypeDef
+	56,  // 53: polargraph.v1.GetEdgeTypeResponse.definition:type_name -> polargraph.v1.EdgeTypeDef
+	56,  // 54: polargraph.v1.ListEdgeTypesResponse.definitions:type_name -> polargraph.v1.EdgeTypeDef
+	180, // 55: polargraph.v1.ValidateEdgeRequest.properties:type_name -> polargraph.v1.ValidateEdgeRequest.PropertiesEntry
+	66,  // 56: polargraph.v1.ValidateOntologyResponse.violations:type_name -> polargraph.v1.OntologyViolation
+	181, // 57: polargraph.v1.ScoredBinding.vars:type_name -> polargraph.v1.ScoredBinding.VarsEntry
+	12,  // 58: polargraph.v1.VectorSeedQueryRequest.patterns:type_name -> polargraph.v1.VarPattern
+	35,  // 59: polargraph.v1.VectorSeedQueryRequest.node_type_filter:type_name -> polargraph.v1.NodeTypeFilter
+	36,  // 60: polargraph.v1.VectorSeedQueryRequest.reachability_filter:type_name -> polargraph.v1.ReachabilityFilter
+	182, // 61: polargraph.v1.VectorSeedQueryRequest.params:type_name -> polargraph.v1.VectorSeedQueryRequest.ParamsEntry
+	70,  // 62: polargraph.v1.VectorSeedQueryResponse.bindings:type_name -> polargraph.v1.ScoredBinding
+	73,  // 63: polargraph.v1.ListBackupsResponse.backups:type_name -> polargraph.v1.BackupInfo
+	90,  // 64: polargraph.v1.MigrationStatusResponse.applied:type_name -> polargraph.v1.AppliedMigrationInfo
+	92,  // 65: polargraph.v1.ShowIndexesResponse.column_families:type_name -> polargraph.v1.ColumnFamilyInfo
+	93,  // 66: polargraph.v1.ShowIndexesResponse.vector_spaces:type_name -> polargraph.v1.VectorSpaceInfo
+	183, // 67: polargraph.v1.CypherQueryRequest.params:type_name -> polargraph.v1.CypherQueryRequest.ParamsEntry
+	184, // 68: polargraph.v1.CypherBinding.nodes:type_name -> polargraph.v1.CypherBinding.NodesEntry
+	185, // 69: polargraph.v1.CypherBinding.values:type_name -> polargraph.v1.CypherBinding.ValuesEntry
+	98,  // 70: polargraph.v1.CypherQueryResponse.rows:type_name -> polargraph.v1.CypherBinding
+	103, // 71: polargraph.v1.ExplainResponse.nodes:type_name -> polargraph.v1.PlanNode
+	103, // 72: polargraph.v1.PlanNode.children:type_name -> polargraph.v1.PlanNode
+	125, // 73: polargraph.v1.GetPropertyHistoryResponse.versions:type_name -> polargraph.v1.PropertyVersion
+	3,   // 74: polargraph.v1.DeleteTriplesRequest.value:type_name -> polargraph.v1.Value
+	13,  // 75: polargraph.v1.DeleteTriplesRequest.graph:type_name -> polargraph.v1.GraphTerm
+	3,   // 76: polargraph.v1.GraphMetadata.value:type_name -> polargraph.v1.Value
+	131, // 77: polargraph.v1.GraphInfo.metadata:type_name -> polargraph.v1.GraphMetadata
+	131, // 78: polargraph.v1.CreateGraphRequest.metadata:type_name -> polargraph.v1.GraphMetadata
+	132, // 79: polargraph.v1.CreateGraphResponse.graph:type_name -> polargraph.v1.GraphInfo
+	131, // 80: polargraph.v1.ListGraphsRequest.filter:type_name -> polargraph.v1.GraphMetadata
+	132, // 81: polargraph.v1.ListGraphsResponse.graphs:type_name -> polargraph.v1.GraphInfo
+	10,  // 82: polargraph.v1.GraphTriples.triples:type_name -> polargraph.v1.Triple
+	2,   // 83: polargraph.v1.QuadRef.subject:type_name -> polargraph.v1.NodeId
+	2,   // 84: polargraph.v1.QuadRef.node:type_name -> polargraph.v1.NodeId
+	3,   // 85: polargraph.v1.QuadRef.value:type_name -> polargraph.v1.Value
+	144, // 86: polargraph.v1.ApplyChangesRequest.adds:type_name -> polargraph.v1.GraphTriples
+	145, // 87: polargraph.v1.ApplyChangesRequest.retractions:type_name -> polargraph.v1.QuadRef
+	144, // 88: polargraph.v1.ValidateShapesRequest.overlay_adds:type_name -> polargraph.v1.GraphTriples
+	145, // 89: polargraph.v1.ValidateShapesRequest.overlay_retractions:type_name -> polargraph.v1.QuadRef
+	3,   // 90: polargraph.v1.ValidationResult.focus_literal:type_name -> polargraph.v1.Value
+	3,   // 91: polargraph.v1.ValidationResult.value_literal:type_name -> polargraph.v1.Value
+	149, // 92: polargraph.v1.ValidateShapesResponse.results:type_name -> polargraph.v1.ValidationResult
+	1,   // 93: polargraph.v1.ChangeEvent.kind:type_name -> polargraph.v1.ChangeKind
+	10,  // 94: polargraph.v1.ChangeEvent.quad:type_name -> polargraph.v1.Triple
+	158, // 95: polargraph.v1.GetGraphAccessResponse.graphs:type_name -> polargraph.v1.GraphAccessEntry
+	2,   // 96: polargraph.v1.ExportedQuad.subject:type_name -> polargraph.v1.NodeId
+	2,   // 97: polargraph.v1.ExportedQuad.node:type_name -> polargraph.v1.NodeId
+	3,   // 98: polargraph.v1.ExportedQuad.value:type_name -> polargraph.v1.Value
+	161, // 99: polargraph.v1.ExportGraphChunk.quads:type_name -> polargraph.v1.ExportedQuad
+	2,   // 100: polargraph.v1.ResolveIrisRequest.nodes:type_name -> polargraph.v1.NodeId
+	165, // 101: polargraph.v1.Vocabulary.prefixes:type_name -> polargraph.v1.VocabularyPrefix
+	166, // 102: polargraph.v1.Vocabulary.legacy:type_name -> polargraph.v1.LegacyStatus
+	173, // 103: polargraph.v1.ConvertLegacyDataResponse.predicates:type_name -> polargraph.v1.PredicateConversion
+	166, // 104: polargraph.v1.ConvertLegacyDataResponse.legacy:type_name -> polargraph.v1.LegacyStatus
+	2,   // 105: polargraph.v1.Binding.VarsEntry.value:type_name -> polargraph.v1.NodeId
+	2,   // 106: polargraph.v1.QueryResult.VarsEntry.value:type_name -> polargraph.v1.NodeId
+	3,   // 107: polargraph.v1.ValidateNodeRequest.PropertiesEntry.value:type_name -> polargraph.v1.Value
+	3,   // 108: polargraph.v1.ValidateEdgeRequest.PropertiesEntry.value:type_name -> polargraph.v1.Value
+	2,   // 109: polargraph.v1.ScoredBinding.VarsEntry.value:type_name -> polargraph.v1.NodeId
+	2,   // 110: polargraph.v1.CypherBinding.NodesEntry.value:type_name -> polargraph.v1.NodeId
+	3,   // 111: polargraph.v1.CypherBinding.ValuesEntry.value:type_name -> polargraph.v1.Value
+	168, // 112: polargraph.v1.PolarGraphService.GetVocabulary:input_type -> polargraph.v1.GetVocabularyRequest
+	169, // 113: polargraph.v1.PolarGraphService.SetVocabularyBase:input_type -> polargraph.v1.SetVocabularyBaseRequest
+	170, // 114: polargraph.v1.PolarGraphService.PutPrefix:input_type -> polargraph.v1.PutPrefixRequest
+	171, // 115: polargraph.v1.PolarGraphService.RemovePrefix:input_type -> polargraph.v1.RemovePrefixRequest
+	172, // 116: polargraph.v1.PolarGraphService.ConvertLegacyData:input_type -> polargraph.v1.ConvertLegacyDataRequest
+	21,  // 117: polargraph.v1.PolarGraphService.Insert:input_type -> polargraph.v1.InsertRequest
+	163, // 118: polargraph.v1.PolarGraphService.ResolveIris:input_type -> polargraph.v1.ResolveIrisRequest
+	133, // 119: polargraph.v1.PolarGraphService.CreateGraph:input_type -> polargraph.v1.CreateGraphRequest
+	135, // 120: polargraph.v1.PolarGraphService.ListGraphs:input_type -> polargraph.v1.ListGraphsRequest
+	137, // 121: polargraph.v1.PolarGraphService.GraphStats:input_type -> polargraph.v1.GraphStatsRequest
+	139, // 122: polargraph.v1.PolarGraphService.CopyGraph:input_type -> polargraph.v1.CopyGraphRequest
+	141, // 123: polargraph.v1.PolarGraphService.MoveGraph:input_type -> polargraph.v1.MoveGraphRequest
+	142, // 124: polargraph.v1.PolarGraphService.DropGraph:input_type -> polargraph.v1.DropGraphRequest
+	160, // 125: polargraph.v1.PolarGraphService.ExportGraph:input_type -> polargraph.v1.ExportGraphRequest
+	146, // 126: polargraph.v1.PolarGraphService.ApplyChanges:input_type -> polargraph.v1.ApplyChangesRequest
+	148, // 127: polargraph.v1.PolarGraphService.ValidateShapes:input_type -> polargraph.v1.ValidateShapesRequest
+	151, // 128: polargraph.v1.PolarGraphService.Subscribe:input_type -> polargraph.v1.SubscribeRequest
+	153, // 129: polargraph.v1.PolarGraphService.GrantGraphAccess:input_type -> polargraph.v1.GrantGraphAccessRequest
+	155, // 130: polargraph.v1.PolarGraphService.RevokeGraphAccess:input_type -> polargraph.v1.RevokeGraphAccessRequest
+	157, // 131: polargraph.v1.PolarGraphService.GetGraphAccess:input_type -> polargraph.v1.GetGraphAccessRequest
+	23,  // 132: polargraph.v1.PolarGraphService.Query:input_type -> polargraph.v1.QueryRequest
+	30,  // 133: polargraph.v1.PolarGraphService.InsertVector:input_type -> polargraph.v1.InsertVectorRequest
+	32,  // 134: polargraph.v1.PolarGraphService.SearchVector:input_type -> polargraph.v1.SearchVectorRequest
+	28,  // 135: polargraph.v1.PolarGraphService.Reachable:input_type -> polargraph.v1.ReachableRequest
+	48,  // 136: polargraph.v1.PolarGraphService.RegisterNodeType:input_type -> polargraph.v1.RegisterNodeTypeRequest
+	50,  // 137: polargraph.v1.PolarGraphService.GetNodeType:input_type -> polargraph.v1.GetNodeTypeRequest
+	52,  // 138: polargraph.v1.PolarGraphService.ListNodeTypes:input_type -> polargraph.v1.ListNodeTypesRequest
+	54,  // 139: polargraph.v1.PolarGraphService.ValidateNode:input_type -> polargraph.v1.ValidateNodeRequest
+	57,  // 140: polargraph.v1.PolarGraphService.RegisterEdgeType:input_type -> polargraph.v1.RegisterEdgeTypeRequest
+	59,  // 141: polargraph.v1.PolarGraphService.GetEdgeType:input_type -> polargraph.v1.GetEdgeTypeRequest
+	61,  // 142: polargraph.v1.PolarGraphService.ListEdgeTypes:input_type -> polargraph.v1.ListEdgeTypesRequest
+	63,  // 143: polargraph.v1.PolarGraphService.ValidateEdge:input_type -> polargraph.v1.ValidateEdgeRequest
+	68,  // 144: polargraph.v1.PolarGraphService.ListPredicatesBetween:input_type -> polargraph.v1.ListPredicatesBetweenRequest
+	65,  // 145: polargraph.v1.PolarGraphService.ValidateOntology:input_type -> polargraph.v1.ValidateOntologyRequest
+	37,  // 146: polargraph.v1.PolarGraphService.SearchVectorFiltered:input_type -> polargraph.v1.SearchVectorFilteredRequest
+	39,  // 147: polargraph.v1.PolarGraphService.SearchVectorInSet:input_type -> polargraph.v1.SearchVectorInSetRequest
+	43,  // 148: polargraph.v1.PolarGraphService.BatchInsertVectors:input_type -> polargraph.v1.BatchInsertVectorsRequest
+	71,  // 149: polargraph.v1.PolarGraphService.VectorSeedQuery:input_type -> polargraph.v1.VectorSeedQueryRequest
+	74,  // 150: polargraph.v1.PolarGraphService.CreateBackup:input_type -> polargraph.v1.CreateBackupRequest
+	76,  // 151: polargraph.v1.PolarGraphService.ListBackups:input_type -> polargraph.v1.ListBackupsRequest
+	78,  // 152: polargraph.v1.PolarGraphService.PurgeOldBackups:input_type -> polargraph.v1.PurgeOldBackupsRequest
+	80,  // 153: polargraph.v1.PolarGraphService.RunRetention:input_type -> polargraph.v1.RunRetentionRequest
+	84,  // 154: polargraph.v1.PolarGraphService.ReplicaStatus:input_type -> polargraph.v1.ReplicaStatusRequest
+	82,  // 155: polargraph.v1.PolarGraphService.StreamWal:input_type -> polargraph.v1.StreamWalRequest
+	23,  // 156: polargraph.v1.PolarGraphService.ExplainQuery:input_type -> polargraph.v1.QueryRequest
+	86,  // 157: polargraph.v1.PolarGraphService.MigrateSchema:input_type -> polargraph.v1.MigrateRequest
+	88,  // 158: polargraph.v1.PolarGraphService.MigrationStatus:input_type -> polargraph.v1.MigrationStatusRequest
+	97,  // 159: polargraph.v1.PolarGraphService.CypherQuery:input_type -> polargraph.v1.CypherQueryRequest
+	100, // 160: polargraph.v1.PolarGraphService.CypherWrite:input_type -> polargraph.v1.CypherWriteRequest
+	23,  // 161: polargraph.v1.PolarGraphService.QueryStream:input_type -> polargraph.v1.QueryRequest
+	97,  // 162: polargraph.v1.PolarGraphService.CypherQueryStream:input_type -> polargraph.v1.CypherQueryRequest
+	91,  // 163: polargraph.v1.PolarGraphService.ShowIndexes:input_type -> polargraph.v1.ShowIndexesRequest
+	95,  // 164: polargraph.v1.PolarGraphService.ShowStats:input_type -> polargraph.v1.ShowStatsRequest
+	104, // 165: polargraph.v1.PolarGraphService.BeginTransaction:input_type -> polargraph.v1.BeginTransactionRequest
+	106, // 166: polargraph.v1.PolarGraphService.CommitTransaction:input_type -> polargraph.v1.CommitTransactionRequest
+	108, // 167: polargraph.v1.PolarGraphService.RollbackTransaction:input_type -> polargraph.v1.RollbackTransactionRequest
+	17,  // 168: polargraph.v1.PolarGraphService.GetEdgeAnnotations:input_type -> polargraph.v1.GetEdgeAnnotationsRequest
+	19,  // 169: polargraph.v1.PolarGraphService.GetEdgeIdsByTriple:input_type -> polargraph.v1.GetEdgeIdsByTripleRequest
+	110, // 170: polargraph.v1.PolarGraphService.AddApiKey:input_type -> polargraph.v1.AddApiKeyRequest
+	112, // 171: polargraph.v1.PolarGraphService.RevokeApiKey:input_type -> polargraph.v1.RevokeApiKeyRequest
+	114, // 172: polargraph.v1.PolarGraphService.ListApiKeys:input_type -> polargraph.v1.ListApiKeysRequest
+	116, // 173: polargraph.v1.PolarGraphService.GrantAccess:input_type -> polargraph.v1.GrantAccessRequest
+	118, // 174: polargraph.v1.PolarGraphService.RevokeAccess:input_type -> polargraph.v1.RevokeAccessRequest
+	120, // 175: polargraph.v1.PolarGraphService.AddUserToGroup:input_type -> polargraph.v1.AddUserToGroupRequest
+	122, // 176: polargraph.v1.PolarGraphService.GetUserAccess:input_type -> polargraph.v1.GetUserAccessRequest
+	124, // 177: polargraph.v1.PolarGraphService.GetPropertyHistory:input_type -> polargraph.v1.GetPropertyHistoryRequest
+	127, // 178: polargraph.v1.PolarGraphService.DeleteTriples:input_type -> polargraph.v1.DeleteTriplesRequest
+	129, // 179: polargraph.v1.PolarGraphService.RunMaterialization:input_type -> polargraph.v1.RunMaterializationRequest
+	167, // 180: polargraph.v1.PolarGraphService.GetVocabulary:output_type -> polargraph.v1.Vocabulary
+	167, // 181: polargraph.v1.PolarGraphService.SetVocabularyBase:output_type -> polargraph.v1.Vocabulary
+	167, // 182: polargraph.v1.PolarGraphService.PutPrefix:output_type -> polargraph.v1.Vocabulary
+	167, // 183: polargraph.v1.PolarGraphService.RemovePrefix:output_type -> polargraph.v1.Vocabulary
+	174, // 184: polargraph.v1.PolarGraphService.ConvertLegacyData:output_type -> polargraph.v1.ConvertLegacyDataResponse
+	22,  // 185: polargraph.v1.PolarGraphService.Insert:output_type -> polargraph.v1.InsertResponse
+	164, // 186: polargraph.v1.PolarGraphService.ResolveIris:output_type -> polargraph.v1.ResolveIrisResponse
+	134, // 187: polargraph.v1.PolarGraphService.CreateGraph:output_type -> polargraph.v1.CreateGraphResponse
+	136, // 188: polargraph.v1.PolarGraphService.ListGraphs:output_type -> polargraph.v1.ListGraphsResponse
+	138, // 189: polargraph.v1.PolarGraphService.GraphStats:output_type -> polargraph.v1.GraphStatsResponse
+	140, // 190: polargraph.v1.PolarGraphService.CopyGraph:output_type -> polargraph.v1.CopyGraphResponse
+	140, // 191: polargraph.v1.PolarGraphService.MoveGraph:output_type -> polargraph.v1.CopyGraphResponse
+	143, // 192: polargraph.v1.PolarGraphService.DropGraph:output_type -> polargraph.v1.DropGraphResponse
+	162, // 193: polargraph.v1.PolarGraphService.ExportGraph:output_type -> polargraph.v1.ExportGraphChunk
+	147, // 194: polargraph.v1.PolarGraphService.ApplyChanges:output_type -> polargraph.v1.ApplyChangesResponse
+	150, // 195: polargraph.v1.PolarGraphService.ValidateShapes:output_type -> polargraph.v1.ValidateShapesResponse
+	152, // 196: polargraph.v1.PolarGraphService.Subscribe:output_type -> polargraph.v1.ChangeEvent
+	154, // 197: polargraph.v1.PolarGraphService.GrantGraphAccess:output_type -> polargraph.v1.GrantGraphAccessResponse
+	156, // 198: polargraph.v1.PolarGraphService.RevokeGraphAccess:output_type -> polargraph.v1.RevokeGraphAccessResponse
+	159, // 199: polargraph.v1.PolarGraphService.GetGraphAccess:output_type -> polargraph.v1.GetGraphAccessResponse
+	25,  // 200: polargraph.v1.PolarGraphService.Query:output_type -> polargraph.v1.QueryResponse
+	31,  // 201: polargraph.v1.PolarGraphService.InsertVector:output_type -> polargraph.v1.InsertVectorResponse
+	34,  // 202: polargraph.v1.PolarGraphService.SearchVector:output_type -> polargraph.v1.SearchVectorResponse
+	29,  // 203: polargraph.v1.PolarGraphService.Reachable:output_type -> polargraph.v1.ReachableResponse
+	49,  // 204: polargraph.v1.PolarGraphService.RegisterNodeType:output_type -> polargraph.v1.RegisterNodeTypeResponse
+	51,  // 205: polargraph.v1.PolarGraphService.GetNodeType:output_type -> polargraph.v1.GetNodeTypeResponse
+	53,  // 206: polargraph.v1.PolarGraphService.ListNodeTypes:output_type -> polargraph.v1.ListNodeTypesResponse
+	55,  // 207: polargraph.v1.PolarGraphService.ValidateNode:output_type -> polargraph.v1.ValidateNodeResponse
+	58,  // 208: polargraph.v1.PolarGraphService.RegisterEdgeType:output_type -> polargraph.v1.RegisterEdgeTypeResponse
+	60,  // 209: polargraph.v1.PolarGraphService.GetEdgeType:output_type -> polargraph.v1.GetEdgeTypeResponse
+	62,  // 210: polargraph.v1.PolarGraphService.ListEdgeTypes:output_type -> polargraph.v1.ListEdgeTypesResponse
+	64,  // 211: polargraph.v1.PolarGraphService.ValidateEdge:output_type -> polargraph.v1.ValidateEdgeResponse
+	69,  // 212: polargraph.v1.PolarGraphService.ListPredicatesBetween:output_type -> polargraph.v1.ListPredicatesBetweenResponse
+	67,  // 213: polargraph.v1.PolarGraphService.ValidateOntology:output_type -> polargraph.v1.ValidateOntologyResponse
+	38,  // 214: polargraph.v1.PolarGraphService.SearchVectorFiltered:output_type -> polargraph.v1.SearchVectorFilteredResponse
+	40,  // 215: polargraph.v1.PolarGraphService.SearchVectorInSet:output_type -> polargraph.v1.SearchVectorInSetResponse
+	44,  // 216: polargraph.v1.PolarGraphService.BatchInsertVectors:output_type -> polargraph.v1.BatchInsertVectorsResponse
+	72,  // 217: polargraph.v1.PolarGraphService.VectorSeedQuery:output_type -> polargraph.v1.VectorSeedQueryResponse
+	75,  // 218: polargraph.v1.PolarGraphService.CreateBackup:output_type -> polargraph.v1.CreateBackupResponse
+	77,  // 219: polargraph.v1.PolarGraphService.ListBackups:output_type -> polargraph.v1.ListBackupsResponse
+	79,  // 220: polargraph.v1.PolarGraphService.PurgeOldBackups:output_type -> polargraph.v1.PurgeOldBackupsResponse
+	81,  // 221: polargraph.v1.PolarGraphService.RunRetention:output_type -> polargraph.v1.RunRetentionResponse
+	85,  // 222: polargraph.v1.PolarGraphService.ReplicaStatus:output_type -> polargraph.v1.ReplicaStatusResponse
+	83,  // 223: polargraph.v1.PolarGraphService.StreamWal:output_type -> polargraph.v1.WalEntry
+	102, // 224: polargraph.v1.PolarGraphService.ExplainQuery:output_type -> polargraph.v1.ExplainResponse
+	87,  // 225: polargraph.v1.PolarGraphService.MigrateSchema:output_type -> polargraph.v1.MigrateResponse
+	89,  // 226: polargraph.v1.PolarGraphService.MigrationStatus:output_type -> polargraph.v1.MigrationStatusResponse
+	99,  // 227: polargraph.v1.PolarGraphService.CypherQuery:output_type -> polargraph.v1.CypherQueryResponse
+	101, // 228: polargraph.v1.PolarGraphService.CypherWrite:output_type -> polargraph.v1.CypherWriteResponse
+	27,  // 229: polargraph.v1.PolarGraphService.QueryStream:output_type -> polargraph.v1.QueryStreamChunk
+	27,  // 230: polargraph.v1.PolarGraphService.CypherQueryStream:output_type -> polargraph.v1.QueryStreamChunk
+	94,  // 231: polargraph.v1.PolarGraphService.ShowIndexes:output_type -> polargraph.v1.ShowIndexesResponse
+	96,  // 232: polargraph.v1.PolarGraphService.ShowStats:output_type -> polargraph.v1.ShowStatsResponse
+	105, // 233: polargraph.v1.PolarGraphService.BeginTransaction:output_type -> polargraph.v1.BeginTransactionResponse
+	107, // 234: polargraph.v1.PolarGraphService.CommitTransaction:output_type -> polargraph.v1.CommitTransactionResponse
+	109, // 235: polargraph.v1.PolarGraphService.RollbackTransaction:output_type -> polargraph.v1.RollbackTransactionResponse
+	18,  // 236: polargraph.v1.PolarGraphService.GetEdgeAnnotations:output_type -> polargraph.v1.GetEdgeAnnotationsResponse
+	20,  // 237: polargraph.v1.PolarGraphService.GetEdgeIdsByTriple:output_type -> polargraph.v1.GetEdgeIdsByTripleResponse
+	111, // 238: polargraph.v1.PolarGraphService.AddApiKey:output_type -> polargraph.v1.AddApiKeyResponse
+	113, // 239: polargraph.v1.PolarGraphService.RevokeApiKey:output_type -> polargraph.v1.RevokeApiKeyResponse
+	115, // 240: polargraph.v1.PolarGraphService.ListApiKeys:output_type -> polargraph.v1.ListApiKeysResponse
+	117, // 241: polargraph.v1.PolarGraphService.GrantAccess:output_type -> polargraph.v1.GrantAccessResponse
+	119, // 242: polargraph.v1.PolarGraphService.RevokeAccess:output_type -> polargraph.v1.RevokeAccessResponse
+	121, // 243: polargraph.v1.PolarGraphService.AddUserToGroup:output_type -> polargraph.v1.AddUserToGroupResponse
+	123, // 244: polargraph.v1.PolarGraphService.GetUserAccess:output_type -> polargraph.v1.GetUserAccessResponse
+	126, // 245: polargraph.v1.PolarGraphService.GetPropertyHistory:output_type -> polargraph.v1.GetPropertyHistoryResponse
+	128, // 246: polargraph.v1.PolarGraphService.DeleteTriples:output_type -> polargraph.v1.DeleteTriplesResponse
+	130, // 247: polargraph.v1.PolarGraphService.RunMaterialization:output_type -> polargraph.v1.RunMaterializationResponse
+	180, // [180:248] is the sub-list for method output_type
+	112, // [112:180] is the sub-list for method input_type
+	112, // [112:112] is the sub-list for extension type_name
+	112, // [112:112] is the sub-list for extension extendee
+	0,   // [0:112] is the sub-list for field type_name
 }
 
 func init() { file_polargraph_proto_init() }
@@ -5491,35 +11860,65 @@ func file_polargraph_proto_init() {
 		(*Value_TextVal)(nil),
 		(*Value_BlobVal)(nil),
 		(*Value_VecVal)(nil),
+		(*Value_LangText)(nil),
+		(*Value_Typed)(nil),
 	}
-	file_polargraph_proto_msgTypes[6].OneofWrappers = []any{
+	file_polargraph_proto_msgTypes[8].OneofWrappers = []any{
 		(*Triple_Relation)(nil),
 		(*Triple_Property)(nil),
 	}
-	file_polargraph_proto_msgTypes[7].OneofWrappers = []any{
+	file_polargraph_proto_msgTypes[9].OneofWrappers = []any{
 		(*Term_Bound)(nil),
 		(*Term_Var)(nil),
+		(*Term_Literal)(nil),
 	}
-	file_polargraph_proto_msgTypes[26].OneofWrappers = []any{
+	file_polargraph_proto_msgTypes[11].OneofWrappers = []any{
+		(*GraphTerm_DefaultGraph)(nil),
+		(*GraphTerm_Iri)(nil),
+		(*GraphTerm_Var)(nil),
+		(*GraphTerm_Set)(nil),
+	}
+	file_polargraph_proto_msgTypes[14].OneofWrappers = []any{
+		(*EdgeAnnotation_NodeId)(nil),
+		(*EdgeAnnotation_Scalar)(nil),
+	}
+	file_polargraph_proto_msgTypes[35].OneofWrappers = []any{
 		(*SearchVectorFilteredRequest_NodeTypeFilter)(nil),
 		(*SearchVectorFilteredRequest_ReachabilityFilter)(nil),
 	}
-	file_polargraph_proto_msgTypes[57].OneofWrappers = []any{
+	file_polargraph_proto_msgTypes[69].OneofWrappers = []any{
 		(*VectorSeedQueryRequest_NodeTypeFilter)(nil),
 		(*VectorSeedQueryRequest_ReachabilityFilter)(nil),
+	}
+	file_polargraph_proto_msgTypes[114].OneofWrappers = []any{
+		(*GrantAccessRequest_NodeId)(nil),
+		(*GrantAccessRequest_TypeName)(nil),
+	}
+	file_polargraph_proto_msgTypes[116].OneofWrappers = []any{
+		(*RevokeAccessRequest_NodeId)(nil),
+		(*RevokeAccessRequest_TypeName)(nil),
+	}
+	file_polargraph_proto_msgTypes[143].OneofWrappers = []any{
+		(*QuadRef_Node)(nil),
+		(*QuadRef_Value)(nil),
+	}
+	file_polargraph_proto_msgTypes[159].OneofWrappers = []any{
+		(*ExportedQuad_Node)(nil),
+		(*ExportedQuad_Value)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_polargraph_proto_rawDesc), len(file_polargraph_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   91,
+			NumEnums:      2,
+			NumMessages:   184,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_polargraph_proto_goTypes,
 		DependencyIndexes: file_polargraph_proto_depIdxs,
+		EnumInfos:         file_polargraph_proto_enumTypes,
 		MessageInfos:      file_polargraph_proto_msgTypes,
 	}.Build()
 	File_polargraph_proto = out.File

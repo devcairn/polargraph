@@ -484,44 +484,50 @@ curl -s -X POST http://localhost:8000/cypher \
 
 Supported Cypher: `MATCH`, `WHERE` (equality, comparison, text predicates), `RETURN`, `LIMIT`, `ORDER BY`, `SKIP`, `WITH`, `COUNT`, `COLLECT`, directed relationships `(a)-[:pred]->(b)`, transitive closure `[:pred*]`. Unsupported features return `INVALID_ARGUMENT`.
 
-### Cypher write operations
+### Writes (Cypher writes are deprecated)
 
-`POST /cypher/write` (or the `CypherWrite` gRPC RPC) executes CREATE, MERGE, SET, and DELETE statements.
+`POST /cypher/write` / `CypherWrite` (CREATE, MERGE, SET, DELETE) still work
+for one more release but are **deprecated**: responses carry `Deprecation` /
+`Warning` headers. Write with an atomic changeset (`POST /changes`,
+`ApplyChanges`) or SPARQL Update instead — one write path for graph ACLs,
+authors, the change feed and validation. See
+[`docs/upgrade-cypher-rdf.md`](docs/upgrade-cypher-rdf.md#cypher-writes-are-deprecated).
 
 ```bash
-# Create a node
-curl -s -X POST http://localhost:8000/cypher/write \
+# Create a typed node with properties (an object that isn't a UUID is an IRI,
+# prefix:local or a bare vocabulary name)
+curl -s -X POST http://localhost:8000/changes \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer my-key' \
-  -d '{"cypher": "CREATE (c:Company {name: \"Acme\", founded: 2010})"}'
-# Response: {"created_node_ids": ["019012ab-..."], "triples_written": 3}
+  -d '{"adds": [{"triples": [
+        {"subject": "019012ab-0000-7000-8000-000000000001",
+         "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "object": "Company"},
+        {"subject": "019012ab-0000-7000-8000-000000000001", "predicate": "name", "value": "Acme"}
+      ]}]}'
 
-# MERGE (create if not exists)
-curl -s -X POST http://localhost:8000/cypher/write \
+# SET: add the new value — the default write mode replaces the current one
+curl -s -X POST http://localhost:8000/changes \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer my-key' \
-  -d '{
-    "cypher": "MATCH (a:Person {name: \"Alice\"}) MERGE (a)-[:works_at]->(c:Company {name: \"Acme\"})"
-  }'
+  -d '{"adds": [{"triples": [{"subject": "019012ab-0000-7000-8000-000000000001", "predicate": "founded", "value": 2011}]}]}'
 
-# SET property
-curl -s -X POST http://localhost:8000/cypher/write \
+# Remove an exact value
+curl -s -X POST http://localhost:8000/changes \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer my-key' \
-  -d '{"cypher": "MATCH (a:Person {name: \"Alice\"}) SET a.age = 31"}'
+  -d '{"strict": true, "retractions": [{"subject": "019012ab-0000-7000-8000-000000000001", "predicate": "name", "value": "Acme"}]}'
 
-# DELETE
-curl -s -X POST http://localhost:8000/cypher/write \
-  -H 'Content-Type: application/json' \
+# Pattern-based updates: SPARQL Update (WHERE variables bind nodes)
+curl -s -X POST http://localhost:8000/sparql/update \
+  -H 'Content-Type: application/sparql-update' \
   -H 'Authorization: Bearer my-key' \
-  -d '{"cypher": "MATCH (a:Person {name: \"Temp\"}) DELETE a"}'
+  --data 'DELETE { ?p <urn:pg:vocab:status> "active" } INSERT { ?p <urn:pg:vocab:status> "archived" }
+          WHERE { ?p a <urn:pg:vocab:Project> ; <urn:pg:vocab:status> "active" }'
 ```
-
-Cypher writes can be included in a wire transaction by supplying `tx_id` (see below).
 
 ### Wire transactions
 
-Batch multiple insert and write operations into a single atomic transaction. The server holds the transaction open until `CommitTransaction` or `RollbackTransaction` is called.
+Batch multiple inserts into a single atomic transaction (for a one-shot batch, `POST /changes` is simpler). The server holds the transaction open until `CommitTransaction` or `RollbackTransaction` is called.
 
 ```bash
 # 1. Open a transaction — returns a tx_id token
@@ -529,11 +535,6 @@ TX=$(curl -s -X POST http://localhost:8000/tx/begin \
   -H 'Authorization: Bearer my-key' | jq -r .tx_id)
 
 # 2. Write inside the transaction
-curl -s -X POST http://localhost:8000/cypher/write \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer my-key' \
-  -d "{\"cypher\": \"CREATE (n:Event {name: \\\"Deploy\\\"})\", \"tx_id\": \"$TX\"}"
-
 curl -s -X POST http://localhost:8000/insert \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer my-key' \
@@ -544,7 +545,7 @@ curl -s -X POST http://localhost:8000/tx/commit \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer my-key' \
   -d "{\"tx_id\": \"$TX\"}"
-# Response: {"commit_ts": 1718000000000001, "triples_written": 4}
+# Response: {"commit_ts": 1718000000000001, ...}
 
 # Or rollback
 curl -s -X POST http://localhost:8000/tx/rollback \

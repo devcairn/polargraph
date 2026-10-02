@@ -62,6 +62,10 @@ message RelationTriple {
     /// Optional scalar properties carried by this edge.
     /// Each property is stored as a Property triple whose subject is the edge UUID.
     repeated EdgeProperty properties = 6;
+    /// The object named by IRI instead of `object`: a full IRI, `prefix:local`
+    /// or a bare name (resolved through the vocabulary). The server maps it to
+    /// its node and records the IRI — e.g. `rdf:type` to a class by name.
+    string object_iri = 7;
 }
 
 /// A scalar property on a node.
@@ -1604,6 +1608,9 @@ service PolarGraphService {
     /// write clauses (CREATE/MERGE/SET/DELETE) — use CypherWrite for mutations.
     rpc CypherQuery(CypherQueryRequest) returns (CypherQueryResponse);
 
+    /// DEPRECATED — removed in the next release; write with ApplyChanges or
+    /// SPARQL Update (docs/upgrade-cypher-rdf.md). Responses carry a
+    /// `warning` header.
     /// Parse and execute a Cypher write statement (CREATE, MERGE, SET, DELETE).
     /// Executes atomically in a single MVCC transaction.
     /// Returns INVALID_ARGUMENT if the statement cannot be parsed or contains no
