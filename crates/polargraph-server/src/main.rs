@@ -266,14 +266,24 @@ struct Cli {
     )]
     replica_tls_ca: Option<PathBuf>,
 
-    /// Run OWL 2 RL forward-chaining materialization at startup (primary only).
-    /// Derives RDFS/OWL entailments and writes them to the DRV column family.
+    /// Run OWL 2 RL inference at startup (primary only), writing the inferred
+    /// graphs (`urn:pg:inferred:*`). Implies `--inference`.
     #[arg(
         long = "auto-materialize",
         env = "POLARGRAPH_AUTO_MATERIALIZE",
         default_value_t = false
     )]
     auto_materialize: bool,
+
+    /// Keep OWL 2 RL inference current: a background task applies every
+    /// commit to the inferred graphs within about a second (DRed). Primary
+    /// only.
+    #[arg(
+        long = "inference",
+        env = "POLARGRAPH_INFERENCE",
+        default_value_t = false
+    )]
+    inference: bool,
 
     /// Property values whose encoded payload exceeds this many bytes are
     /// stored once, out of line, in the `blob` column family (default 256).
@@ -458,6 +468,7 @@ async fn main() -> Result<()> {
     let tx_idle_timeout_ms = resolve(cli.tx_idle_timeout_ms, None::<u64>, 300_000u64);
     let query_cache_size = resolve(cli.query_cache_size, cfg.query.cache_size, 1000usize);
     let auto_materialize = cli.auto_materialize || cfg.storage.auto_materialize.unwrap_or(false);
+    let inference = auto_materialize || cli.inference || cfg.storage.inference.unwrap_or(false);
 
     // ── Tracing ───────────────────────────────────────────────────────────────
     let filter = EnvFilter::try_new(&log_level)
@@ -601,9 +612,9 @@ async fn main() -> Result<()> {
         let mat_stats = polargraph_storage::owl_rl::materialize(&store, true)
             .context("startup OWL 2 RL materialization failed")?;
         info!(
-            rules_fired = mat_stats.rules_fired,
-            derived_triples = mat_stats.derived_triples,
-            iterations = mat_stats.iterations,
+            asserted = mat_stats.asserted,
+            closed = mat_stats.closed,
+            derived = mat_stats.derived_triples,
             "startup OWL 2 RL materialization complete"
         );
     }
@@ -768,6 +779,10 @@ async fn main() -> Result<()> {
     };
 
     pg_server.warn_if_legacy_pending();
+    if inference && replica_address.is_none() {
+        info!("incremental OWL 2 RL inference enabled");
+        pg_server.spawn_inference_task(token.clone());
+    }
 
     // ── Wire transaction TTL task ─────────────────────────────────────────────
     pg_server.spawn_tx_ttl_task(token.clone(), tx_idle_timeout_ms);

@@ -174,7 +174,12 @@ pub struct UserGraphAccess {
 }
 
 impl UserGraphAccess {
-    fn from_levels(levels: &HashMap<GraphId, GraphAccessLevel>) -> Self {
+    /// `companions`: `(inferred graph, source graph)` — an inferred graph is
+    /// readable by whoever can read its source (step 9); nobody writes it.
+    fn from_levels(
+        levels: &HashMap<GraphId, GraphAccessLevel>,
+        companions: &[(GraphId, GraphId)],
+    ) -> Self {
         let mut at_least: [RoaringBitmap; 4] = Default::default();
         for (g, level) in levels {
             for l in GraphAccessLevel::ALL.into_iter().filter(|l| l <= level) {
@@ -183,6 +188,11 @@ impl UserGraphAccess {
         }
         let mut readable = at_least[GraphAccessLevel::Read as usize].clone();
         readable.insert(GraphId::DEFAULT.0);
+        for (inferred, source) in companions {
+            if readable.contains(source.0) {
+                readable.insert(inferred.0);
+            }
+        }
         Self {
             at_least,
             readable: Arc::new(readable),
@@ -234,7 +244,7 @@ impl Default for GraphAccessIndex {
     fn default() -> Self {
         Self {
             users: HashMap::new(),
-            no_grants: Arc::new(UserGraphAccess::from_levels(&HashMap::new())),
+            no_grants: Arc::new(UserGraphAccess::from_levels(&HashMap::new(), &[])),
         }
     }
 }
@@ -243,6 +253,9 @@ impl GraphAccessIndex {
     /// Build from the live grants and `MEMBER_OF` relations. A user's level on
     /// a graph is the highest of its own grant and its groups' grants.
     pub fn build(store: &TripleStore) -> Result<Self, StorageError> {
+        let companions: Vec<(GraphId, GraphId)> = crate::owl_rl::InferredGraphs::load(store)
+            .companions()
+            .collect();
         let mut direct: HashMap<NodeId, HashMap<GraphId, GraphAccessLevel>> = HashMap::new();
         for grant in store.graph_grants()? {
             let slot = direct
@@ -272,11 +285,14 @@ impl GraphAccessIndex {
                     *slot = (*slot).max(*level);
                 }
             }
-            users.insert(principal, Arc::new(UserGraphAccess::from_levels(&levels)));
+            users.insert(
+                principal,
+                Arc::new(UserGraphAccess::from_levels(&levels, &companions)),
+            );
         }
         Ok(Self {
             users,
-            ..Self::default()
+            no_grants: Arc::new(UserGraphAccess::from_levels(&HashMap::new(), &companions)),
         })
     }
 

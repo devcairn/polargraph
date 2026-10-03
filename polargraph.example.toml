@@ -37,6 +37,13 @@
 
 [storage]
 
+# OWL 2 RL inference writes inferred facts to the urn:pg:inferred:* graphs.
+# auto_materialize runs a full pass at startup (and implies inference);
+# inference keeps them current, applying every commit within about a second.
+# Equivalent to --auto-materialize / --inference.
+# auto_materialize = false
+# inference = false
+
 # Directory for incremental RocksDB backups.  Leave unset to disable backups.
 # Equivalent to --backup-dir / POLARGRAPH_BACKUP_DIR
 # backup_dir = "/var/lib/polargraph/backups"

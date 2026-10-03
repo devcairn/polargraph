@@ -567,6 +567,7 @@ async fn run_filtered_search(
                     dimensions: dims as u32,
                     embedding_model: String::new(),
                     storage_mode: String::new(),
+                    quantization: String::new(),
                 }),
             }),
         })

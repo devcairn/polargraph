@@ -19,6 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	PolarGraphService_IncrementCounters_FullMethodName     = "/polargraph.v1.PolarGraphService/IncrementCounters"
+	PolarGraphService_GetCounters_FullMethodName           = "/polargraph.v1.PolarGraphService/GetCounters"
 	PolarGraphService_GetVocabulary_FullMethodName         = "/polargraph.v1.PolarGraphService/GetVocabulary"
 	PolarGraphService_SetVocabularyBase_FullMethodName     = "/polargraph.v1.PolarGraphService/SetVocabularyBase"
 	PolarGraphService_PutPrefix_FullMethodName             = "/polargraph.v1.PolarGraphService/PutPrefix"
@@ -93,6 +95,10 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type PolarGraphServiceClient interface {
+	// / Add to counters (service calls, primary only).
+	IncrementCounters(ctx context.Context, in *IncrementCountersRequest, opts ...grpc.CallOption) (*IncrementCountersResponse, error)
+	// / Read counters (service calls).
+	GetCounters(ctx context.Context, in *GetCountersRequest, opts ...grpc.CallOption) (*GetCountersResponse, error)
 	// / The vocabulary base, prefixes and legacy-conversion status.
 	GetVocabulary(ctx context.Context, in *GetVocabularyRequest, opts ...grpc.CallOption) (*Vocabulary, error)
 	// / Set the base IRI for bare names.
@@ -312,6 +318,26 @@ type polarGraphServiceClient struct {
 
 func NewPolarGraphServiceClient(cc grpc.ClientConnInterface) PolarGraphServiceClient {
 	return &polarGraphServiceClient{cc}
+}
+
+func (c *polarGraphServiceClient) IncrementCounters(ctx context.Context, in *IncrementCountersRequest, opts ...grpc.CallOption) (*IncrementCountersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IncrementCountersResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_IncrementCounters_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) GetCounters(ctx context.Context, in *GetCountersRequest, opts ...grpc.CallOption) (*GetCountersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetCountersResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_GetCounters_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *polarGraphServiceClient) GetVocabulary(ctx context.Context, in *GetVocabularyRequest, opts ...grpc.CallOption) (*Vocabulary, error) {
@@ -1043,6 +1069,10 @@ func (c *polarGraphServiceClient) RunMaterialization(ctx context.Context, in *Ru
 // All implementations must embed UnimplementedPolarGraphServiceServer
 // for forward compatibility.
 type PolarGraphServiceServer interface {
+	// / Add to counters (service calls, primary only).
+	IncrementCounters(context.Context, *IncrementCountersRequest) (*IncrementCountersResponse, error)
+	// / Read counters (service calls).
+	GetCounters(context.Context, *GetCountersRequest) (*GetCountersResponse, error)
 	// / The vocabulary base, prefixes and legacy-conversion status.
 	GetVocabulary(context.Context, *GetVocabularyRequest) (*Vocabulary, error)
 	// / Set the base IRI for bare names.
@@ -1264,6 +1294,12 @@ type PolarGraphServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedPolarGraphServiceServer struct{}
 
+func (UnimplementedPolarGraphServiceServer) IncrementCounters(context.Context, *IncrementCountersRequest) (*IncrementCountersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IncrementCounters not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) GetCounters(context.Context, *GetCountersRequest) (*GetCountersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetCounters not implemented")
+}
 func (UnimplementedPolarGraphServiceServer) GetVocabulary(context.Context, *GetVocabularyRequest) (*Vocabulary, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetVocabulary not implemented")
 }
@@ -1487,6 +1523,42 @@ func RegisterPolarGraphServiceServer(s grpc.ServiceRegistrar, srv PolarGraphServ
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&PolarGraphService_ServiceDesc, srv)
+}
+
+func _PolarGraphService_IncrementCounters_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IncrementCountersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).IncrementCounters(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_IncrementCounters_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).IncrementCounters(ctx, req.(*IncrementCountersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_GetCounters_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetCountersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).GetCounters(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_GetCounters_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).GetCounters(ctx, req.(*GetCountersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _PolarGraphService_GetVocabulary_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -2685,6 +2757,14 @@ var PolarGraphService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "polargraph.v1.PolarGraphService",
 	HandlerType: (*PolarGraphServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "IncrementCounters",
+			Handler:    _PolarGraphService_IncrementCounters_Handler,
+		},
+		{
+			MethodName: "GetCounters",
+			Handler:    _PolarGraphService_GetCounters_Handler,
+		},
 		{
 			MethodName: "GetVocabulary",
 			Handler:    _PolarGraphService_GetVocabulary_Handler,

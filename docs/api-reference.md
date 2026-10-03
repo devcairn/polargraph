@@ -1122,10 +1122,38 @@ resolved triple; triples not found in the store are omitted rather than returned
 rpc RunMaterialization(RunMaterializationRequest) returns (RunMaterializationResponse)
 ```
 
-Runs OWL 2 RL forward-chaining materialization over the current triple store,
-writing derived facts to the `DRV` column family. Returns
-`RunMaterializationResponse { derived_count }`. Returns `FAILED_PRECONDITION`
-on a read replica.
+Recomputes OWL 2 RL inference and diffs it against the inferred graphs
+(`urn:pg:inferred:*`): asserts new facts, closes facts that no longer
+follow. Idempotent; `clear_first` is ignored. Returns
+`RunMaterializationResponse { asserted, closed, derived_triples,
+rules_fired (= asserted), iterations (1 if anything changed) }`.
+`FAILED_PRECONDITION` on a read replica. See "OWL 2 RL inference" in
+`docs/architecture.md`.
+
+**Inferred facts in reads.** `QueryRequest`, `CypherQueryRequest` and
+`ValidateShapesRequest` carry `exclude_inferred` (default false: inferred
+facts included). REST: `"inferred": false` in `/query`, `/cypher` and
+`/validate` bodies; SPARQL `?inferred=false`.
+
+---
+
+### `IncrementCounters` / `GetCounters`
+
+```
+rpc IncrementCounters(IncrementCountersRequest) returns (IncrementCountersResponse)
+rpc GetCounters(GetCountersRequest) returns (GetCountersResponse)
+```
+
+`IncrementCountersRequest { namespace, increments: [{node, delta}] }` adds
+atomically; `GetCountersRequest { namespace, nodes }` returns one `i64` per
+node (0 if never counted). Service calls only (`PERMISSION_DENIED` with a
+user id); increments on the primary; at most 10 000 per call. REST:
+`POST /counters {"namespace", "increments": [{"node", "delta"}]}`,
+`GET /counters?namespace=&nodes=a,b` → `{"counters": {node: value}}`
+(nodes as UUIDs or IRIs).
+
+`VectorSpaceDef.quantization` (`""` or `"int8"`) makes a space int8-quantized
+(see "Vector storage modes" in `docs/architecture.md`).
 
 ---
 

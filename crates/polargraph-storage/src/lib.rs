@@ -18,6 +18,7 @@ pub mod cf;
 pub mod changes;
 pub mod codec;
 pub mod compaction;
+pub mod counters;
 pub mod error;
 pub mod graph_acl;
 pub mod graphs;

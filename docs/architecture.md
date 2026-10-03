@@ -192,7 +192,8 @@ PolarGraph opens seventeen RocksDB column families:
 | `meta` | Predicate and graph intern tables, timestamp oracle, storage format, schema-migration version | text keys |
 | `hnsw` | HNSW vector index nodes and entry points (per named space) | `<space>/n/<id>`, `<space>/__ep` |
 | `trig` | Trigram full-text index | `[trigram:3][pred:4][g:4][subject:16]` |
-| `drvg` | OWL 2 RL derived facts | `spog` layout |
+| `drvg` | Legacy OWL 2 RL derived facts (retired in step 9; inferred facts live in `urn:pg:inferred:*` graphs) | `spog` layout |
+| `sts` | Counters (`IncrementCounters` / `GetCounters`), add merge operator, unversioned | `[namespace][0x00][node:16]` → `i64` LE |
 | `epag` | Edge property annotations | `[edge:16][pred:4][g:4][tt:8]` |
 | `epog` | Edge relation annotations | `[edge:16][pred:4][obj:16][g:4][tt:8]` |
 | `peag` | Predicate-first index over `epag` | `[pred:4][edge:16][g:4][tt:8]` |
@@ -467,6 +468,17 @@ Each HNSW space is created in one of two vector storage modes, controlled by
 |------|----------------------|-------------|
 | **Memory** (default) | `Vec<f32>` inside each `HnswNode`, all in heap RAM | Small-to-medium spaces, fastest search |
 | **Mmap** | Flat binary `.vecs` file under `<data_dir>/vectors/`, accessed via `memmap2::MmapMut` | Large spaces that exceed available RAM; OS pages vectors in on demand |
+
+**int8 quantization** (step 9c, `VectorSpaceDef.quantization = "int8"`):
+each vector keeps `i8` codes (per-vector scale `max|x| / 127`) and their
+norm in RAM, and its full `f32` vector in the mmap `.vecs` file. HNSW
+traversal compares codes (integer dot product; scales cancel in cosine);
+`search` re-ranks its `max(ef, k)` candidates with the exact vectors, so
+returned scores are exact; `search_in_set` is exact. Codes persist under
+`<space>/q/<id>` with the marker `<space>/__q`. ~4× less vector RAM
+(384-dim: 1,536 → 388 bytes). Setting it on an existing space converts the
+space on its next insert. Recall@10 vs brute force: 1.0 on 2,000 × 64-dim
+random vectors at `ef` 100 (`tests/vector_int8.rs`).
 
 In **Mmap** mode the graph topology (neighbor lists, entry point) is still
 stored in RocksDB as usual. Only the raw float data lives in the `.vecs`
@@ -1877,6 +1889,17 @@ time (the label is closed). Chunked commits of 10 000, author
 Until it runs, the server logs a startup warning and reports
 `legacy_conversion_pending` in `GetVocabulary`, `ShowStats` and `/health`.
 
+## Counters (step 9d)
+
+`IncrementCounters { namespace, increments: [{node, delta}] }` and
+`GetCounters { namespace, nodes }` (REST `POST /counters`,
+`GET /counters?namespace=&nodes=a,b`) keep an `i64` per
+`(namespace, node)` in the `sts` CF, updated atomically by a RocksDB merge
+operator — no read-modify-write, no MVCC versions, not in the change log,
+not covered by retention; replicated by WAL. Service calls only; at most
+10 000 per call. What a counter means is the caller's (e.g. ContxtBroker
+usage feedback for ranking).
+
 ## Read replicas
 
 A replica is a `polargraphd` started with `--replica-of <primary gRPC URL>`.
@@ -3213,68 +3236,58 @@ errors), and `ok` is false when any failed.
 
 ---
 
-## OWL 2 RL materialization
+## OWL 2 RL inference
 
-PolarGraph implements OWL 2 RL Phase 1 forward-chaining materialization via
-the `polargraph-storage::owl_rl` module. Materialized (derived) facts are
-stored in the `drvg` column family, separate from the base quad index, so they
-can be cleared and re-derived independently.
+Design: `docs/design/step9-inference-vectors-stats.md`; release note
+`docs/upgrade-step9.md`. Module: `polargraph-storage::owl_rl`.
 
-### DRV column family
+**Inferred graphs.** Inferred facts are ordinary relation quads in
+companion graphs — `urn:pg:inferred:<source graph IRI>`
+(`urn:pg:inferred:default` for the default graph, metadata
+`urn:pg:inferredFrom`) and `urn:pg:inferred:cross` — written through the
+normal commit path with author `urn:pg:inference`. So every reader sees
+them: Datalog / Query, SPARQL, Cypher (labels match subclass instances),
+SHACL, exports, `Subscribe`, the type index.
 
-The `drvg` CF uses the 48-byte `spog` key layout (default graph for now; one
-derived graph per approved graph is planned). A read chooses whether to
-include derived facts by also scanning it, or reads only the quad index for
-the authoritative fact set.
+- A fact goes to the inferred graph of its **instance premises'** graph;
+  schema premises (`subClassOf`, `subPropertyOf`, `domain`, `range`,
+  `inverseOf`, symmetric / transitive declarations) don't decide it, so a
+  schema in its own graph still yields per-graph inferences. Instance
+  premises from several graphs → the cross graph.
+- **ACL**: an inferred graph is readable by whoever can read its source
+  graph; the cross graph has no grants (service-only). Writes, grants and
+  graph admin operations on inferred graphs are `PERMISSION_DENIED`.
+- **Opt-out**: `exclude_inferred` on `Query` / `QueryStream` /
+  `CypherQuery` / `ValidateShapes`, REST `"inferred": false`, SPARQL
+  `?inferred=false` (`Snapshot::without_graphs`). Included by default; a
+  store that never ran inference has no inferred graphs.
 
-### Implemented rules
+**Rules** (12): rdfs2, rdfs3, rdfs5, rdfs7 (prp-spo1), rdfs9, rdfs11,
+prp-symp, prp-trp, prp-inv1, prp-inv2, eq-sym, eq-trans. The schema is
+loaded and closed up front (rdfs5 / rdfs11 as a labelled transitive
+closure), so each instance rule is one step. Properties and classes are
+named with `term::iri_to_node_id` (as RDF import does); a property node's
+IRI comes from the interned predicates or the IRI dictionary.
 
-`polargraph_storage::owl_rl::materialize()` applies 12 forward-chaining rules:
+**Full run** — `materialize()` (`RunMaterialization`, REST
+`POST /materialize`, `--auto-materialize` at startup): compute the closure
+semi-naively, diff against the live inferred graphs, assert new facts and
+close (`vt_end`) facts that no longer follow. Idempotent. Reports
+`asserted`, `closed`, `derived_triples`.
 
-| Rule | Semantics |
-|------|-----------|
-| `rdfs2` | `P domain C`, `s P o` → `s type C` |
-| `rdfs3` | `P range C`, `s P o` → `o type C` |
-| `rdfs5` | `P subPropertyOf Q`, `Q subPropertyOf R` → `P subPropertyOf R` |
-| `rdfs7 / prp-spo1` | `P subPropertyOf Q`, `s P o` → `s Q o` |
-| `rdfs9` | `C subClassOf D`, `s type C` → `s type D` |
-| `rdfs11` | `C subClassOf D`, `D subClassOf E` → `C subClassOf E` |
-| `prp-symp` | `P type SymmetricProperty`, `s P o` → `o P s` |
-| `prp-trp` | `P type TransitiveProperty`, `s P o`, `o P x` → `s P x` |
-| `prp-inv1` | `P inverseOf Q`, `s P o` → `o Q s` |
-| `prp-inv2` | `P inverseOf Q`, `s Q o` → `o P s` |
-| `eq-sym` | `s sameAs o` → `o sameAs s` |
-| `eq-trans` | `s sameAs o`, `o sameAs x` → `s sameAs x` |
+**Incremental** — `infer_changes()` (DRed), run every second by a
+background task on the primary with `--inference` (`POLARGRAPH_INFERENCE`,
+`[storage] inference`; implied by `--auto-materialize`). From the change
+log since the last run (resume point in META): over-delete inferred facts
+with a derivation through a closed fact, re-derive those still supported,
+insert forward from new facts; one commit. A schema change, a missing
+resume point or a pruned change log triggers the full recompute-and-diff.
+Inference's own commits are skipped. Metrics:
+`polargraph_inference_batches_total`, `…_asserted_total`, `…_closed_total`,
+`polargraph_inference_lag_seconds`, `polargraph_materialization_derived_total`.
 
-Predicates are represented as `NodeId` values via `uri_to_node_id(uri)` (a
-stable xxHash3-128 of the predicate URI string). `predicate_node(pred)` is
-the public helper that converts a predicate string to its node representation.
-
-### API
-
-**Storage layer:**
-- `store.insert_derived_batch(triples)` — write derived triples to `DRV`
-- `store.clear_derived()` — truncate the DRV CF
-- `store.scan_derived(snapshot_ts)` — iterate all derived triples
-- `store.estimate_derived_count()` — approximate DRV entry count
-
-**gRPC RPC:**
-```
-rpc RunMaterialization(RunMaterializationRequest) returns (RunMaterializationResponse)
-```
-Runs in `spawn_blocking` (CPU-intensive), guarded against replicas.
-Returns `RunMaterializationResponse { derived_count }`.
-
-**Prometheus gauge:** `polargraph_materialization_derived_total`
-
-**Startup flag:** `--auto-materialize` / `POLARGRAPH_AUTO_MATERIALIZE` / `[storage] auto_materialize`
-runs materialization at startup before accepting connections.
-
-**REST endpoint:** `POST /materialize` — calls `RunMaterialization` and returns
-`{"derived_count": N}`.
-
----
-
+The pre-step-9 `drvg` CF is retired: no longer written or read (kept only
+for `polargraphd migrate`).
 ## RDF-star edge annotations
 
 PolarGraph supports RDF-star-style annotations on edges (relation triples) via

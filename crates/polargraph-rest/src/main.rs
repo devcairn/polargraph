@@ -183,6 +183,9 @@ struct QueryBody {
     /// Dataset: graph IRIs for patterns without an `@graph` suffix.
     #[serde(default)]
     graphs: Vec<String>,
+    /// `false` leaves out inferred facts (OWL RL inferred graphs); default true.
+    #[serde(default)]
+    inferred: Option<bool>,
 }
 
 /// A scalar property to attach to an edge at insert time.
@@ -427,6 +430,13 @@ fn node_id_to_uuid_string(nid: &proto::NodeId) -> String {
     }
 }
 
+/// `?inferred=false` in a query string: leave out inferred facts.
+fn inferred_off(raw: Option<&str>) -> bool {
+    raw.unwrap_or("")
+        .split('&')
+        .any(|kv| kv.eq_ignore_ascii_case("inferred=false"))
+}
+
 /// A query row as SPARQL bindings: node variables as IRIs (by node), value
 /// variables as literals (`docs/design/value-bindings.md`).
 fn sparql_row(pb: proto::Binding) -> polargraph_sparql::SparqlBindings {
@@ -608,6 +618,7 @@ async fn handle_query(
         user_id: user_id.clone(),
         params: std::collections::HashMap::new(),
         graphs: body.graphs.clone(),
+        exclude_inferred: body.inferred == Some(false),
     };
 
     let mut client = state.client.clone();
@@ -883,6 +894,9 @@ struct CypherBody {
     /// Dataset: graph IRIs the MATCH reads (empty = every graph).
     #[serde(default)]
     graphs: Vec<String>,
+    /// `false` leaves out inferred facts (OWL RL inferred graphs); default true.
+    #[serde(default)]
+    inferred: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -922,6 +936,7 @@ async fn handle_cypher(
         user_id: user_id.clone(),
         params: body.params,
         graphs: body.graphs,
+        exclude_inferred: body.inferred == Some(false),
     };
 
     let mut client = state.client.clone();
@@ -1273,6 +1288,9 @@ struct ValidateBody {
     read_ts: i64,
     #[serde(default)]
     all_focus_nodes: bool,
+    /// `false` leaves out inferred facts (OWL RL inferred graphs); default true.
+    #[serde(default)]
+    inferred: Option<bool>,
 }
 
 /// `POST /validate` — SHACL validation (`ValidateShapes`). Body:
@@ -1330,6 +1348,7 @@ async fn handle_validate(
         read_ts: body.read_ts,
         user_id: String::new(),
         all_focus_nodes: body.all_focus_nodes,
+        exclude_inferred: body.inferred == Some(false),
     };
     let resp = match state
         .client
@@ -2235,7 +2254,8 @@ async fn handle_sparql_get(
     QueryParams(params): QueryParams<SparqlGetParams>,
 ) -> Response {
     let dataset = polargraph_sparql::protocol::dataset_from_params(&[raw.as_deref().unwrap_or("")]);
-    execute_sparql_query(state, headers, params.query, dataset).await
+    let exclude_inferred = inferred_off(raw.as_deref());
+    execute_sparql_query(state, headers, params.query, dataset, exclude_inferred).await
 }
 
 async fn handle_sparql_post(
@@ -2308,7 +2328,14 @@ async fn handle_sparql_post(
         }
     };
 
-    execute_sparql_query(state, headers, query_string, dataset).await
+    execute_sparql_query(
+        state,
+        headers,
+        query_string,
+        dataset,
+        inferred_off(raw.as_deref()),
+    )
+    .await
 }
 
 // ── SPARQL-star runtime execution helpers ────────────────────────────────────
@@ -2543,6 +2570,7 @@ async fn execute_sparql_query(
     headers: axum::http::HeaderMap,
     query_string: String,
     protocol_dataset: Option<polargraph_sparql::SparqlDataset>,
+    exclude_inferred: bool,
 ) -> Response {
     use polargraph_sparql::response::ResponseFormat;
     use polargraph_sparql::{translate_query, SparqlBindings, SparqlError, SparqlValue};
@@ -2573,7 +2601,7 @@ async fn execute_sparql_query(
         &parsed,
         spargebra::Query::Construct { .. } | spargebra::Query::Describe { .. }
     ) {
-        return execute_sparql_construct(state, headers, parsed).await;
+        return execute_sparql_construct(state, headers, parsed, exclude_inferred).await;
     }
 
     // 2. Translate to PolarGraph query
@@ -2629,6 +2657,7 @@ async fn execute_sparql_query(
             patterns,
             rules,
             graphs: dataset_graphs.clone(),
+            exclude_inferred,
             ..Default::default()
         };
 
@@ -2655,6 +2684,7 @@ async fn execute_sparql_query(
                 patterns: opt_patterns,
                 rules: opt_rules,
                 graphs: dataset_graphs.clone(),
+                exclude_inferred,
                 ..Default::default()
             };
             let opt_resp = match client.query(tonic::Request::new(opt_req)).await {
@@ -2903,6 +2933,7 @@ async fn execute_sparql_construct(
     state: Arc<AppState>,
     headers: axum::http::HeaderMap,
     query: spargebra::Query,
+    exclude_inferred: bool,
 ) -> Response {
     use polargraph_sparql::{
         node_id_to_iri, serialize_ntriples_star, serialize_turtle_star, translate_construct,
@@ -2951,6 +2982,7 @@ async fn execute_sparql_construct(
             patterns,
             rules,
             graphs: dataset_graphs.clone(),
+            exclude_inferred,
             ..Default::default()
         };
         let mut client = state.client.clone();
@@ -3017,6 +3049,7 @@ async fn execute_sparql_construct(
                     predicate_var: "_p".to_string(),
                     graph: None,
                 }],
+                exclude_inferred,
                 ..Default::default()
             };
             let mut client = state.client.clone();
@@ -3704,6 +3737,8 @@ async fn handle_materialize(
                 "rules_fired": inner.rules_fired,
                 "derived_triples": inner.derived_triples,
                 "iterations": inner.iterations,
+                "asserted": inner.asserted,
+                "closed": inner.closed,
             }))
             .into_response()
         }
@@ -5178,6 +5213,87 @@ struct GraphAccessParams {
     graph: String,
 }
 
+// ── Counters (step 9d) ───────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CounterIncrementJson {
+    /// Node UUID or IRI.
+    node: String,
+    delta: i64,
+}
+
+#[derive(Deserialize)]
+struct IncrementCountersBody {
+    namespace: String,
+    increments: Vec<CounterIncrementJson>,
+}
+
+/// `POST /counters {namespace, increments: [{node, delta}]}` — add to counters.
+async fn handle_increment_counters(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<IncrementCountersBody>,
+) -> Response {
+    let mut iris = Vec::new();
+    let req = proto::IncrementCountersRequest {
+        namespace: body.namespace,
+        increments: body
+            .increments
+            .iter()
+            .map(|i| proto::CounterIncrement {
+                node: Some(change_node(&i.node, &mut iris)),
+                delta: i.delta,
+            })
+            .collect(),
+        user_id: String::new(),
+    };
+    match state
+        .client
+        .clone()
+        .increment_counters(tonic::Request::new(req))
+        .await
+    {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => grpc_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct CountersParams {
+    namespace: String,
+    /// Comma-separated node UUIDs or IRIs.
+    nodes: String,
+}
+
+/// `GET /counters?namespace=&nodes=a,b` — `{"counters": {node: value}}`.
+async fn handle_get_counters(
+    State(state): State<Arc<AppState>>,
+    QueryParams(params): QueryParams<CountersParams>,
+) -> Response {
+    let mut iris = Vec::new();
+    let names: Vec<&str> = params.nodes.split(',').filter(|n| !n.is_empty()).collect();
+    let req = proto::GetCountersRequest {
+        namespace: params.namespace,
+        nodes: names.iter().map(|n| change_node(n, &mut iris)).collect(),
+        user_id: String::new(),
+    };
+    match state
+        .client
+        .clone()
+        .get_counters(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            let counters: serde_json::Map<String, serde_json::Value> = names
+                .iter()
+                .zip(r.into_inner().values)
+                .map(|(n, v)| (n.to_string(), serde_json::json!(v)))
+                .collect();
+            Json(serde_json::json!({ "counters": counters })).into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
 // ── Vocabulary (docs/design/cypher-rdf.md) ───────────────────────────────────
 
 fn vocabulary_json(v: proto::Vocabulary) -> serde_json::Value {
@@ -5749,6 +5865,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/subscribe", get(handle_subscribe))
         .route("/changes", post(handle_apply_changes))
         .route("/validate", post(handle_validate))
+        .route(
+            "/counters",
+            get(handle_get_counters).post(handle_increment_counters),
+        )
         .route("/vocabulary", get(handle_get_vocabulary))
         .route("/vocabulary/base", put(handle_set_vocabulary_base))
         .route(

@@ -524,6 +524,15 @@ pub fn vector_space_def_from_proto(
     if !proto.storage_mode.is_empty() {
         def = def.with_storage_mode(storage_mode_from_str(&proto.storage_mode));
     }
+    match proto.quantization.as_str() {
+        "" => {}
+        "int8" => def = def.with_quantization("int8"),
+        other => {
+            return Err(Status::invalid_argument(format!(
+                "vector_space.quantization must be \"\" or \"int8\", got {other:?}"
+            )))
+        }
+    }
     Ok(def)
 }
 
@@ -533,6 +542,7 @@ pub fn vector_space_def_to_proto(def: &VectorSpaceDef) -> proto::VectorSpaceDef 
         dimensions: def.dimensions,
         embedding_model: def.embedding_model.clone().unwrap_or_default(),
         storage_mode: storage_mode_to_str(def.storage_mode).to_string(),
+        quantization: def.quantization.clone().unwrap_or_default(),
     }
 }
 

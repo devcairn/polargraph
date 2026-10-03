@@ -36,7 +36,7 @@ use crate::{
     cf,
     codec::{self, DecodedValue},
     error::StorageError,
-    hnsw::{self, HnswIndex, MmapState},
+    hnsw::{self, HnswIndex, MmapState, SpaceOptions},
     keys::{self, Order, PredId, QuadKey},
     mvcc::{Snapshot, TimestampOracle, Transaction, WriteMode, META_ORACLE_CTR},
 };
@@ -340,7 +340,16 @@ impl TripleStore {
         }
         let cf_descriptors: Vec<ColumnFamilyDescriptor> = names
             .iter()
-            .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
+            .map(|name| {
+                let mut opts = Options::default();
+                if name == cf::STS {
+                    opts.set_merge_operator_associative(
+                        "polargraph_add_i64",
+                        crate::counters::add_i64,
+                    );
+                }
+                ColumnFamilyDescriptor::new(name, opts)
+            })
             .collect();
 
         let db = DB::open_cf_descriptors(&db_opts, path, cf_descriptors)?;
@@ -701,6 +710,36 @@ impl TripleStore {
                 idx.load_node(id, node_vector, max_layer, neighbors);
             }
 
+            // int8 spaces: load codes; recompute any that are missing.
+            if db
+                .get_cf(&hnsw_cf, hnsw::int8_marker_key(&space))?
+                .is_some()
+            {
+                let prefix = hnsw::codes_prefix_for_space(&space);
+                let iter =
+                    db.iterator_cf(&hnsw_cf, IteratorMode::From(&prefix, Direction::Forward));
+                for item in iter {
+                    let (key, value) = item?;
+                    if !key.starts_with(&prefix) || key.len() != prefix.len() + 16 {
+                        break;
+                    }
+                    let id = NodeId(uuid::Uuid::from_bytes(
+                        key[prefix.len()..].try_into().unwrap(),
+                    ));
+                    idx.load_codes(id, hnsw::Codes::from_bytes(&value));
+                }
+                let missing: Vec<NodeId> = idx
+                    .nodes
+                    .keys()
+                    .filter(|id| idx.codes_of(**id).is_none())
+                    .copied()
+                    .collect();
+                for id in missing {
+                    let v = idx.vector_of(id);
+                    idx.load_codes(id, hnsw::Codes::quantize(&v));
+                }
+            }
+
             spaces.insert(space, idx);
         }
 
@@ -770,29 +809,24 @@ impl TripleStore {
         space: &str,
         node_id: NodeId,
         vector: Vec<f32>,
-        mode: StorageMode,
+        opts: impl Into<SpaceOptions>,
     ) -> Result<(), StorageError> {
         if self.is_replica() {
             return Err(Self::read_only_err());
         }
-        let mut spaces = self.inner.hnsw_spaces.write().unwrap();
-        let idx = spaces
-            .entry(space.to_string())
-            .or_insert_with(|| match mode {
-                StorageMode::Mmap => {
-                    let path = self
-                        .inner
-                        .data_dir
-                        .join("vectors")
-                        .join(format!("{space}.vecs"));
-                    HnswIndex::new_mmap(path)
-                }
-                StorageMode::Memory => HnswIndex::new(),
-            });
-        let modified = idx.insert(node_id, vector);
-
+        let opts = opts.into();
         let hnsw_cf = self.cf_handle(cf::HNSW)?;
         let mut batch = WriteBatch::default();
+        let mut spaces = self.inner.hnsw_spaces.write().unwrap();
+        let idx = self.space_index(&mut spaces, space, opts, &mut batch)?;
+        let modified = idx.insert(node_id, vector);
+        if let Some(codes) = idx.codes_of(node_id) {
+            batch.put_cf(
+                &hnsw_cf,
+                hnsw::codes_key_for_space(space, node_id),
+                codes.to_bytes(),
+            );
+        }
 
         for id in &modified {
             let serialized = idx.serialize_node_for(*id);
@@ -813,6 +847,56 @@ impl TripleStore {
 
         self.inner.db.write(batch)?;
         Ok(())
+    }
+
+    /// The index of `space`, created with `opts` if new. A space that `opts`
+    /// asks to quantize but isn't yet is converted here (full vectors move to
+    /// its `.vecs` file, every node gets codes); the changed records go into
+    /// `batch`.
+    fn space_index<'a>(
+        &self,
+        spaces: &'a mut HashMap<String, HnswIndex>,
+        space: &str,
+        opts: SpaceOptions,
+        batch: &mut WriteBatch,
+    ) -> Result<&'a mut HnswIndex, StorageError> {
+        let hnsw_cf = self.cf_handle(cf::HNSW)?;
+        let path = self
+            .inner
+            .data_dir
+            .join("vectors")
+            .join(format!("{space}.vecs"));
+        let idx = spaces.entry(space.to_string()).or_insert_with(|| {
+            if opts.int8 || opts.mode == StorageMode::Mmap {
+                HnswIndex::new_mmap(path.clone())
+            } else {
+                HnswIndex::new()
+            }
+        });
+        if opts.int8 && !idx.is_int8() {
+            if !idx.is_empty() {
+                info!(space, nodes = idx.len(), "quantizing vector space to int8");
+            }
+            for id in idx.enable_int8(path)? {
+                batch.put_cf(
+                    &hnsw_cf,
+                    hnsw::node_key_for_space(space, id),
+                    idx.serialize_node_for(id),
+                );
+            }
+            let ids: Vec<NodeId> = idx.nodes.keys().copied().collect();
+            for id in ids {
+                if let Some(codes) = idx.codes_of(id) {
+                    batch.put_cf(
+                        &hnsw_cf,
+                        hnsw::codes_key_for_space(space, id),
+                        codes.to_bytes(),
+                    );
+                }
+            }
+            batch.put_cf(&hnsw_cf, hnsw::int8_marker_key(space), b"int8");
+        }
+        Ok(idx)
     }
 
     /// Return the number of named HNSW vector spaces in this store.
@@ -875,8 +959,9 @@ impl TripleStore {
         &self,
         space: &str,
         items: &[(NodeId, Vec<f32>)],
-        mode: StorageMode,
+        opts: impl Into<SpaceOptions>,
     ) -> (usize, Vec<(usize, StorageError)>) {
+        let opts = opts.into();
         if self.is_replica() {
             return (0, vec![(0, Self::read_only_err())]);
         }
@@ -886,26 +971,23 @@ impl TripleStore {
         };
 
         let mut spaces = self.inner.hnsw_spaces.write().unwrap();
-        let idx = spaces
-            .entry(space.to_string())
-            .or_insert_with(|| match mode {
-                StorageMode::Mmap => {
-                    let path = self
-                        .inner
-                        .data_dir
-                        .join("vectors")
-                        .join(format!("{space}.vecs"));
-                    HnswIndex::new_mmap(path)
-                }
-                StorageMode::Memory => HnswIndex::new(),
-            });
-
         let mut batch = WriteBatch::default();
+        let idx = match self.space_index(&mut spaces, space, opts, &mut batch) {
+            Ok(idx) => idx,
+            Err(e) => return (0, vec![(0, e)]),
+        };
         let mut inserted = 0usize;
         let mut errors: Vec<(usize, StorageError)> = Vec::new();
 
         for (node_id, vector) in items.iter() {
             let modified = idx.insert(*node_id, vector.clone());
+            if let Some(codes) = idx.codes_of(*node_id) {
+                batch.put_cf(
+                    &hnsw_cf,
+                    hnsw::codes_key_for_space(space, *node_id),
+                    codes.to_bytes(),
+                );
+            }
             for id in &modified {
                 let serialized = idx.serialize_node_for(*id);
                 if !serialized.is_empty() {
@@ -2686,72 +2768,9 @@ impl TripleStore {
 
     // ── Derived triple store (DRV CF) ─────────────────────────────────────────
 
-    /// Insert a batch of derived (inferred) Relation triples into the DRV CF.
-    ///
-    /// Uses the `spog` key layout (default graph). Each fact is written
-    /// with a timestamp of `Timestamp::now()` so that subsequent `scan_derived()`
-    /// calls see it. Deduplication (same S,P,O already in DRV) is left to the
-    /// caller — the materializer builds its own in-memory dedup set.
-    pub fn insert_derived_batch(
-        &self,
-        facts: &[(NodeId, PredId, NodeId)],
-    ) -> Result<(), StorageError> {
-        if self.is_replica() {
-            return Err(Self::read_only_err());
-        }
-        if facts.is_empty() {
-            return Ok(());
-        }
-        let tt = Timestamp::now();
-        let drv_cf = self.cf_handle(cf::DRV)?;
-        let edge_id = polargraph_core::id::EdgeId(uuid::Uuid::from_bytes([0u8; 16]));
-        let temporal = BiTemporalRange::assert_now(tt);
-        let value_bytes = codec::encode_relation(&edge_id, &temporal);
-        let mut batch = WriteBatch::default();
-        for &(s, p, o) in facts {
-            let q = QuadKey {
-                s,
-                p,
-                o,
-                g: GraphId::DEFAULT,
-                tt,
-            };
-            batch.put_cf(&drv_cf, Order::Spog.encode(&q), &value_bytes);
-        }
-        self.inner.db.write(batch)?;
-        self.inner.oracle.advance_to(tt);
-        Ok(())
-    }
-
-    /// Delete all entries from the DRV column family.
-    ///
-    /// Called at the start of a fresh materialization run to ensure the derived
-    /// store is rebuilt from scratch without stale facts.
-    pub fn clear_derived(&self) -> Result<(), StorageError> {
-        if self.is_replica() {
-            return Err(Self::read_only_err());
-        }
-        let drv_cf = self.cf_handle(cf::DRV)?;
-        let iter = self
-            .inner
-            .db
-            .iterator_cf(&drv_cf, rocksdb::IteratorMode::Start);
-        let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
-        for item in iter {
-            let (k, _) = item?;
-            keys_to_delete.push(k.to_vec());
-        }
-        if !keys_to_delete.is_empty() {
-            let mut batch = WriteBatch::default();
-            for key in keys_to_delete {
-                batch.delete_cf(&drv_cf, &key);
-            }
-            self.inner.db.write(batch)?;
-        }
-        Ok(())
-    }
-
-    /// Scan all derived (inferred) Relation triples visible at the current oracle timestamp.
+    /// Legacy: the pre-step-9 `drvg` CF (kept by `polargraphd migrate`; no
+    /// longer written or queried — inferred facts live in inferred graphs,
+    /// see `owl_rl`).
     pub fn scan_derived(&self) -> Result<Vec<Triple>, StorageError> {
         self.scan_derived_at(self.inner.oracle.read_ts())
     }
@@ -2769,11 +2788,6 @@ impl TripleStore {
             .into_iter()
             .map(|(_, t)| t)
             .collect())
-    }
-
-    /// Approximate count of derived triples in the DRV CF (for Prometheus gauge).
-    pub fn estimate_derived_count(&self) -> u64 {
-        self.cf_approx_key_count(cf::DRV)
     }
 
     // ── reconstruction ────────────────────────────────────────────────────────

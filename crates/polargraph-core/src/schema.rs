@@ -110,6 +110,10 @@ pub struct VectorSpaceDef {
     /// Storage mode for this space's vector data. Defaults to `Memory`.
     #[serde(default)]
     pub storage_mode: StorageMode,
+    /// `Some("int8")`: int8 codes in RAM, full vectors on disk, exact
+    /// re-ranking (step 9c). `None`: full-precision vectors only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantization: Option<String>,
 }
 
 impl VectorSpaceDef {
@@ -119,7 +123,19 @@ impl VectorSpaceDef {
             dimensions,
             embedding_model: None,
             storage_mode: StorageMode::Memory,
+            quantization: None,
         }
+    }
+
+    /// Quantize the space's vectors (`"int8"`).
+    pub fn with_quantization(mut self, q: impl Into<String>) -> Self {
+        self.quantization = Some(q.into());
+        self
+    }
+
+    /// Whether the space is int8-quantized.
+    pub fn is_int8(&self) -> bool {
+        self.quantization.as_deref() == Some("int8")
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
