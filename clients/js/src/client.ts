@@ -532,6 +532,7 @@ export class PolarGraphClient {
       k,
       space,
       ef: options.ef ?? 0,
+      graphs: options.graphs ?? [],
     };
     const resp = await this._unary(this._grpc.searchVector.bind(this._grpc), req);
     return resp.results.map((r) => ({

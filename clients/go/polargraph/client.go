@@ -294,6 +294,12 @@ func WithSearchEF(ef uint32) SearchOption {
 	return func(r *pb.SearchVectorRequest) { r.Ef = ef }
 }
 
+// WithSearchGraphs keeps only nodes with a live quad in one of graphs
+// ("" = the default graph).
+func WithSearchGraphs(graphs ...string) SearchOption {
+	return func(r *pb.SearchVectorRequest) { r.Graphs = graphs }
+}
+
 // SearchResult is one nearest-neighbour result.
 type SearchResult struct {
 	NodeID     string

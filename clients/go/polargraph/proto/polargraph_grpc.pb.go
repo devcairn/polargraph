@@ -89,6 +89,8 @@ const (
 	PolarGraphService_GetPropertyHistory_FullMethodName    = "/polargraph.v1.PolarGraphService/GetPropertyHistory"
 	PolarGraphService_DeleteTriples_FullMethodName         = "/polargraph.v1.PolarGraphService/DeleteTriples"
 	PolarGraphService_RunMaterialization_FullMethodName    = "/polargraph.v1.PolarGraphService/RunMaterialization"
+	PolarGraphService_GetInferenceSettings_FullMethodName  = "/polargraph.v1.PolarGraphService/GetInferenceSettings"
+	PolarGraphService_SetInferenceSettings_FullMethodName  = "/polargraph.v1.PolarGraphService/SetInferenceSettings"
 )
 
 // PolarGraphServiceClient is the client API for PolarGraphService service.
@@ -310,6 +312,11 @@ type PolarGraphServiceClient interface {
 	// /
 	// / Returns FAILED_PRECONDITION on a read replica.
 	RunMaterialization(ctx context.Context, in *RunMaterializationRequest, opts ...grpc.CallOption) (*RunMaterializationResponse, error)
+	// / Which graphs inference reads schema axioms from.
+	GetInferenceSettings(ctx context.Context, in *GetInferenceSettingsRequest, opts ...grpc.CallOption) (*InferenceSettings, error)
+	// / Change them (service calls, primary only); recomputes the inferred
+	// / graphs and returns the run's statistics.
+	SetInferenceSettings(ctx context.Context, in *SetInferenceSettingsRequest, opts ...grpc.CallOption) (*RunMaterializationResponse, error)
 }
 
 type polarGraphServiceClient struct {
@@ -1065,6 +1072,26 @@ func (c *polarGraphServiceClient) RunMaterialization(ctx context.Context, in *Ru
 	return out, nil
 }
 
+func (c *polarGraphServiceClient) GetInferenceSettings(ctx context.Context, in *GetInferenceSettingsRequest, opts ...grpc.CallOption) (*InferenceSettings, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InferenceSettings)
+	err := c.cc.Invoke(ctx, PolarGraphService_GetInferenceSettings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *polarGraphServiceClient) SetInferenceSettings(ctx context.Context, in *SetInferenceSettingsRequest, opts ...grpc.CallOption) (*RunMaterializationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RunMaterializationResponse)
+	err := c.cc.Invoke(ctx, PolarGraphService_SetInferenceSettings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PolarGraphServiceServer is the server API for PolarGraphService service.
 // All implementations must embed UnimplementedPolarGraphServiceServer
 // for forward compatibility.
@@ -1284,6 +1311,11 @@ type PolarGraphServiceServer interface {
 	// /
 	// / Returns FAILED_PRECONDITION on a read replica.
 	RunMaterialization(context.Context, *RunMaterializationRequest) (*RunMaterializationResponse, error)
+	// / Which graphs inference reads schema axioms from.
+	GetInferenceSettings(context.Context, *GetInferenceSettingsRequest) (*InferenceSettings, error)
+	// / Change them (service calls, primary only); recomputes the inferred
+	// / graphs and returns the run's statistics.
+	SetInferenceSettings(context.Context, *SetInferenceSettingsRequest) (*RunMaterializationResponse, error)
 	mustEmbedUnimplementedPolarGraphServiceServer()
 }
 
@@ -1503,6 +1535,12 @@ func (UnimplementedPolarGraphServiceServer) DeleteTriples(context.Context, *Dele
 }
 func (UnimplementedPolarGraphServiceServer) RunMaterialization(context.Context, *RunMaterializationRequest) (*RunMaterializationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RunMaterialization not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) GetInferenceSettings(context.Context, *GetInferenceSettingsRequest) (*InferenceSettings, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetInferenceSettings not implemented")
+}
+func (UnimplementedPolarGraphServiceServer) SetInferenceSettings(context.Context, *SetInferenceSettingsRequest) (*RunMaterializationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetInferenceSettings not implemented")
 }
 func (UnimplementedPolarGraphServiceServer) mustEmbedUnimplementedPolarGraphServiceServer() {}
 func (UnimplementedPolarGraphServiceServer) testEmbeddedByValue()                           {}
@@ -2750,6 +2788,42 @@ func _PolarGraphService_RunMaterialization_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PolarGraphService_GetInferenceSettings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetInferenceSettingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).GetInferenceSettings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_GetInferenceSettings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).GetInferenceSettings(ctx, req.(*GetInferenceSettingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolarGraphService_SetInferenceSettings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetInferenceSettingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolarGraphServiceServer).SetInferenceSettings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolarGraphService_SetInferenceSettings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolarGraphServiceServer).SetInferenceSettings(ctx, req.(*SetInferenceSettingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PolarGraphService_ServiceDesc is the grpc.ServiceDesc for PolarGraphService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3016,6 +3090,14 @@ var PolarGraphService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RunMaterialization",
 			Handler:    _PolarGraphService_RunMaterialization_Handler,
+		},
+		{
+			MethodName: "GetInferenceSettings",
+			Handler:    _PolarGraphService_GetInferenceSettings_Handler,
+		},
+		{
+			MethodName: "SetInferenceSettings",
+			Handler:    _PolarGraphService_SetInferenceSettings_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -538,6 +538,11 @@ export interface SearchVectorRequest {
    * / 0 means use the server-wide default (--default-vector-ef, default 50).
    */
   ef: number;
+  /**
+   * / Only nodes with a live quad in one of these graphs ("" = default
+   * / graph); empty = every graph.
+   */
+  graphs: string[];
 }
 
 export interface VectorSearchResult {
@@ -579,6 +584,11 @@ export interface SearchVectorFilteredRequest {
   ef: number;
   /** / Optional identity for access-control filtering. */
   userId: string;
+  /**
+   * / Only nodes with a live quad in one of these graphs ("" = default
+   * / graph); empty = every graph.
+   */
+  graphs: string[];
 }
 
 export interface SearchVectorFilteredResponse {
@@ -590,6 +600,11 @@ export interface SearchVectorInSetRequest {
   query: number[];
   k: number;
   nodeIds: NodeId[];
+  /**
+   * / Only nodes with a live quad in one of these graphs ("" = default
+   * / graph); empty = every graph.
+   */
+  graphs: string[];
 }
 
 export interface SearchVectorInSetResponse {
@@ -836,6 +851,11 @@ export interface VectorSeedQueryRequest {
    * / (without the `$`); values are JSON-encoded `Value` objects.
    */
   params: { [key: string]: string };
+  /**
+   * / Only seeds with a live quad in one of these graphs ("" = default
+   * / graph), and the patterns read only these graphs; empty = every graph.
+   */
+  graphs: string[];
 }
 
 export interface VectorSeedQueryRequest_ParamsEntry {
@@ -1335,6 +1355,31 @@ export interface RunMaterializationRequest {
   clearFirst: boolean;
 }
 
+export interface GetInferenceSettingsRequest {
+}
+
+export interface InferenceSettings {
+  /**
+   * / Graphs whose schema axioms (rdfs:subClassOf, rdfs:subPropertyOf,
+   * / rdfs:domain, rdfs:range, owl:inverseOf, symmetric / transitive
+   * / property declarations) drive OWL RL inference; "" = the default graph.
+   * / Axioms in other graphs are ordinary data.
+   */
+  schemaGraphs: string[];
+  /** / True when no selection is set: axioms come from every graph. */
+  allGraphs: boolean;
+}
+
+export interface SetInferenceSettingsRequest {
+  schemaGraphs: string[];
+  /**
+   * / Clear the selection (axioms from every graph); `schema_graphs` must
+   * / be empty.
+   */
+  allGraphs: boolean;
+  userId: string;
+}
+
 /** / Statistics from a materialization run. */
 export interface RunMaterializationResponse {
   /** / Inferred facts asserted by this run (same as `asserted`). */
@@ -1466,6 +1511,11 @@ export interface QuadRef {
     | undefined;
   /** / Graph IRI ("" = default graph). */
   graph: string;
+  /**
+   * / Retract the quad in every graph where it is live (that the caller
+   * / may write) instead of only `graph`.
+   */
+  allGraphs: boolean;
 }
 
 export interface ApplyChangesRequest {
@@ -1490,6 +1540,11 @@ export interface ApplyChangesRequest {
    * / change, and the graph ACL applies (write on every graph touched).
    */
   userId: string;
+  /**
+   * / RDF-star edge annotations to add (default graph), in the same
+   * / transaction.
+   */
+  edgeAnnotations: EdgeAnnotation[];
 }
 
 export interface ApplyChangesResponse {
@@ -5436,7 +5491,7 @@ export const InsertVectorResponse: MessageFns<InsertVectorResponse> = {
 };
 
 function createBaseSearchVectorRequest(): SearchVectorRequest {
-  return { query: [], k: 0, space: "", ef: 0 };
+  return { query: [], k: 0, space: "", ef: 0, graphs: [] };
 }
 
 export const SearchVectorRequest: MessageFns<SearchVectorRequest> = {
@@ -5454,6 +5509,9 @@ export const SearchVectorRequest: MessageFns<SearchVectorRequest> = {
     }
     if (message.ef !== 0) {
       writer.uint32(32).uint32(message.ef);
+    }
+    for (const v of message.graphs) {
+      writer.uint32(42).string(v!);
     }
     return writer;
   },
@@ -5507,6 +5565,14 @@ export const SearchVectorRequest: MessageFns<SearchVectorRequest> = {
           message.ef = reader.uint32();
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.graphs.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5522,6 +5588,7 @@ export const SearchVectorRequest: MessageFns<SearchVectorRequest> = {
       k: isSet(object.k) ? globalThis.Number(object.k) : 0,
       space: isSet(object.space) ? globalThis.String(object.space) : "",
       ef: isSet(object.ef) ? globalThis.Number(object.ef) : 0,
+      graphs: globalThis.Array.isArray(object?.graphs) ? object.graphs.map((e: any) => globalThis.String(e)) : [],
     };
   },
 
@@ -5539,6 +5606,9 @@ export const SearchVectorRequest: MessageFns<SearchVectorRequest> = {
     if (message.ef !== 0) {
       obj.ef = Math.round(message.ef);
     }
+    if (message.graphs?.length) {
+      obj.graphs = message.graphs;
+    }
     return obj;
   },
 
@@ -5551,6 +5621,7 @@ export const SearchVectorRequest: MessageFns<SearchVectorRequest> = {
     message.k = object.k ?? 0;
     message.space = object.space ?? "";
     message.ef = object.ef ?? 0;
+    message.graphs = object.graphs?.map((e) => e) || [];
     return message;
   },
 };
@@ -5866,7 +5937,16 @@ export const ReachabilityFilter: MessageFns<ReachabilityFilter> = {
 };
 
 function createBaseSearchVectorFilteredRequest(): SearchVectorFilteredRequest {
-  return { space: "", query: [], k: 0, nodeTypeFilter: undefined, reachabilityFilter: undefined, ef: 0, userId: "" };
+  return {
+    space: "",
+    query: [],
+    k: 0,
+    nodeTypeFilter: undefined,
+    reachabilityFilter: undefined,
+    ef: 0,
+    userId: "",
+    graphs: [],
+  };
 }
 
 export const SearchVectorFilteredRequest: MessageFns<SearchVectorFilteredRequest> = {
@@ -5893,6 +5973,9 @@ export const SearchVectorFilteredRequest: MessageFns<SearchVectorFilteredRequest
     }
     if (message.userId !== "") {
       writer.uint32(58).string(message.userId);
+    }
+    for (const v of message.graphs) {
+      writer.uint32(66).string(v!);
     }
     return writer;
   },
@@ -5970,6 +6053,14 @@ export const SearchVectorFilteredRequest: MessageFns<SearchVectorFilteredRequest
           message.userId = reader.string();
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.graphs.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6000,6 +6091,9 @@ export const SearchVectorFilteredRequest: MessageFns<SearchVectorFilteredRequest
         : isSet(object.user_id)
         ? globalThis.String(object.user_id)
         : "",
+      graphs: globalThis.Array.isArray(object?.graphs)
+        ? object.graphs.map((e: any) => globalThis.String(e))
+        : [],
     };
   },
 
@@ -6026,6 +6120,9 @@ export const SearchVectorFilteredRequest: MessageFns<SearchVectorFilteredRequest
     if (message.userId !== "") {
       obj.userId = message.userId;
     }
+    if (message.graphs?.length) {
+      obj.graphs = message.graphs;
+    }
     return obj;
   },
 
@@ -6045,6 +6142,7 @@ export const SearchVectorFilteredRequest: MessageFns<SearchVectorFilteredRequest
       : undefined;
     message.ef = object.ef ?? 0;
     message.userId = object.userId ?? "";
+    message.graphs = object.graphs?.map((e) => e) || [];
     return message;
   },
 };
@@ -6112,7 +6210,7 @@ export const SearchVectorFilteredResponse: MessageFns<SearchVectorFilteredRespon
 };
 
 function createBaseSearchVectorInSetRequest(): SearchVectorInSetRequest {
-  return { space: "", query: [], k: 0, nodeIds: [] };
+  return { space: "", query: [], k: 0, nodeIds: [], graphs: [] };
 }
 
 export const SearchVectorInSetRequest: MessageFns<SearchVectorInSetRequest> = {
@@ -6130,6 +6228,9 @@ export const SearchVectorInSetRequest: MessageFns<SearchVectorInSetRequest> = {
     }
     for (const v of message.nodeIds) {
       NodeId.encode(v!, writer.uint32(34).fork()).join();
+    }
+    for (const v of message.graphs) {
+      writer.uint32(42).string(v!);
     }
     return writer;
   },
@@ -6183,6 +6284,14 @@ export const SearchVectorInSetRequest: MessageFns<SearchVectorInSetRequest> = {
           message.nodeIds.push(NodeId.decode(reader, reader.uint32()));
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.graphs.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6202,6 +6311,7 @@ export const SearchVectorInSetRequest: MessageFns<SearchVectorInSetRequest> = {
         : globalThis.Array.isArray(object?.node_ids)
         ? object.node_ids.map((e: any) => NodeId.fromJSON(e))
         : [],
+      graphs: globalThis.Array.isArray(object?.graphs) ? object.graphs.map((e: any) => globalThis.String(e)) : [],
     };
   },
 
@@ -6219,6 +6329,9 @@ export const SearchVectorInSetRequest: MessageFns<SearchVectorInSetRequest> = {
     if (message.nodeIds?.length) {
       obj.nodeIds = message.nodeIds.map((e) => NodeId.toJSON(e));
     }
+    if (message.graphs?.length) {
+      obj.graphs = message.graphs;
+    }
     return obj;
   },
 
@@ -6231,6 +6344,7 @@ export const SearchVectorInSetRequest: MessageFns<SearchVectorInSetRequest> = {
     message.query = object.query?.map((e) => e) || [];
     message.k = object.k ?? 0;
     message.nodeIds = object.nodeIds?.map((e) => NodeId.fromPartial(e)) || [];
+    message.graphs = object.graphs?.map((e) => e) || [];
     return message;
   },
 };
@@ -8896,6 +9010,7 @@ function createBaseVectorSeedQueryRequest(): VectorSeedQueryRequest {
     ef: 0,
     userId: "",
     params: {},
+    graphs: [],
   };
 }
 
@@ -8936,6 +9051,9 @@ export const VectorSeedQueryRequest: MessageFns<VectorSeedQueryRequest> = {
     globalThis.Object.entries(message.params).forEach(([key, value]: [string, string]) => {
       VectorSeedQueryRequest_ParamsEntry.encode({ key: key as any, value }, writer.uint32(90).fork()).join();
     });
+    for (const v of message.graphs) {
+      writer.uint32(98).string(v!);
+    }
     return writer;
   },
 
@@ -9047,6 +9165,14 @@ export const VectorSeedQueryRequest: MessageFns<VectorSeedQueryRequest> = {
           }
           continue;
         }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.graphs.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9103,6 +9229,9 @@ export const VectorSeedQueryRequest: MessageFns<VectorSeedQueryRequest> = {
           {},
         )
         : {},
+      graphs: globalThis.Array.isArray(object?.graphs)
+        ? object.graphs.map((e: any) => globalThis.String(e))
+        : [],
     };
   },
 
@@ -9147,6 +9276,9 @@ export const VectorSeedQueryRequest: MessageFns<VectorSeedQueryRequest> = {
         });
       }
     }
+    if (message.graphs?.length) {
+      obj.graphs = message.graphs;
+    }
     return obj;
   },
 
@@ -9178,6 +9310,7 @@ export const VectorSeedQueryRequest: MessageFns<VectorSeedQueryRequest> = {
       },
       {},
     );
+    message.graphs = object.graphs?.map((e) => e) || [];
     return message;
   },
 };
@@ -14479,6 +14612,237 @@ export const RunMaterializationRequest: MessageFns<RunMaterializationRequest> = 
   },
 };
 
+function createBaseGetInferenceSettingsRequest(): GetInferenceSettingsRequest {
+  return {};
+}
+
+export const GetInferenceSettingsRequest: MessageFns<GetInferenceSettingsRequest> = {
+  encode(_: GetInferenceSettingsRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetInferenceSettingsRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetInferenceSettingsRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): GetInferenceSettingsRequest {
+    return {};
+  },
+
+  toJSON(_: GetInferenceSettingsRequest): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetInferenceSettingsRequest>, I>>(base?: I): GetInferenceSettingsRequest {
+    return GetInferenceSettingsRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetInferenceSettingsRequest>, I>>(_: I): GetInferenceSettingsRequest {
+    const message = createBaseGetInferenceSettingsRequest();
+    return message;
+  },
+};
+
+function createBaseInferenceSettings(): InferenceSettings {
+  return { schemaGraphs: [], allGraphs: false };
+}
+
+export const InferenceSettings: MessageFns<InferenceSettings> = {
+  encode(message: InferenceSettings, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.schemaGraphs) {
+      writer.uint32(10).string(v!);
+    }
+    if (message.allGraphs !== false) {
+      writer.uint32(16).bool(message.allGraphs);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InferenceSettings {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInferenceSettings();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.schemaGraphs.push(reader.string());
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.allGraphs = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): InferenceSettings {
+    return {
+      schemaGraphs: globalThis.Array.isArray(object?.schemaGraphs)
+        ? object.schemaGraphs.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.schema_graphs)
+        ? object.schema_graphs.map((e: any) => globalThis.String(e))
+        : [],
+      allGraphs: isSet(object.allGraphs)
+        ? globalThis.Boolean(object.allGraphs)
+        : isSet(object.all_graphs)
+        ? globalThis.Boolean(object.all_graphs)
+        : false,
+    };
+  },
+
+  toJSON(message: InferenceSettings): unknown {
+    const obj: any = {};
+    if (message.schemaGraphs?.length) {
+      obj.schemaGraphs = message.schemaGraphs;
+    }
+    if (message.allGraphs !== false) {
+      obj.allGraphs = message.allGraphs;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<InferenceSettings>, I>>(base?: I): InferenceSettings {
+    return InferenceSettings.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InferenceSettings>, I>>(object: I): InferenceSettings {
+    const message = createBaseInferenceSettings();
+    message.schemaGraphs = object.schemaGraphs?.map((e) => e) || [];
+    message.allGraphs = object.allGraphs ?? false;
+    return message;
+  },
+};
+
+function createBaseSetInferenceSettingsRequest(): SetInferenceSettingsRequest {
+  return { schemaGraphs: [], allGraphs: false, userId: "" };
+}
+
+export const SetInferenceSettingsRequest: MessageFns<SetInferenceSettingsRequest> = {
+  encode(message: SetInferenceSettingsRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.schemaGraphs) {
+      writer.uint32(10).string(v!);
+    }
+    if (message.allGraphs !== false) {
+      writer.uint32(16).bool(message.allGraphs);
+    }
+    if (message.userId !== "") {
+      writer.uint32(26).string(message.userId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetInferenceSettingsRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetInferenceSettingsRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.schemaGraphs.push(reader.string());
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.allGraphs = reader.bool();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.userId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SetInferenceSettingsRequest {
+    return {
+      schemaGraphs: globalThis.Array.isArray(object?.schemaGraphs)
+        ? object.schemaGraphs.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.schema_graphs)
+        ? object.schema_graphs.map((e: any) => globalThis.String(e))
+        : [],
+      allGraphs: isSet(object.allGraphs)
+        ? globalThis.Boolean(object.allGraphs)
+        : isSet(object.all_graphs)
+        ? globalThis.Boolean(object.all_graphs)
+        : false,
+      userId: isSet(object.userId)
+        ? globalThis.String(object.userId)
+        : isSet(object.user_id)
+        ? globalThis.String(object.user_id)
+        : "",
+    };
+  },
+
+  toJSON(message: SetInferenceSettingsRequest): unknown {
+    const obj: any = {};
+    if (message.schemaGraphs?.length) {
+      obj.schemaGraphs = message.schemaGraphs;
+    }
+    if (message.allGraphs !== false) {
+      obj.allGraphs = message.allGraphs;
+    }
+    if (message.userId !== "") {
+      obj.userId = message.userId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SetInferenceSettingsRequest>, I>>(base?: I): SetInferenceSettingsRequest {
+    return SetInferenceSettingsRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SetInferenceSettingsRequest>, I>>(object: I): SetInferenceSettingsRequest {
+    const message = createBaseSetInferenceSettingsRequest();
+    message.schemaGraphs = object.schemaGraphs?.map((e) => e) || [];
+    message.allGraphs = object.allGraphs ?? false;
+    message.userId = object.userId ?? "";
+    return message;
+  },
+};
+
 function createBaseRunMaterializationResponse(): RunMaterializationResponse {
   return { rulesFired: 0, derivedTriples: 0, iterations: 0, asserted: 0, closed: 0 };
 }
@@ -15728,7 +16092,7 @@ export const GraphTriples: MessageFns<GraphTriples> = {
 };
 
 function createBaseQuadRef(): QuadRef {
-  return { subject: undefined, predicate: "", node: undefined, value: undefined, graph: "" };
+  return { subject: undefined, predicate: "", node: undefined, value: undefined, graph: "", allGraphs: false };
 }
 
 export const QuadRef: MessageFns<QuadRef> = {
@@ -15747,6 +16111,9 @@ export const QuadRef: MessageFns<QuadRef> = {
     }
     if (message.graph !== "") {
       writer.uint32(42).string(message.graph);
+    }
+    if (message.allGraphs !== false) {
+      writer.uint32(48).bool(message.allGraphs);
     }
     return writer;
   },
@@ -15798,6 +16165,14 @@ export const QuadRef: MessageFns<QuadRef> = {
           message.graph = reader.string();
           continue;
         }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.allGraphs = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -15814,6 +16189,11 @@ export const QuadRef: MessageFns<QuadRef> = {
       node: isSet(object.node) ? NodeId.fromJSON(object.node) : undefined,
       value: isSet(object.value) ? Value.fromJSON(object.value) : undefined,
       graph: isSet(object.graph) ? globalThis.String(object.graph) : "",
+      allGraphs: isSet(object.allGraphs)
+        ? globalThis.Boolean(object.allGraphs)
+        : isSet(object.all_graphs)
+        ? globalThis.Boolean(object.all_graphs)
+        : false,
     };
   },
 
@@ -15834,6 +16214,9 @@ export const QuadRef: MessageFns<QuadRef> = {
     if (message.graph !== "") {
       obj.graph = message.graph;
     }
+    if (message.allGraphs !== false) {
+      obj.allGraphs = message.allGraphs;
+    }
     return obj;
   },
 
@@ -15849,12 +16232,13 @@ export const QuadRef: MessageFns<QuadRef> = {
     message.node = (object.node !== undefined && object.node !== null) ? NodeId.fromPartial(object.node) : undefined;
     message.value = (object.value !== undefined && object.value !== null) ? Value.fromPartial(object.value) : undefined;
     message.graph = object.graph ?? "";
+    message.allGraphs = object.allGraphs ?? false;
     return message;
   },
 };
 
 function createBaseApplyChangesRequest(): ApplyChangesRequest {
-  return { adds: [], retractions: [], readTs: 0, strict: false, iris: [], userId: "" };
+  return { adds: [], retractions: [], readTs: 0, strict: false, iris: [], userId: "", edgeAnnotations: [] };
 }
 
 export const ApplyChangesRequest: MessageFns<ApplyChangesRequest> = {
@@ -15876,6 +16260,9 @@ export const ApplyChangesRequest: MessageFns<ApplyChangesRequest> = {
     }
     if (message.userId !== "") {
       writer.uint32(50).string(message.userId);
+    }
+    for (const v of message.edgeAnnotations) {
+      EdgeAnnotation.encode(v!, writer.uint32(58).fork()).join();
     }
     return writer;
   },
@@ -15935,6 +16322,14 @@ export const ApplyChangesRequest: MessageFns<ApplyChangesRequest> = {
           message.userId = reader.string();
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.edgeAnnotations.push(EdgeAnnotation.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -15962,6 +16357,11 @@ export const ApplyChangesRequest: MessageFns<ApplyChangesRequest> = {
         : isSet(object.user_id)
         ? globalThis.String(object.user_id)
         : "",
+      edgeAnnotations: globalThis.Array.isArray(object?.edgeAnnotations)
+        ? object.edgeAnnotations.map((e: any) => EdgeAnnotation.fromJSON(e))
+        : globalThis.Array.isArray(object?.edge_annotations)
+        ? object.edge_annotations.map((e: any) => EdgeAnnotation.fromJSON(e))
+        : [],
     };
   },
 
@@ -15985,6 +16385,9 @@ export const ApplyChangesRequest: MessageFns<ApplyChangesRequest> = {
     if (message.userId !== "") {
       obj.userId = message.userId;
     }
+    if (message.edgeAnnotations?.length) {
+      obj.edgeAnnotations = message.edgeAnnotations.map((e) => EdgeAnnotation.toJSON(e));
+    }
     return obj;
   },
 
@@ -15999,6 +16402,7 @@ export const ApplyChangesRequest: MessageFns<ApplyChangesRequest> = {
     message.strict = object.strict ?? false;
     message.iris = object.iris?.map((e) => e) || [];
     message.userId = object.userId ?? "";
+    message.edgeAnnotations = object.edgeAnnotations?.map((e) => EdgeAnnotation.fromPartial(e)) || [];
     return message;
   },
 };
@@ -20117,6 +20521,32 @@ export const PolarGraphServiceService = {
       Buffer.from(RunMaterializationResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): RunMaterializationResponse => RunMaterializationResponse.decode(value),
   },
+  /** / Which graphs inference reads schema axioms from. */
+  getInferenceSettings: {
+    path: "/polargraph.v1.PolarGraphService/GetInferenceSettings" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: GetInferenceSettingsRequest): Buffer =>
+      Buffer.from(GetInferenceSettingsRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): GetInferenceSettingsRequest => GetInferenceSettingsRequest.decode(value),
+    responseSerialize: (value: InferenceSettings): Buffer => Buffer.from(InferenceSettings.encode(value).finish()),
+    responseDeserialize: (value: Buffer): InferenceSettings => InferenceSettings.decode(value),
+  },
+  /**
+   * / Change them (service calls, primary only); recomputes the inferred
+   * / graphs and returns the run's statistics.
+   */
+  setInferenceSettings: {
+    path: "/polargraph.v1.PolarGraphService/SetInferenceSettings" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: SetInferenceSettingsRequest): Buffer =>
+      Buffer.from(SetInferenceSettingsRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): SetInferenceSettingsRequest => SetInferenceSettingsRequest.decode(value),
+    responseSerialize: (value: RunMaterializationResponse): Buffer =>
+      Buffer.from(RunMaterializationResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): RunMaterializationResponse => RunMaterializationResponse.decode(value),
+  },
 } as const;
 
 export interface PolarGraphServiceServer extends UntypedServiceImplementation {
@@ -20409,6 +20839,13 @@ export interface PolarGraphServiceServer extends UntypedServiceImplementation {
    * / Returns FAILED_PRECONDITION on a read replica.
    */
   runMaterialization: handleUnaryCall<RunMaterializationRequest, RunMaterializationResponse>;
+  /** / Which graphs inference reads schema axioms from. */
+  getInferenceSettings: handleUnaryCall<GetInferenceSettingsRequest, InferenceSettings>;
+  /**
+   * / Change them (service calls, primary only); recomputes the inferred
+   * / graphs and returns the run's statistics.
+   */
+  setInferenceSettings: handleUnaryCall<SetInferenceSettingsRequest, RunMaterializationResponse>;
 }
 
 export interface PolarGraphServiceClient extends Client {
@@ -21635,6 +22072,41 @@ export interface PolarGraphServiceClient extends Client {
   ): ClientUnaryCall;
   runMaterialization(
     request: RunMaterializationRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: RunMaterializationResponse) => void,
+  ): ClientUnaryCall;
+  /** / Which graphs inference reads schema axioms from. */
+  getInferenceSettings(
+    request: GetInferenceSettingsRequest,
+    callback: (error: ServiceError | null, response: InferenceSettings) => void,
+  ): ClientUnaryCall;
+  getInferenceSettings(
+    request: GetInferenceSettingsRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: InferenceSettings) => void,
+  ): ClientUnaryCall;
+  getInferenceSettings(
+    request: GetInferenceSettingsRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: InferenceSettings) => void,
+  ): ClientUnaryCall;
+  /**
+   * / Change them (service calls, primary only); recomputes the inferred
+   * / graphs and returns the run's statistics.
+   */
+  setInferenceSettings(
+    request: SetInferenceSettingsRequest,
+    callback: (error: ServiceError | null, response: RunMaterializationResponse) => void,
+  ): ClientUnaryCall;
+  setInferenceSettings(
+    request: SetInferenceSettingsRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: RunMaterializationResponse) => void,
+  ): ClientUnaryCall;
+  setInferenceSettings(
+    request: SetInferenceSettingsRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: RunMaterializationResponse) => void,
