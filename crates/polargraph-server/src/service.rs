@@ -1216,14 +1216,24 @@ impl PolarGraphServer {
         compiled
     }
 
-    /// Confine a Cypher read to its dataset (`graphs`, "" = default graph):
-    /// filters, projections and aggregates read the snapshot directly, so
-    /// scoping the patterns alone isn't enough.
+    /// Confine a Cypher read to its dataset — `USE GRAPH`, else `graphs`
+    /// ("" = default graph): filters, projections and aggregates read the
+    /// snapshot directly, so scoping the patterns alone isn't enough.
     fn cypher_snapshot_scope(
         &self,
         snapshot: polargraph_storage::Snapshot,
+        cypher: &str,
         graphs: &[String],
     ) -> polargraph_storage::Snapshot {
+        let use_graph = polargraph_query::cypher::split_use_graph(cypher)
+            .ok()
+            .and_then(|(g, _)| g);
+        let use_graph = use_graph.as_slice();
+        let graphs = if use_graph.is_empty() {
+            graphs
+        } else {
+            use_graph
+        };
         if graphs.is_empty() {
             return snapshot;
         }
@@ -3916,7 +3926,7 @@ impl PolarGraphService for PolarGraphServer {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
         }
         let snapshot = self.inferred_scope(snapshot, req.exclude_inferred);
-        let snapshot = self.cypher_snapshot_scope(snapshot, &req.graphs);
+        let snapshot = self.cypher_snapshot_scope(snapshot, &req.cypher, &req.graphs);
 
         let deadline = self.make_deadline();
         let t0 = Instant::now();
@@ -4301,7 +4311,7 @@ impl PolarGraphService for PolarGraphServer {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
         }
         let snapshot = self.inferred_scope(snapshot, req.exclude_inferred);
-        let snapshot = self.cypher_snapshot_scope(snapshot, &req.graphs);
+        let snapshot = self.cypher_snapshot_scope(snapshot, &req.cypher, &req.graphs);
 
         let deadline = self.make_deadline();
         let t0 = Instant::now();
