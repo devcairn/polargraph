@@ -664,11 +664,9 @@ impl HnswIndex {
 
                 if let Some(candidates) = prune_candidates {
                     // All &mut borrows are released here; we can call &self methods.
-                    let nv = self.get_vector_owned(neighbor_id);
-                    let nprobe = self.probe(&nv);
                     let mut scored: Vec<(f32, NodeId)> = candidates
                         .iter()
-                        .map(|&c| (self.dist(c, &nprobe), c))
+                        .map(|&c| (self.dist_nodes(neighbor_id, c), c))
                         .collect();
                     scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(cmp::Ordering::Equal));
                     let pruned = self.select_neighbors_heuristic(&scored, m_max);
@@ -803,6 +801,29 @@ impl HnswIndex {
         }
     }
 
+    /// Distance between two stored nodes, as the index compares them (codes
+    /// when quantized), without copying either vector.
+    fn dist_nodes(&self, a: NodeId, b: NodeId) -> f32 {
+        if self.is_int8() {
+            return match (self.codes_of(a), self.codes_of(b)) {
+                (Some(x), Some(y)) => x.distance(y),
+                _ => f32::INFINITY,
+            };
+        }
+        match self.slice_of(a) {
+            Some(v) => self.dist_to(b, v),
+            None => f32::INFINITY,
+        }
+    }
+
+    /// A stored-or-mapped node's vector, borrowed.
+    fn slice_of(&self, id: NodeId) -> Option<&[f32]> {
+        match &self.mmap_state {
+            Some(ms) => ms.get_slice(id),
+            None => self.nodes.get(&id).map(|n| n.vector.as_slice()),
+        }
+    }
+
     /// Exact cosine distance from stored-or-mapped node `id` to `query`.
     fn dist_to(&self, id: NodeId, query: &[f32]) -> f32 {
         let vec: &[f32] = if let Some(ms) = &self.mmap_state {
@@ -899,9 +920,7 @@ impl HnswIndex {
             if kept.len() >= m {
                 break;
             }
-            let cv = self.get_vector_owned(c);
-            let cprobe = self.probe(&cv);
-            if kept.iter().all(|&k| self.dist(k, &cprobe) > d) {
+            if kept.iter().all(|&k| self.dist_nodes(k, c) > d) {
                 kept.push(c);
             }
         }
