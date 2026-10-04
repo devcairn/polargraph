@@ -374,7 +374,8 @@ impl Codes {
 
 /// A query as the index compares it: exact, or as int8 codes.
 enum Probe<'a> {
-    Exact(&'a [f32]),
+    /// The query and its norm.
+    Exact(&'a [f32], f32),
     Int8(Codes),
 }
 
@@ -382,6 +383,8 @@ pub struct HnswIndex {
     pub(crate) nodes: HashMap<NodeId, HnswNode>,
     /// int8 codes by node (`Some` ⇒ quantized space).
     pub(crate) int8: Option<HashMap<NodeId, Codes>>,
+    /// Exact vector norms by node (cosine then needs one dot product).
+    norms: HashMap<NodeId, f32>,
     pub(crate) entry_point: Option<NodeId>,
     pub(crate) global_max_layer: usize,
     m: usize,
@@ -418,6 +421,7 @@ impl HnswIndex {
             mmap_path: None,
             mmap_state: None,
             int8: None,
+            norms: HashMap::new(),
         }
     }
 
@@ -517,6 +521,13 @@ impl HnswIndex {
                 (Vec::new(), false) // vector lives in mmap, not in the node struct
             }
         };
+        let n = match &self.mmap_state {
+            Some(ms) => ms.get_slice(id).map(norm),
+            None => Some(norm(&vector)),
+        };
+        if let Some(n) = n {
+            self.norms.insert(id, n);
+        }
         self.nodes.insert(
             id,
             HnswNode {
@@ -567,6 +578,7 @@ impl HnswIndex {
         if let Some(codes) = &mut self.int8 {
             codes.insert(id, Codes::quantize(&vector));
         }
+        self.norms.insert(id, norm(&vector));
         let probe = self.probe(&vector);
         let level = self.random_level();
         let mut modified: Vec<NodeId> = Vec::new();
@@ -694,13 +706,14 @@ impl HnswIndex {
     ///
     /// Nodes absent from the index are silently skipped.  O(|allowed|).
     pub fn search_in_set(&self, query: &[f32], k: usize, allowed: &[NodeId]) -> Vec<(NodeId, f32)> {
+        let qn = norm(query);
         let mut scored: Vec<(NodeId, f32)> = allowed
             .iter()
             .filter_map(|&id| {
                 if !self.nodes.contains_key(&id) {
                     return None;
                 }
-                let d = self.dist_to(id, query);
+                let d = self.cosine_with(id, query, qn);
                 if d.is_infinite() {
                     None
                 } else {
@@ -748,9 +761,10 @@ impl HnswIndex {
 
         if self.is_int8() {
             // Re-rank the candidates with the exact vectors.
+            let qn = norm(query);
             let mut exact: Vec<(NodeId, f32)> = w
                 .into_iter()
-                .map(|Far(_, id)| (id, 1.0 - self.dist_to(id, query)))
+                .map(|Far(_, id)| (id, 1.0 - self.cosine_with(id, query, qn)))
                 .collect();
             exact.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(cmp::Ordering::Equal));
             exact.truncate(k);
@@ -786,14 +800,14 @@ impl HnswIndex {
         if self.is_int8() {
             Probe::Int8(Codes::quantize(query))
         } else {
-            Probe::Exact(query)
+            Probe::Exact(query, norm(query))
         }
     }
 
     /// Distance from node `id` to `probe` (codes when quantized).
     fn dist(&self, id: NodeId, probe: &Probe) -> f32 {
         match probe {
-            Probe::Exact(q) => self.dist_to(id, q),
+            Probe::Exact(q, qn) => self.cosine_with(id, q, *qn),
             Probe::Int8(q) => match self.codes_of(id) {
                 Some(c) => c.distance(q),
                 None => f32::INFINITY,
@@ -810,10 +824,31 @@ impl HnswIndex {
                 _ => f32::INFINITY,
             };
         }
-        match self.slice_of(a) {
-            Some(v) => self.dist_to(b, v),
-            None => f32::INFINITY,
+        match (self.slice_of(a), self.norm_of(a)) {
+            (Some(v), Some(n)) => self.cosine_with(b, v, n),
+            _ => f32::INFINITY,
         }
+    }
+
+    /// A node's vector norm: cached at insert / load (computed for nodes
+    /// that predate the cache).
+    fn norm_of(&self, id: NodeId) -> Option<f32> {
+        match self.norms.get(&id) {
+            Some(n) => Some(*n),
+            None => self.slice_of(id).map(norm),
+        }
+    }
+
+    /// Cosine distance from node `id` to `q` (norm `qn`), using the node's
+    /// cached norm: one dot product per comparison.
+    fn cosine_with(&self, id: NodeId, q: &[f32], qn: f32) -> f32 {
+        let (Some(v), Some(vn)) = (self.slice_of(id), self.norm_of(id)) else {
+            return f32::INFINITY;
+        };
+        if v.is_empty() || v.len() != q.len() || vn == 0.0 || qn == 0.0 {
+            return 1.0;
+        }
+        (1.0 - dot(v, q) / (vn * qn)).clamp(0.0, 2.0)
     }
 
     /// A stored-or-mapped node's vector, borrowed.
@@ -822,22 +857,6 @@ impl HnswIndex {
             Some(ms) => ms.get_slice(id),
             None => self.nodes.get(&id).map(|n| n.vector.as_slice()),
         }
-    }
-
-    /// Exact cosine distance from stored-or-mapped node `id` to `query`.
-    fn dist_to(&self, id: NodeId, query: &[f32]) -> f32 {
-        let vec: &[f32] = if let Some(ms) = &self.mmap_state {
-            match ms.get_slice(id) {
-                Some(s) => s,
-                None => return f32::INFINITY,
-            }
-        } else {
-            match self.nodes.get(&id) {
-                Some(n) => &n.vector,
-                None => return f32::INFINITY,
-            }
-        };
-        cosine_distance(vec, query)
     }
 
     /// Copy the vector for `id` into a new `Vec<f32>`.
@@ -941,6 +960,30 @@ impl HnswIndex {
 // ── Distance function ─────────────────────────────────────────────────────────
 
 /// Cosine distance ∈ [0, 2]. Zero = identical direction, 2 = opposite.
+fn norm(v: &[f32]) -> f32 {
+    dot(v, v).sqrt()
+}
+
+/// Dot product with eight independent accumulators, so the compiler can
+/// vectorize it (a single running sum fixes the order of float additions
+/// and stays scalar). Neighbour selection runs thousands per insert.
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0.0f32; 8];
+    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
+    let tail: f32 = ca
+        .remainder()
+        .iter()
+        .zip(cb.remainder())
+        .map(|(x, y)| x * y)
+        .sum();
+    for (x, y) in ca.zip(cb) {
+        for i in 0..8 {
+            acc[i] += x[i] * y[i];
+        }
+    }
+    acc.iter().sum::<f32>() + tail
+}
+
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     if a.is_empty() || b.is_empty() || a.len() != b.len() {
         return 1.0;
