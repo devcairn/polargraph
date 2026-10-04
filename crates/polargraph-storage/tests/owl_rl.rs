@@ -477,3 +477,63 @@ mod dred {
         ));
     }
 }
+
+#[test]
+fn schema_axioms_come_only_from_the_selected_schema_graphs() {
+    let (store, _d) = open_store();
+    rel(
+        &store,
+        "urn:onto:a",
+        "http://ex/Cat",
+        RDFS_SUBCLASS_OF,
+        "http://ex/Animal",
+    );
+    rel(
+        &store,
+        "urn:onto:b",
+        "http://ex/Cat",
+        RDFS_SUBCLASS_OF,
+        "http://ex/Pet",
+    );
+    rel(&store, "", "http://ex/tom", RDF_TYPE, "http://ex/Cat");
+    let is = |class: &str| inferred(&store, DEFAULT_INFERRED, "http://ex/tom", RDF_TYPE, class);
+
+    // Default: axioms from every graph.
+    owl_rl::materialize(&store, true).unwrap();
+    assert!(is("http://ex/Animal") && is("http://ex/Pet"));
+    assert_eq!(owl_rl::schema_graphs(&store).unwrap(), None);
+
+    // Selecting one ontology graph recomputes: the other's axioms drop out.
+    let stats = owl_rl::set_schema_graphs(&store, Some(&["urn:onto:a".to_string()])).unwrap();
+    assert_eq!(stats.closed, 1);
+    assert!(is("http://ex/Animal") && !is("http://ex/Pet"));
+    assert_eq!(
+        owl_rl::schema_graphs(&store).unwrap(),
+        Some(vec!["urn:onto:a".to_string()])
+    );
+
+    // Incremental inference ignores axioms added outside the schema graphs …
+    rel(
+        &store,
+        "urn:onto:b",
+        "http://ex/Cat",
+        RDFS_SUBCLASS_OF,
+        "http://ex/Mammal",
+    );
+    owl_rl::infer_changes(&store).unwrap();
+    assert!(!is("http://ex/Mammal"));
+    // … and picks up those added inside them.
+    rel(
+        &store,
+        "urn:onto:a",
+        "http://ex/Cat",
+        RDFS_SUBCLASS_OF,
+        "http://ex/Mammal",
+    );
+    owl_rl::infer_changes(&store).unwrap();
+    assert!(is("http://ex/Mammal"));
+
+    // Back to every graph.
+    owl_rl::set_schema_graphs(&store, None).unwrap();
+    assert!(is("http://ex/Pet"));
+}

@@ -8435,3 +8435,47 @@ async fn validate_shapes_full_and_overlay() {
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
+
+#[tokio::test]
+async fn inference_settings_select_schema_graphs() {
+    use polargraph_server::proto::{GetInferenceSettingsRequest, SetInferenceSettingsRequest};
+
+    let (svc, _dir) = open();
+    let settings = svc
+        .get_inference_settings(Request::new(GetInferenceSettingsRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(settings.all_graphs && settings.schema_graphs.is_empty());
+
+    let set = |graphs: Vec<&str>, user: &str| SetInferenceSettingsRequest {
+        schema_graphs: graphs.into_iter().map(str::to_string).collect(),
+        all_graphs: false,
+        user_id: user.into(),
+    };
+    let err = svc
+        .set_inference_settings(Request::new(set(vec!["urn:onto"], "urn:user:alice")))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code(),
+        tonic::Code::PermissionDenied,
+        "service calls only"
+    );
+    let err = svc
+        .set_inference_settings(Request::new(set(vec!["urn:pg:inferred:default"], "")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    svc.set_inference_settings(Request::new(set(vec!["urn:onto", ""], "")))
+        .await
+        .unwrap();
+    let settings = svc
+        .get_inference_settings(Request::new(GetInferenceSettingsRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!settings.all_graphs);
+    assert_eq!(settings.schema_graphs, vec!["", "urn:onto"]);
+}

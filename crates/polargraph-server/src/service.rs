@@ -5190,6 +5190,59 @@ impl PolarGraphService for PolarGraphServer {
             closed: stats.closed,
         }))
     }
+
+    async fn get_inference_settings(
+        &self,
+        _request: Request<crate::proto::GetInferenceSettingsRequest>,
+    ) -> Result<Response<crate::proto::InferenceSettings>, Status> {
+        let graphs = owl_rl::schema_graphs(&self.store).map_err(storage_err_to_status)?;
+        Ok(Response::new(crate::proto::InferenceSettings {
+            all_graphs: graphs.is_none(),
+            schema_graphs: graphs.unwrap_or_default(),
+        }))
+    }
+
+    async fn set_inference_settings(
+        &self,
+        request: Request<crate::proto::SetInferenceSettingsRequest>,
+    ) -> Result<Response<RunMaterializationResponse>, Status> {
+        self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
+        let req = request.into_inner();
+        require_service(&self.caller_access(&resolve_user_id(&req.user_id, &meta_uid)))?;
+        if req.all_graphs && !req.schema_graphs.is_empty() {
+            return Err(Status::invalid_argument(
+                "all_graphs and schema_graphs are exclusive",
+            ));
+        }
+        if let Some(iri) = req
+            .schema_graphs
+            .iter()
+            .find(|g| owl_rl::is_inferred_graph_iri(g))
+        {
+            return Err(Status::invalid_argument(format!(
+                "<{iri}> is an inferred graph; schema graphs hold base data"
+            )));
+        }
+        let stats = tokio::task::spawn_blocking({
+            let store = self.store.clone();
+            move || {
+                let graphs = (!req.all_graphs).then_some(req.schema_graphs);
+                owl_rl::set_schema_graphs(&store, graphs.as_deref())
+            }
+        })
+        .await
+        .map_err(|e| Status::internal(format!("materialize task panicked: {e}")))?
+        .map_err(storage_err_to_status)?;
+        self.after_inference(&stats);
+        Ok(Response::new(RunMaterializationResponse {
+            rules_fired: stats.asserted,
+            derived_triples: stats.derived_triples,
+            iterations: u32::from(stats.asserted + stats.closed > 0),
+            asserted: stats.asserted,
+            closed: stats.closed,
+        }))
+    }
 }
 
 // ── Streaming helpers ─────────────────────────────────────────────────────────

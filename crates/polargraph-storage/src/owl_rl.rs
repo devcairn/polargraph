@@ -96,6 +96,9 @@ pub const INFERENCE_AUTHOR: &str = "urn:pg:inference";
 
 /// META key: the last change-log commit incremental inference processed.
 const META_INFERENCE_APPLIED: &[u8] = b"__inference__/applied_ts";
+/// The graphs schema axioms are read from (JSON array of IRIs, "" = the
+/// default graph); absent = every graph.
+const META_SCHEMA_GRAPHS: &[u8] = b"__inference__/schema_graphs";
 
 /// Commit at most this many quad writes per transaction.
 const CHUNK: usize = 10_000;
@@ -164,12 +167,22 @@ pub struct InferredGraphs {
     pub graph_of: HashMap<Label, GraphId>,
     /// The system graph (never a premise).
     system: Option<GraphId>,
+    /// Graphs schema (T-box) axioms are read from; `None` = every graph.
+    schema_graphs: Option<HashSet<GraphId>>,
 }
 
 impl InferredGraphs {
     pub fn load(store: &TripleStore) -> Self {
         let mut out = InferredGraphs {
             system: store.graph_id(SYSTEM_GRAPH_IRI),
+            schema_graphs: schema_graphs(store).ok().flatten().map(|iris| {
+                iris.iter()
+                    .filter_map(|iri| match iri.as_str() {
+                        "" => Some(GraphId::DEFAULT),
+                        iri => store.graph_id(iri),
+                    })
+                    .collect()
+            }),
             ..Default::default()
         };
         for (id, iri) in store.list_graphs() {
@@ -201,6 +214,14 @@ impl InferredGraphs {
 
     fn is_inferred(&self, g: GraphId) -> bool {
         self.label_of.contains_key(&g)
+    }
+
+    /// Whether schema axioms in `g` drive the rules.
+    fn is_schema_graph(&self, g: GraphId) -> bool {
+        match &self.schema_graphs {
+            Some(s) => s.contains(&g),
+            None => true,
+        }
     }
 
     /// Inferred graph ids, for excluding them from a snapshot.
@@ -477,7 +498,7 @@ impl Schema {
             Ok(snap
                 .scan_scoped(None, Some(p), None, &GraphScope::Union)?
                 .into_iter()
-                .filter(|(g, _)| !graphs.is_inferred(*g))
+                .filter(|(g, _)| !graphs.is_inferred(*g) && graphs.is_schema_graph(*g))
                 .filter_map(|(g, t)| match (t, graphs.label(g)) {
                     (
                         Triple::Relation {
@@ -554,7 +575,7 @@ impl Schema {
                     &GraphScope::Union,
                 )?
                 .into_iter()
-                .filter(|(g, _)| !graphs.is_inferred(*g))
+                .filter(|(g, _)| !graphs.is_inferred(*g) && graphs.is_schema_graph(*g))
                 .filter_map(|(_, t)| prop(t.subject()))
                 .collect())
         };
@@ -753,6 +774,45 @@ fn put_applied(store: &TripleStore, ts: Timestamp) -> Result<(), StorageError> {
     Ok(())
 }
 
+// ── Schema graphs ─────────────────────────────────────────────────────────────
+
+/// The graphs schema axioms are read from (IRIs, "" = the default graph);
+/// `None` = every graph (the default).
+pub fn schema_graphs(store: &TripleStore) -> Result<Option<Vec<String>>, StorageError> {
+    let meta = store.cf_handle(crate::cf::META)?;
+    Ok(store
+        .db_ref()
+        .get_cf(&meta, META_SCHEMA_GRAPHS)?
+        .and_then(|v| serde_json::from_slice(&v).ok()))
+}
+
+/// Read schema axioms only from `graphs` (IRIs, "" = the default graph;
+/// `None` = every graph), then recompute the inferred graphs. Schema
+/// axioms in other graphs drive no rules; they stay ordinary data.
+pub fn set_schema_graphs(
+    store: &TripleStore,
+    graphs: Option<&[String]>,
+) -> Result<MaterializationStats, StorageError> {
+    if store.is_replica() {
+        return Err(StorageError::ReadOnly(
+            "inference runs on the primary".into(),
+        ));
+    }
+    let _run = run_lock();
+    let meta = store.cf_handle(crate::cf::META)?;
+    match graphs {
+        Some(iris) => {
+            let mut iris = iris.to_vec();
+            iris.sort();
+            iris.dedup();
+            let json = serde_json::to_vec(&iris)?;
+            store.db_ref().put_cf(&meta, META_SCHEMA_GRAPHS, json)?;
+        }
+        None => store.db_ref().delete_cf(&meta, META_SCHEMA_GRAPHS)?,
+    }
+    materialize_locked(store)
+}
+
 // ── Full materialization ──────────────────────────────────────────────────────
 
 /// Recompute the closure of the base data and bring the inferred graphs in
@@ -764,6 +824,18 @@ pub fn materialize(
     store: &TripleStore,
     _clear_first: bool,
 ) -> Result<MaterializationStats, StorageError> {
+    let _run = run_lock();
+    materialize_locked(store)
+}
+
+/// One inference run at a time (a manual run, a settings change and the
+/// background task would otherwise assert the same facts twice).
+fn run_lock() -> std::sync::MutexGuard<'static, ()> {
+    static RUN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    RUN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn materialize_locked(store: &TripleStore) -> Result<MaterializationStats, StorageError> {
     if store.is_replica() {
         return Err(StorageError::ReadOnly(
             "inference runs on the primary".into(),
@@ -859,10 +931,11 @@ pub fn infer_changes(store: &TripleStore) -> Result<Option<MaterializationStats>
             "inference runs on the primary".into(),
         ));
     }
+    let _run = run_lock();
     let resume = get_applied(store)?;
     let Some(from) = resume.filter(|ts| *ts >= store.changes_floor().unwrap_or(Timestamp(0)))
     else {
-        return materialize(store, false).map(Some);
+        return materialize_locked(store).map(Some);
     };
 
     let mut records = Vec::new();
@@ -909,7 +982,7 @@ pub fn infer_changes(store: &TripleStore) -> Result<Option<MaterializationStats>
                 continue;
             };
             let f = Fact::new(*subject, &predicate.0, *object, l);
-            schema_changed |= f.is_schema();
+            schema_changed |= f.is_schema() && graphs.is_schema_graph(*g);
             if temporal.vt_end == Timestamp::END_OF_TIME {
                 asserted.push(f);
             } else {

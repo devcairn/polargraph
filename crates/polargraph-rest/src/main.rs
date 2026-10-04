@@ -4023,6 +4023,68 @@ async fn handle_materialize(
     }
 }
 
+#[derive(Deserialize)]
+struct InferenceSettingsBody {
+    /// Graphs whose schema axioms drive inference ("" = default graph).
+    #[serde(default)]
+    schema_graphs: Vec<String>,
+    /// Clear the selection: axioms from every graph.
+    #[serde(default)]
+    all_graphs: bool,
+}
+
+/// `GET /inference/settings` — which graphs supply schema axioms.
+async fn handle_get_inference_settings(State(state): State<Arc<AppState>>) -> Response {
+    let req = proto::GetInferenceSettingsRequest {};
+    match state
+        .client
+        .clone()
+        .get_inference_settings(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            let r = r.into_inner();
+            Json(serde_json::json!({
+                "schema_graphs": r.schema_graphs,
+                "all_graphs": r.all_graphs,
+            }))
+            .into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
+/// `PUT /inference/settings` — choose the schema graphs; recomputes the
+/// inferred graphs and returns the run's statistics.
+async fn handle_set_inference_settings(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<InferenceSettingsBody>,
+) -> Response {
+    let req = proto::SetInferenceSettingsRequest {
+        schema_graphs: body.schema_graphs,
+        all_graphs: body.all_graphs,
+        user_id: String::new(),
+    };
+    match state
+        .client
+        .clone()
+        .set_inference_settings(tonic::Request::new(req))
+        .await
+    {
+        Ok(r) => {
+            let r = r.into_inner();
+            Json(serde_json::json!({
+                "ok": true,
+                "derived_triples": r.derived_triples,
+                "asserted": r.asserted,
+                "closed": r.closed,
+            }))
+            .into_response()
+        }
+        Err(e) => grpc_error(e),
+    }
+}
+
 // ── SPARQL-star Update helpers (Gap 4) ───────────────────────────────────────
 
 /// Extract the subject IRI (as a bare urn:uuid:... string) from a `GroundTriple` subject.
@@ -6100,6 +6162,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/sparql/update", post(handle_sparql_update))
         .route("/delete", post(handle_delete_triples))
         .route("/materialize", post(handle_materialize))
+        .route(
+            "/inference/settings",
+            get(handle_get_inference_settings).put(handle_set_inference_settings),
+        )
         .route("/import/rdf", post(handle_import_rdf))
         .route("/import/subgraph", post(handle_import_subgraph))
         .route(
