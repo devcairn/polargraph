@@ -1182,6 +1182,9 @@ message QuadRef {
     }
     /// Graph IRI ("" = default graph).
     string graph = 5;
+    /// Retract the quad in every graph where it is live (that the caller
+    /// may write) instead of only `graph`.
+    bool all_graphs = 6;
 }
 
 message ApplyChangesRequest {
@@ -1200,6 +1203,9 @@ message ApplyChangesRequest {
     /// Caller identity (optional; also `x-polargraph-user-id`): author of the
     /// change, and the graph ACL applies (write on every graph touched).
     string user_id = 6;
+    /// RDF-star edge annotations to add (default graph), in the same
+    /// transaction.
+    repeated EdgeAnnotation edge_annotations = 7;
 }
 
 message ApplyChangesResponse {

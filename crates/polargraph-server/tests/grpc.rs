@@ -8099,6 +8099,7 @@ async fn apply_changes_is_atomic_with_precondition() {
         predicate: "dependsOn".into(),
         object: Some(QObject::Node(o.clone())),
         graph: "urn:g:approved".into(),
+        all_graphs: false,
     };
     let retract_owner = || QuadRef {
         subject: Some(s.clone()),
@@ -8107,6 +8108,7 @@ async fn apply_changes_is_atomic_with_precondition() {
             kind: Some(ValueKind::TextVal("a".into())),
         })),
         graph: "urn:g:approved".into(),
+        all_graphs: false,
     };
     let live = |iri: &'static str| {
         let svc = &svc;
@@ -8230,6 +8232,70 @@ async fn apply_changes_is_atomic_with_precondition() {
 }
 
 #[tokio::test]
+async fn apply_changes_retracts_in_all_graphs_and_adds_annotations() {
+    use polargraph_server::proto::{
+        quad_ref::Object as QObject, ApplyChangesRequest, GraphStatsRequest, QuadRef,
+    };
+
+    let (svc, _dir) = open();
+    let (_, s) = new_node();
+    let (_, o) = new_node();
+    for graph in ["", "urn:g:a", "urn:g:b"] {
+        svc.insert(Request::new(InsertRequest {
+            triples: vec![rel(s.clone(), "dependsOn", o.clone())],
+            graph: graph.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    }
+    let edge = insert_relation_with_known_edge(&svc, s.clone(), "owns", o.clone()).await;
+
+    let resp = svc
+        .apply_changes(Request::new(ApplyChangesRequest {
+            retractions: vec![QuadRef {
+                subject: Some(s.clone()),
+                predicate: "dependsOn".into(),
+                object: Some(QObject::Node(o.clone())),
+                graph: String::new(),
+                all_graphs: true,
+            }],
+            edge_annotations: vec![EdgeAnnotation {
+                edge_id: edge.clone(),
+                predicate: "since".into(),
+                value: Some(AnnotationValue::Scalar(Value {
+                    kind: Some(ValueKind::IntVal(2020)),
+                })),
+            }],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        resp.retracted, 3,
+        "closed in the default graph and both named graphs"
+    );
+    assert_eq!(resp.added, 1, "the annotation");
+    for iri in ["urn:g:a", "urn:g:b"] {
+        let live = svc
+            .graph_stats(Request::new(GraphStatsRequest { iri: iri.into() }))
+            .await
+            .unwrap()
+            .into_inner()
+            .live_quads;
+        assert_eq!(live, 0, "{iri}");
+    }
+    let anns = svc
+        .get_edge_annotations(Request::new(GetEdgeAnnotationsRequest { edge_id: edge }))
+        .await
+        .unwrap()
+        .into_inner()
+        .annotations;
+    assert_eq!(anns.len(), 1);
+}
+
+#[tokio::test]
 async fn validate_shapes_full_and_overlay() {
     use polargraph_core::{
         term::iri_to_node_id,
@@ -8346,6 +8412,7 @@ async fn validate_shapes_full_and_overlay() {
                 kind: Some(ValueKind::TextVal("team".into())),
             })),
             graph: "urn:data".into(),
+            all_graphs: false,
         }],
         ..base()
     })

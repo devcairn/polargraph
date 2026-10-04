@@ -1886,10 +1886,10 @@ impl PolarGraphService for PolarGraphServer {
         let access = self.caller_access(&author);
 
         let n_adds: usize = req.adds.iter().map(|g| g.triples.len()).sum();
-        let n_changes = n_adds + req.retractions.len();
+        let n_changes = n_adds + req.retractions.len() + req.edge_annotations.len();
         if n_changes == 0 && req.iris.is_empty() {
             return Err(Status::invalid_argument(
-                "changeset must contain adds, retractions or IRIs",
+                "changeset must contain adds, retractions, annotations or IRIs",
             ));
         }
         if n_changes > MAX_CHANGESET {
@@ -1925,6 +1925,16 @@ impl PolarGraphService for PolarGraphServer {
                 }
             }
         }
+        if !req.edge_annotations.is_empty() {
+            let g = self.graph_for(&access, "", GraphAccessLevel::Write, true)?;
+            for ann in &req.edge_annotations {
+                adds.push((
+                    convert::edge_annotation_from_proto(ann)?,
+                    g,
+                    polargraph_storage::WriteMode::Auto,
+                ));
+            }
+        }
         for (triple, _, _) in &adds {
             if let Triple::Relation {
                 subject,
@@ -1949,11 +1959,20 @@ impl PolarGraphService for PolarGraphServer {
         let mut closes: Vec<(Triple, polargraph_core::id::GraphId)> = Vec::new();
         let mut not_found: u64 = 0;
         for r in &req.retractions {
-            let g = if access.is_some() {
-                self.graph_for(&access, &r.graph, GraphAccessLevel::Write, false)?
+            // `all_graphs`: every graph holding the quad that the caller may
+            // write (inferred graphs never).
+            let scope = if r.all_graphs {
+                polargraph_storage::GraphScope::Union
+            } else if access.is_some() {
+                polargraph_storage::GraphScope::One(self.graph_for(
+                    &access,
+                    &r.graph,
+                    GraphAccessLevel::Write,
+                    false,
+                )?)
             } else {
                 match self.existing_graph(&r.graph) {
-                    Ok(g) => g,
+                    Ok(g) => polargraph_storage::GraphScope::One(g),
                     Err(_) => {
                         not_found += 1;
                         continue;
@@ -1979,26 +1998,36 @@ impl PolarGraphService for PolarGraphServer {
                     ))
                 }
             };
-            let matched: Vec<Triple> = snapshot
+            let writable = |g: polargraph_core::id::GraphId| {
+                let iri = self.store.graph_iri(g).unwrap_or_default();
+                !owl_rl::is_inferred_graph_iri(&iri)
+                    && iri != polargraph_storage::SYSTEM_GRAPH_IRI
+                    && access
+                        .as_ref()
+                        .map_or(true, |a| a.allows(g, GraphAccessLevel::Write))
+            };
+            let matched: Vec<(polargraph_core::id::GraphId, Triple)> = snapshot
                 .scan_scoped(
                     Some(&subject),
                     Some(r.predicate.as_str()),
                     Some(&object),
-                    &polargraph_storage::GraphScope::One(g),
+                    &scope,
                 )
                 .map_err(storage_err_to_status)?
                 .into_iter()
-                .map(|(_, t)| t)
-                .filter(|t| match (t, &value) {
-                    (Triple::Property { value: tv, .. }, Some(v)) => tv == v,
-                    (Triple::Relation { .. }, None) => true,
-                    _ => false,
+                .filter(|(g, t)| {
+                    (!r.all_graphs || writable(*g))
+                        && match (t, &value) {
+                            (Triple::Property { value: tv, .. }, Some(v)) => tv == v,
+                            (Triple::Relation { .. }, None) => true,
+                            _ => false,
+                        }
                 })
                 .collect();
             if matched.is_empty() {
                 not_found += 1;
             }
-            closes.extend(matched.into_iter().map(|t| (t, g)));
+            closes.extend(matched.into_iter().map(|(g, t)| (t, g)));
         }
         if req.strict && not_found > 0 {
             return Err(Status::failed_precondition(format!(
@@ -2100,8 +2129,13 @@ impl PolarGraphService for PolarGraphServer {
             }
         }
         for r in &req.overlay_retractions {
-            let Ok(g) = self.existing_graph(&r.graph) else {
-                continue;
+            let g = if r.all_graphs {
+                None
+            } else {
+                let Ok(g) = self.existing_graph(&r.graph) else {
+                    continue;
+                };
+                Some(g)
             };
             let subject = convert::node_id_from_proto(
                 r.subject
@@ -2121,9 +2155,33 @@ impl PolarGraphService for PolarGraphServer {
                     ))
                 }
             };
-            overlay
-                .retractions
-                .push((g, subject, r.predicate.clone(), object));
+            let graphs: Vec<polargraph_core::id::GraphId> = match g {
+                Some(g) => vec![g],
+                // `all_graphs`: every graph where the quad is live now.
+                None => {
+                    let key = match &object {
+                        Obj::Node(n) => *n,
+                        Obj::Lit(v) => polargraph_storage::keys::value_object(v),
+                    };
+                    self.store
+                        .snapshot(self.store.begin().read_ts)
+                        .scan_scoped(
+                            Some(&subject),
+                            Some(r.predicate.as_str()),
+                            Some(&key),
+                            &polargraph_storage::GraphScope::Union,
+                        )
+                        .map_err(storage_err_to_status)?
+                        .into_iter()
+                        .map(|(g, _)| g)
+                        .collect()
+                }
+            };
+            for g in graphs {
+                overlay
+                    .retractions
+                    .push((g, subject, r.predicate.clone(), object.clone()));
+            }
         }
         let has_overlay = !overlay.adds.is_empty() || !overlay.retractions.is_empty();
 
