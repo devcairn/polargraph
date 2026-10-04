@@ -8576,3 +8576,87 @@ async fn vector_searches_filter_by_graph() {
     assert_eq!(seeded.bindings.len(), 1);
     assert_eq!(seeded.bindings[0].vars["n"].bytes, a.bytes);
 }
+
+#[tokio::test]
+async fn cypher_reads_stay_in_the_dataset_and_time_travel_keeps_the_acl() {
+    use polargraph_server::proto::GrantGraphAccessRequest;
+
+    let (svc, _dir) = open();
+    let (_, s) = new_node();
+    let (_, o) = new_node();
+    let (alice, _) = new_node();
+    for graph in ["urn:g:1", "urn:g:2"] {
+        svc.insert(Request::new(InsertRequest {
+            triples: vec![
+                rel(s.clone(), "knows", o.clone()),
+                text_prop(s.clone(), "title", graph),
+            ],
+            graph: graph.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    }
+    let cypher = |q: &str, graphs: Vec<&str>| CypherQueryRequest {
+        cypher: q.into(),
+        graphs: graphs.into_iter().map(str::to_string).collect(),
+        ..Default::default()
+    };
+
+    // A property filter and a projection read only the dataset's graphs.
+    let rows = svc
+        .cypher_query(Request::new(cypher(
+            "MATCH (n)-[:knows]->(m) WHERE n.title = 'urn:g:2' RETURN n",
+            vec!["urn:g:1"],
+        )))
+        .await
+        .unwrap()
+        .into_inner()
+        .rows;
+    assert!(rows.is_empty(), "the urn:g:2 title is outside the dataset");
+    let rows = svc
+        .cypher_query(Request::new(cypher(
+            "MATCH (n)-[:knows]->(m) RETURN n.title",
+            vec!["urn:g:1"],
+        )))
+        .await
+        .unwrap()
+        .into_inner()
+        .rows;
+    let collected = format!("{rows:?}");
+    assert!(
+        collected.contains("urn:g:1") && !collected.contains("urn:g:2"),
+        "{collected}"
+    );
+
+    // Time travel doesn't lift the graph ACL.
+    svc.grant_graph_access(Request::new(GrantGraphAccessRequest {
+        principal: alice.to_string(),
+        graph: "urn:g:1".into(),
+        level: "read".into(),
+        user_id: String::new(),
+    }))
+    .await
+    .unwrap();
+    let now = polargraph_core::temporal::Timestamp::now().0;
+    let mut req = Request::new(CypherQueryRequest {
+        as_of_tx_time: now,
+        ..cypher(
+            "MATCH (n)-[:knows]->(m) WHERE n.title = 'urn:g:2' RETURN n",
+            vec![],
+        )
+    });
+    req.metadata_mut()
+        .insert("x-polargraph-user-id", alice.to_string().parse().unwrap());
+    let rows = svc.cypher_query(req).await.unwrap().into_inner().rows;
+    assert!(rows.is_empty(), "alice can't read urn:g:2, as of any time");
+    let mut req = Request::new(QueryRequest {
+        patterns: vec![pattern(var("s"), "title", var("t"))],
+        as_of_tx_time: now,
+        ..Default::default()
+    });
+    req.metadata_mut()
+        .insert("x-polargraph-user-id", alice.to_string().parse().unwrap());
+    let bindings = svc.query(req).await.unwrap().into_inner().bindings;
+    assert_eq!(bindings.len(), 1, "only the urn:g:1 title");
+}

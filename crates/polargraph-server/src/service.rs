@@ -1206,11 +1206,31 @@ impl PolarGraphServer {
         if !graphs.is_empty() {
             let ids = graphs
                 .iter()
-                .filter_map(|iri| self.store.graph_id(iri))
+                .filter_map(|iri| match iri.as_str() {
+                    "" => Some(polargraph_core::id::GraphId::DEFAULT),
+                    iri => self.store.graph_id(iri),
+                })
                 .collect();
             compiled.scope_to(&polargraph_query::GraphTerm::Set(ids));
         }
         compiled
+    }
+
+    /// Confine a Cypher read to its dataset (`graphs`, "" = default graph):
+    /// filters, projections and aggregates read the snapshot directly, so
+    /// scoping the patterns alone isn't enough.
+    fn cypher_snapshot_scope(
+        &self,
+        snapshot: polargraph_storage::Snapshot,
+        graphs: &[String],
+    ) -> polargraph_storage::Snapshot {
+        if graphs.is_empty() {
+            return snapshot;
+        }
+        snapshot.within_graphs(graphs.iter().filter_map(|iri| match iri.as_str() {
+            "" => Some(polargraph_core::id::GraphId::DEFAULT),
+            iri => self.store.graph_id(iri),
+        }))
     }
 
     fn target_graph(&self, iri: &str) -> Result<polargraph_core::id::GraphId, Status> {
@@ -2602,8 +2622,7 @@ impl PolarGraphService for PolarGraphServer {
         let mut snapshot = if tx_ts == 0 {
             self.snapshot_for(self.store.begin().read_ts, &access)
         } else {
-            self.store
-                .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+            self.snapshot_for(polargraph_core::temporal::Timestamp(tx_ts), &access)
         };
 
         // Apply valid-time filter when requested.
@@ -3890,14 +3909,14 @@ impl PolarGraphService for PolarGraphServer {
             if tx_ts == 0 {
                 self.snapshot_for(self.store.begin().read_ts, &access)
             } else {
-                self.store
-                    .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+                self.snapshot_for(polargraph_core::temporal::Timestamp(tx_ts), &access)
             }
         };
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
         }
         let snapshot = self.inferred_scope(snapshot, req.exclude_inferred);
+        let snapshot = self.cypher_snapshot_scope(snapshot, &req.graphs);
 
         let deadline = self.make_deadline();
         let t0 = Instant::now();
@@ -4199,8 +4218,7 @@ impl PolarGraphService for PolarGraphServer {
         let mut snapshot = if tx_ts == 0 {
             self.snapshot_for(self.store.begin().read_ts, &access)
         } else {
-            self.store
-                .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+            self.snapshot_for(polargraph_core::temporal::Timestamp(tx_ts), &access)
         };
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
@@ -4277,13 +4295,13 @@ impl PolarGraphService for PolarGraphServer {
         let mut snapshot = if tx_ts == 0 {
             self.snapshot_for(self.store.begin().read_ts, &access)
         } else {
-            self.store
-                .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+            self.snapshot_for(polargraph_core::temporal::Timestamp(tx_ts), &access)
         };
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
         }
         let snapshot = self.inferred_scope(snapshot, req.exclude_inferred);
+        let snapshot = self.cypher_snapshot_scope(snapshot, &req.graphs);
 
         let deadline = self.make_deadline();
         let t0 = Instant::now();

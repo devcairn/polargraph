@@ -477,6 +477,21 @@ impl Snapshot {
         self
     }
 
+    /// This snapshot restricted to the graphs in `included` (a query's
+    /// dataset). Composes with [`Self::with_readable_graphs`] (intersection).
+    pub fn within_graphs(
+        mut self,
+        included: impl IntoIterator<Item = polargraph_core::id::GraphId>,
+    ) -> Self {
+        let included: roaring::RoaringBitmap = included.into_iter().map(|g| g.0).collect();
+        let readable = match self.readable.take() {
+            Some(r) => &*r & &included,
+            None => included,
+        };
+        self.readable = Some(std::sync::Arc::new(readable));
+        self
+    }
+
     /// This snapshot without the graphs in `excluded` (e.g. the inferred
     /// graphs, for a request that opts out of inferred facts). Composes with
     /// [`Self::with_readable_graphs`].
