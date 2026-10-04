@@ -837,8 +837,9 @@ to Datalog IR and evaluated by the standard query pipeline.
 | `tx_id` | `string` | Optional wire transaction ID for consistent reads |
 | `graphs` | `repeated string` | Dataset: graph IRIs the MATCH reads (empty = every graph); a `USE GRAPH <iri>` clause wins |
 
-A leading `USE GRAPH <iri>` (or `USE <iri>`) scopes the MATCH to one graph.
-Property filters and projections read every graph.
+A leading `USE GRAPH <iri>` (or `USE <iri>`) scopes the query to one graph.
+The dataset bounds the whole read — MATCH patterns, property filters, text
+predicates, projections and aggregates ("" names the default graph).
 
 **Response fields:** `repeated CypherRow rows` where each row contains a
 `map<string, Value> columns` matching the `RETURN` clause variables.
@@ -1135,6 +1136,22 @@ rules_fired (= asserted), iterations (1 if anything changed) }`.
 facts included). REST: `"inferred": false` in `/query`, `/cypher` and
 `/validate` bodies; SPARQL `?inferred=false`.
 
+### `GetInferenceSettings` / `SetInferenceSettings`
+
+```
+rpc GetInferenceSettings(GetInferenceSettingsRequest) returns (InferenceSettings)
+rpc SetInferenceSettings(SetInferenceSettingsRequest) returns (RunMaterializationResponse)
+```
+
+`InferenceSettings { schema_graphs, all_graphs }`: the graphs whose schema
+axioms drive the rules ("" = default graph); `all_graphs` = no selection,
+axioms from every graph (the default). `SetInferenceSettings
+{ schema_graphs, all_graphs, user_id }` stores the selection and recomputes
+the inferred graphs (service calls only, primary only; inferred graphs
+can't be schema graphs). Axioms in other graphs are ordinary data. REST:
+`GET` / `PUT /inference/settings` with `{"schema_graphs": [...]}` or
+`{"all_graphs": true}`.
+
 ---
 
 ### `IncrementCounters` / `GetCounters`
@@ -1250,11 +1267,28 @@ Executes a SPARQL 1.1 Update request. Body is a raw SPARQL Update string.
 Supports `INSERT DATA` / `DELETE DATA` (with `GRAPH`), `INSERT/DELETE WHERE`
 (graph templates, `USING`), `CLEAR` / `DROP` (graph, `DEFAULT`, `NAMED`,
 `ALL`, `SILENT`), `CREATE`, and `ADD` / `COPY` / `MOVE` (run as `CopyGraph`);
-`LOAD` is reported as unsupported. Returns
-`{"ok": bool, "inserted": N, "deleted": N, "failed": N, "errors": [...]}`.
-Each deleted quad closes exactly that triple — in the named graph, or in
-every graph when there is no `GRAPH`. IRIs map to nodes the same way as `/import/rdf`
-(`urn:uuid:` IRIs keep their UUID, others are hashed).
+`LOAD` is reported as unsupported. Each deleted quad closes exactly that
+triple — in the named graph, or in every graph when there is no `GRAPH`.
+IRIs map to nodes the same way as `/import/rdf` (`urn:uuid:` IRIs keep their
+UUID, others are hashed).
+
+**Data operations are atomic.** A request of `INSERT DATA`, `DELETE DATA`
+and `DELETE` / `INSERT … WHERE` operations compiles to one `ApplyChanges`
+changeset — one transaction, one change-feed entry. Every `WHERE` reads the
+request's read point; a later `DELETE` of a quad cancels an earlier
+`INSERT` of it. Query parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `dry_run=true` | Return `{"dry_run": true, "read_ts", "changeset": {adds, retractions}, "edge_annotations": N, "failed": N}` (the `/changes` format) without applying |
+| `read_ts=N` | `WHERE` reads at N and the commit fails with 409 if a touched quad changed after N. Without it, a request with `WHERE` uses its start time the same way |
+
+Returns `{"ok", "inserted", "deleted", "failed", "errors", "commit_ts",
+"retractions_not_found"}`; a rejected changeset returns its status (403,
+409, …) and applies nothing. Graph operations (`CLEAR`, `DROP`, `CREATE`,
+`ADD` / `COPY` / `MOVE`, `LOAD`, annotation deletes) run one by one and
+can't share a request with data operations (400). See
+`docs/upgrade-step10.md`.
 
 ---
 
@@ -1267,11 +1301,12 @@ rpc ApplyChanges(ApplyChangesRequest) returns (ApplyChangesResponse)
 | Request field | Meaning |
 |---|---|
 | `adds` | `repeated GraphTriples { graph, repeated Triple triples }` ("" = default graph) |
-| `retractions` | `repeated QuadRef { subject, predicate, node \| value, graph }` — closed at now |
+| `retractions` | `repeated QuadRef { subject, predicate, node \| value, graph, all_graphs }` — closed at now; `all_graphs` closes it in every graph where it is live (and writable) |
 | `read_ts` | Precondition: fail (`ABORTED`) if any touched quad changed after it; 0 = none |
 | `strict` | Fail (`FAILED_PRECONDITION`) if a retraction matches no live quad |
 | `iris` | IRI dictionary bindings |
 | `user_id` | Author; graph ACL (`write` on every graph touched) |
+| `edge_annotations` | RDF-star annotations to add (default graph), same transaction |
 
 Response: `{commit_ts, added, retracted, retractions_not_found, edge_ids}`.
 At most 100 000 adds + retractions (`RESOURCE_EXHAUSTED`).
@@ -1402,6 +1437,7 @@ snapshot.can_read_graph(g)
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/materialize` | Run OWL 2 RL materialization; returns `{"derived_count": N}` |
+| `GET` / `PUT` | `/inference/settings` | Schema graphs for inference (`{"schema_graphs": [...]}` / `{"all_graphs": true}`) |
 | `GET` | `/property-history` | Property version history; params: `subject`, `predicate`, `limit` |
 | `POST` | `/edge-annotations` | Insert RDF-star edge annotations |
 | `GET` | `/edge-annotations/:edge_id` | Retrieve all annotations for an edge |

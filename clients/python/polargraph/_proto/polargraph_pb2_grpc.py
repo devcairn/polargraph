@@ -384,6 +384,16 @@ class PolarGraphServiceStub:
                 request_serializer=polargraph__pb2.RunMaterializationRequest.SerializeToString,
                 response_deserializer=polargraph__pb2.RunMaterializationResponse.FromString,
                 _registered_method=True)
+        self.GetInferenceSettings = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/GetInferenceSettings',
+                request_serializer=polargraph__pb2.GetInferenceSettingsRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.InferenceSettings.FromString,
+                _registered_method=True)
+        self.SetInferenceSettings = channel.unary_unary(
+                '/polargraph.v1.PolarGraphService/SetInferenceSettings',
+                request_serializer=polargraph__pb2.SetInferenceSettingsRequest.SerializeToString,
+                response_deserializer=polargraph__pb2.RunMaterializationResponse.FromString,
+                _registered_method=True)
 
 
 class PolarGraphServiceServicer:
@@ -954,6 +964,21 @@ class PolarGraphServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetInferenceSettings(self, request, context):
+        """/ Which graphs inference reads schema axioms from.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SetInferenceSettings(self, request, context):
+        """/ Change them (service calls, primary only); recomputes the inferred
+        / graphs and returns the run's statistics.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_PolarGraphServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -1305,6 +1330,16 @@ def add_PolarGraphServiceServicer_to_server(servicer, server):
             'RunMaterialization': grpc.unary_unary_rpc_method_handler(
                     servicer.RunMaterialization,
                     request_deserializer=polargraph__pb2.RunMaterializationRequest.FromString,
+                    response_serializer=polargraph__pb2.RunMaterializationResponse.SerializeToString,
+            ),
+            'GetInferenceSettings': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetInferenceSettings,
+                    request_deserializer=polargraph__pb2.GetInferenceSettingsRequest.FromString,
+                    response_serializer=polargraph__pb2.InferenceSettings.SerializeToString,
+            ),
+            'SetInferenceSettings': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetInferenceSettings,
+                    request_deserializer=polargraph__pb2.SetInferenceSettingsRequest.FromString,
                     response_serializer=polargraph__pb2.RunMaterializationResponse.SerializeToString,
             ),
     }
@@ -3197,6 +3232,60 @@ class PolarGraphService:
             target,
             '/polargraph.v1.PolarGraphService/RunMaterialization',
             polargraph__pb2.RunMaterializationRequest.SerializeToString,
+            polargraph__pb2.RunMaterializationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetInferenceSettings(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/GetInferenceSettings',
+            polargraph__pb2.GetInferenceSettingsRequest.SerializeToString,
+            polargraph__pb2.InferenceSettings.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetInferenceSettings(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/polargraph.v1.PolarGraphService/SetInferenceSettings',
+            polargraph__pb2.SetInferenceSettingsRequest.SerializeToString,
             polargraph__pb2.RunMaterializationResponse.FromString,
             options,
             channel_credentials,

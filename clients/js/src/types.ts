@@ -172,6 +172,8 @@ export interface ConversionReport {
 export interface SearchOptions {
   /** HNSW exploration factor. Higher = better recall, slower. */
   ef?: number;
+  /** Only nodes with a live quad in one of these graphs ("" = default graph). */
+  graphs?: string[];
 }
 
 /** One nearest-neighbour search result. */

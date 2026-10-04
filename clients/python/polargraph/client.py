@@ -458,9 +458,12 @@ class PolarGraphClient:
         vector: list[float],
         k: int,
         ef: Optional[int] = None,
+        graphs: Optional[list[str]] = None,
     ) -> list[dict]:
         """Search for k nearest neighbours in a named HNSW space."""
-        req = pb.SearchVectorRequest(query=vector, k=k, space=space, ef=ef or 0)
+        req = pb.SearchVectorRequest(
+            query=vector, k=k, space=space, ef=ef or 0, graphs=graphs or []
+        )
         resp: pb.SearchVectorResponse = self._stub.SearchVector(req, metadata=self._metadata)
         return [
             {"node_id": _str_node_id(r.node_id), "similarity": r.similarity}

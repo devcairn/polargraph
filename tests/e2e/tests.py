@@ -357,13 +357,22 @@ def sparql_select(base_url: str, query: str):
     return data["results"]["bindings"]
 
 
-def sparql_update(base_url: str, update: str):
+def sparql_update(base_url: str, update: str, params: dict = None):
+    url = base_url + "/sparql/update"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(
-        base_url + "/sparql/update", data=update.encode(),
+        url, data=update.encode(),
         headers={"Content-Type": "application/sparql-update"},
     )
-    with urllib.request.urlopen(req) as resp:
-        return resp.status, json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read())
+        except Exception:
+            return e.code, {}
 
 
 def test_sparql_literal_results(base_url: str):
@@ -448,6 +457,62 @@ def test_sparql_filter_functions(base_url: str):
     assert titles(f'STR(?s) = "urn:uuid:{b}"') == ["Hello"]
 
 
+def test_sparql_update_atomic(base_url: str):
+    """One request = one transaction: dry_run, all-or-nothing, net deletes, read_ts, no mixing."""
+    ns = f"http://e2e.example/{uuid.uuid4().hex[:8]}/"
+    a, b = ns + "a", ns + "b"
+
+    def names(node):
+        rows = sparql_select(base_url, f"SELECT ?n WHERE {{ <{node}> <{ns}name> ?n }}")
+        return sorted(r["n"]["value"] for r in rows)
+
+    # dry_run returns the changeset and applies nothing.
+    update = f'INSERT DATA {{ <{a}> <{ns}name> "Ada" }}'
+    status, data = sparql_update(base_url, update, {"dry_run": "true"})
+    assert status == 200 and data["dry_run"], f"dry run: {status} {data}"
+    triples = data["changeset"]["adds"][0]["triples"]
+    assert triples == [{"subject": a, "predicate": ns + "name", "value": "Ada"}], data
+    assert names(a) == [], "dry run applied nothing"
+
+    # A rejected quad (writes to inferred graphs are refused) fails the whole request.
+    status, data = sparql_update(base_url,
+        f'INSERT DATA {{ <{a}> <{ns}name> "Ada" . '
+        f'GRAPH <urn:pg:inferred:default> {{ <{b}> <{ns}name> "Bob" }} }}')
+    assert status == 403, f"inferred-graph write rejected: {status} {data}"
+    assert names(a) == [], "nothing applied"
+
+    # Several operations commit together; a later DELETE undoes an earlier INSERT.
+    status, data = sparql_update(base_url,
+        f'INSERT DATA {{ <{a}> <{ns}name> "Ada" . <{b}> <{ns}name> "Bob" }} ; '
+        f'DELETE DATA {{ <{b}> <{ns}name> "Bob" }}')
+    assert status == 200 and data["inserted"] == 1 and data["commit_ts"] > 0, f"atomic: {data}"
+    assert names(a) == ["Ada"] and names(b) == [], (names(a), names(b))
+
+    # WHERE reads the request's read point; quads it retracts that changed
+    # after an explicit read_ts make the request a conflict.
+    read_ts = data["commit_ts"]
+    status, data = http_post(base_url + "/changes", {
+        "retractions": [{"subject": a, "predicate": ns + "name", "value": "Ada"}],
+        "adds": [{"triples": [{"subject": a, "predicate": ns + "name", "value": "Augusta"}]}],
+    })
+    assert status == 200, f"/changes: {status} {data}"
+    status, data = sparql_update(base_url,
+        f'DELETE {{ ?s <{ns}name> ?n }} INSERT {{ ?s <{ns}name> "Ada L." }} '
+        f'WHERE {{ ?s <{ns}name> ?n }}', {"read_ts": str(read_ts)})
+    assert status == 409, f"stale read_ts: {status} {data}"
+    status, data = sparql_update(base_url,
+        f'DELETE {{ ?s <{ns}name> ?n }} INSERT {{ ?s <{ns}name> "Ada L." }} '
+        f'WHERE {{ ?s <{ns}name> ?n }}')
+    assert status == 200 and data["deleted"] == 1 and data["inserted"] == 1, f"rename: {data}"
+    assert names(a) == ["Ada L."], names(a)
+
+    # Graph operations can't share a request with data operations.
+    status, data = sparql_update(base_url,
+        f'INSERT DATA {{ <{b}> <{ns}name> "Bob" }} ; CLEAR GRAPH <{ns}g>')
+    assert status == 400, f"mixed request: {status} {data}"
+    assert names(b) == []
+
+
 def test_inferred_facts_via_sparql(base_url: str):
     """Materialized subclass instances are visible to SPARQL; ?inferred=false hides them."""
     ns = f"http://e2e.example/{uuid.uuid4().hex[:8]}/"
@@ -499,6 +564,7 @@ TESTS = [
     test_query_value_bindings,
     test_sparql_literal_results,
     test_sparql_update_with_value_variables,
+    test_sparql_update_atomic,
     test_sparql_filter_functions,
     test_inferred_facts_via_sparql,
     test_counters,

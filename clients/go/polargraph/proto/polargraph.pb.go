@@ -2310,7 +2310,10 @@ type SearchVectorRequest struct {
 	Space string `protobuf:"bytes,3,opt,name=space,proto3" json:"space,omitempty"`
 	// / HNSW exploration factor. Higher = better recall, slower.
 	// / 0 means use the server-wide default (--default-vector-ef, default 50).
-	Ef            uint32 `protobuf:"varint,4,opt,name=ef,proto3" json:"ef,omitempty"`
+	Ef uint32 `protobuf:"varint,4,opt,name=ef,proto3" json:"ef,omitempty"`
+	// / Only nodes with a live quad in one of these graphs ("" = default
+	// / graph); empty = every graph.
+	Graphs        []string `protobuf:"bytes,5,rep,name=graphs,proto3" json:"graphs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2371,6 +2374,13 @@ func (x *SearchVectorRequest) GetEf() uint32 {
 		return x.Ef
 	}
 	return 0
+}
+
+func (x *SearchVectorRequest) GetGraphs() []string {
+	if x != nil {
+		return x.Graphs
+	}
+	return nil
 }
 
 type VectorSearchResult struct {
@@ -2590,7 +2600,10 @@ type SearchVectorFilteredRequest struct {
 	// / HNSW exploration factor. 0 = use server default.
 	Ef uint32 `protobuf:"varint,6,opt,name=ef,proto3" json:"ef,omitempty"`
 	// / Optional identity for access-control filtering.
-	UserId        string `protobuf:"bytes,7,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	UserId string `protobuf:"bytes,7,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// / Only nodes with a live quad in one of these graphs ("" = default
+	// / graph); empty = every graph.
+	Graphs        []string `protobuf:"bytes,8,rep,name=graphs,proto3" json:"graphs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2685,6 +2698,13 @@ func (x *SearchVectorFilteredRequest) GetUserId() string {
 	return ""
 }
 
+func (x *SearchVectorFilteredRequest) GetGraphs() []string {
+	if x != nil {
+		return x.Graphs
+	}
+	return nil
+}
+
 type isSearchVectorFilteredRequest_Filter interface {
 	isSearchVectorFilteredRequest_Filter()
 }
@@ -2746,11 +2766,14 @@ func (x *SearchVectorFilteredResponse) GetResults() []*VectorSearchResult {
 }
 
 type SearchVectorInSetRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Space         string                 `protobuf:"bytes,1,opt,name=space,proto3" json:"space,omitempty"`
-	Query         []float32              `protobuf:"fixed32,2,rep,packed,name=query,proto3" json:"query,omitempty"`
-	K             uint32                 `protobuf:"varint,3,opt,name=k,proto3" json:"k,omitempty"`
-	NodeIds       []*NodeId              `protobuf:"bytes,4,rep,name=node_ids,json=nodeIds,proto3" json:"node_ids,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Space   string                 `protobuf:"bytes,1,opt,name=space,proto3" json:"space,omitempty"`
+	Query   []float32              `protobuf:"fixed32,2,rep,packed,name=query,proto3" json:"query,omitempty"`
+	K       uint32                 `protobuf:"varint,3,opt,name=k,proto3" json:"k,omitempty"`
+	NodeIds []*NodeId              `protobuf:"bytes,4,rep,name=node_ids,json=nodeIds,proto3" json:"node_ids,omitempty"`
+	// / Only nodes with a live quad in one of these graphs ("" = default
+	// / graph); empty = every graph.
+	Graphs        []string `protobuf:"bytes,5,rep,name=graphs,proto3" json:"graphs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2809,6 +2832,13 @@ func (x *SearchVectorInSetRequest) GetK() uint32 {
 func (x *SearchVectorInSetRequest) GetNodeIds() []*NodeId {
 	if x != nil {
 		return x.NodeIds
+	}
+	return nil
+}
+
+func (x *SearchVectorInSetRequest) GetGraphs() []string {
+	if x != nil {
+		return x.Graphs
 	}
 	return nil
 }
@@ -4435,7 +4465,10 @@ type VectorSeedQueryRequest struct {
 	UserId string `protobuf:"bytes,10,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	// / Named query parameters for `$param` substitution. Keys are parameter names
 	// / (without the `$`); values are JSON-encoded `Value` objects.
-	Params        map[string]string `protobuf:"bytes,11,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Params map[string]string `protobuf:"bytes,11,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// / Only seeds with a live quad in one of these graphs ("" = default
+	// / graph), and the patterns read only these graphs; empty = every graph.
+	Graphs        []string `protobuf:"bytes,12,rep,name=graphs,proto3" json:"graphs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4554,6 +4587,13 @@ func (x *VectorSeedQueryRequest) GetUserId() string {
 func (x *VectorSeedQueryRequest) GetParams() map[string]string {
 	if x != nil {
 		return x.Params
+	}
+	return nil
+}
+
+func (x *VectorSeedQueryRequest) GetGraphs() []string {
+	if x != nil {
+		return x.Graphs
 	}
 	return nil
 }
@@ -7818,6 +7858,161 @@ func (x *RunMaterializationRequest) GetClearFirst() bool {
 	return false
 }
 
+type GetInferenceSettingsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetInferenceSettingsRequest) Reset() {
+	*x = GetInferenceSettingsRequest{}
+	mi := &file_polargraph_proto_msgTypes[128]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetInferenceSettingsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetInferenceSettingsRequest) ProtoMessage() {}
+
+func (x *GetInferenceSettingsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[128]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetInferenceSettingsRequest.ProtoReflect.Descriptor instead.
+func (*GetInferenceSettingsRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{128}
+}
+
+type InferenceSettings struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// / Graphs whose schema axioms (rdfs:subClassOf, rdfs:subPropertyOf,
+	// / rdfs:domain, rdfs:range, owl:inverseOf, symmetric / transitive
+	// / property declarations) drive OWL RL inference; "" = the default graph.
+	// / Axioms in other graphs are ordinary data.
+	SchemaGraphs []string `protobuf:"bytes,1,rep,name=schema_graphs,json=schemaGraphs,proto3" json:"schema_graphs,omitempty"`
+	// / True when no selection is set: axioms come from every graph.
+	AllGraphs     bool `protobuf:"varint,2,opt,name=all_graphs,json=allGraphs,proto3" json:"all_graphs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InferenceSettings) Reset() {
+	*x = InferenceSettings{}
+	mi := &file_polargraph_proto_msgTypes[129]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InferenceSettings) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InferenceSettings) ProtoMessage() {}
+
+func (x *InferenceSettings) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[129]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InferenceSettings.ProtoReflect.Descriptor instead.
+func (*InferenceSettings) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{129}
+}
+
+func (x *InferenceSettings) GetSchemaGraphs() []string {
+	if x != nil {
+		return x.SchemaGraphs
+	}
+	return nil
+}
+
+func (x *InferenceSettings) GetAllGraphs() bool {
+	if x != nil {
+		return x.AllGraphs
+	}
+	return false
+}
+
+type SetInferenceSettingsRequest struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	SchemaGraphs []string               `protobuf:"bytes,1,rep,name=schema_graphs,json=schemaGraphs,proto3" json:"schema_graphs,omitempty"`
+	// / Clear the selection (axioms from every graph); `schema_graphs` must
+	// / be empty.
+	AllGraphs     bool   `protobuf:"varint,2,opt,name=all_graphs,json=allGraphs,proto3" json:"all_graphs,omitempty"`
+	UserId        string `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetInferenceSettingsRequest) Reset() {
+	*x = SetInferenceSettingsRequest{}
+	mi := &file_polargraph_proto_msgTypes[130]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetInferenceSettingsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetInferenceSettingsRequest) ProtoMessage() {}
+
+func (x *SetInferenceSettingsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_polargraph_proto_msgTypes[130]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetInferenceSettingsRequest.ProtoReflect.Descriptor instead.
+func (*SetInferenceSettingsRequest) Descriptor() ([]byte, []int) {
+	return file_polargraph_proto_rawDescGZIP(), []int{130}
+}
+
+func (x *SetInferenceSettingsRequest) GetSchemaGraphs() []string {
+	if x != nil {
+		return x.SchemaGraphs
+	}
+	return nil
+}
+
+func (x *SetInferenceSettingsRequest) GetAllGraphs() bool {
+	if x != nil {
+		return x.AllGraphs
+	}
+	return false
+}
+
+func (x *SetInferenceSettingsRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
 // / Statistics from a materialization run.
 type RunMaterializationResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -7837,7 +8032,7 @@ type RunMaterializationResponse struct {
 
 func (x *RunMaterializationResponse) Reset() {
 	*x = RunMaterializationResponse{}
-	mi := &file_polargraph_proto_msgTypes[128]
+	mi := &file_polargraph_proto_msgTypes[131]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7849,7 +8044,7 @@ func (x *RunMaterializationResponse) String() string {
 func (*RunMaterializationResponse) ProtoMessage() {}
 
 func (x *RunMaterializationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[128]
+	mi := &file_polargraph_proto_msgTypes[131]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7862,7 +8057,7 @@ func (x *RunMaterializationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunMaterializationResponse.ProtoReflect.Descriptor instead.
 func (*RunMaterializationResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{128}
+	return file_polargraph_proto_rawDescGZIP(), []int{131}
 }
 
 func (x *RunMaterializationResponse) GetRulesFired() uint64 {
@@ -7912,7 +8107,7 @@ type GraphMetadata struct {
 
 func (x *GraphMetadata) Reset() {
 	*x = GraphMetadata{}
-	mi := &file_polargraph_proto_msgTypes[129]
+	mi := &file_polargraph_proto_msgTypes[132]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7924,7 +8119,7 @@ func (x *GraphMetadata) String() string {
 func (*GraphMetadata) ProtoMessage() {}
 
 func (x *GraphMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[129]
+	mi := &file_polargraph_proto_msgTypes[132]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7937,7 +8132,7 @@ func (x *GraphMetadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphMetadata.ProtoReflect.Descriptor instead.
 func (*GraphMetadata) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{129}
+	return file_polargraph_proto_rawDescGZIP(), []int{132}
 }
 
 func (x *GraphMetadata) GetPredicate() string {
@@ -7966,7 +8161,7 @@ type GraphInfo struct {
 
 func (x *GraphInfo) Reset() {
 	*x = GraphInfo{}
-	mi := &file_polargraph_proto_msgTypes[130]
+	mi := &file_polargraph_proto_msgTypes[133]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7978,7 +8173,7 @@ func (x *GraphInfo) String() string {
 func (*GraphInfo) ProtoMessage() {}
 
 func (x *GraphInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[130]
+	mi := &file_polargraph_proto_msgTypes[133]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7991,7 +8186,7 @@ func (x *GraphInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphInfo.ProtoReflect.Descriptor instead.
 func (*GraphInfo) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{130}
+	return file_polargraph_proto_rawDescGZIP(), []int{133}
 }
 
 func (x *GraphInfo) GetIri() string {
@@ -8029,7 +8224,7 @@ type CreateGraphRequest struct {
 
 func (x *CreateGraphRequest) Reset() {
 	*x = CreateGraphRequest{}
-	mi := &file_polargraph_proto_msgTypes[131]
+	mi := &file_polargraph_proto_msgTypes[134]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8041,7 +8236,7 @@ func (x *CreateGraphRequest) String() string {
 func (*CreateGraphRequest) ProtoMessage() {}
 
 func (x *CreateGraphRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[131]
+	mi := &file_polargraph_proto_msgTypes[134]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8054,7 +8249,7 @@ func (x *CreateGraphRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateGraphRequest.ProtoReflect.Descriptor instead.
 func (*CreateGraphRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{131}
+	return file_polargraph_proto_rawDescGZIP(), []int{134}
 }
 
 func (x *CreateGraphRequest) GetIri() string {
@@ -8087,7 +8282,7 @@ type CreateGraphResponse struct {
 
 func (x *CreateGraphResponse) Reset() {
 	*x = CreateGraphResponse{}
-	mi := &file_polargraph_proto_msgTypes[132]
+	mi := &file_polargraph_proto_msgTypes[135]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8099,7 +8294,7 @@ func (x *CreateGraphResponse) String() string {
 func (*CreateGraphResponse) ProtoMessage() {}
 
 func (x *CreateGraphResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[132]
+	mi := &file_polargraph_proto_msgTypes[135]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8112,7 +8307,7 @@ func (x *CreateGraphResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateGraphResponse.ProtoReflect.Descriptor instead.
 func (*CreateGraphResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{132}
+	return file_polargraph_proto_rawDescGZIP(), []int{135}
 }
 
 func (x *CreateGraphResponse) GetGraph() *GraphInfo {
@@ -8135,7 +8330,7 @@ type ListGraphsRequest struct {
 
 func (x *ListGraphsRequest) Reset() {
 	*x = ListGraphsRequest{}
-	mi := &file_polargraph_proto_msgTypes[133]
+	mi := &file_polargraph_proto_msgTypes[136]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8147,7 +8342,7 @@ func (x *ListGraphsRequest) String() string {
 func (*ListGraphsRequest) ProtoMessage() {}
 
 func (x *ListGraphsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[133]
+	mi := &file_polargraph_proto_msgTypes[136]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8160,7 +8355,7 @@ func (x *ListGraphsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListGraphsRequest.ProtoReflect.Descriptor instead.
 func (*ListGraphsRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{133}
+	return file_polargraph_proto_rawDescGZIP(), []int{136}
 }
 
 func (x *ListGraphsRequest) GetFilter() []*GraphMetadata {
@@ -8186,7 +8381,7 @@ type ListGraphsResponse struct {
 
 func (x *ListGraphsResponse) Reset() {
 	*x = ListGraphsResponse{}
-	mi := &file_polargraph_proto_msgTypes[134]
+	mi := &file_polargraph_proto_msgTypes[137]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8198,7 +8393,7 @@ func (x *ListGraphsResponse) String() string {
 func (*ListGraphsResponse) ProtoMessage() {}
 
 func (x *ListGraphsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[134]
+	mi := &file_polargraph_proto_msgTypes[137]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8211,7 +8406,7 @@ func (x *ListGraphsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListGraphsResponse.ProtoReflect.Descriptor instead.
 func (*ListGraphsResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{134}
+	return file_polargraph_proto_rawDescGZIP(), []int{137}
 }
 
 func (x *ListGraphsResponse) GetGraphs() []*GraphInfo {
@@ -8231,7 +8426,7 @@ type GraphStatsRequest struct {
 
 func (x *GraphStatsRequest) Reset() {
 	*x = GraphStatsRequest{}
-	mi := &file_polargraph_proto_msgTypes[135]
+	mi := &file_polargraph_proto_msgTypes[138]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8243,7 +8438,7 @@ func (x *GraphStatsRequest) String() string {
 func (*GraphStatsRequest) ProtoMessage() {}
 
 func (x *GraphStatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[135]
+	mi := &file_polargraph_proto_msgTypes[138]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8256,7 +8451,7 @@ func (x *GraphStatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphStatsRequest.ProtoReflect.Descriptor instead.
 func (*GraphStatsRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{135}
+	return file_polargraph_proto_rawDescGZIP(), []int{138}
 }
 
 func (x *GraphStatsRequest) GetIri() string {
@@ -8279,7 +8474,7 @@ type GraphStatsResponse struct {
 
 func (x *GraphStatsResponse) Reset() {
 	*x = GraphStatsResponse{}
-	mi := &file_polargraph_proto_msgTypes[136]
+	mi := &file_polargraph_proto_msgTypes[139]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8291,7 +8486,7 @@ func (x *GraphStatsResponse) String() string {
 func (*GraphStatsResponse) ProtoMessage() {}
 
 func (x *GraphStatsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[136]
+	mi := &file_polargraph_proto_msgTypes[139]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8304,7 +8499,7 @@ func (x *GraphStatsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphStatsResponse.ProtoReflect.Descriptor instead.
 func (*GraphStatsResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{136}
+	return file_polargraph_proto_rawDescGZIP(), []int{139}
 }
 
 func (x *GraphStatsResponse) GetIri() string {
@@ -8344,7 +8539,7 @@ type CopyGraphRequest struct {
 
 func (x *CopyGraphRequest) Reset() {
 	*x = CopyGraphRequest{}
-	mi := &file_polargraph_proto_msgTypes[137]
+	mi := &file_polargraph_proto_msgTypes[140]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8356,7 +8551,7 @@ func (x *CopyGraphRequest) String() string {
 func (*CopyGraphRequest) ProtoMessage() {}
 
 func (x *CopyGraphRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[137]
+	mi := &file_polargraph_proto_msgTypes[140]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8369,7 +8564,7 @@ func (x *CopyGraphRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CopyGraphRequest.ProtoReflect.Descriptor instead.
 func (*CopyGraphRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{137}
+	return file_polargraph_proto_rawDescGZIP(), []int{140}
 }
 
 func (x *CopyGraphRequest) GetSource() string {
@@ -8409,7 +8604,7 @@ type CopyGraphResponse struct {
 
 func (x *CopyGraphResponse) Reset() {
 	*x = CopyGraphResponse{}
-	mi := &file_polargraph_proto_msgTypes[138]
+	mi := &file_polargraph_proto_msgTypes[141]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8421,7 +8616,7 @@ func (x *CopyGraphResponse) String() string {
 func (*CopyGraphResponse) ProtoMessage() {}
 
 func (x *CopyGraphResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[138]
+	mi := &file_polargraph_proto_msgTypes[141]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8434,7 +8629,7 @@ func (x *CopyGraphResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CopyGraphResponse.ProtoReflect.Descriptor instead.
 func (*CopyGraphResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{138}
+	return file_polargraph_proto_rawDescGZIP(), []int{141}
 }
 
 func (x *CopyGraphResponse) GetQuads() uint64 {
@@ -8457,7 +8652,7 @@ type MoveGraphRequest struct {
 
 func (x *MoveGraphRequest) Reset() {
 	*x = MoveGraphRequest{}
-	mi := &file_polargraph_proto_msgTypes[139]
+	mi := &file_polargraph_proto_msgTypes[142]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8469,7 +8664,7 @@ func (x *MoveGraphRequest) String() string {
 func (*MoveGraphRequest) ProtoMessage() {}
 
 func (x *MoveGraphRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[139]
+	mi := &file_polargraph_proto_msgTypes[142]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8482,7 +8677,7 @@ func (x *MoveGraphRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MoveGraphRequest.ProtoReflect.Descriptor instead.
 func (*MoveGraphRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{139}
+	return file_polargraph_proto_rawDescGZIP(), []int{142}
 }
 
 func (x *MoveGraphRequest) GetSource() string {
@@ -8519,7 +8714,7 @@ type DropGraphRequest struct {
 
 func (x *DropGraphRequest) Reset() {
 	*x = DropGraphRequest{}
-	mi := &file_polargraph_proto_msgTypes[140]
+	mi := &file_polargraph_proto_msgTypes[143]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8531,7 +8726,7 @@ func (x *DropGraphRequest) String() string {
 func (*DropGraphRequest) ProtoMessage() {}
 
 func (x *DropGraphRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[140]
+	mi := &file_polargraph_proto_msgTypes[143]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8544,7 +8739,7 @@ func (x *DropGraphRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropGraphRequest.ProtoReflect.Descriptor instead.
 func (*DropGraphRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{140}
+	return file_polargraph_proto_rawDescGZIP(), []int{143}
 }
 
 func (x *DropGraphRequest) GetIri() string {
@@ -8571,7 +8766,7 @@ type DropGraphResponse struct {
 
 func (x *DropGraphResponse) Reset() {
 	*x = DropGraphResponse{}
-	mi := &file_polargraph_proto_msgTypes[141]
+	mi := &file_polargraph_proto_msgTypes[144]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8583,7 +8778,7 @@ func (x *DropGraphResponse) String() string {
 func (*DropGraphResponse) ProtoMessage() {}
 
 func (x *DropGraphResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[141]
+	mi := &file_polargraph_proto_msgTypes[144]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8596,7 +8791,7 @@ func (x *DropGraphResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropGraphResponse.ProtoReflect.Descriptor instead.
 func (*DropGraphResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{141}
+	return file_polargraph_proto_rawDescGZIP(), []int{144}
 }
 
 func (x *DropGraphResponse) GetQuadsClosed() uint64 {
@@ -8618,7 +8813,7 @@ type GraphTriples struct {
 
 func (x *GraphTriples) Reset() {
 	*x = GraphTriples{}
-	mi := &file_polargraph_proto_msgTypes[142]
+	mi := &file_polargraph_proto_msgTypes[145]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8630,7 +8825,7 @@ func (x *GraphTriples) String() string {
 func (*GraphTriples) ProtoMessage() {}
 
 func (x *GraphTriples) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[142]
+	mi := &file_polargraph_proto_msgTypes[145]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8643,7 +8838,7 @@ func (x *GraphTriples) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphTriples.ProtoReflect.Descriptor instead.
 func (*GraphTriples) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{142}
+	return file_polargraph_proto_rawDescGZIP(), []int{145}
 }
 
 func (x *GraphTriples) GetGraph() string {
@@ -8671,14 +8866,17 @@ type QuadRef struct {
 	//	*QuadRef_Value
 	Object isQuadRef_Object `protobuf_oneof:"object"`
 	// / Graph IRI ("" = default graph).
-	Graph         string `protobuf:"bytes,5,opt,name=graph,proto3" json:"graph,omitempty"`
+	Graph string `protobuf:"bytes,5,opt,name=graph,proto3" json:"graph,omitempty"`
+	// / Retract the quad in every graph where it is live (that the caller
+	// / may write) instead of only `graph`.
+	AllGraphs     bool `protobuf:"varint,6,opt,name=all_graphs,json=allGraphs,proto3" json:"all_graphs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *QuadRef) Reset() {
 	*x = QuadRef{}
-	mi := &file_polargraph_proto_msgTypes[143]
+	mi := &file_polargraph_proto_msgTypes[146]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8690,7 +8888,7 @@ func (x *QuadRef) String() string {
 func (*QuadRef) ProtoMessage() {}
 
 func (x *QuadRef) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[143]
+	mi := &file_polargraph_proto_msgTypes[146]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8703,7 +8901,7 @@ func (x *QuadRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuadRef.ProtoReflect.Descriptor instead.
 func (*QuadRef) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{143}
+	return file_polargraph_proto_rawDescGZIP(), []int{146}
 }
 
 func (x *QuadRef) GetSubject() *NodeId {
@@ -8752,6 +8950,13 @@ func (x *QuadRef) GetGraph() string {
 	return ""
 }
 
+func (x *QuadRef) GetAllGraphs() bool {
+	if x != nil {
+		return x.AllGraphs
+	}
+	return false
+}
+
 type isQuadRef_Object interface {
 	isQuadRef_Object()
 }
@@ -8784,14 +8989,17 @@ type ApplyChangesRequest struct {
 	Iris []string `protobuf:"bytes,5,rep,name=iris,proto3" json:"iris,omitempty"`
 	// / Caller identity (optional; also `x-polargraph-user-id`): author of the
 	// / change, and the graph ACL applies (write on every graph touched).
-	UserId        string `protobuf:"bytes,6,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	UserId string `protobuf:"bytes,6,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// / RDF-star edge annotations to add (default graph), in the same
+	// / transaction.
+	EdgeAnnotations []*EdgeAnnotation `protobuf:"bytes,7,rep,name=edge_annotations,json=edgeAnnotations,proto3" json:"edge_annotations,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ApplyChangesRequest) Reset() {
 	*x = ApplyChangesRequest{}
-	mi := &file_polargraph_proto_msgTypes[144]
+	mi := &file_polargraph_proto_msgTypes[147]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8803,7 +9011,7 @@ func (x *ApplyChangesRequest) String() string {
 func (*ApplyChangesRequest) ProtoMessage() {}
 
 func (x *ApplyChangesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[144]
+	mi := &file_polargraph_proto_msgTypes[147]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8816,7 +9024,7 @@ func (x *ApplyChangesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyChangesRequest.ProtoReflect.Descriptor instead.
 func (*ApplyChangesRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{144}
+	return file_polargraph_proto_rawDescGZIP(), []int{147}
 }
 
 func (x *ApplyChangesRequest) GetAdds() []*GraphTriples {
@@ -8861,6 +9069,13 @@ func (x *ApplyChangesRequest) GetUserId() string {
 	return ""
 }
 
+func (x *ApplyChangesRequest) GetEdgeAnnotations() []*EdgeAnnotation {
+	if x != nil {
+		return x.EdgeAnnotations
+	}
+	return nil
+}
+
 type ApplyChangesResponse struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
 	CommitTs            int64                  `protobuf:"varint,1,opt,name=commit_ts,json=commitTs,proto3" json:"commit_ts,omitempty"`
@@ -8875,7 +9090,7 @@ type ApplyChangesResponse struct {
 
 func (x *ApplyChangesResponse) Reset() {
 	*x = ApplyChangesResponse{}
-	mi := &file_polargraph_proto_msgTypes[145]
+	mi := &file_polargraph_proto_msgTypes[148]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8887,7 +9102,7 @@ func (x *ApplyChangesResponse) String() string {
 func (*ApplyChangesResponse) ProtoMessage() {}
 
 func (x *ApplyChangesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[145]
+	mi := &file_polargraph_proto_msgTypes[148]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8900,7 +9115,7 @@ func (x *ApplyChangesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyChangesResponse.ProtoReflect.Descriptor instead.
 func (*ApplyChangesResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{145}
+	return file_polargraph_proto_rawDescGZIP(), []int{148}
 }
 
 func (x *ApplyChangesResponse) GetCommitTs() int64 {
@@ -8963,7 +9178,7 @@ type ValidateShapesRequest struct {
 
 func (x *ValidateShapesRequest) Reset() {
 	*x = ValidateShapesRequest{}
-	mi := &file_polargraph_proto_msgTypes[146]
+	mi := &file_polargraph_proto_msgTypes[149]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8975,7 +9190,7 @@ func (x *ValidateShapesRequest) String() string {
 func (*ValidateShapesRequest) ProtoMessage() {}
 
 func (x *ValidateShapesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[146]
+	mi := &file_polargraph_proto_msgTypes[149]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8988,7 +9203,7 @@ func (x *ValidateShapesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateShapesRequest.ProtoReflect.Descriptor instead.
 func (*ValidateShapesRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{146}
+	return file_polargraph_proto_rawDescGZIP(), []int{149}
 }
 
 func (x *ValidateShapesRequest) GetShapesGraphs() []string {
@@ -9069,7 +9284,7 @@ type ValidationResult struct {
 
 func (x *ValidationResult) Reset() {
 	*x = ValidationResult{}
-	mi := &file_polargraph_proto_msgTypes[147]
+	mi := &file_polargraph_proto_msgTypes[150]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9081,7 +9296,7 @@ func (x *ValidationResult) String() string {
 func (*ValidationResult) ProtoMessage() {}
 
 func (x *ValidationResult) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[147]
+	mi := &file_polargraph_proto_msgTypes[150]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9094,7 +9309,7 @@ func (x *ValidationResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidationResult.ProtoReflect.Descriptor instead.
 func (*ValidationResult) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{147}
+	return file_polargraph_proto_rawDescGZIP(), []int{150}
 }
 
 func (x *ValidationResult) GetFocusNode() string {
@@ -9173,7 +9388,7 @@ type ValidateShapesResponse struct {
 
 func (x *ValidateShapesResponse) Reset() {
 	*x = ValidateShapesResponse{}
-	mi := &file_polargraph_proto_msgTypes[148]
+	mi := &file_polargraph_proto_msgTypes[151]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9185,7 +9400,7 @@ func (x *ValidateShapesResponse) String() string {
 func (*ValidateShapesResponse) ProtoMessage() {}
 
 func (x *ValidateShapesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[148]
+	mi := &file_polargraph_proto_msgTypes[151]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9198,7 +9413,7 @@ func (x *ValidateShapesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateShapesResponse.ProtoReflect.Descriptor instead.
 func (*ValidateShapesResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{148}
+	return file_polargraph_proto_rawDescGZIP(), []int{151}
 }
 
 func (x *ValidateShapesResponse) GetConforms() bool {
@@ -9245,7 +9460,7 @@ type SubscribeRequest struct {
 
 func (x *SubscribeRequest) Reset() {
 	*x = SubscribeRequest{}
-	mi := &file_polargraph_proto_msgTypes[149]
+	mi := &file_polargraph_proto_msgTypes[152]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9257,7 +9472,7 @@ func (x *SubscribeRequest) String() string {
 func (*SubscribeRequest) ProtoMessage() {}
 
 func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[149]
+	mi := &file_polargraph_proto_msgTypes[152]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9270,7 +9485,7 @@ func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeRequest.ProtoReflect.Descriptor instead.
 func (*SubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{149}
+	return file_polargraph_proto_rawDescGZIP(), []int{152}
 }
 
 func (x *SubscribeRequest) GetGraphs() []string {
@@ -9336,7 +9551,7 @@ type ChangeEvent struct {
 
 func (x *ChangeEvent) Reset() {
 	*x = ChangeEvent{}
-	mi := &file_polargraph_proto_msgTypes[150]
+	mi := &file_polargraph_proto_msgTypes[153]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9348,7 +9563,7 @@ func (x *ChangeEvent) String() string {
 func (*ChangeEvent) ProtoMessage() {}
 
 func (x *ChangeEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[150]
+	mi := &file_polargraph_proto_msgTypes[153]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9361,7 +9576,7 @@ func (x *ChangeEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChangeEvent.ProtoReflect.Descriptor instead.
 func (*ChangeEvent) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{150}
+	return file_polargraph_proto_rawDescGZIP(), []int{153}
 }
 
 func (x *ChangeEvent) GetCommitTs() int64 {
@@ -9429,7 +9644,7 @@ type GrantGraphAccessRequest struct {
 
 func (x *GrantGraphAccessRequest) Reset() {
 	*x = GrantGraphAccessRequest{}
-	mi := &file_polargraph_proto_msgTypes[151]
+	mi := &file_polargraph_proto_msgTypes[154]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9441,7 +9656,7 @@ func (x *GrantGraphAccessRequest) String() string {
 func (*GrantGraphAccessRequest) ProtoMessage() {}
 
 func (x *GrantGraphAccessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[151]
+	mi := &file_polargraph_proto_msgTypes[154]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9454,7 +9669,7 @@ func (x *GrantGraphAccessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GrantGraphAccessRequest.ProtoReflect.Descriptor instead.
 func (*GrantGraphAccessRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{151}
+	return file_polargraph_proto_rawDescGZIP(), []int{154}
 }
 
 func (x *GrantGraphAccessRequest) GetPrincipal() string {
@@ -9493,7 +9708,7 @@ type GrantGraphAccessResponse struct {
 
 func (x *GrantGraphAccessResponse) Reset() {
 	*x = GrantGraphAccessResponse{}
-	mi := &file_polargraph_proto_msgTypes[152]
+	mi := &file_polargraph_proto_msgTypes[155]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9505,7 +9720,7 @@ func (x *GrantGraphAccessResponse) String() string {
 func (*GrantGraphAccessResponse) ProtoMessage() {}
 
 func (x *GrantGraphAccessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[152]
+	mi := &file_polargraph_proto_msgTypes[155]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9518,7 +9733,7 @@ func (x *GrantGraphAccessResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GrantGraphAccessResponse.ProtoReflect.Descriptor instead.
 func (*GrantGraphAccessResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{152}
+	return file_polargraph_proto_rawDescGZIP(), []int{155}
 }
 
 type RevokeGraphAccessRequest struct {
@@ -9532,7 +9747,7 @@ type RevokeGraphAccessRequest struct {
 
 func (x *RevokeGraphAccessRequest) Reset() {
 	*x = RevokeGraphAccessRequest{}
-	mi := &file_polargraph_proto_msgTypes[153]
+	mi := &file_polargraph_proto_msgTypes[156]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9544,7 +9759,7 @@ func (x *RevokeGraphAccessRequest) String() string {
 func (*RevokeGraphAccessRequest) ProtoMessage() {}
 
 func (x *RevokeGraphAccessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[153]
+	mi := &file_polargraph_proto_msgTypes[156]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9557,7 +9772,7 @@ func (x *RevokeGraphAccessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeGraphAccessRequest.ProtoReflect.Descriptor instead.
 func (*RevokeGraphAccessRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{153}
+	return file_polargraph_proto_rawDescGZIP(), []int{156}
 }
 
 func (x *RevokeGraphAccessRequest) GetPrincipal() string {
@@ -9591,7 +9806,7 @@ type RevokeGraphAccessResponse struct {
 
 func (x *RevokeGraphAccessResponse) Reset() {
 	*x = RevokeGraphAccessResponse{}
-	mi := &file_polargraph_proto_msgTypes[154]
+	mi := &file_polargraph_proto_msgTypes[157]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9603,7 +9818,7 @@ func (x *RevokeGraphAccessResponse) String() string {
 func (*RevokeGraphAccessResponse) ProtoMessage() {}
 
 func (x *RevokeGraphAccessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[154]
+	mi := &file_polargraph_proto_msgTypes[157]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9616,7 +9831,7 @@ func (x *RevokeGraphAccessResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeGraphAccessResponse.ProtoReflect.Descriptor instead.
 func (*RevokeGraphAccessResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{154}
+	return file_polargraph_proto_rawDescGZIP(), []int{157}
 }
 
 func (x *RevokeGraphAccessResponse) GetRevoked() bool {
@@ -9639,7 +9854,7 @@ type GetGraphAccessRequest struct {
 
 func (x *GetGraphAccessRequest) Reset() {
 	*x = GetGraphAccessRequest{}
-	mi := &file_polargraph_proto_msgTypes[155]
+	mi := &file_polargraph_proto_msgTypes[158]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9651,7 +9866,7 @@ func (x *GetGraphAccessRequest) String() string {
 func (*GetGraphAccessRequest) ProtoMessage() {}
 
 func (x *GetGraphAccessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[155]
+	mi := &file_polargraph_proto_msgTypes[158]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9664,7 +9879,7 @@ func (x *GetGraphAccessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetGraphAccessRequest.ProtoReflect.Descriptor instead.
 func (*GetGraphAccessRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{155}
+	return file_polargraph_proto_rawDescGZIP(), []int{158}
 }
 
 func (x *GetGraphAccessRequest) GetPrincipal() string {
@@ -9691,7 +9906,7 @@ type GraphAccessEntry struct {
 
 func (x *GraphAccessEntry) Reset() {
 	*x = GraphAccessEntry{}
-	mi := &file_polargraph_proto_msgTypes[156]
+	mi := &file_polargraph_proto_msgTypes[159]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9703,7 +9918,7 @@ func (x *GraphAccessEntry) String() string {
 func (*GraphAccessEntry) ProtoMessage() {}
 
 func (x *GraphAccessEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[156]
+	mi := &file_polargraph_proto_msgTypes[159]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9716,7 +9931,7 @@ func (x *GraphAccessEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphAccessEntry.ProtoReflect.Descriptor instead.
 func (*GraphAccessEntry) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{156}
+	return file_polargraph_proto_rawDescGZIP(), []int{159}
 }
 
 func (x *GraphAccessEntry) GetGraph() string {
@@ -9744,7 +9959,7 @@ type GetGraphAccessResponse struct {
 
 func (x *GetGraphAccessResponse) Reset() {
 	*x = GetGraphAccessResponse{}
-	mi := &file_polargraph_proto_msgTypes[157]
+	mi := &file_polargraph_proto_msgTypes[160]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9756,7 +9971,7 @@ func (x *GetGraphAccessResponse) String() string {
 func (*GetGraphAccessResponse) ProtoMessage() {}
 
 func (x *GetGraphAccessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[157]
+	mi := &file_polargraph_proto_msgTypes[160]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9769,7 +9984,7 @@ func (x *GetGraphAccessResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetGraphAccessResponse.ProtoReflect.Descriptor instead.
 func (*GetGraphAccessResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{157}
+	return file_polargraph_proto_rawDescGZIP(), []int{160}
 }
 
 func (x *GetGraphAccessResponse) GetGraphs() []*GraphAccessEntry {
@@ -9792,7 +10007,7 @@ type ExportGraphRequest struct {
 
 func (x *ExportGraphRequest) Reset() {
 	*x = ExportGraphRequest{}
-	mi := &file_polargraph_proto_msgTypes[158]
+	mi := &file_polargraph_proto_msgTypes[161]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9804,7 +10019,7 @@ func (x *ExportGraphRequest) String() string {
 func (*ExportGraphRequest) ProtoMessage() {}
 
 func (x *ExportGraphRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[158]
+	mi := &file_polargraph_proto_msgTypes[161]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9817,7 +10032,7 @@ func (x *ExportGraphRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportGraphRequest.ProtoReflect.Descriptor instead.
 func (*ExportGraphRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{158}
+	return file_polargraph_proto_rawDescGZIP(), []int{161}
 }
 
 func (x *ExportGraphRequest) GetIri() string {
@@ -9852,7 +10067,7 @@ type ExportedQuad struct {
 
 func (x *ExportedQuad) Reset() {
 	*x = ExportedQuad{}
-	mi := &file_polargraph_proto_msgTypes[159]
+	mi := &file_polargraph_proto_msgTypes[162]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9864,7 +10079,7 @@ func (x *ExportedQuad) String() string {
 func (*ExportedQuad) ProtoMessage() {}
 
 func (x *ExportedQuad) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[159]
+	mi := &file_polargraph_proto_msgTypes[162]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9877,7 +10092,7 @@ func (x *ExportedQuad) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportedQuad.ProtoReflect.Descriptor instead.
 func (*ExportedQuad) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{159}
+	return file_polargraph_proto_rawDescGZIP(), []int{162}
 }
 
 func (x *ExportedQuad) GetSubject() *NodeId {
@@ -9951,7 +10166,7 @@ type ExportGraphChunk struct {
 
 func (x *ExportGraphChunk) Reset() {
 	*x = ExportGraphChunk{}
-	mi := &file_polargraph_proto_msgTypes[160]
+	mi := &file_polargraph_proto_msgTypes[163]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9963,7 +10178,7 @@ func (x *ExportGraphChunk) String() string {
 func (*ExportGraphChunk) ProtoMessage() {}
 
 func (x *ExportGraphChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[160]
+	mi := &file_polargraph_proto_msgTypes[163]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9976,7 +10191,7 @@ func (x *ExportGraphChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportGraphChunk.ProtoReflect.Descriptor instead.
 func (*ExportGraphChunk) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{160}
+	return file_polargraph_proto_rawDescGZIP(), []int{163}
 }
 
 func (x *ExportGraphChunk) GetQuads() []*ExportedQuad {
@@ -9996,7 +10211,7 @@ type ResolveIrisRequest struct {
 
 func (x *ResolveIrisRequest) Reset() {
 	*x = ResolveIrisRequest{}
-	mi := &file_polargraph_proto_msgTypes[161]
+	mi := &file_polargraph_proto_msgTypes[164]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10008,7 +10223,7 @@ func (x *ResolveIrisRequest) String() string {
 func (*ResolveIrisRequest) ProtoMessage() {}
 
 func (x *ResolveIrisRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[161]
+	mi := &file_polargraph_proto_msgTypes[164]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10021,7 +10236,7 @@ func (x *ResolveIrisRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveIrisRequest.ProtoReflect.Descriptor instead.
 func (*ResolveIrisRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{161}
+	return file_polargraph_proto_rawDescGZIP(), []int{164}
 }
 
 func (x *ResolveIrisRequest) GetNodes() []*NodeId {
@@ -10042,7 +10257,7 @@ type ResolveIrisResponse struct {
 
 func (x *ResolveIrisResponse) Reset() {
 	*x = ResolveIrisResponse{}
-	mi := &file_polargraph_proto_msgTypes[162]
+	mi := &file_polargraph_proto_msgTypes[165]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10054,7 +10269,7 @@ func (x *ResolveIrisResponse) String() string {
 func (*ResolveIrisResponse) ProtoMessage() {}
 
 func (x *ResolveIrisResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[162]
+	mi := &file_polargraph_proto_msgTypes[165]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10067,7 +10282,7 @@ func (x *ResolveIrisResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveIrisResponse.ProtoReflect.Descriptor instead.
 func (*ResolveIrisResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{162}
+	return file_polargraph_proto_rawDescGZIP(), []int{165}
 }
 
 func (x *ResolveIrisResponse) GetIris() []string {
@@ -10087,7 +10302,7 @@ type VocabularyPrefix struct {
 
 func (x *VocabularyPrefix) Reset() {
 	*x = VocabularyPrefix{}
-	mi := &file_polargraph_proto_msgTypes[163]
+	mi := &file_polargraph_proto_msgTypes[166]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10099,7 +10314,7 @@ func (x *VocabularyPrefix) String() string {
 func (*VocabularyPrefix) ProtoMessage() {}
 
 func (x *VocabularyPrefix) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[163]
+	mi := &file_polargraph_proto_msgTypes[166]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10112,7 +10327,7 @@ func (x *VocabularyPrefix) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VocabularyPrefix.ProtoReflect.Descriptor instead.
 func (*VocabularyPrefix) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{163}
+	return file_polargraph_proto_rawDescGZIP(), []int{166}
 }
 
 func (x *VocabularyPrefix) GetName() string {
@@ -10145,7 +10360,7 @@ type LegacyStatus struct {
 
 func (x *LegacyStatus) Reset() {
 	*x = LegacyStatus{}
-	mi := &file_polargraph_proto_msgTypes[164]
+	mi := &file_polargraph_proto_msgTypes[167]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10157,7 +10372,7 @@ func (x *LegacyStatus) String() string {
 func (*LegacyStatus) ProtoMessage() {}
 
 func (x *LegacyStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[164]
+	mi := &file_polargraph_proto_msgTypes[167]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10170,7 +10385,7 @@ func (x *LegacyStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LegacyStatus.ProtoReflect.Descriptor instead.
 func (*LegacyStatus) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{164}
+	return file_polargraph_proto_rawDescGZIP(), []int{167}
 }
 
 func (x *LegacyStatus) GetConversionPending() bool {
@@ -10212,7 +10427,7 @@ type Vocabulary struct {
 
 func (x *Vocabulary) Reset() {
 	*x = Vocabulary{}
-	mi := &file_polargraph_proto_msgTypes[165]
+	mi := &file_polargraph_proto_msgTypes[168]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10224,7 +10439,7 @@ func (x *Vocabulary) String() string {
 func (*Vocabulary) ProtoMessage() {}
 
 func (x *Vocabulary) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[165]
+	mi := &file_polargraph_proto_msgTypes[168]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10237,7 +10452,7 @@ func (x *Vocabulary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Vocabulary.ProtoReflect.Descriptor instead.
 func (*Vocabulary) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{165}
+	return file_polargraph_proto_rawDescGZIP(), []int{168}
 }
 
 func (x *Vocabulary) GetBase() string {
@@ -10269,7 +10484,7 @@ type GetVocabularyRequest struct {
 
 func (x *GetVocabularyRequest) Reset() {
 	*x = GetVocabularyRequest{}
-	mi := &file_polargraph_proto_msgTypes[166]
+	mi := &file_polargraph_proto_msgTypes[169]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10281,7 +10496,7 @@ func (x *GetVocabularyRequest) String() string {
 func (*GetVocabularyRequest) ProtoMessage() {}
 
 func (x *GetVocabularyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[166]
+	mi := &file_polargraph_proto_msgTypes[169]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10294,7 +10509,7 @@ func (x *GetVocabularyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetVocabularyRequest.ProtoReflect.Descriptor instead.
 func (*GetVocabularyRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{166}
+	return file_polargraph_proto_rawDescGZIP(), []int{169}
 }
 
 type SetVocabularyBaseRequest struct {
@@ -10309,7 +10524,7 @@ type SetVocabularyBaseRequest struct {
 
 func (x *SetVocabularyBaseRequest) Reset() {
 	*x = SetVocabularyBaseRequest{}
-	mi := &file_polargraph_proto_msgTypes[167]
+	mi := &file_polargraph_proto_msgTypes[170]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10321,7 +10536,7 @@ func (x *SetVocabularyBaseRequest) String() string {
 func (*SetVocabularyBaseRequest) ProtoMessage() {}
 
 func (x *SetVocabularyBaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[167]
+	mi := &file_polargraph_proto_msgTypes[170]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10334,7 +10549,7 @@ func (x *SetVocabularyBaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetVocabularyBaseRequest.ProtoReflect.Descriptor instead.
 func (*SetVocabularyBaseRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{167}
+	return file_polargraph_proto_rawDescGZIP(), []int{170}
 }
 
 func (x *SetVocabularyBaseRequest) GetBase() string {
@@ -10362,7 +10577,7 @@ type PutPrefixRequest struct {
 
 func (x *PutPrefixRequest) Reset() {
 	*x = PutPrefixRequest{}
-	mi := &file_polargraph_proto_msgTypes[168]
+	mi := &file_polargraph_proto_msgTypes[171]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10374,7 +10589,7 @@ func (x *PutPrefixRequest) String() string {
 func (*PutPrefixRequest) ProtoMessage() {}
 
 func (x *PutPrefixRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[168]
+	mi := &file_polargraph_proto_msgTypes[171]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10387,7 +10602,7 @@ func (x *PutPrefixRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutPrefixRequest.ProtoReflect.Descriptor instead.
 func (*PutPrefixRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{168}
+	return file_polargraph_proto_rawDescGZIP(), []int{171}
 }
 
 func (x *PutPrefixRequest) GetName() string {
@@ -10421,7 +10636,7 @@ type RemovePrefixRequest struct {
 
 func (x *RemovePrefixRequest) Reset() {
 	*x = RemovePrefixRequest{}
-	mi := &file_polargraph_proto_msgTypes[169]
+	mi := &file_polargraph_proto_msgTypes[172]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10433,7 +10648,7 @@ func (x *RemovePrefixRequest) String() string {
 func (*RemovePrefixRequest) ProtoMessage() {}
 
 func (x *RemovePrefixRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[169]
+	mi := &file_polargraph_proto_msgTypes[172]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10446,7 +10661,7 @@ func (x *RemovePrefixRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemovePrefixRequest.ProtoReflect.Descriptor instead.
 func (*RemovePrefixRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{169}
+	return file_polargraph_proto_rawDescGZIP(), []int{172}
 }
 
 func (x *RemovePrefixRequest) GetName() string {
@@ -10474,7 +10689,7 @@ type ConvertLegacyDataRequest struct {
 
 func (x *ConvertLegacyDataRequest) Reset() {
 	*x = ConvertLegacyDataRequest{}
-	mi := &file_polargraph_proto_msgTypes[170]
+	mi := &file_polargraph_proto_msgTypes[173]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10486,7 +10701,7 @@ func (x *ConvertLegacyDataRequest) String() string {
 func (*ConvertLegacyDataRequest) ProtoMessage() {}
 
 func (x *ConvertLegacyDataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[170]
+	mi := &file_polargraph_proto_msgTypes[173]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10499,7 +10714,7 @@ func (x *ConvertLegacyDataRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConvertLegacyDataRequest.ProtoReflect.Descriptor instead.
 func (*ConvertLegacyDataRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{170}
+	return file_polargraph_proto_rawDescGZIP(), []int{173}
 }
 
 func (x *ConvertLegacyDataRequest) GetDryRun() bool {
@@ -10532,7 +10747,7 @@ type PredicateConversion struct {
 
 func (x *PredicateConversion) Reset() {
 	*x = PredicateConversion{}
-	mi := &file_polargraph_proto_msgTypes[171]
+	mi := &file_polargraph_proto_msgTypes[174]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10544,7 +10759,7 @@ func (x *PredicateConversion) String() string {
 func (*PredicateConversion) ProtoMessage() {}
 
 func (x *PredicateConversion) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[171]
+	mi := &file_polargraph_proto_msgTypes[174]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10557,7 +10772,7 @@ func (x *PredicateConversion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PredicateConversion.ProtoReflect.Descriptor instead.
 func (*PredicateConversion) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{171}
+	return file_polargraph_proto_rawDescGZIP(), []int{174}
 }
 
 func (x *PredicateConversion) GetFrom() string {
@@ -10602,7 +10817,7 @@ type ConvertLegacyDataResponse struct {
 
 func (x *ConvertLegacyDataResponse) Reset() {
 	*x = ConvertLegacyDataResponse{}
-	mi := &file_polargraph_proto_msgTypes[172]
+	mi := &file_polargraph_proto_msgTypes[175]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10614,7 +10829,7 @@ func (x *ConvertLegacyDataResponse) String() string {
 func (*ConvertLegacyDataResponse) ProtoMessage() {}
 
 func (x *ConvertLegacyDataResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[172]
+	mi := &file_polargraph_proto_msgTypes[175]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10627,7 +10842,7 @@ func (x *ConvertLegacyDataResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConvertLegacyDataResponse.ProtoReflect.Descriptor instead.
 func (*ConvertLegacyDataResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{172}
+	return file_polargraph_proto_rawDescGZIP(), []int{175}
 }
 
 func (x *ConvertLegacyDataResponse) GetDryRun() bool {
@@ -10668,7 +10883,7 @@ type CounterIncrement struct {
 
 func (x *CounterIncrement) Reset() {
 	*x = CounterIncrement{}
-	mi := &file_polargraph_proto_msgTypes[173]
+	mi := &file_polargraph_proto_msgTypes[176]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10680,7 +10895,7 @@ func (x *CounterIncrement) String() string {
 func (*CounterIncrement) ProtoMessage() {}
 
 func (x *CounterIncrement) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[173]
+	mi := &file_polargraph_proto_msgTypes[176]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10693,7 +10908,7 @@ func (x *CounterIncrement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CounterIncrement.ProtoReflect.Descriptor instead.
 func (*CounterIncrement) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{173}
+	return file_polargraph_proto_rawDescGZIP(), []int{176}
 }
 
 func (x *CounterIncrement) GetNode() *NodeId {
@@ -10722,7 +10937,7 @@ type IncrementCountersRequest struct {
 
 func (x *IncrementCountersRequest) Reset() {
 	*x = IncrementCountersRequest{}
-	mi := &file_polargraph_proto_msgTypes[174]
+	mi := &file_polargraph_proto_msgTypes[177]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10734,7 +10949,7 @@ func (x *IncrementCountersRequest) String() string {
 func (*IncrementCountersRequest) ProtoMessage() {}
 
 func (x *IncrementCountersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[174]
+	mi := &file_polargraph_proto_msgTypes[177]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10747,7 +10962,7 @@ func (x *IncrementCountersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IncrementCountersRequest.ProtoReflect.Descriptor instead.
 func (*IncrementCountersRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{174}
+	return file_polargraph_proto_rawDescGZIP(), []int{177}
 }
 
 func (x *IncrementCountersRequest) GetNamespace() string {
@@ -10779,7 +10994,7 @@ type IncrementCountersResponse struct {
 
 func (x *IncrementCountersResponse) Reset() {
 	*x = IncrementCountersResponse{}
-	mi := &file_polargraph_proto_msgTypes[175]
+	mi := &file_polargraph_proto_msgTypes[178]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10791,7 +11006,7 @@ func (x *IncrementCountersResponse) String() string {
 func (*IncrementCountersResponse) ProtoMessage() {}
 
 func (x *IncrementCountersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[175]
+	mi := &file_polargraph_proto_msgTypes[178]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10804,7 +11019,7 @@ func (x *IncrementCountersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IncrementCountersResponse.ProtoReflect.Descriptor instead.
 func (*IncrementCountersResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{175}
+	return file_polargraph_proto_rawDescGZIP(), []int{178}
 }
 
 type GetCountersRequest struct {
@@ -10819,7 +11034,7 @@ type GetCountersRequest struct {
 
 func (x *GetCountersRequest) Reset() {
 	*x = GetCountersRequest{}
-	mi := &file_polargraph_proto_msgTypes[176]
+	mi := &file_polargraph_proto_msgTypes[179]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10831,7 +11046,7 @@ func (x *GetCountersRequest) String() string {
 func (*GetCountersRequest) ProtoMessage() {}
 
 func (x *GetCountersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[176]
+	mi := &file_polargraph_proto_msgTypes[179]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10844,7 +11059,7 @@ func (x *GetCountersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCountersRequest.ProtoReflect.Descriptor instead.
 func (*GetCountersRequest) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{176}
+	return file_polargraph_proto_rawDescGZIP(), []int{179}
 }
 
 func (x *GetCountersRequest) GetNamespace() string {
@@ -10878,7 +11093,7 @@ type GetCountersResponse struct {
 
 func (x *GetCountersResponse) Reset() {
 	*x = GetCountersResponse{}
-	mi := &file_polargraph_proto_msgTypes[177]
+	mi := &file_polargraph_proto_msgTypes[180]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10890,7 +11105,7 @@ func (x *GetCountersResponse) String() string {
 func (*GetCountersResponse) ProtoMessage() {}
 
 func (x *GetCountersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_polargraph_proto_msgTypes[177]
+	mi := &file_polargraph_proto_msgTypes[180]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10903,7 +11118,7 @@ func (x *GetCountersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCountersResponse.ProtoReflect.Descriptor instead.
 func (*GetCountersResponse) Descriptor() ([]byte, []int) {
-	return file_polargraph_proto_rawDescGZIP(), []int{177}
+	return file_polargraph_proto_rawDescGZIP(), []int{180}
 }
 
 func (x *GetCountersResponse) GetValues() []int64 {
@@ -11075,12 +11290,13 @@ const file_polargraph_proto_rawDesc = "" +
 	"\anode_id\x18\x01 \x01(\v2\x15.polargraph.v1.NodeIdR\x06nodeId\x12\x16\n" +
 	"\x06vector\x18\x02 \x03(\x02R\x06vector\x12\x14\n" +
 	"\x05space\x18\x03 \x01(\tR\x05space\"\x16\n" +
-	"\x14InsertVectorResponse\"_\n" +
+	"\x14InsertVectorResponse\"w\n" +
 	"\x13SearchVectorRequest\x12\x14\n" +
 	"\x05query\x18\x01 \x03(\x02R\x05query\x12\f\n" +
 	"\x01k\x18\x02 \x01(\rR\x01k\x12\x14\n" +
 	"\x05space\x18\x03 \x01(\tR\x05space\x12\x0e\n" +
-	"\x02ef\x18\x04 \x01(\rR\x02ef\"d\n" +
+	"\x02ef\x18\x04 \x01(\rR\x02ef\x12\x16\n" +
+	"\x06graphs\x18\x05 \x03(\tR\x06graphs\"d\n" +
 	"\x12VectorSearchResult\x12.\n" +
 	"\anode_id\x18\x01 \x01(\v2\x15.polargraph.v1.NodeIdR\x06nodeId\x12\x1e\n" +
 	"\n" +
@@ -11093,7 +11309,7 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x12ReachabilityFilter\x122\n" +
 	"\tfrom_node\x18\x01 \x01(\v2\x15.polargraph.v1.NodeIdR\bfromNode\x12\x1c\n" +
 	"\tpredicate\x18\x02 \x01(\tR\tpredicate\x12\x19\n" +
-	"\bmax_hops\x18\x03 \x01(\rR\amaxHops\"\xab\x02\n" +
+	"\bmax_hops\x18\x03 \x01(\rR\amaxHops\"\xc3\x02\n" +
 	"\x1bSearchVectorFilteredRequest\x12\x14\n" +
 	"\x05space\x18\x01 \x01(\tR\x05space\x12\x14\n" +
 	"\x05query\x18\x02 \x03(\x02R\x05query\x12\f\n" +
@@ -11101,15 +11317,17 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x10node_type_filter\x18\x04 \x01(\v2\x1d.polargraph.v1.NodeTypeFilterH\x00R\x0enodeTypeFilter\x12T\n" +
 	"\x13reachability_filter\x18\x05 \x01(\v2!.polargraph.v1.ReachabilityFilterH\x00R\x12reachabilityFilter\x12\x0e\n" +
 	"\x02ef\x18\x06 \x01(\rR\x02ef\x12\x17\n" +
-	"\auser_id\x18\a \x01(\tR\x06userIdB\b\n" +
+	"\auser_id\x18\a \x01(\tR\x06userId\x12\x16\n" +
+	"\x06graphs\x18\b \x03(\tR\x06graphsB\b\n" +
 	"\x06filter\"[\n" +
 	"\x1cSearchVectorFilteredResponse\x12;\n" +
-	"\aresults\x18\x01 \x03(\v2!.polargraph.v1.VectorSearchResultR\aresults\"\x86\x01\n" +
+	"\aresults\x18\x01 \x03(\v2!.polargraph.v1.VectorSearchResultR\aresults\"\x9e\x01\n" +
 	"\x18SearchVectorInSetRequest\x12\x14\n" +
 	"\x05space\x18\x01 \x01(\tR\x05space\x12\x14\n" +
 	"\x05query\x18\x02 \x03(\x02R\x05query\x12\f\n" +
 	"\x01k\x18\x03 \x01(\rR\x01k\x120\n" +
-	"\bnode_ids\x18\x04 \x03(\v2\x15.polargraph.v1.NodeIdR\anodeIds\"X\n" +
+	"\bnode_ids\x18\x04 \x03(\v2\x15.polargraph.v1.NodeIdR\anodeIds\x12\x16\n" +
+	"\x06graphs\x18\x05 \x03(\tR\x06graphs\"X\n" +
 	"\x19SearchVectorInSetResponse\x12;\n" +
 	"\aresults\x18\x01 \x03(\v2!.polargraph.v1.VectorSearchResultR\aresults\"T\n" +
 	"\n" +
@@ -11229,7 +11447,7 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x05score\x18\x02 \x01(\x02R\x05score\x1aN\n" +
 	"\tVarsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12+\n" +
-	"\x05value\x18\x02 \x01(\v2\x15.polargraph.v1.NodeIdR\x05value:\x028\x01\"\xb6\x04\n" +
+	"\x05value\x18\x02 \x01(\v2\x15.polargraph.v1.NodeIdR\x05value:\x028\x01\"\xce\x04\n" +
 	"\x16VectorSeedQueryRequest\x12\x14\n" +
 	"\x05space\x18\x01 \x01(\tR\x05space\x12!\n" +
 	"\fquery_vector\x18\x02 \x03(\x02R\vqueryVector\x12\f\n" +
@@ -11243,7 +11461,8 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x02ef\x18\t \x01(\rR\x02ef\x12\x17\n" +
 	"\auser_id\x18\n" +
 	" \x01(\tR\x06userId\x12I\n" +
-	"\x06params\x18\v \x03(\v21.polargraph.v1.VectorSeedQueryRequest.ParamsEntryR\x06params\x1a9\n" +
+	"\x06params\x18\v \x03(\v21.polargraph.v1.VectorSeedQueryRequest.ParamsEntryR\x06params\x12\x16\n" +
+	"\x06graphs\x18\f \x03(\tR\x06graphs\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\b\n" +
@@ -11460,7 +11679,17 @@ const file_polargraph_proto_rawDesc = "" +
 	"\rdeleted_count\x18\x01 \x01(\x04R\fdeletedCount\"<\n" +
 	"\x19RunMaterializationRequest\x12\x1f\n" +
 	"\vclear_first\x18\x01 \x01(\bR\n" +
-	"clearFirst\"\xba\x01\n" +
+	"clearFirst\"\x1d\n" +
+	"\x1bGetInferenceSettingsRequest\"W\n" +
+	"\x11InferenceSettings\x12#\n" +
+	"\rschema_graphs\x18\x01 \x03(\tR\fschemaGraphs\x12\x1d\n" +
+	"\n" +
+	"all_graphs\x18\x02 \x01(\bR\tallGraphs\"z\n" +
+	"\x1bSetInferenceSettingsRequest\x12#\n" +
+	"\rschema_graphs\x18\x01 \x03(\tR\fschemaGraphs\x12\x1d\n" +
+	"\n" +
+	"all_graphs\x18\x02 \x01(\bR\tallGraphs\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\"\xba\x01\n" +
 	"\x1aRunMaterializationResponse\x12\x1f\n" +
 	"\vrules_fired\x18\x01 \x01(\x04R\n" +
 	"rulesFired\x12'\n" +
@@ -11513,21 +11742,24 @@ const file_polargraph_proto_rawDesc = "" +
 	"\fquads_closed\x18\x01 \x01(\x04R\vquadsClosed\"U\n" +
 	"\fGraphTriples\x12\x14\n" +
 	"\x05graph\x18\x01 \x01(\tR\x05graph\x12/\n" +
-	"\atriples\x18\x02 \x03(\v2\x15.polargraph.v1.TripleR\atriples\"\xd3\x01\n" +
+	"\atriples\x18\x02 \x03(\v2\x15.polargraph.v1.TripleR\atriples\"\xf2\x01\n" +
 	"\aQuadRef\x12/\n" +
 	"\asubject\x18\x01 \x01(\v2\x15.polargraph.v1.NodeIdR\asubject\x12\x1c\n" +
 	"\tpredicate\x18\x02 \x01(\tR\tpredicate\x12+\n" +
 	"\x04node\x18\x03 \x01(\v2\x15.polargraph.v1.NodeIdH\x00R\x04node\x12,\n" +
 	"\x05value\x18\x04 \x01(\v2\x14.polargraph.v1.ValueH\x00R\x05value\x12\x14\n" +
-	"\x05graph\x18\x05 \x01(\tR\x05graphB\b\n" +
-	"\x06object\"\xde\x01\n" +
+	"\x05graph\x18\x05 \x01(\tR\x05graph\x12\x1d\n" +
+	"\n" +
+	"all_graphs\x18\x06 \x01(\bR\tallGraphsB\b\n" +
+	"\x06object\"\xa8\x02\n" +
 	"\x13ApplyChangesRequest\x12/\n" +
 	"\x04adds\x18\x01 \x03(\v2\x1b.polargraph.v1.GraphTriplesR\x04adds\x128\n" +
 	"\vretractions\x18\x02 \x03(\v2\x16.polargraph.v1.QuadRefR\vretractions\x12\x17\n" +
 	"\aread_ts\x18\x03 \x01(\x03R\x06readTs\x12\x16\n" +
 	"\x06strict\x18\x04 \x01(\bR\x06strict\x12\x12\n" +
 	"\x04iris\x18\x05 \x03(\tR\x04iris\x12\x17\n" +
-	"\auser_id\x18\x06 \x01(\tR\x06userId\"\xb6\x01\n" +
+	"\auser_id\x18\x06 \x01(\tR\x06userId\x12H\n" +
+	"\x10edge_annotations\x18\a \x03(\v2\x1d.polargraph.v1.EdgeAnnotationR\x0fedgeAnnotations\"\xb6\x01\n" +
 	"\x14ApplyChangesResponse\x12\x1b\n" +
 	"\tcommit_ts\x18\x01 \x01(\x03R\bcommitTs\x12\x14\n" +
 	"\x05added\x18\x02 \x01(\x04R\x05added\x12\x1c\n" +
@@ -11682,7 +11914,7 @@ const file_polargraph_proto_rawDesc = "" +
 	"\x11CHANGE_KIND_CLOSE\x10\x02\x12\x1d\n" +
 	"\x19CHANGE_KIND_GRAPH_CREATED\x10\x03\x12\x1d\n" +
 	"\x19CHANGE_KIND_GRAPH_DROPPED\x10\x04\x12\x1c\n" +
-	"\x18CHANGE_KIND_GRAPH_COPIED\x10\x052\xe41\n" +
+	"\x18CHANGE_KIND_GRAPH_COPIED\x10\x052\xb93\n" +
 	"\x11PolarGraphService\x12f\n" +
 	"\x11IncrementCounters\x12'.polargraph.v1.IncrementCountersRequest\x1a(.polargraph.v1.IncrementCountersResponse\x12T\n" +
 	"\vGetCounters\x12!.polargraph.v1.GetCountersRequest\x1a\".polargraph.v1.GetCountersResponse\x12O\n" +
@@ -11755,7 +11987,9 @@ const file_polargraph_proto_rawDesc = "" +
 	"\rGetUserAccess\x12#.polargraph.v1.GetUserAccessRequest\x1a$.polargraph.v1.GetUserAccessResponse\x12i\n" +
 	"\x12GetPropertyHistory\x12(.polargraph.v1.GetPropertyHistoryRequest\x1a).polargraph.v1.GetPropertyHistoryResponse\x12Z\n" +
 	"\rDeleteTriples\x12#.polargraph.v1.DeleteTriplesRequest\x1a$.polargraph.v1.DeleteTriplesResponse\x12i\n" +
-	"\x12RunMaterialization\x12(.polargraph.v1.RunMaterializationRequest\x1a).polargraph.v1.RunMaterializationResponseb\x06proto3"
+	"\x12RunMaterialization\x12(.polargraph.v1.RunMaterializationRequest\x1a).polargraph.v1.RunMaterializationResponse\x12d\n" +
+	"\x14GetInferenceSettings\x12*.polargraph.v1.GetInferenceSettingsRequest\x1a .polargraph.v1.InferenceSettings\x12m\n" +
+	"\x14SetInferenceSettings\x12*.polargraph.v1.SetInferenceSettingsRequest\x1a).polargraph.v1.RunMaterializationResponseb\x06proto3"
 
 var (
 	file_polargraph_proto_rawDescOnce sync.Once
@@ -11770,7 +12004,7 @@ func file_polargraph_proto_rawDescGZIP() []byte {
 }
 
 var file_polargraph_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_polargraph_proto_msgTypes = make([]protoimpl.MessageInfo, 191)
+var file_polargraph_proto_msgTypes = make([]protoimpl.MessageInfo, 194)
 var file_polargraph_proto_goTypes = []any{
 	(PropertyWriteMode)(0),                // 0: polargraph.v1.PropertyWriteMode
 	(ChangeKind)(0),                       // 1: polargraph.v1.ChangeKind
@@ -11902,69 +12136,72 @@ var file_polargraph_proto_goTypes = []any{
 	(*DeleteTriplesRequest)(nil),          // 127: polargraph.v1.DeleteTriplesRequest
 	(*DeleteTriplesResponse)(nil),         // 128: polargraph.v1.DeleteTriplesResponse
 	(*RunMaterializationRequest)(nil),     // 129: polargraph.v1.RunMaterializationRequest
-	(*RunMaterializationResponse)(nil),    // 130: polargraph.v1.RunMaterializationResponse
-	(*GraphMetadata)(nil),                 // 131: polargraph.v1.GraphMetadata
-	(*GraphInfo)(nil),                     // 132: polargraph.v1.GraphInfo
-	(*CreateGraphRequest)(nil),            // 133: polargraph.v1.CreateGraphRequest
-	(*CreateGraphResponse)(nil),           // 134: polargraph.v1.CreateGraphResponse
-	(*ListGraphsRequest)(nil),             // 135: polargraph.v1.ListGraphsRequest
-	(*ListGraphsResponse)(nil),            // 136: polargraph.v1.ListGraphsResponse
-	(*GraphStatsRequest)(nil),             // 137: polargraph.v1.GraphStatsRequest
-	(*GraphStatsResponse)(nil),            // 138: polargraph.v1.GraphStatsResponse
-	(*CopyGraphRequest)(nil),              // 139: polargraph.v1.CopyGraphRequest
-	(*CopyGraphResponse)(nil),             // 140: polargraph.v1.CopyGraphResponse
-	(*MoveGraphRequest)(nil),              // 141: polargraph.v1.MoveGraphRequest
-	(*DropGraphRequest)(nil),              // 142: polargraph.v1.DropGraphRequest
-	(*DropGraphResponse)(nil),             // 143: polargraph.v1.DropGraphResponse
-	(*GraphTriples)(nil),                  // 144: polargraph.v1.GraphTriples
-	(*QuadRef)(nil),                       // 145: polargraph.v1.QuadRef
-	(*ApplyChangesRequest)(nil),           // 146: polargraph.v1.ApplyChangesRequest
-	(*ApplyChangesResponse)(nil),          // 147: polargraph.v1.ApplyChangesResponse
-	(*ValidateShapesRequest)(nil),         // 148: polargraph.v1.ValidateShapesRequest
-	(*ValidationResult)(nil),              // 149: polargraph.v1.ValidationResult
-	(*ValidateShapesResponse)(nil),        // 150: polargraph.v1.ValidateShapesResponse
-	(*SubscribeRequest)(nil),              // 151: polargraph.v1.SubscribeRequest
-	(*ChangeEvent)(nil),                   // 152: polargraph.v1.ChangeEvent
-	(*GrantGraphAccessRequest)(nil),       // 153: polargraph.v1.GrantGraphAccessRequest
-	(*GrantGraphAccessResponse)(nil),      // 154: polargraph.v1.GrantGraphAccessResponse
-	(*RevokeGraphAccessRequest)(nil),      // 155: polargraph.v1.RevokeGraphAccessRequest
-	(*RevokeGraphAccessResponse)(nil),     // 156: polargraph.v1.RevokeGraphAccessResponse
-	(*GetGraphAccessRequest)(nil),         // 157: polargraph.v1.GetGraphAccessRequest
-	(*GraphAccessEntry)(nil),              // 158: polargraph.v1.GraphAccessEntry
-	(*GetGraphAccessResponse)(nil),        // 159: polargraph.v1.GetGraphAccessResponse
-	(*ExportGraphRequest)(nil),            // 160: polargraph.v1.ExportGraphRequest
-	(*ExportedQuad)(nil),                  // 161: polargraph.v1.ExportedQuad
-	(*ExportGraphChunk)(nil),              // 162: polargraph.v1.ExportGraphChunk
-	(*ResolveIrisRequest)(nil),            // 163: polargraph.v1.ResolveIrisRequest
-	(*ResolveIrisResponse)(nil),           // 164: polargraph.v1.ResolveIrisResponse
-	(*VocabularyPrefix)(nil),              // 165: polargraph.v1.VocabularyPrefix
-	(*LegacyStatus)(nil),                  // 166: polargraph.v1.LegacyStatus
-	(*Vocabulary)(nil),                    // 167: polargraph.v1.Vocabulary
-	(*GetVocabularyRequest)(nil),          // 168: polargraph.v1.GetVocabularyRequest
-	(*SetVocabularyBaseRequest)(nil),      // 169: polargraph.v1.SetVocabularyBaseRequest
-	(*PutPrefixRequest)(nil),              // 170: polargraph.v1.PutPrefixRequest
-	(*RemovePrefixRequest)(nil),           // 171: polargraph.v1.RemovePrefixRequest
-	(*ConvertLegacyDataRequest)(nil),      // 172: polargraph.v1.ConvertLegacyDataRequest
-	(*PredicateConversion)(nil),           // 173: polargraph.v1.PredicateConversion
-	(*ConvertLegacyDataResponse)(nil),     // 174: polargraph.v1.ConvertLegacyDataResponse
-	(*CounterIncrement)(nil),              // 175: polargraph.v1.CounterIncrement
-	(*IncrementCountersRequest)(nil),      // 176: polargraph.v1.IncrementCountersRequest
-	(*IncrementCountersResponse)(nil),     // 177: polargraph.v1.IncrementCountersResponse
-	(*GetCountersRequest)(nil),            // 178: polargraph.v1.GetCountersRequest
-	(*GetCountersResponse)(nil),           // 179: polargraph.v1.GetCountersResponse
-	nil,                                   // 180: polargraph.v1.QueryRequest.ParamsEntry
-	nil,                                   // 181: polargraph.v1.Binding.VarsEntry
-	nil,                                   // 182: polargraph.v1.Binding.PredicatesEntry
-	nil,                                   // 183: polargraph.v1.Binding.ValuesEntry
-	nil,                                   // 184: polargraph.v1.QueryResult.VarsEntry
-	nil,                                   // 185: polargraph.v1.QueryResult.ValuesEntry
-	nil,                                   // 186: polargraph.v1.ValidateNodeRequest.PropertiesEntry
-	nil,                                   // 187: polargraph.v1.ValidateEdgeRequest.PropertiesEntry
-	nil,                                   // 188: polargraph.v1.ScoredBinding.VarsEntry
-	nil,                                   // 189: polargraph.v1.VectorSeedQueryRequest.ParamsEntry
-	nil,                                   // 190: polargraph.v1.CypherQueryRequest.ParamsEntry
-	nil,                                   // 191: polargraph.v1.CypherBinding.NodesEntry
-	nil,                                   // 192: polargraph.v1.CypherBinding.ValuesEntry
+	(*GetInferenceSettingsRequest)(nil),   // 130: polargraph.v1.GetInferenceSettingsRequest
+	(*InferenceSettings)(nil),             // 131: polargraph.v1.InferenceSettings
+	(*SetInferenceSettingsRequest)(nil),   // 132: polargraph.v1.SetInferenceSettingsRequest
+	(*RunMaterializationResponse)(nil),    // 133: polargraph.v1.RunMaterializationResponse
+	(*GraphMetadata)(nil),                 // 134: polargraph.v1.GraphMetadata
+	(*GraphInfo)(nil),                     // 135: polargraph.v1.GraphInfo
+	(*CreateGraphRequest)(nil),            // 136: polargraph.v1.CreateGraphRequest
+	(*CreateGraphResponse)(nil),           // 137: polargraph.v1.CreateGraphResponse
+	(*ListGraphsRequest)(nil),             // 138: polargraph.v1.ListGraphsRequest
+	(*ListGraphsResponse)(nil),            // 139: polargraph.v1.ListGraphsResponse
+	(*GraphStatsRequest)(nil),             // 140: polargraph.v1.GraphStatsRequest
+	(*GraphStatsResponse)(nil),            // 141: polargraph.v1.GraphStatsResponse
+	(*CopyGraphRequest)(nil),              // 142: polargraph.v1.CopyGraphRequest
+	(*CopyGraphResponse)(nil),             // 143: polargraph.v1.CopyGraphResponse
+	(*MoveGraphRequest)(nil),              // 144: polargraph.v1.MoveGraphRequest
+	(*DropGraphRequest)(nil),              // 145: polargraph.v1.DropGraphRequest
+	(*DropGraphResponse)(nil),             // 146: polargraph.v1.DropGraphResponse
+	(*GraphTriples)(nil),                  // 147: polargraph.v1.GraphTriples
+	(*QuadRef)(nil),                       // 148: polargraph.v1.QuadRef
+	(*ApplyChangesRequest)(nil),           // 149: polargraph.v1.ApplyChangesRequest
+	(*ApplyChangesResponse)(nil),          // 150: polargraph.v1.ApplyChangesResponse
+	(*ValidateShapesRequest)(nil),         // 151: polargraph.v1.ValidateShapesRequest
+	(*ValidationResult)(nil),              // 152: polargraph.v1.ValidationResult
+	(*ValidateShapesResponse)(nil),        // 153: polargraph.v1.ValidateShapesResponse
+	(*SubscribeRequest)(nil),              // 154: polargraph.v1.SubscribeRequest
+	(*ChangeEvent)(nil),                   // 155: polargraph.v1.ChangeEvent
+	(*GrantGraphAccessRequest)(nil),       // 156: polargraph.v1.GrantGraphAccessRequest
+	(*GrantGraphAccessResponse)(nil),      // 157: polargraph.v1.GrantGraphAccessResponse
+	(*RevokeGraphAccessRequest)(nil),      // 158: polargraph.v1.RevokeGraphAccessRequest
+	(*RevokeGraphAccessResponse)(nil),     // 159: polargraph.v1.RevokeGraphAccessResponse
+	(*GetGraphAccessRequest)(nil),         // 160: polargraph.v1.GetGraphAccessRequest
+	(*GraphAccessEntry)(nil),              // 161: polargraph.v1.GraphAccessEntry
+	(*GetGraphAccessResponse)(nil),        // 162: polargraph.v1.GetGraphAccessResponse
+	(*ExportGraphRequest)(nil),            // 163: polargraph.v1.ExportGraphRequest
+	(*ExportedQuad)(nil),                  // 164: polargraph.v1.ExportedQuad
+	(*ExportGraphChunk)(nil),              // 165: polargraph.v1.ExportGraphChunk
+	(*ResolveIrisRequest)(nil),            // 166: polargraph.v1.ResolveIrisRequest
+	(*ResolveIrisResponse)(nil),           // 167: polargraph.v1.ResolveIrisResponse
+	(*VocabularyPrefix)(nil),              // 168: polargraph.v1.VocabularyPrefix
+	(*LegacyStatus)(nil),                  // 169: polargraph.v1.LegacyStatus
+	(*Vocabulary)(nil),                    // 170: polargraph.v1.Vocabulary
+	(*GetVocabularyRequest)(nil),          // 171: polargraph.v1.GetVocabularyRequest
+	(*SetVocabularyBaseRequest)(nil),      // 172: polargraph.v1.SetVocabularyBaseRequest
+	(*PutPrefixRequest)(nil),              // 173: polargraph.v1.PutPrefixRequest
+	(*RemovePrefixRequest)(nil),           // 174: polargraph.v1.RemovePrefixRequest
+	(*ConvertLegacyDataRequest)(nil),      // 175: polargraph.v1.ConvertLegacyDataRequest
+	(*PredicateConversion)(nil),           // 176: polargraph.v1.PredicateConversion
+	(*ConvertLegacyDataResponse)(nil),     // 177: polargraph.v1.ConvertLegacyDataResponse
+	(*CounterIncrement)(nil),              // 178: polargraph.v1.CounterIncrement
+	(*IncrementCountersRequest)(nil),      // 179: polargraph.v1.IncrementCountersRequest
+	(*IncrementCountersResponse)(nil),     // 180: polargraph.v1.IncrementCountersResponse
+	(*GetCountersRequest)(nil),            // 181: polargraph.v1.GetCountersRequest
+	(*GetCountersResponse)(nil),           // 182: polargraph.v1.GetCountersResponse
+	nil,                                   // 183: polargraph.v1.QueryRequest.ParamsEntry
+	nil,                                   // 184: polargraph.v1.Binding.VarsEntry
+	nil,                                   // 185: polargraph.v1.Binding.PredicatesEntry
+	nil,                                   // 186: polargraph.v1.Binding.ValuesEntry
+	nil,                                   // 187: polargraph.v1.QueryResult.VarsEntry
+	nil,                                   // 188: polargraph.v1.QueryResult.ValuesEntry
+	nil,                                   // 189: polargraph.v1.ValidateNodeRequest.PropertiesEntry
+	nil,                                   // 190: polargraph.v1.ValidateEdgeRequest.PropertiesEntry
+	nil,                                   // 191: polargraph.v1.ScoredBinding.VarsEntry
+	nil,                                   // 192: polargraph.v1.VectorSeedQueryRequest.ParamsEntry
+	nil,                                   // 193: polargraph.v1.CypherQueryRequest.ParamsEntry
+	nil,                                   // 194: polargraph.v1.CypherBinding.NodesEntry
+	nil,                                   // 195: polargraph.v1.CypherBinding.ValuesEntry
 }
 var file_polargraph_proto_depIdxs = []int32{
 	6,   // 0: polargraph.v1.Value.vec_val:type_name -> polargraph.v1.FloatArray
@@ -11992,13 +12229,13 @@ var file_polargraph_proto_depIdxs = []int32{
 	16,  // 22: polargraph.v1.InsertRequest.edge_annotations:type_name -> polargraph.v1.EdgeAnnotation
 	12,  // 23: polargraph.v1.QueryRequest.patterns:type_name -> polargraph.v1.VarPattern
 	15,  // 24: polargraph.v1.QueryRequest.rules:type_name -> polargraph.v1.DatalogRule
-	180, // 25: polargraph.v1.QueryRequest.params:type_name -> polargraph.v1.QueryRequest.ParamsEntry
-	181, // 26: polargraph.v1.Binding.vars:type_name -> polargraph.v1.Binding.VarsEntry
-	182, // 27: polargraph.v1.Binding.predicates:type_name -> polargraph.v1.Binding.PredicatesEntry
-	183, // 28: polargraph.v1.Binding.values:type_name -> polargraph.v1.Binding.ValuesEntry
+	183, // 25: polargraph.v1.QueryRequest.params:type_name -> polargraph.v1.QueryRequest.ParamsEntry
+	184, // 26: polargraph.v1.Binding.vars:type_name -> polargraph.v1.Binding.VarsEntry
+	185, // 27: polargraph.v1.Binding.predicates:type_name -> polargraph.v1.Binding.PredicatesEntry
+	186, // 28: polargraph.v1.Binding.values:type_name -> polargraph.v1.Binding.ValuesEntry
 	24,  // 29: polargraph.v1.QueryResponse.bindings:type_name -> polargraph.v1.Binding
-	184, // 30: polargraph.v1.QueryResult.vars:type_name -> polargraph.v1.QueryResult.VarsEntry
-	185, // 31: polargraph.v1.QueryResult.values:type_name -> polargraph.v1.QueryResult.ValuesEntry
+	187, // 30: polargraph.v1.QueryResult.vars:type_name -> polargraph.v1.QueryResult.VarsEntry
+	188, // 31: polargraph.v1.QueryResult.values:type_name -> polargraph.v1.QueryResult.ValuesEntry
 	26,  // 32: polargraph.v1.QueryStreamChunk.results:type_name -> polargraph.v1.QueryResult
 	2,   // 33: polargraph.v1.ReachableRequest.start:type_name -> polargraph.v1.NodeId
 	2,   // 34: polargraph.v1.ReachableResponse.node_ids:type_name -> polargraph.v1.NodeId
@@ -12019,26 +12256,26 @@ var file_polargraph_proto_depIdxs = []int32{
 	47,  // 49: polargraph.v1.RegisterNodeTypeRequest.definition:type_name -> polargraph.v1.NodeTypeDef
 	47,  // 50: polargraph.v1.GetNodeTypeResponse.definition:type_name -> polargraph.v1.NodeTypeDef
 	47,  // 51: polargraph.v1.ListNodeTypesResponse.definitions:type_name -> polargraph.v1.NodeTypeDef
-	186, // 52: polargraph.v1.ValidateNodeRequest.properties:type_name -> polargraph.v1.ValidateNodeRequest.PropertiesEntry
+	189, // 52: polargraph.v1.ValidateNodeRequest.properties:type_name -> polargraph.v1.ValidateNodeRequest.PropertiesEntry
 	45,  // 53: polargraph.v1.EdgeTypeDef.fields:type_name -> polargraph.v1.FieldDef
 	56,  // 54: polargraph.v1.RegisterEdgeTypeRequest.definition:type_name -> polargraph.v1.EdgeTypeDef
 	56,  // 55: polargraph.v1.GetEdgeTypeResponse.definition:type_name -> polargraph.v1.EdgeTypeDef
 	56,  // 56: polargraph.v1.ListEdgeTypesResponse.definitions:type_name -> polargraph.v1.EdgeTypeDef
-	187, // 57: polargraph.v1.ValidateEdgeRequest.properties:type_name -> polargraph.v1.ValidateEdgeRequest.PropertiesEntry
+	190, // 57: polargraph.v1.ValidateEdgeRequest.properties:type_name -> polargraph.v1.ValidateEdgeRequest.PropertiesEntry
 	66,  // 58: polargraph.v1.ValidateOntologyResponse.violations:type_name -> polargraph.v1.OntologyViolation
-	188, // 59: polargraph.v1.ScoredBinding.vars:type_name -> polargraph.v1.ScoredBinding.VarsEntry
+	191, // 59: polargraph.v1.ScoredBinding.vars:type_name -> polargraph.v1.ScoredBinding.VarsEntry
 	12,  // 60: polargraph.v1.VectorSeedQueryRequest.patterns:type_name -> polargraph.v1.VarPattern
 	35,  // 61: polargraph.v1.VectorSeedQueryRequest.node_type_filter:type_name -> polargraph.v1.NodeTypeFilter
 	36,  // 62: polargraph.v1.VectorSeedQueryRequest.reachability_filter:type_name -> polargraph.v1.ReachabilityFilter
-	189, // 63: polargraph.v1.VectorSeedQueryRequest.params:type_name -> polargraph.v1.VectorSeedQueryRequest.ParamsEntry
+	192, // 63: polargraph.v1.VectorSeedQueryRequest.params:type_name -> polargraph.v1.VectorSeedQueryRequest.ParamsEntry
 	70,  // 64: polargraph.v1.VectorSeedQueryResponse.bindings:type_name -> polargraph.v1.ScoredBinding
 	73,  // 65: polargraph.v1.ListBackupsResponse.backups:type_name -> polargraph.v1.BackupInfo
 	90,  // 66: polargraph.v1.MigrationStatusResponse.applied:type_name -> polargraph.v1.AppliedMigrationInfo
 	92,  // 67: polargraph.v1.ShowIndexesResponse.column_families:type_name -> polargraph.v1.ColumnFamilyInfo
 	93,  // 68: polargraph.v1.ShowIndexesResponse.vector_spaces:type_name -> polargraph.v1.VectorSpaceInfo
-	190, // 69: polargraph.v1.CypherQueryRequest.params:type_name -> polargraph.v1.CypherQueryRequest.ParamsEntry
-	191, // 70: polargraph.v1.CypherBinding.nodes:type_name -> polargraph.v1.CypherBinding.NodesEntry
-	192, // 71: polargraph.v1.CypherBinding.values:type_name -> polargraph.v1.CypherBinding.ValuesEntry
+	193, // 69: polargraph.v1.CypherQueryRequest.params:type_name -> polargraph.v1.CypherQueryRequest.ParamsEntry
+	194, // 70: polargraph.v1.CypherBinding.nodes:type_name -> polargraph.v1.CypherBinding.NodesEntry
+	195, // 71: polargraph.v1.CypherBinding.values:type_name -> polargraph.v1.CypherBinding.ValuesEntry
 	98,  // 72: polargraph.v1.CypherQueryResponse.rows:type_name -> polargraph.v1.CypherBinding
 	103, // 73: polargraph.v1.ExplainResponse.nodes:type_name -> polargraph.v1.PlanNode
 	103, // 74: polargraph.v1.PlanNode.children:type_name -> polargraph.v1.PlanNode
@@ -12046,191 +12283,196 @@ var file_polargraph_proto_depIdxs = []int32{
 	3,   // 76: polargraph.v1.DeleteTriplesRequest.value:type_name -> polargraph.v1.Value
 	13,  // 77: polargraph.v1.DeleteTriplesRequest.graph:type_name -> polargraph.v1.GraphTerm
 	3,   // 78: polargraph.v1.GraphMetadata.value:type_name -> polargraph.v1.Value
-	131, // 79: polargraph.v1.GraphInfo.metadata:type_name -> polargraph.v1.GraphMetadata
-	131, // 80: polargraph.v1.CreateGraphRequest.metadata:type_name -> polargraph.v1.GraphMetadata
-	132, // 81: polargraph.v1.CreateGraphResponse.graph:type_name -> polargraph.v1.GraphInfo
-	131, // 82: polargraph.v1.ListGraphsRequest.filter:type_name -> polargraph.v1.GraphMetadata
-	132, // 83: polargraph.v1.ListGraphsResponse.graphs:type_name -> polargraph.v1.GraphInfo
+	134, // 79: polargraph.v1.GraphInfo.metadata:type_name -> polargraph.v1.GraphMetadata
+	134, // 80: polargraph.v1.CreateGraphRequest.metadata:type_name -> polargraph.v1.GraphMetadata
+	135, // 81: polargraph.v1.CreateGraphResponse.graph:type_name -> polargraph.v1.GraphInfo
+	134, // 82: polargraph.v1.ListGraphsRequest.filter:type_name -> polargraph.v1.GraphMetadata
+	135, // 83: polargraph.v1.ListGraphsResponse.graphs:type_name -> polargraph.v1.GraphInfo
 	10,  // 84: polargraph.v1.GraphTriples.triples:type_name -> polargraph.v1.Triple
 	2,   // 85: polargraph.v1.QuadRef.subject:type_name -> polargraph.v1.NodeId
 	2,   // 86: polargraph.v1.QuadRef.node:type_name -> polargraph.v1.NodeId
 	3,   // 87: polargraph.v1.QuadRef.value:type_name -> polargraph.v1.Value
-	144, // 88: polargraph.v1.ApplyChangesRequest.adds:type_name -> polargraph.v1.GraphTriples
-	145, // 89: polargraph.v1.ApplyChangesRequest.retractions:type_name -> polargraph.v1.QuadRef
-	144, // 90: polargraph.v1.ValidateShapesRequest.overlay_adds:type_name -> polargraph.v1.GraphTriples
-	145, // 91: polargraph.v1.ValidateShapesRequest.overlay_retractions:type_name -> polargraph.v1.QuadRef
-	3,   // 92: polargraph.v1.ValidationResult.focus_literal:type_name -> polargraph.v1.Value
-	3,   // 93: polargraph.v1.ValidationResult.value_literal:type_name -> polargraph.v1.Value
-	149, // 94: polargraph.v1.ValidateShapesResponse.results:type_name -> polargraph.v1.ValidationResult
-	1,   // 95: polargraph.v1.ChangeEvent.kind:type_name -> polargraph.v1.ChangeKind
-	10,  // 96: polargraph.v1.ChangeEvent.quad:type_name -> polargraph.v1.Triple
-	158, // 97: polargraph.v1.GetGraphAccessResponse.graphs:type_name -> polargraph.v1.GraphAccessEntry
-	2,   // 98: polargraph.v1.ExportedQuad.subject:type_name -> polargraph.v1.NodeId
-	2,   // 99: polargraph.v1.ExportedQuad.node:type_name -> polargraph.v1.NodeId
-	3,   // 100: polargraph.v1.ExportedQuad.value:type_name -> polargraph.v1.Value
-	161, // 101: polargraph.v1.ExportGraphChunk.quads:type_name -> polargraph.v1.ExportedQuad
-	2,   // 102: polargraph.v1.ResolveIrisRequest.nodes:type_name -> polargraph.v1.NodeId
-	165, // 103: polargraph.v1.Vocabulary.prefixes:type_name -> polargraph.v1.VocabularyPrefix
-	166, // 104: polargraph.v1.Vocabulary.legacy:type_name -> polargraph.v1.LegacyStatus
-	173, // 105: polargraph.v1.ConvertLegacyDataResponse.predicates:type_name -> polargraph.v1.PredicateConversion
-	166, // 106: polargraph.v1.ConvertLegacyDataResponse.legacy:type_name -> polargraph.v1.LegacyStatus
-	2,   // 107: polargraph.v1.CounterIncrement.node:type_name -> polargraph.v1.NodeId
-	175, // 108: polargraph.v1.IncrementCountersRequest.increments:type_name -> polargraph.v1.CounterIncrement
-	2,   // 109: polargraph.v1.GetCountersRequest.nodes:type_name -> polargraph.v1.NodeId
-	2,   // 110: polargraph.v1.Binding.VarsEntry.value:type_name -> polargraph.v1.NodeId
-	3,   // 111: polargraph.v1.Binding.ValuesEntry.value:type_name -> polargraph.v1.Value
-	2,   // 112: polargraph.v1.QueryResult.VarsEntry.value:type_name -> polargraph.v1.NodeId
-	3,   // 113: polargraph.v1.QueryResult.ValuesEntry.value:type_name -> polargraph.v1.Value
-	3,   // 114: polargraph.v1.ValidateNodeRequest.PropertiesEntry.value:type_name -> polargraph.v1.Value
-	3,   // 115: polargraph.v1.ValidateEdgeRequest.PropertiesEntry.value:type_name -> polargraph.v1.Value
-	2,   // 116: polargraph.v1.ScoredBinding.VarsEntry.value:type_name -> polargraph.v1.NodeId
-	2,   // 117: polargraph.v1.CypherBinding.NodesEntry.value:type_name -> polargraph.v1.NodeId
-	3,   // 118: polargraph.v1.CypherBinding.ValuesEntry.value:type_name -> polargraph.v1.Value
-	176, // 119: polargraph.v1.PolarGraphService.IncrementCounters:input_type -> polargraph.v1.IncrementCountersRequest
-	178, // 120: polargraph.v1.PolarGraphService.GetCounters:input_type -> polargraph.v1.GetCountersRequest
-	168, // 121: polargraph.v1.PolarGraphService.GetVocabulary:input_type -> polargraph.v1.GetVocabularyRequest
-	169, // 122: polargraph.v1.PolarGraphService.SetVocabularyBase:input_type -> polargraph.v1.SetVocabularyBaseRequest
-	170, // 123: polargraph.v1.PolarGraphService.PutPrefix:input_type -> polargraph.v1.PutPrefixRequest
-	171, // 124: polargraph.v1.PolarGraphService.RemovePrefix:input_type -> polargraph.v1.RemovePrefixRequest
-	172, // 125: polargraph.v1.PolarGraphService.ConvertLegacyData:input_type -> polargraph.v1.ConvertLegacyDataRequest
-	21,  // 126: polargraph.v1.PolarGraphService.Insert:input_type -> polargraph.v1.InsertRequest
-	163, // 127: polargraph.v1.PolarGraphService.ResolveIris:input_type -> polargraph.v1.ResolveIrisRequest
-	133, // 128: polargraph.v1.PolarGraphService.CreateGraph:input_type -> polargraph.v1.CreateGraphRequest
-	135, // 129: polargraph.v1.PolarGraphService.ListGraphs:input_type -> polargraph.v1.ListGraphsRequest
-	137, // 130: polargraph.v1.PolarGraphService.GraphStats:input_type -> polargraph.v1.GraphStatsRequest
-	139, // 131: polargraph.v1.PolarGraphService.CopyGraph:input_type -> polargraph.v1.CopyGraphRequest
-	141, // 132: polargraph.v1.PolarGraphService.MoveGraph:input_type -> polargraph.v1.MoveGraphRequest
-	142, // 133: polargraph.v1.PolarGraphService.DropGraph:input_type -> polargraph.v1.DropGraphRequest
-	160, // 134: polargraph.v1.PolarGraphService.ExportGraph:input_type -> polargraph.v1.ExportGraphRequest
-	146, // 135: polargraph.v1.PolarGraphService.ApplyChanges:input_type -> polargraph.v1.ApplyChangesRequest
-	148, // 136: polargraph.v1.PolarGraphService.ValidateShapes:input_type -> polargraph.v1.ValidateShapesRequest
-	151, // 137: polargraph.v1.PolarGraphService.Subscribe:input_type -> polargraph.v1.SubscribeRequest
-	153, // 138: polargraph.v1.PolarGraphService.GrantGraphAccess:input_type -> polargraph.v1.GrantGraphAccessRequest
-	155, // 139: polargraph.v1.PolarGraphService.RevokeGraphAccess:input_type -> polargraph.v1.RevokeGraphAccessRequest
-	157, // 140: polargraph.v1.PolarGraphService.GetGraphAccess:input_type -> polargraph.v1.GetGraphAccessRequest
-	23,  // 141: polargraph.v1.PolarGraphService.Query:input_type -> polargraph.v1.QueryRequest
-	30,  // 142: polargraph.v1.PolarGraphService.InsertVector:input_type -> polargraph.v1.InsertVectorRequest
-	32,  // 143: polargraph.v1.PolarGraphService.SearchVector:input_type -> polargraph.v1.SearchVectorRequest
-	28,  // 144: polargraph.v1.PolarGraphService.Reachable:input_type -> polargraph.v1.ReachableRequest
-	48,  // 145: polargraph.v1.PolarGraphService.RegisterNodeType:input_type -> polargraph.v1.RegisterNodeTypeRequest
-	50,  // 146: polargraph.v1.PolarGraphService.GetNodeType:input_type -> polargraph.v1.GetNodeTypeRequest
-	52,  // 147: polargraph.v1.PolarGraphService.ListNodeTypes:input_type -> polargraph.v1.ListNodeTypesRequest
-	54,  // 148: polargraph.v1.PolarGraphService.ValidateNode:input_type -> polargraph.v1.ValidateNodeRequest
-	57,  // 149: polargraph.v1.PolarGraphService.RegisterEdgeType:input_type -> polargraph.v1.RegisterEdgeTypeRequest
-	59,  // 150: polargraph.v1.PolarGraphService.GetEdgeType:input_type -> polargraph.v1.GetEdgeTypeRequest
-	61,  // 151: polargraph.v1.PolarGraphService.ListEdgeTypes:input_type -> polargraph.v1.ListEdgeTypesRequest
-	63,  // 152: polargraph.v1.PolarGraphService.ValidateEdge:input_type -> polargraph.v1.ValidateEdgeRequest
-	68,  // 153: polargraph.v1.PolarGraphService.ListPredicatesBetween:input_type -> polargraph.v1.ListPredicatesBetweenRequest
-	65,  // 154: polargraph.v1.PolarGraphService.ValidateOntology:input_type -> polargraph.v1.ValidateOntologyRequest
-	37,  // 155: polargraph.v1.PolarGraphService.SearchVectorFiltered:input_type -> polargraph.v1.SearchVectorFilteredRequest
-	39,  // 156: polargraph.v1.PolarGraphService.SearchVectorInSet:input_type -> polargraph.v1.SearchVectorInSetRequest
-	43,  // 157: polargraph.v1.PolarGraphService.BatchInsertVectors:input_type -> polargraph.v1.BatchInsertVectorsRequest
-	71,  // 158: polargraph.v1.PolarGraphService.VectorSeedQuery:input_type -> polargraph.v1.VectorSeedQueryRequest
-	74,  // 159: polargraph.v1.PolarGraphService.CreateBackup:input_type -> polargraph.v1.CreateBackupRequest
-	76,  // 160: polargraph.v1.PolarGraphService.ListBackups:input_type -> polargraph.v1.ListBackupsRequest
-	78,  // 161: polargraph.v1.PolarGraphService.PurgeOldBackups:input_type -> polargraph.v1.PurgeOldBackupsRequest
-	80,  // 162: polargraph.v1.PolarGraphService.RunRetention:input_type -> polargraph.v1.RunRetentionRequest
-	84,  // 163: polargraph.v1.PolarGraphService.ReplicaStatus:input_type -> polargraph.v1.ReplicaStatusRequest
-	82,  // 164: polargraph.v1.PolarGraphService.StreamWal:input_type -> polargraph.v1.StreamWalRequest
-	23,  // 165: polargraph.v1.PolarGraphService.ExplainQuery:input_type -> polargraph.v1.QueryRequest
-	86,  // 166: polargraph.v1.PolarGraphService.MigrateSchema:input_type -> polargraph.v1.MigrateRequest
-	88,  // 167: polargraph.v1.PolarGraphService.MigrationStatus:input_type -> polargraph.v1.MigrationStatusRequest
-	97,  // 168: polargraph.v1.PolarGraphService.CypherQuery:input_type -> polargraph.v1.CypherQueryRequest
-	100, // 169: polargraph.v1.PolarGraphService.CypherWrite:input_type -> polargraph.v1.CypherWriteRequest
-	23,  // 170: polargraph.v1.PolarGraphService.QueryStream:input_type -> polargraph.v1.QueryRequest
-	97,  // 171: polargraph.v1.PolarGraphService.CypherQueryStream:input_type -> polargraph.v1.CypherQueryRequest
-	91,  // 172: polargraph.v1.PolarGraphService.ShowIndexes:input_type -> polargraph.v1.ShowIndexesRequest
-	95,  // 173: polargraph.v1.PolarGraphService.ShowStats:input_type -> polargraph.v1.ShowStatsRequest
-	104, // 174: polargraph.v1.PolarGraphService.BeginTransaction:input_type -> polargraph.v1.BeginTransactionRequest
-	106, // 175: polargraph.v1.PolarGraphService.CommitTransaction:input_type -> polargraph.v1.CommitTransactionRequest
-	108, // 176: polargraph.v1.PolarGraphService.RollbackTransaction:input_type -> polargraph.v1.RollbackTransactionRequest
-	17,  // 177: polargraph.v1.PolarGraphService.GetEdgeAnnotations:input_type -> polargraph.v1.GetEdgeAnnotationsRequest
-	19,  // 178: polargraph.v1.PolarGraphService.GetEdgeIdsByTriple:input_type -> polargraph.v1.GetEdgeIdsByTripleRequest
-	110, // 179: polargraph.v1.PolarGraphService.AddApiKey:input_type -> polargraph.v1.AddApiKeyRequest
-	112, // 180: polargraph.v1.PolarGraphService.RevokeApiKey:input_type -> polargraph.v1.RevokeApiKeyRequest
-	114, // 181: polargraph.v1.PolarGraphService.ListApiKeys:input_type -> polargraph.v1.ListApiKeysRequest
-	116, // 182: polargraph.v1.PolarGraphService.GrantAccess:input_type -> polargraph.v1.GrantAccessRequest
-	118, // 183: polargraph.v1.PolarGraphService.RevokeAccess:input_type -> polargraph.v1.RevokeAccessRequest
-	120, // 184: polargraph.v1.PolarGraphService.AddUserToGroup:input_type -> polargraph.v1.AddUserToGroupRequest
-	122, // 185: polargraph.v1.PolarGraphService.GetUserAccess:input_type -> polargraph.v1.GetUserAccessRequest
-	124, // 186: polargraph.v1.PolarGraphService.GetPropertyHistory:input_type -> polargraph.v1.GetPropertyHistoryRequest
-	127, // 187: polargraph.v1.PolarGraphService.DeleteTriples:input_type -> polargraph.v1.DeleteTriplesRequest
-	129, // 188: polargraph.v1.PolarGraphService.RunMaterialization:input_type -> polargraph.v1.RunMaterializationRequest
-	177, // 189: polargraph.v1.PolarGraphService.IncrementCounters:output_type -> polargraph.v1.IncrementCountersResponse
-	179, // 190: polargraph.v1.PolarGraphService.GetCounters:output_type -> polargraph.v1.GetCountersResponse
-	167, // 191: polargraph.v1.PolarGraphService.GetVocabulary:output_type -> polargraph.v1.Vocabulary
-	167, // 192: polargraph.v1.PolarGraphService.SetVocabularyBase:output_type -> polargraph.v1.Vocabulary
-	167, // 193: polargraph.v1.PolarGraphService.PutPrefix:output_type -> polargraph.v1.Vocabulary
-	167, // 194: polargraph.v1.PolarGraphService.RemovePrefix:output_type -> polargraph.v1.Vocabulary
-	174, // 195: polargraph.v1.PolarGraphService.ConvertLegacyData:output_type -> polargraph.v1.ConvertLegacyDataResponse
-	22,  // 196: polargraph.v1.PolarGraphService.Insert:output_type -> polargraph.v1.InsertResponse
-	164, // 197: polargraph.v1.PolarGraphService.ResolveIris:output_type -> polargraph.v1.ResolveIrisResponse
-	134, // 198: polargraph.v1.PolarGraphService.CreateGraph:output_type -> polargraph.v1.CreateGraphResponse
-	136, // 199: polargraph.v1.PolarGraphService.ListGraphs:output_type -> polargraph.v1.ListGraphsResponse
-	138, // 200: polargraph.v1.PolarGraphService.GraphStats:output_type -> polargraph.v1.GraphStatsResponse
-	140, // 201: polargraph.v1.PolarGraphService.CopyGraph:output_type -> polargraph.v1.CopyGraphResponse
-	140, // 202: polargraph.v1.PolarGraphService.MoveGraph:output_type -> polargraph.v1.CopyGraphResponse
-	143, // 203: polargraph.v1.PolarGraphService.DropGraph:output_type -> polargraph.v1.DropGraphResponse
-	162, // 204: polargraph.v1.PolarGraphService.ExportGraph:output_type -> polargraph.v1.ExportGraphChunk
-	147, // 205: polargraph.v1.PolarGraphService.ApplyChanges:output_type -> polargraph.v1.ApplyChangesResponse
-	150, // 206: polargraph.v1.PolarGraphService.ValidateShapes:output_type -> polargraph.v1.ValidateShapesResponse
-	152, // 207: polargraph.v1.PolarGraphService.Subscribe:output_type -> polargraph.v1.ChangeEvent
-	154, // 208: polargraph.v1.PolarGraphService.GrantGraphAccess:output_type -> polargraph.v1.GrantGraphAccessResponse
-	156, // 209: polargraph.v1.PolarGraphService.RevokeGraphAccess:output_type -> polargraph.v1.RevokeGraphAccessResponse
-	159, // 210: polargraph.v1.PolarGraphService.GetGraphAccess:output_type -> polargraph.v1.GetGraphAccessResponse
-	25,  // 211: polargraph.v1.PolarGraphService.Query:output_type -> polargraph.v1.QueryResponse
-	31,  // 212: polargraph.v1.PolarGraphService.InsertVector:output_type -> polargraph.v1.InsertVectorResponse
-	34,  // 213: polargraph.v1.PolarGraphService.SearchVector:output_type -> polargraph.v1.SearchVectorResponse
-	29,  // 214: polargraph.v1.PolarGraphService.Reachable:output_type -> polargraph.v1.ReachableResponse
-	49,  // 215: polargraph.v1.PolarGraphService.RegisterNodeType:output_type -> polargraph.v1.RegisterNodeTypeResponse
-	51,  // 216: polargraph.v1.PolarGraphService.GetNodeType:output_type -> polargraph.v1.GetNodeTypeResponse
-	53,  // 217: polargraph.v1.PolarGraphService.ListNodeTypes:output_type -> polargraph.v1.ListNodeTypesResponse
-	55,  // 218: polargraph.v1.PolarGraphService.ValidateNode:output_type -> polargraph.v1.ValidateNodeResponse
-	58,  // 219: polargraph.v1.PolarGraphService.RegisterEdgeType:output_type -> polargraph.v1.RegisterEdgeTypeResponse
-	60,  // 220: polargraph.v1.PolarGraphService.GetEdgeType:output_type -> polargraph.v1.GetEdgeTypeResponse
-	62,  // 221: polargraph.v1.PolarGraphService.ListEdgeTypes:output_type -> polargraph.v1.ListEdgeTypesResponse
-	64,  // 222: polargraph.v1.PolarGraphService.ValidateEdge:output_type -> polargraph.v1.ValidateEdgeResponse
-	69,  // 223: polargraph.v1.PolarGraphService.ListPredicatesBetween:output_type -> polargraph.v1.ListPredicatesBetweenResponse
-	67,  // 224: polargraph.v1.PolarGraphService.ValidateOntology:output_type -> polargraph.v1.ValidateOntologyResponse
-	38,  // 225: polargraph.v1.PolarGraphService.SearchVectorFiltered:output_type -> polargraph.v1.SearchVectorFilteredResponse
-	40,  // 226: polargraph.v1.PolarGraphService.SearchVectorInSet:output_type -> polargraph.v1.SearchVectorInSetResponse
-	44,  // 227: polargraph.v1.PolarGraphService.BatchInsertVectors:output_type -> polargraph.v1.BatchInsertVectorsResponse
-	72,  // 228: polargraph.v1.PolarGraphService.VectorSeedQuery:output_type -> polargraph.v1.VectorSeedQueryResponse
-	75,  // 229: polargraph.v1.PolarGraphService.CreateBackup:output_type -> polargraph.v1.CreateBackupResponse
-	77,  // 230: polargraph.v1.PolarGraphService.ListBackups:output_type -> polargraph.v1.ListBackupsResponse
-	79,  // 231: polargraph.v1.PolarGraphService.PurgeOldBackups:output_type -> polargraph.v1.PurgeOldBackupsResponse
-	81,  // 232: polargraph.v1.PolarGraphService.RunRetention:output_type -> polargraph.v1.RunRetentionResponse
-	85,  // 233: polargraph.v1.PolarGraphService.ReplicaStatus:output_type -> polargraph.v1.ReplicaStatusResponse
-	83,  // 234: polargraph.v1.PolarGraphService.StreamWal:output_type -> polargraph.v1.WalEntry
-	102, // 235: polargraph.v1.PolarGraphService.ExplainQuery:output_type -> polargraph.v1.ExplainResponse
-	87,  // 236: polargraph.v1.PolarGraphService.MigrateSchema:output_type -> polargraph.v1.MigrateResponse
-	89,  // 237: polargraph.v1.PolarGraphService.MigrationStatus:output_type -> polargraph.v1.MigrationStatusResponse
-	99,  // 238: polargraph.v1.PolarGraphService.CypherQuery:output_type -> polargraph.v1.CypherQueryResponse
-	101, // 239: polargraph.v1.PolarGraphService.CypherWrite:output_type -> polargraph.v1.CypherWriteResponse
-	27,  // 240: polargraph.v1.PolarGraphService.QueryStream:output_type -> polargraph.v1.QueryStreamChunk
-	27,  // 241: polargraph.v1.PolarGraphService.CypherQueryStream:output_type -> polargraph.v1.QueryStreamChunk
-	94,  // 242: polargraph.v1.PolarGraphService.ShowIndexes:output_type -> polargraph.v1.ShowIndexesResponse
-	96,  // 243: polargraph.v1.PolarGraphService.ShowStats:output_type -> polargraph.v1.ShowStatsResponse
-	105, // 244: polargraph.v1.PolarGraphService.BeginTransaction:output_type -> polargraph.v1.BeginTransactionResponse
-	107, // 245: polargraph.v1.PolarGraphService.CommitTransaction:output_type -> polargraph.v1.CommitTransactionResponse
-	109, // 246: polargraph.v1.PolarGraphService.RollbackTransaction:output_type -> polargraph.v1.RollbackTransactionResponse
-	18,  // 247: polargraph.v1.PolarGraphService.GetEdgeAnnotations:output_type -> polargraph.v1.GetEdgeAnnotationsResponse
-	20,  // 248: polargraph.v1.PolarGraphService.GetEdgeIdsByTriple:output_type -> polargraph.v1.GetEdgeIdsByTripleResponse
-	111, // 249: polargraph.v1.PolarGraphService.AddApiKey:output_type -> polargraph.v1.AddApiKeyResponse
-	113, // 250: polargraph.v1.PolarGraphService.RevokeApiKey:output_type -> polargraph.v1.RevokeApiKeyResponse
-	115, // 251: polargraph.v1.PolarGraphService.ListApiKeys:output_type -> polargraph.v1.ListApiKeysResponse
-	117, // 252: polargraph.v1.PolarGraphService.GrantAccess:output_type -> polargraph.v1.GrantAccessResponse
-	119, // 253: polargraph.v1.PolarGraphService.RevokeAccess:output_type -> polargraph.v1.RevokeAccessResponse
-	121, // 254: polargraph.v1.PolarGraphService.AddUserToGroup:output_type -> polargraph.v1.AddUserToGroupResponse
-	123, // 255: polargraph.v1.PolarGraphService.GetUserAccess:output_type -> polargraph.v1.GetUserAccessResponse
-	126, // 256: polargraph.v1.PolarGraphService.GetPropertyHistory:output_type -> polargraph.v1.GetPropertyHistoryResponse
-	128, // 257: polargraph.v1.PolarGraphService.DeleteTriples:output_type -> polargraph.v1.DeleteTriplesResponse
-	130, // 258: polargraph.v1.PolarGraphService.RunMaterialization:output_type -> polargraph.v1.RunMaterializationResponse
-	189, // [189:259] is the sub-list for method output_type
-	119, // [119:189] is the sub-list for method input_type
-	119, // [119:119] is the sub-list for extension type_name
-	119, // [119:119] is the sub-list for extension extendee
-	0,   // [0:119] is the sub-list for field type_name
+	147, // 88: polargraph.v1.ApplyChangesRequest.adds:type_name -> polargraph.v1.GraphTriples
+	148, // 89: polargraph.v1.ApplyChangesRequest.retractions:type_name -> polargraph.v1.QuadRef
+	16,  // 90: polargraph.v1.ApplyChangesRequest.edge_annotations:type_name -> polargraph.v1.EdgeAnnotation
+	147, // 91: polargraph.v1.ValidateShapesRequest.overlay_adds:type_name -> polargraph.v1.GraphTriples
+	148, // 92: polargraph.v1.ValidateShapesRequest.overlay_retractions:type_name -> polargraph.v1.QuadRef
+	3,   // 93: polargraph.v1.ValidationResult.focus_literal:type_name -> polargraph.v1.Value
+	3,   // 94: polargraph.v1.ValidationResult.value_literal:type_name -> polargraph.v1.Value
+	152, // 95: polargraph.v1.ValidateShapesResponse.results:type_name -> polargraph.v1.ValidationResult
+	1,   // 96: polargraph.v1.ChangeEvent.kind:type_name -> polargraph.v1.ChangeKind
+	10,  // 97: polargraph.v1.ChangeEvent.quad:type_name -> polargraph.v1.Triple
+	161, // 98: polargraph.v1.GetGraphAccessResponse.graphs:type_name -> polargraph.v1.GraphAccessEntry
+	2,   // 99: polargraph.v1.ExportedQuad.subject:type_name -> polargraph.v1.NodeId
+	2,   // 100: polargraph.v1.ExportedQuad.node:type_name -> polargraph.v1.NodeId
+	3,   // 101: polargraph.v1.ExportedQuad.value:type_name -> polargraph.v1.Value
+	164, // 102: polargraph.v1.ExportGraphChunk.quads:type_name -> polargraph.v1.ExportedQuad
+	2,   // 103: polargraph.v1.ResolveIrisRequest.nodes:type_name -> polargraph.v1.NodeId
+	168, // 104: polargraph.v1.Vocabulary.prefixes:type_name -> polargraph.v1.VocabularyPrefix
+	169, // 105: polargraph.v1.Vocabulary.legacy:type_name -> polargraph.v1.LegacyStatus
+	176, // 106: polargraph.v1.ConvertLegacyDataResponse.predicates:type_name -> polargraph.v1.PredicateConversion
+	169, // 107: polargraph.v1.ConvertLegacyDataResponse.legacy:type_name -> polargraph.v1.LegacyStatus
+	2,   // 108: polargraph.v1.CounterIncrement.node:type_name -> polargraph.v1.NodeId
+	178, // 109: polargraph.v1.IncrementCountersRequest.increments:type_name -> polargraph.v1.CounterIncrement
+	2,   // 110: polargraph.v1.GetCountersRequest.nodes:type_name -> polargraph.v1.NodeId
+	2,   // 111: polargraph.v1.Binding.VarsEntry.value:type_name -> polargraph.v1.NodeId
+	3,   // 112: polargraph.v1.Binding.ValuesEntry.value:type_name -> polargraph.v1.Value
+	2,   // 113: polargraph.v1.QueryResult.VarsEntry.value:type_name -> polargraph.v1.NodeId
+	3,   // 114: polargraph.v1.QueryResult.ValuesEntry.value:type_name -> polargraph.v1.Value
+	3,   // 115: polargraph.v1.ValidateNodeRequest.PropertiesEntry.value:type_name -> polargraph.v1.Value
+	3,   // 116: polargraph.v1.ValidateEdgeRequest.PropertiesEntry.value:type_name -> polargraph.v1.Value
+	2,   // 117: polargraph.v1.ScoredBinding.VarsEntry.value:type_name -> polargraph.v1.NodeId
+	2,   // 118: polargraph.v1.CypherBinding.NodesEntry.value:type_name -> polargraph.v1.NodeId
+	3,   // 119: polargraph.v1.CypherBinding.ValuesEntry.value:type_name -> polargraph.v1.Value
+	179, // 120: polargraph.v1.PolarGraphService.IncrementCounters:input_type -> polargraph.v1.IncrementCountersRequest
+	181, // 121: polargraph.v1.PolarGraphService.GetCounters:input_type -> polargraph.v1.GetCountersRequest
+	171, // 122: polargraph.v1.PolarGraphService.GetVocabulary:input_type -> polargraph.v1.GetVocabularyRequest
+	172, // 123: polargraph.v1.PolarGraphService.SetVocabularyBase:input_type -> polargraph.v1.SetVocabularyBaseRequest
+	173, // 124: polargraph.v1.PolarGraphService.PutPrefix:input_type -> polargraph.v1.PutPrefixRequest
+	174, // 125: polargraph.v1.PolarGraphService.RemovePrefix:input_type -> polargraph.v1.RemovePrefixRequest
+	175, // 126: polargraph.v1.PolarGraphService.ConvertLegacyData:input_type -> polargraph.v1.ConvertLegacyDataRequest
+	21,  // 127: polargraph.v1.PolarGraphService.Insert:input_type -> polargraph.v1.InsertRequest
+	166, // 128: polargraph.v1.PolarGraphService.ResolveIris:input_type -> polargraph.v1.ResolveIrisRequest
+	136, // 129: polargraph.v1.PolarGraphService.CreateGraph:input_type -> polargraph.v1.CreateGraphRequest
+	138, // 130: polargraph.v1.PolarGraphService.ListGraphs:input_type -> polargraph.v1.ListGraphsRequest
+	140, // 131: polargraph.v1.PolarGraphService.GraphStats:input_type -> polargraph.v1.GraphStatsRequest
+	142, // 132: polargraph.v1.PolarGraphService.CopyGraph:input_type -> polargraph.v1.CopyGraphRequest
+	144, // 133: polargraph.v1.PolarGraphService.MoveGraph:input_type -> polargraph.v1.MoveGraphRequest
+	145, // 134: polargraph.v1.PolarGraphService.DropGraph:input_type -> polargraph.v1.DropGraphRequest
+	163, // 135: polargraph.v1.PolarGraphService.ExportGraph:input_type -> polargraph.v1.ExportGraphRequest
+	149, // 136: polargraph.v1.PolarGraphService.ApplyChanges:input_type -> polargraph.v1.ApplyChangesRequest
+	151, // 137: polargraph.v1.PolarGraphService.ValidateShapes:input_type -> polargraph.v1.ValidateShapesRequest
+	154, // 138: polargraph.v1.PolarGraphService.Subscribe:input_type -> polargraph.v1.SubscribeRequest
+	156, // 139: polargraph.v1.PolarGraphService.GrantGraphAccess:input_type -> polargraph.v1.GrantGraphAccessRequest
+	158, // 140: polargraph.v1.PolarGraphService.RevokeGraphAccess:input_type -> polargraph.v1.RevokeGraphAccessRequest
+	160, // 141: polargraph.v1.PolarGraphService.GetGraphAccess:input_type -> polargraph.v1.GetGraphAccessRequest
+	23,  // 142: polargraph.v1.PolarGraphService.Query:input_type -> polargraph.v1.QueryRequest
+	30,  // 143: polargraph.v1.PolarGraphService.InsertVector:input_type -> polargraph.v1.InsertVectorRequest
+	32,  // 144: polargraph.v1.PolarGraphService.SearchVector:input_type -> polargraph.v1.SearchVectorRequest
+	28,  // 145: polargraph.v1.PolarGraphService.Reachable:input_type -> polargraph.v1.ReachableRequest
+	48,  // 146: polargraph.v1.PolarGraphService.RegisterNodeType:input_type -> polargraph.v1.RegisterNodeTypeRequest
+	50,  // 147: polargraph.v1.PolarGraphService.GetNodeType:input_type -> polargraph.v1.GetNodeTypeRequest
+	52,  // 148: polargraph.v1.PolarGraphService.ListNodeTypes:input_type -> polargraph.v1.ListNodeTypesRequest
+	54,  // 149: polargraph.v1.PolarGraphService.ValidateNode:input_type -> polargraph.v1.ValidateNodeRequest
+	57,  // 150: polargraph.v1.PolarGraphService.RegisterEdgeType:input_type -> polargraph.v1.RegisterEdgeTypeRequest
+	59,  // 151: polargraph.v1.PolarGraphService.GetEdgeType:input_type -> polargraph.v1.GetEdgeTypeRequest
+	61,  // 152: polargraph.v1.PolarGraphService.ListEdgeTypes:input_type -> polargraph.v1.ListEdgeTypesRequest
+	63,  // 153: polargraph.v1.PolarGraphService.ValidateEdge:input_type -> polargraph.v1.ValidateEdgeRequest
+	68,  // 154: polargraph.v1.PolarGraphService.ListPredicatesBetween:input_type -> polargraph.v1.ListPredicatesBetweenRequest
+	65,  // 155: polargraph.v1.PolarGraphService.ValidateOntology:input_type -> polargraph.v1.ValidateOntologyRequest
+	37,  // 156: polargraph.v1.PolarGraphService.SearchVectorFiltered:input_type -> polargraph.v1.SearchVectorFilteredRequest
+	39,  // 157: polargraph.v1.PolarGraphService.SearchVectorInSet:input_type -> polargraph.v1.SearchVectorInSetRequest
+	43,  // 158: polargraph.v1.PolarGraphService.BatchInsertVectors:input_type -> polargraph.v1.BatchInsertVectorsRequest
+	71,  // 159: polargraph.v1.PolarGraphService.VectorSeedQuery:input_type -> polargraph.v1.VectorSeedQueryRequest
+	74,  // 160: polargraph.v1.PolarGraphService.CreateBackup:input_type -> polargraph.v1.CreateBackupRequest
+	76,  // 161: polargraph.v1.PolarGraphService.ListBackups:input_type -> polargraph.v1.ListBackupsRequest
+	78,  // 162: polargraph.v1.PolarGraphService.PurgeOldBackups:input_type -> polargraph.v1.PurgeOldBackupsRequest
+	80,  // 163: polargraph.v1.PolarGraphService.RunRetention:input_type -> polargraph.v1.RunRetentionRequest
+	84,  // 164: polargraph.v1.PolarGraphService.ReplicaStatus:input_type -> polargraph.v1.ReplicaStatusRequest
+	82,  // 165: polargraph.v1.PolarGraphService.StreamWal:input_type -> polargraph.v1.StreamWalRequest
+	23,  // 166: polargraph.v1.PolarGraphService.ExplainQuery:input_type -> polargraph.v1.QueryRequest
+	86,  // 167: polargraph.v1.PolarGraphService.MigrateSchema:input_type -> polargraph.v1.MigrateRequest
+	88,  // 168: polargraph.v1.PolarGraphService.MigrationStatus:input_type -> polargraph.v1.MigrationStatusRequest
+	97,  // 169: polargraph.v1.PolarGraphService.CypherQuery:input_type -> polargraph.v1.CypherQueryRequest
+	100, // 170: polargraph.v1.PolarGraphService.CypherWrite:input_type -> polargraph.v1.CypherWriteRequest
+	23,  // 171: polargraph.v1.PolarGraphService.QueryStream:input_type -> polargraph.v1.QueryRequest
+	97,  // 172: polargraph.v1.PolarGraphService.CypherQueryStream:input_type -> polargraph.v1.CypherQueryRequest
+	91,  // 173: polargraph.v1.PolarGraphService.ShowIndexes:input_type -> polargraph.v1.ShowIndexesRequest
+	95,  // 174: polargraph.v1.PolarGraphService.ShowStats:input_type -> polargraph.v1.ShowStatsRequest
+	104, // 175: polargraph.v1.PolarGraphService.BeginTransaction:input_type -> polargraph.v1.BeginTransactionRequest
+	106, // 176: polargraph.v1.PolarGraphService.CommitTransaction:input_type -> polargraph.v1.CommitTransactionRequest
+	108, // 177: polargraph.v1.PolarGraphService.RollbackTransaction:input_type -> polargraph.v1.RollbackTransactionRequest
+	17,  // 178: polargraph.v1.PolarGraphService.GetEdgeAnnotations:input_type -> polargraph.v1.GetEdgeAnnotationsRequest
+	19,  // 179: polargraph.v1.PolarGraphService.GetEdgeIdsByTriple:input_type -> polargraph.v1.GetEdgeIdsByTripleRequest
+	110, // 180: polargraph.v1.PolarGraphService.AddApiKey:input_type -> polargraph.v1.AddApiKeyRequest
+	112, // 181: polargraph.v1.PolarGraphService.RevokeApiKey:input_type -> polargraph.v1.RevokeApiKeyRequest
+	114, // 182: polargraph.v1.PolarGraphService.ListApiKeys:input_type -> polargraph.v1.ListApiKeysRequest
+	116, // 183: polargraph.v1.PolarGraphService.GrantAccess:input_type -> polargraph.v1.GrantAccessRequest
+	118, // 184: polargraph.v1.PolarGraphService.RevokeAccess:input_type -> polargraph.v1.RevokeAccessRequest
+	120, // 185: polargraph.v1.PolarGraphService.AddUserToGroup:input_type -> polargraph.v1.AddUserToGroupRequest
+	122, // 186: polargraph.v1.PolarGraphService.GetUserAccess:input_type -> polargraph.v1.GetUserAccessRequest
+	124, // 187: polargraph.v1.PolarGraphService.GetPropertyHistory:input_type -> polargraph.v1.GetPropertyHistoryRequest
+	127, // 188: polargraph.v1.PolarGraphService.DeleteTriples:input_type -> polargraph.v1.DeleteTriplesRequest
+	129, // 189: polargraph.v1.PolarGraphService.RunMaterialization:input_type -> polargraph.v1.RunMaterializationRequest
+	130, // 190: polargraph.v1.PolarGraphService.GetInferenceSettings:input_type -> polargraph.v1.GetInferenceSettingsRequest
+	132, // 191: polargraph.v1.PolarGraphService.SetInferenceSettings:input_type -> polargraph.v1.SetInferenceSettingsRequest
+	180, // 192: polargraph.v1.PolarGraphService.IncrementCounters:output_type -> polargraph.v1.IncrementCountersResponse
+	182, // 193: polargraph.v1.PolarGraphService.GetCounters:output_type -> polargraph.v1.GetCountersResponse
+	170, // 194: polargraph.v1.PolarGraphService.GetVocabulary:output_type -> polargraph.v1.Vocabulary
+	170, // 195: polargraph.v1.PolarGraphService.SetVocabularyBase:output_type -> polargraph.v1.Vocabulary
+	170, // 196: polargraph.v1.PolarGraphService.PutPrefix:output_type -> polargraph.v1.Vocabulary
+	170, // 197: polargraph.v1.PolarGraphService.RemovePrefix:output_type -> polargraph.v1.Vocabulary
+	177, // 198: polargraph.v1.PolarGraphService.ConvertLegacyData:output_type -> polargraph.v1.ConvertLegacyDataResponse
+	22,  // 199: polargraph.v1.PolarGraphService.Insert:output_type -> polargraph.v1.InsertResponse
+	167, // 200: polargraph.v1.PolarGraphService.ResolveIris:output_type -> polargraph.v1.ResolveIrisResponse
+	137, // 201: polargraph.v1.PolarGraphService.CreateGraph:output_type -> polargraph.v1.CreateGraphResponse
+	139, // 202: polargraph.v1.PolarGraphService.ListGraphs:output_type -> polargraph.v1.ListGraphsResponse
+	141, // 203: polargraph.v1.PolarGraphService.GraphStats:output_type -> polargraph.v1.GraphStatsResponse
+	143, // 204: polargraph.v1.PolarGraphService.CopyGraph:output_type -> polargraph.v1.CopyGraphResponse
+	143, // 205: polargraph.v1.PolarGraphService.MoveGraph:output_type -> polargraph.v1.CopyGraphResponse
+	146, // 206: polargraph.v1.PolarGraphService.DropGraph:output_type -> polargraph.v1.DropGraphResponse
+	165, // 207: polargraph.v1.PolarGraphService.ExportGraph:output_type -> polargraph.v1.ExportGraphChunk
+	150, // 208: polargraph.v1.PolarGraphService.ApplyChanges:output_type -> polargraph.v1.ApplyChangesResponse
+	153, // 209: polargraph.v1.PolarGraphService.ValidateShapes:output_type -> polargraph.v1.ValidateShapesResponse
+	155, // 210: polargraph.v1.PolarGraphService.Subscribe:output_type -> polargraph.v1.ChangeEvent
+	157, // 211: polargraph.v1.PolarGraphService.GrantGraphAccess:output_type -> polargraph.v1.GrantGraphAccessResponse
+	159, // 212: polargraph.v1.PolarGraphService.RevokeGraphAccess:output_type -> polargraph.v1.RevokeGraphAccessResponse
+	162, // 213: polargraph.v1.PolarGraphService.GetGraphAccess:output_type -> polargraph.v1.GetGraphAccessResponse
+	25,  // 214: polargraph.v1.PolarGraphService.Query:output_type -> polargraph.v1.QueryResponse
+	31,  // 215: polargraph.v1.PolarGraphService.InsertVector:output_type -> polargraph.v1.InsertVectorResponse
+	34,  // 216: polargraph.v1.PolarGraphService.SearchVector:output_type -> polargraph.v1.SearchVectorResponse
+	29,  // 217: polargraph.v1.PolarGraphService.Reachable:output_type -> polargraph.v1.ReachableResponse
+	49,  // 218: polargraph.v1.PolarGraphService.RegisterNodeType:output_type -> polargraph.v1.RegisterNodeTypeResponse
+	51,  // 219: polargraph.v1.PolarGraphService.GetNodeType:output_type -> polargraph.v1.GetNodeTypeResponse
+	53,  // 220: polargraph.v1.PolarGraphService.ListNodeTypes:output_type -> polargraph.v1.ListNodeTypesResponse
+	55,  // 221: polargraph.v1.PolarGraphService.ValidateNode:output_type -> polargraph.v1.ValidateNodeResponse
+	58,  // 222: polargraph.v1.PolarGraphService.RegisterEdgeType:output_type -> polargraph.v1.RegisterEdgeTypeResponse
+	60,  // 223: polargraph.v1.PolarGraphService.GetEdgeType:output_type -> polargraph.v1.GetEdgeTypeResponse
+	62,  // 224: polargraph.v1.PolarGraphService.ListEdgeTypes:output_type -> polargraph.v1.ListEdgeTypesResponse
+	64,  // 225: polargraph.v1.PolarGraphService.ValidateEdge:output_type -> polargraph.v1.ValidateEdgeResponse
+	69,  // 226: polargraph.v1.PolarGraphService.ListPredicatesBetween:output_type -> polargraph.v1.ListPredicatesBetweenResponse
+	67,  // 227: polargraph.v1.PolarGraphService.ValidateOntology:output_type -> polargraph.v1.ValidateOntologyResponse
+	38,  // 228: polargraph.v1.PolarGraphService.SearchVectorFiltered:output_type -> polargraph.v1.SearchVectorFilteredResponse
+	40,  // 229: polargraph.v1.PolarGraphService.SearchVectorInSet:output_type -> polargraph.v1.SearchVectorInSetResponse
+	44,  // 230: polargraph.v1.PolarGraphService.BatchInsertVectors:output_type -> polargraph.v1.BatchInsertVectorsResponse
+	72,  // 231: polargraph.v1.PolarGraphService.VectorSeedQuery:output_type -> polargraph.v1.VectorSeedQueryResponse
+	75,  // 232: polargraph.v1.PolarGraphService.CreateBackup:output_type -> polargraph.v1.CreateBackupResponse
+	77,  // 233: polargraph.v1.PolarGraphService.ListBackups:output_type -> polargraph.v1.ListBackupsResponse
+	79,  // 234: polargraph.v1.PolarGraphService.PurgeOldBackups:output_type -> polargraph.v1.PurgeOldBackupsResponse
+	81,  // 235: polargraph.v1.PolarGraphService.RunRetention:output_type -> polargraph.v1.RunRetentionResponse
+	85,  // 236: polargraph.v1.PolarGraphService.ReplicaStatus:output_type -> polargraph.v1.ReplicaStatusResponse
+	83,  // 237: polargraph.v1.PolarGraphService.StreamWal:output_type -> polargraph.v1.WalEntry
+	102, // 238: polargraph.v1.PolarGraphService.ExplainQuery:output_type -> polargraph.v1.ExplainResponse
+	87,  // 239: polargraph.v1.PolarGraphService.MigrateSchema:output_type -> polargraph.v1.MigrateResponse
+	89,  // 240: polargraph.v1.PolarGraphService.MigrationStatus:output_type -> polargraph.v1.MigrationStatusResponse
+	99,  // 241: polargraph.v1.PolarGraphService.CypherQuery:output_type -> polargraph.v1.CypherQueryResponse
+	101, // 242: polargraph.v1.PolarGraphService.CypherWrite:output_type -> polargraph.v1.CypherWriteResponse
+	27,  // 243: polargraph.v1.PolarGraphService.QueryStream:output_type -> polargraph.v1.QueryStreamChunk
+	27,  // 244: polargraph.v1.PolarGraphService.CypherQueryStream:output_type -> polargraph.v1.QueryStreamChunk
+	94,  // 245: polargraph.v1.PolarGraphService.ShowIndexes:output_type -> polargraph.v1.ShowIndexesResponse
+	96,  // 246: polargraph.v1.PolarGraphService.ShowStats:output_type -> polargraph.v1.ShowStatsResponse
+	105, // 247: polargraph.v1.PolarGraphService.BeginTransaction:output_type -> polargraph.v1.BeginTransactionResponse
+	107, // 248: polargraph.v1.PolarGraphService.CommitTransaction:output_type -> polargraph.v1.CommitTransactionResponse
+	109, // 249: polargraph.v1.PolarGraphService.RollbackTransaction:output_type -> polargraph.v1.RollbackTransactionResponse
+	18,  // 250: polargraph.v1.PolarGraphService.GetEdgeAnnotations:output_type -> polargraph.v1.GetEdgeAnnotationsResponse
+	20,  // 251: polargraph.v1.PolarGraphService.GetEdgeIdsByTriple:output_type -> polargraph.v1.GetEdgeIdsByTripleResponse
+	111, // 252: polargraph.v1.PolarGraphService.AddApiKey:output_type -> polargraph.v1.AddApiKeyResponse
+	113, // 253: polargraph.v1.PolarGraphService.RevokeApiKey:output_type -> polargraph.v1.RevokeApiKeyResponse
+	115, // 254: polargraph.v1.PolarGraphService.ListApiKeys:output_type -> polargraph.v1.ListApiKeysResponse
+	117, // 255: polargraph.v1.PolarGraphService.GrantAccess:output_type -> polargraph.v1.GrantAccessResponse
+	119, // 256: polargraph.v1.PolarGraphService.RevokeAccess:output_type -> polargraph.v1.RevokeAccessResponse
+	121, // 257: polargraph.v1.PolarGraphService.AddUserToGroup:output_type -> polargraph.v1.AddUserToGroupResponse
+	123, // 258: polargraph.v1.PolarGraphService.GetUserAccess:output_type -> polargraph.v1.GetUserAccessResponse
+	126, // 259: polargraph.v1.PolarGraphService.GetPropertyHistory:output_type -> polargraph.v1.GetPropertyHistoryResponse
+	128, // 260: polargraph.v1.PolarGraphService.DeleteTriples:output_type -> polargraph.v1.DeleteTriplesResponse
+	133, // 261: polargraph.v1.PolarGraphService.RunMaterialization:output_type -> polargraph.v1.RunMaterializationResponse
+	131, // 262: polargraph.v1.PolarGraphService.GetInferenceSettings:output_type -> polargraph.v1.InferenceSettings
+	133, // 263: polargraph.v1.PolarGraphService.SetInferenceSettings:output_type -> polargraph.v1.RunMaterializationResponse
+	192, // [192:264] is the sub-list for method output_type
+	120, // [120:192] is the sub-list for method input_type
+	120, // [120:120] is the sub-list for extension type_name
+	120, // [120:120] is the sub-list for extension extendee
+	0,   // [0:120] is the sub-list for field type_name
 }
 
 func init() { file_polargraph_proto_init() }
@@ -12284,11 +12526,11 @@ func file_polargraph_proto_init() {
 		(*RevokeAccessRequest_NodeId)(nil),
 		(*RevokeAccessRequest_TypeName)(nil),
 	}
-	file_polargraph_proto_msgTypes[143].OneofWrappers = []any{
+	file_polargraph_proto_msgTypes[146].OneofWrappers = []any{
 		(*QuadRef_Node)(nil),
 		(*QuadRef_Value)(nil),
 	}
-	file_polargraph_proto_msgTypes[159].OneofWrappers = []any{
+	file_polargraph_proto_msgTypes[162].OneofWrappers = []any{
 		(*ExportedQuad_Node)(nil),
 		(*ExportedQuad_Value)(nil),
 	}
@@ -12298,7 +12540,7 @@ func file_polargraph_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_polargraph_proto_rawDesc), len(file_polargraph_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   191,
+			NumMessages:   194,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

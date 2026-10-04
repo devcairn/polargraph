@@ -338,6 +338,9 @@ message SearchVectorRequest {
     /// HNSW exploration factor. Higher = better recall, slower.
     /// 0 means use the server-wide default (--default-vector-ef, default 50).
     uint32         ef    = 4;
+    /// Only nodes with a live quad in one of these graphs ("" = default
+    /// graph); empty = every graph.
+    repeated string graphs = 5;
 }
 
 message VectorSearchResult {
@@ -377,6 +380,9 @@ message SearchVectorFilteredRequest {
     uint32         ef    = 6;
     /// Optional identity for access-control filtering.
     string         user_id = 7;
+    /// Only nodes with a live quad in one of these graphs ("" = default
+    /// graph); empty = every graph.
+    repeated string graphs = 8;
 }
 
 message SearchVectorFilteredResponse {
@@ -390,6 +396,9 @@ message SearchVectorInSetRequest {
     repeated float query    = 2;
     uint32         k        = 3;
     repeated NodeId node_ids = 4;
+    /// Only nodes with a live quad in one of these graphs ("" = default
+    /// graph); empty = every graph.
+    repeated string graphs = 5;
 }
 
 message SearchVectorInSetResponse {
@@ -607,6 +616,9 @@ message VectorSeedQueryRequest {
     /// Named query parameters for `$param` substitution. Keys are parameter names
     /// (without the `$`); values are JSON-encoded `Value` objects.
     map<string, string> params       = 11;
+    /// Only seeds with a live quad in one of these graphs ("" = default
+    /// graph), and the patterns read only these graphs; empty = every graph.
+    repeated string graphs = 12;
 }
 
 message VectorSeedQueryResponse {
@@ -1054,6 +1066,26 @@ message RunMaterializationRequest {
     bool clear_first = 1;
 }
 
+message GetInferenceSettingsRequest {}
+
+message InferenceSettings {
+    /// Graphs whose schema axioms (rdfs:subClassOf, rdfs:subPropertyOf,
+    /// rdfs:domain, rdfs:range, owl:inverseOf, symmetric / transitive
+    /// property declarations) drive OWL RL inference; "" = the default graph.
+    /// Axioms in other graphs are ordinary data.
+    repeated string schema_graphs = 1;
+    /// True when no selection is set: axioms come from every graph.
+    bool all_graphs = 2;
+}
+
+message SetInferenceSettingsRequest {
+    repeated string schema_graphs = 1;
+    /// Clear the selection (axioms from every graph); `schema_graphs` must
+    /// be empty.
+    bool all_graphs = 2;
+    string user_id = 3;
+}
+
 /// Statistics from a materialization run.
 message RunMaterializationResponse {
     /// Inferred facts asserted by this run (same as `asserted`).
@@ -1182,6 +1214,9 @@ message QuadRef {
     }
     /// Graph IRI ("" = default graph).
     string graph = 5;
+    /// Retract the quad in every graph where it is live (that the caller
+    /// may write) instead of only `graph`.
+    bool all_graphs = 6;
 }
 
 message ApplyChangesRequest {
@@ -1200,6 +1235,9 @@ message ApplyChangesRequest {
     /// Caller identity (optional; also `x-polargraph-user-id`): author of the
     /// change, and the graph ACL applies (write on every graph touched).
     string user_id = 6;
+    /// RDF-star edge annotations to add (default graph), in the same
+    /// transaction.
+    repeated EdgeAnnotation edge_annotations = 7;
 }
 
 message ApplyChangesResponse {
@@ -1771,4 +1809,9 @@ service PolarGraphService {
     ///
     /// Returns FAILED_PRECONDITION on a read replica.
     rpc RunMaterialization(RunMaterializationRequest) returns (RunMaterializationResponse);
+    /// Which graphs inference reads schema axioms from.
+    rpc GetInferenceSettings(GetInferenceSettingsRequest) returns (InferenceSettings);
+    /// Change them (service calls, primary only); recomputes the inferred
+    /// graphs and returns the run's statistics.
+    rpc SetInferenceSettings(SetInferenceSettingsRequest) returns (RunMaterializationResponse);
 }

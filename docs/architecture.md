@@ -707,6 +707,13 @@ defaults to 10), and an optional `space` string. Results are
 `VectorSearchResult` pairs of `(node_id, similarity)` ordered by descending
 similarity.
 
+**Graph filter.** `SearchVector`, `SearchVectorFiltered`,
+`SearchVectorInSet` and `VectorSeedQuery` take `repeated string graphs`
+("" = default graph). HNSW indexes nodes, not quads, so a hit is kept only
+if the node has a live quad in one of the graphs (the same check as graph-ACL
+visibility); searches over-fetch `max(k, ef)` candidates to fill k.
+`VectorSeedQuery`'s patterns read only those graphs too.
+
 ### SearchVectorFiltered
 
 `SearchVectorFilteredRequest` carries a space, query, k, and a `oneof filter`:
@@ -726,9 +733,9 @@ similarity.
 ### SearchVectorInSet
 
 `SearchVectorInSetRequest` carries a space, query, k, and an explicit
-`repeated NodeId node_ids`. The server scores every listed node against the
-query using the stored embedding (skipping nodes absent from the index) and
-returns the top-k. O(|node_ids|) — appropriate for small sets derived from
+`repeated NodeId node_ids`. The server drops nodes the caller can't see (or
+outside `graphs`), scores the rest against the query using the stored
+embedding (skipping nodes absent from the index) and returns the top-k. O(|node_ids|) — appropriate for small sets derived from
 graph traversals.
 
 ### BatchInsertVectors
@@ -981,11 +988,12 @@ flowchart TD
     U --> CD["CLEAR / DROP (graph, DEFAULT, NAMED, ALL)"]
     U --> CR["CREATE GRAPH"]
     U --> CM["ADD / COPY / MOVE"]
-    ID --> INS["Insert { graph }"]
-    DD --> DEL["DeleteTriples { graph }"]
-    DI -->|"WHERE → Query (USING → graphs)"| T["templates per solution<br/>(fixed graph or ?g)"]
-    T --> INS
-    T --> DEL
+    ID --> CS["one changeset<br/>(adds, retractions, annotations)"]
+    DD --> CS
+    DI -->|"WHERE → Query at the read point (USING → graphs)"| T["templates per solution<br/>(fixed graph or ?g)"]
+    T --> CS
+    CS -->|"dry_run"| JSON["changeset JSON"]
+    CS --> AC["ApplyChanges (one transaction, read_ts)"]
     CD --> DG["DropGraph per target"]
     CR --> CG["CreateGraph"]
     CM -->|"spargebra rewrites to DROP + INSERT { GRAPH dst { ?s ?p ?o } } WHERE { GRAPH src { ?s ?p ?o } }"| DETECT{"graph_copy_shape"}
@@ -993,9 +1001,17 @@ flowchart TD
     DETECT --> DG
 ```
 
+- **Data operations are atomic**: `INSERT DATA`, `DELETE DATA` and
+  `DELETE` / `INSERT … WHERE` compile to one `ApplyChanges` changeset. Every
+  `WHERE` reads one read point (`?read_ts`, else the request's start) and
+  the commit is conditional on it (409 on a conflict). Sequential semantics
+  within the changeset: a `DELETE` drops earlier adds of the same quad;
+  retractions are applied before adds, so a later `INSERT` re-asserts.
+  `?dry_run=true` returns the changeset. Graph operations below run one by
+  one and can't be mixed with data operations (400).
 - A quad without `GRAPH` is inserted into the default graph; a DELETE
   without `GRAPH` closes the triple **in every graph** (the default graph is
-  the union). `DeleteTriplesRequest.graph` carries the choice.
+  the union): `QuadRef.all_graphs`.
 - `CLEAR` and `DROP` both close live quads (bitemporal); `SILENT`
   suppresses errors for unknown graphs. `CREATE` is idempotent.
 - spargebra rewrites `ADD` / `COPY` / `MOVE` into `DROP` + a `?s ?p ?o`
@@ -3219,13 +3235,15 @@ Content negotiation via `Accept` header: `application/sparql-results+json`
 
 | Operation | Notes |
 |-----------|-------|
-| INSERT DATA | Each triple translated to an `InsertRequest` gRPC call |
-| DELETE DATA | Each triple closes exactly that `(S, P, O)` via `DeleteTriples` with `object_id` / `value` set |
-| INSERT/DELETE WHERE | WHERE clause evaluated via `Query` RPC; templates applied per binding row; DELETE templates close exactly the bound `(S, P, O)` |
+| INSERT DATA | Each triple becomes a changeset add |
+| DELETE DATA | Each triple becomes an exact retraction `(S, P, O)` (`QuadRef`) |
+| INSERT/DELETE WHERE | WHERE evaluated via `Query` at the read point; templates applied per binding row into the changeset; DELETE templates retract exactly the bound `(S, P, O)` |
 
-The response is `{"ok": bool, "inserted": N, "deleted": N, "failed": N}`;
-`failed` counts quads that couldn't be applied (unsupported terms or RPC
-errors), and `ok` is false when any failed.
+The changeset commits as one `ApplyChanges`. The response is
+`{"ok", "inserted", "deleted", "failed", "errors", "commit_ts",
+"retractions_not_found"}`; `failed` counts quads that couldn't be compiled
+(unsupported terms, unbound template graphs, unresolvable annotation
+targets), and `ok` is false when any failed.
 
 ### Other known limitations
 
@@ -3282,9 +3300,19 @@ log since the last run (resume point in META): over-delete inferred facts
 with a derivation through a closed fact, re-derive those still supported,
 insert forward from new facts; one commit. A schema change, a missing
 resume point or a pruned change log triggers the full recompute-and-diff.
-Inference's own commits are skipped. Metrics:
+Inference's own commits are skipped. Runs (manual, settings change,
+background) are serialized. Metrics:
 `polargraph_inference_batches_total`, `…_asserted_total`, `…_closed_total`,
 `polargraph_inference_lag_seconds`, `polargraph_materialization_derived_total`.
+
+**Schema graphs.** By default schema axioms come from every graph. A
+persisted setting (META `__inference__/schema_graphs`, set with
+`SetInferenceSettings` / `PUT /inference/settings`) limits them to named
+graphs ("" = default graph); axioms elsewhere drive no rule and are
+ordinary data, and only changes in schema graphs count as schema changes
+for DRed. Changing the setting recomputes and diffs. The application
+decides which ontology graphs are in force; the engine has no other notion
+of schema packages.
 
 The pre-step-9 `drvg` CF is retired: no longer written or read (kept only
 for `polargraphd migrate`).

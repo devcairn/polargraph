@@ -989,6 +989,39 @@ impl PolarGraphServer {
                 .is_ok_and(|t| !t.is_empty())
     }
 
+    /// A vector request's `graphs` filter ("" = default graph) as a scope;
+    /// `None` when empty. Unknown graphs match nothing.
+    fn vector_graph_scope(&self, graphs: &[String]) -> Option<polargraph_storage::GraphScope> {
+        (!graphs.is_empty()).then(|| {
+            polargraph_storage::GraphScope::set(
+                graphs
+                    .iter()
+                    .filter_map(|iri| match iri.as_str() {
+                        "" => Some(polargraph_core::id::GraphId::DEFAULT),
+                        iri => self.store.graph_id(iri),
+                    })
+                    .collect(),
+            )
+        })
+    }
+
+    /// [`Self::node_visible`], and with `scope`, the live quad must be in
+    /// one of its graphs.
+    fn node_visible_in(
+        &self,
+        node: &NodeId,
+        access: &Option<Arc<polargraph_storage::UserGraphAccess>>,
+        scope: &Option<polargraph_storage::GraphScope>,
+    ) -> bool {
+        match scope {
+            None => self.node_visible(node, access),
+            Some(scope) => self
+                .snapshot_for(self.store.begin().read_ts, access)
+                .scan_scoped(Some(node), None, None, scope)
+                .is_ok_and(|t| !t.is_empty()),
+        }
+    }
+
     /// The graph `iri` names, checked for `level` when the caller is a user.
     /// A service call may create the graph (`create`); a user's graph must
     /// already exist (it would otherwise have no grants), so unknown graphs
@@ -1173,11 +1206,41 @@ impl PolarGraphServer {
         if !graphs.is_empty() {
             let ids = graphs
                 .iter()
-                .filter_map(|iri| self.store.graph_id(iri))
+                .filter_map(|iri| match iri.as_str() {
+                    "" => Some(polargraph_core::id::GraphId::DEFAULT),
+                    iri => self.store.graph_id(iri),
+                })
                 .collect();
             compiled.scope_to(&polargraph_query::GraphTerm::Set(ids));
         }
         compiled
+    }
+
+    /// Confine a Cypher read to its dataset — `USE GRAPH`, else `graphs`
+    /// ("" = default graph): filters, projections and aggregates read the
+    /// snapshot directly, so scoping the patterns alone isn't enough.
+    fn cypher_snapshot_scope(
+        &self,
+        snapshot: polargraph_storage::Snapshot,
+        cypher: &str,
+        graphs: &[String],
+    ) -> polargraph_storage::Snapshot {
+        let use_graph = polargraph_query::cypher::split_use_graph(cypher)
+            .ok()
+            .and_then(|(g, _)| g);
+        let use_graph = use_graph.as_slice();
+        let graphs = if use_graph.is_empty() {
+            graphs
+        } else {
+            use_graph
+        };
+        if graphs.is_empty() {
+            return snapshot;
+        }
+        snapshot.within_graphs(graphs.iter().filter_map(|iri| match iri.as_str() {
+            "" => Some(polargraph_core::id::GraphId::DEFAULT),
+            iri => self.store.graph_id(iri),
+        }))
     }
 
     fn target_graph(&self, iri: &str) -> Result<polargraph_core::id::GraphId, Status> {
@@ -1886,10 +1949,10 @@ impl PolarGraphService for PolarGraphServer {
         let access = self.caller_access(&author);
 
         let n_adds: usize = req.adds.iter().map(|g| g.triples.len()).sum();
-        let n_changes = n_adds + req.retractions.len();
+        let n_changes = n_adds + req.retractions.len() + req.edge_annotations.len();
         if n_changes == 0 && req.iris.is_empty() {
             return Err(Status::invalid_argument(
-                "changeset must contain adds, retractions or IRIs",
+                "changeset must contain adds, retractions, annotations or IRIs",
             ));
         }
         if n_changes > MAX_CHANGESET {
@@ -1925,6 +1988,16 @@ impl PolarGraphService for PolarGraphServer {
                 }
             }
         }
+        if !req.edge_annotations.is_empty() {
+            let g = self.graph_for(&access, "", GraphAccessLevel::Write, true)?;
+            for ann in &req.edge_annotations {
+                adds.push((
+                    convert::edge_annotation_from_proto(ann)?,
+                    g,
+                    polargraph_storage::WriteMode::Auto,
+                ));
+            }
+        }
         for (triple, _, _) in &adds {
             if let Triple::Relation {
                 subject,
@@ -1949,11 +2022,20 @@ impl PolarGraphService for PolarGraphServer {
         let mut closes: Vec<(Triple, polargraph_core::id::GraphId)> = Vec::new();
         let mut not_found: u64 = 0;
         for r in &req.retractions {
-            let g = if access.is_some() {
-                self.graph_for(&access, &r.graph, GraphAccessLevel::Write, false)?
+            // `all_graphs`: every graph holding the quad that the caller may
+            // write (inferred graphs never).
+            let scope = if r.all_graphs {
+                polargraph_storage::GraphScope::Union
+            } else if access.is_some() {
+                polargraph_storage::GraphScope::One(self.graph_for(
+                    &access,
+                    &r.graph,
+                    GraphAccessLevel::Write,
+                    false,
+                )?)
             } else {
                 match self.existing_graph(&r.graph) {
-                    Ok(g) => g,
+                    Ok(g) => polargraph_storage::GraphScope::One(g),
                     Err(_) => {
                         not_found += 1;
                         continue;
@@ -1979,26 +2061,36 @@ impl PolarGraphService for PolarGraphServer {
                     ))
                 }
             };
-            let matched: Vec<Triple> = snapshot
+            let writable = |g: polargraph_core::id::GraphId| {
+                let iri = self.store.graph_iri(g).unwrap_or_default();
+                !owl_rl::is_inferred_graph_iri(&iri)
+                    && iri != polargraph_storage::SYSTEM_GRAPH_IRI
+                    && access
+                        .as_ref()
+                        .map_or(true, |a| a.allows(g, GraphAccessLevel::Write))
+            };
+            let matched: Vec<(polargraph_core::id::GraphId, Triple)> = snapshot
                 .scan_scoped(
                     Some(&subject),
                     Some(r.predicate.as_str()),
                     Some(&object),
-                    &polargraph_storage::GraphScope::One(g),
+                    &scope,
                 )
                 .map_err(storage_err_to_status)?
                 .into_iter()
-                .map(|(_, t)| t)
-                .filter(|t| match (t, &value) {
-                    (Triple::Property { value: tv, .. }, Some(v)) => tv == v,
-                    (Triple::Relation { .. }, None) => true,
-                    _ => false,
+                .filter(|(g, t)| {
+                    (!r.all_graphs || writable(*g))
+                        && match (t, &value) {
+                            (Triple::Property { value: tv, .. }, Some(v)) => tv == v,
+                            (Triple::Relation { .. }, None) => true,
+                            _ => false,
+                        }
                 })
                 .collect();
             if matched.is_empty() {
                 not_found += 1;
             }
-            closes.extend(matched.into_iter().map(|t| (t, g)));
+            closes.extend(matched.into_iter().map(|(g, t)| (t, g)));
         }
         if req.strict && not_found > 0 {
             return Err(Status::failed_precondition(format!(
@@ -2100,8 +2192,13 @@ impl PolarGraphService for PolarGraphServer {
             }
         }
         for r in &req.overlay_retractions {
-            let Ok(g) = self.existing_graph(&r.graph) else {
-                continue;
+            let g = if r.all_graphs {
+                None
+            } else {
+                let Ok(g) = self.existing_graph(&r.graph) else {
+                    continue;
+                };
+                Some(g)
             };
             let subject = convert::node_id_from_proto(
                 r.subject
@@ -2121,9 +2218,33 @@ impl PolarGraphService for PolarGraphServer {
                     ))
                 }
             };
-            overlay
-                .retractions
-                .push((g, subject, r.predicate.clone(), object));
+            let graphs: Vec<polargraph_core::id::GraphId> = match g {
+                Some(g) => vec![g],
+                // `all_graphs`: every graph where the quad is live now.
+                None => {
+                    let key = match &object {
+                        Obj::Node(n) => *n,
+                        Obj::Lit(v) => polargraph_storage::keys::value_object(v),
+                    };
+                    self.store
+                        .snapshot(self.store.begin().read_ts)
+                        .scan_scoped(
+                            Some(&subject),
+                            Some(r.predicate.as_str()),
+                            Some(&key),
+                            &polargraph_storage::GraphScope::Union,
+                        )
+                        .map_err(storage_err_to_status)?
+                        .into_iter()
+                        .map(|(g, _)| g)
+                        .collect()
+                }
+            };
+            for g in graphs {
+                overlay
+                    .retractions
+                    .push((g, subject, r.predicate.clone(), object.clone()));
+            }
         }
         let has_overlay = !overlay.adds.is_empty() || !overlay.retractions.is_empty();
 
@@ -2511,8 +2632,7 @@ impl PolarGraphService for PolarGraphServer {
         let mut snapshot = if tx_ts == 0 {
             self.snapshot_for(self.store.begin().read_ts, &access)
         } else {
-            self.store
-                .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+            self.snapshot_for(polargraph_core::temporal::Timestamp(tx_ts), &access)
         };
 
         // Apply valid-time filter when requested.
@@ -2678,12 +2798,18 @@ impl PolarGraphService for PolarGraphServer {
             req.query.len()
         );
 
-        // A restricted caller over-fetches, then drops hits it can't see.
-        let fetch = if access.is_some() { k.max(ef) } else { k };
+        // A restricted or graph-scoped search over-fetches, then drops hits
+        // it can't see.
+        let scope = self.vector_graph_scope(&req.graphs);
+        let fetch = if access.is_some() || scope.is_some() {
+            k.max(ef)
+        } else {
+            k
+        };
         let hits = self.store.search_vector_ef(space, &req.query, fetch, ef);
         let results = hits
             .into_iter()
-            .filter(|(id, _)| self.node_visible(id, &access))
+            .filter(|(id, _)| self.node_visible_in(id, &access, &scope))
             .take(k)
             .map(|(id, score)| VectorSearchResult {
                 node_id: Some(convert::node_id_to_proto(id)),
@@ -2721,6 +2847,7 @@ impl PolarGraphService for PolarGraphServer {
 
         // Access filter (may be None when user_id is not set).
         let access_allowed = self.get_access_filter(&user_id);
+        let scope = self.vector_graph_scope(&req.graphs);
 
         match req.filter {
             // ── NodeTypeFilter: O(1) cache read, no triple scan ───────────────
@@ -2741,7 +2868,7 @@ impl PolarGraphService for PolarGraphServer {
                     .into_iter()
                     .filter(|(id, _)| type_allowed.contains(id))
                     .filter(|(id, _)| access_allowed.as_ref().map_or(true, |s| s.contains(id)))
-                    .filter(|(id, _)| self.node_visible(id, &access))
+                    .filter(|(id, _)| self.node_visible_in(id, &access, &scope))
                     .take(k)
                     .map(|(id, score)| VectorSearchResult {
                         node_id: Some(convert::node_id_to_proto(id)),
@@ -2780,7 +2907,7 @@ impl PolarGraphService for PolarGraphServer {
                     .into_iter()
                     .filter(|(id, _)| reach_allowed.contains(id))
                     .filter(|(id, _)| access_allowed.as_ref().map_or(true, |s| s.contains(id)))
-                    .filter(|(id, _)| self.node_visible(id, &access))
+                    .filter(|(id, _)| self.node_visible_in(id, &access, &scope))
                     .take(k)
                     .map(|(id, score)| VectorSearchResult {
                         node_id: Some(convert::node_id_to_proto(id)),
@@ -2826,12 +2953,18 @@ impl PolarGraphService for PolarGraphServer {
             allowed.len()
         );
 
+        // Drop nodes the caller can't see (or outside `graphs`) before
+        // ranking, so up to k visible nodes come back.
+        let scope = self.vector_graph_scope(&req.graphs);
+        let allowed: Vec<polargraph_core::NodeId> = allowed
+            .into_iter()
+            .filter(|id| self.node_visible_in(id, &access, &scope))
+            .collect();
         let hits = self
             .store
             .search_vector_in_set(space, &req.query, k, &allowed);
         let results = hits
             .into_iter()
-            .filter(|(id, _)| self.node_visible(id, &access))
             .map(|(id, score)| VectorSearchResult {
                 node_id: Some(convert::node_id_to_proto(id)),
                 similarity: score,
@@ -3356,6 +3489,8 @@ impl PolarGraphService for PolarGraphServer {
             req.patterns.len()
         );
 
+        let scope = self.vector_graph_scope(&req.graphs);
+
         // Step 1: ANN search with optional pre-filter.
         let ann_hits: Vec<(NodeId, f32)> = match &req.filter {
             Some(SeedFilter::NodeTypeFilter(f)) => {
@@ -3364,7 +3499,7 @@ impl PolarGraphService for PolarGraphServer {
                     .search_vector_ef(space, &req.query_vector, ef, ef)
                     .into_iter()
                     .filter(|(id, _)| allowed.contains(id))
-                    .filter(|(id, _)| self.node_visible(id, &access))
+                    .filter(|(id, _)| self.node_visible_in(id, &access, &scope))
                     .take(k)
                     .collect()
             }
@@ -3386,15 +3521,15 @@ impl PolarGraphService for PolarGraphServer {
                     .search_vector_ef(space, &req.query_vector, ef, ef)
                     .into_iter()
                     .filter(|(id, _)| allowed.contains(id))
-                    .filter(|(id, _)| self.node_visible(id, &access))
+                    .filter(|(id, _)| self.node_visible_in(id, &access, &scope))
                     .take(k)
                     .collect()
             }
-            None if access.is_some() => self
+            None if access.is_some() || scope.is_some() => self
                 .store
                 .search_vector_ef(space, &req.query_vector, k.max(ef), ef)
                 .into_iter()
-                .filter(|(id, _)| self.node_visible(id, &access))
+                .filter(|(id, _)| self.node_visible_in(id, &access, &scope))
                 .take(k)
                 .collect(),
             None => self.store.search_vector(space, req.query_vector.clone(), k),
@@ -3417,15 +3552,16 @@ impl PolarGraphService for PolarGraphServer {
             .collect();
 
         // Step 3: if no patterns, return seed bindings directly; otherwise join.
-        let snapshot = if req.snapshot_ts == 0 {
-            self.snapshot_for(self.store.begin().read_ts, &access)
+        let read_ts = if req.snapshot_ts == 0 {
+            self.store.begin().read_ts
         } else {
-            self.store
-                .snapshot(polargraph_core::temporal::Timestamp(req.snapshot_ts))
+            polargraph_core::temporal::Timestamp(req.snapshot_ts)
         };
+        let snapshot = self.snapshot_for(read_ts, &access);
 
-        let patterns =
-            convert::var_patterns_from_proto(&req.patterns, &[], &|iri| self.store.graph_id(iri))?;
+        let patterns = convert::var_patterns_from_proto(&req.patterns, &req.graphs, &|iri| {
+            self.store.graph_id(iri)
+        })?;
 
         let mut query = Query::new();
         for p in patterns {
@@ -3783,14 +3919,14 @@ impl PolarGraphService for PolarGraphServer {
             if tx_ts == 0 {
                 self.snapshot_for(self.store.begin().read_ts, &access)
             } else {
-                self.store
-                    .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+                self.snapshot_for(polargraph_core::temporal::Timestamp(tx_ts), &access)
             }
         };
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
         }
         let snapshot = self.inferred_scope(snapshot, req.exclude_inferred);
+        let snapshot = self.cypher_snapshot_scope(snapshot, &req.cypher, &req.graphs);
 
         let deadline = self.make_deadline();
         let t0 = Instant::now();
@@ -4092,8 +4228,7 @@ impl PolarGraphService for PolarGraphServer {
         let mut snapshot = if tx_ts == 0 {
             self.snapshot_for(self.store.begin().read_ts, &access)
         } else {
-            self.store
-                .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+            self.snapshot_for(polargraph_core::temporal::Timestamp(tx_ts), &access)
         };
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
@@ -4170,13 +4305,13 @@ impl PolarGraphService for PolarGraphServer {
         let mut snapshot = if tx_ts == 0 {
             self.snapshot_for(self.store.begin().read_ts, &access)
         } else {
-            self.store
-                .snapshot(polargraph_core::temporal::Timestamp(tx_ts))
+            self.snapshot_for(polargraph_core::temporal::Timestamp(tx_ts), &access)
         };
         if req.as_of_valid_time != 0 {
             snapshot = snapshot.with_vt_as_of(req.as_of_valid_time);
         }
         let snapshot = self.inferred_scope(snapshot, req.exclude_inferred);
+        let snapshot = self.cypher_snapshot_scope(snapshot, &req.cypher, &req.graphs);
 
         let deadline = self.make_deadline();
         let t0 = Instant::now();
@@ -5124,6 +5259,59 @@ impl PolarGraphService for PolarGraphServer {
         .map_err(storage_err_to_status)?;
         self.after_inference(&stats);
 
+        Ok(Response::new(RunMaterializationResponse {
+            rules_fired: stats.asserted,
+            derived_triples: stats.derived_triples,
+            iterations: u32::from(stats.asserted + stats.closed > 0),
+            asserted: stats.asserted,
+            closed: stats.closed,
+        }))
+    }
+
+    async fn get_inference_settings(
+        &self,
+        _request: Request<crate::proto::GetInferenceSettingsRequest>,
+    ) -> Result<Response<crate::proto::InferenceSettings>, Status> {
+        let graphs = owl_rl::schema_graphs(&self.store).map_err(storage_err_to_status)?;
+        Ok(Response::new(crate::proto::InferenceSettings {
+            all_graphs: graphs.is_none(),
+            schema_graphs: graphs.unwrap_or_default(),
+        }))
+    }
+
+    async fn set_inference_settings(
+        &self,
+        request: Request<crate::proto::SetInferenceSettingsRequest>,
+    ) -> Result<Response<RunMaterializationResponse>, Status> {
+        self.check_not_replica()?;
+        let meta_uid = meta_user_id(request.metadata());
+        let req = request.into_inner();
+        require_service(&self.caller_access(&resolve_user_id(&req.user_id, &meta_uid)))?;
+        if req.all_graphs && !req.schema_graphs.is_empty() {
+            return Err(Status::invalid_argument(
+                "all_graphs and schema_graphs are exclusive",
+            ));
+        }
+        if let Some(iri) = req
+            .schema_graphs
+            .iter()
+            .find(|g| owl_rl::is_inferred_graph_iri(g))
+        {
+            return Err(Status::invalid_argument(format!(
+                "<{iri}> is an inferred graph; schema graphs hold base data"
+            )));
+        }
+        let stats = tokio::task::spawn_blocking({
+            let store = self.store.clone();
+            move || {
+                let graphs = (!req.all_graphs).then_some(req.schema_graphs);
+                owl_rl::set_schema_graphs(&store, graphs.as_deref())
+            }
+        })
+        .await
+        .map_err(|e| Status::internal(format!("materialize task panicked: {e}")))?
+        .map_err(storage_err_to_status)?;
+        self.after_inference(&stats);
         Ok(Response::new(RunMaterializationResponse {
             rules_fired: stats.asserted,
             derived_triples: stats.derived_triples,

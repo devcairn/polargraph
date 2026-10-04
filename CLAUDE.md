@@ -147,7 +147,7 @@ RocksDB-backed persistence. Owns the quad-index layout (storage format v3,
 | `backup` | `BackupManager` — incremental RocksDB `BackupEngine` wrapper |
 | `migrations` | `MigrationRunner`, `Migration`, `AppliedMigration` — versioned schema migrations |
 | `wal_stream` | `WalStreamer`, `WalEntry` — WAL streaming for replication |
-| `owl_rl` | OWL 2 RL inference into `urn:pg:inferred:*` graphs: `materialize()` (closure + diff), `infer_changes()` (DRed from the change log), `InferredGraphs`, 12 rules |
+| `owl_rl` | OWL 2 RL inference into `urn:pg:inferred:*` graphs: `materialize()` (closure + diff), `infer_changes()` (DRed from the change log), `schema_graphs` / `set_schema_graphs` (which graphs supply axioms), `InferredGraphs`, 12 rules |
 | `counters` | `increment_counters` / `get_counters` — `sts` CF with an add merge operator |
 
 `TripleStore` is `Clone` (Arc-backed). Prefer passing it by clone rather
@@ -266,7 +266,7 @@ Endpoints include: `POST /query`, `POST /query/stream`, `POST /insert`, `GET /tr
 `POST /vector/search`, `GET /health`, `POST /explain`, `POST /cypher`, `POST /cypher/write`,
 `POST /cypher/stream`, `GET /sparql`, `POST /sparql`, `POST /sparql/update`,
 `POST /tx/begin`, `POST /tx/commit`, `POST /tx/rollback`, `GET /indexes`, `GET /stats`,
-`POST /materialize`, `GET /property-history`, `POST /edge-annotations`, `GET /edge-annotations/:id`,
+`POST /materialize`, `GET` / `PUT /inference/settings`, `GET /property-history`, `POST /edge-annotations`, `GET /edge-annotations/:id`,
 `POST /access/grant`, `POST /access/revoke`, `POST /access/add-user`, `GET /access/user/:id`,
 `POST` / `DELETE` / `GET /graphs/access` (graph grants; `X-User-Id` is forwarded on every endpoint),
 `GET /subscribe` (change feed as Server-Sent Events), `POST /changes` (atomic changeset), `POST /validate` (SHACL),
@@ -516,6 +516,7 @@ entries were superseded by storage format v3 (last entries below).
 - [x] Value bindings, PR 1 (plan step 8.6; `docs/design/value-bindings.md`, release note `docs/upgrade-value-bindings.md`) — `Solution { nodes, preds, values }` / `ValueBindings` in `polargraph-query::datalog`; `*_full` evaluators bind object variables to property values (RDF term equality, value-index lookups, vectors excluded), node-only entry points unchanged (Cypher); rule bodies may bind values; proto `Binding.values` / `QueryResult.values` on `Query` / `QueryStream`; REST `/query` rows `@values`; UI shows values; SDK rows decode values (Go `QueryRows`). SPARQL keeps node-only rows (`node_rows`) until PR 2
 - [x] Value bindings, PR 2 — SPARQL: literal results (`SparqlValue::LangLiteral` / `TypedLiteral` / `Iri`), `polargraph_sparql::values` (`sparql_eq` / `sparql_cmp` with numeric promotion and type errors, `order_cmp`, `term_key`), three-valued `FILTER` (`eval_filter`), `sameTerm`, `ORDER BY` (`order_bindings`), aggregates per SPARQL 1.1 (MIN / MAX by order, unbound on empty / non-numeric), predicate variables bind, DESCRIBE includes values, UPDATE templates with value / predicate variables (`DELETE WHERE { <n> ?p ?o }`); FILTER expressions (`FilterExpr`, `SparqlFilter::Compare`): variable-to-variable comparisons, `STR` / `LANG` / `DATATYPE`, `CONTAINS` / `STRSTARTS` / `STRENDS`, `LANGMATCHES`, `REGEX`
 - [x] Step 9 (`docs/design/step9-inference-vectors-stats.md`, release note `docs/upgrade-step9.md`) — 9a: OWL 2 RL writes queryable inferred graphs (`urn:pg:inferred:<g>`, service-only `urn:pg:inferred:cross`), ACL inherited from the source graph, `exclude_inferred` opt-out, recompute-and-diff `materialize()`, canonical IRI hashing (RDF-loaded schema now fires), `drvg` retired; 9b: `--inference` background DRed (`infer_changes`) from the change log; 9c: int8 vector quantization (`VectorSpaceDef.quantization`, exact re-ranking); 9d: counters (`sts` CF, `IncrementCounters` / `GetCounters`, REST `/counters`)
+- [x] Step 10 (`docs/design/type-packages-boundary.md`: type packages are application-only; release note `docs/upgrade-step10.md`) — atomic SPARQL Update: data operations compile to one `ApplyChanges` changeset (`?dry_run`, `?read_ts`, WHERE at one read point, graph ops can't be mixed); `QuadRef.all_graphs`, `ApplyChangesRequest.edge_annotations`; inference schema graphs (`Get`/`SetInferenceSettings`, REST `/inference/settings`); `graphs` filter on vector RPCs; Cypher reads confined to the dataset (`Snapshot::within_graphs`); fixed time-travel reads (`as_of_tx_time` / `snapshot_ts`) bypassing the graph ACL
 
 ## Adding a new predicate
 
