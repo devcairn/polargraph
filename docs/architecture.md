@@ -420,6 +420,17 @@ more similar. Search results are returned as cosine *similarity* scores
 then beam-search construction at each layer down to 0, wiring bidirectional
 edges and pruning neighbor lists that exceed M or M_max0.
 
+**Neighbour selection** (new node's links and pruning alike) uses the HNSW
+heuristic (Malkov & Yashunin, algorithm 4, as in hnswlib): candidates are
+taken nearest-first, and one is kept only if it is closer to the base node
+than to every neighbour already kept. Plain nearest-M selection (before
+2026-10) links each node only within its own cluster; on clustered data —
+real embeddings — the graph split into islands and searches couldn't leave
+the entry point's cluster (recall@20 0.17 f32 / 0.19 int8 at 20K clustered
+vectors, unchanged by `ef`). `hnsw::tests::clustered_data_stays_connected` guards
+this. Spaces built before the fix keep their old links and improve as new
+vectors arrive.
+
 **Search**: greedy descent to layer 1, then beam search at layer 0 with
 `ef = max(ef_construction / 2, k)`. Returns the k nearest nodes sorted by
 descending similarity.
@@ -445,7 +456,9 @@ Key layout in the `hnsw` CF:
 
 ```
 <space>/__ep            → [node_id: 16][max_layer: 4 LE]   (entry point for this space)
-<space>/n/<node_id(16)> → serialised HnswNode
+<space>/n/<node_id(16)> → serialised HnswNode (neighbour lists)
+<space>/v/<node_id(16)> → [f32 × dim LE]   (memory mode: the vector, written once)
+<space>/q/<node_id(16)> → int8 codes        (int8 spaces)
 ```
 
 On `TripleStore::open`, the store does a two-phase scan: it first finds all
@@ -455,9 +468,19 @@ each space's `<space>/n/` range to reconstruct the in-memory indexes.
 `HnswNode` serialisation:
 
 ```
-[max_layer: 4 LE][dim: 4 LE][f32 × dim LE]
-[for l = 0..=max_layer: [n_neighbors: 4 LE][node_id × n LE]]
+memory mode:  [max_layer: 4 LE][0xFFFF_FFFE: 4 LE]
+mmap mode:    [max_layer: 4 LE][0xFFFF_FFFF: 4 LE][dense index: 4 LE]
+legacy:       [max_layer: 4 LE][dim: 4 LE][f32 × dim LE]
+then          [for l = 0..=max_layer: [n_neighbors: 4 LE][node_id × n LE]]
 ```
+
+An insert changes the neighbour lists of up to M_max0 + M·layers other
+nodes, so node records are rewritten often; vectors are not. Memory-mode
+vectors therefore live under their own `/v/` key, written once at insert,
+and `batch_insert_vectors` writes each changed node record once per batch.
+Records in the legacy inline format (written before this layout) still load
+and keep that format when rewritten; no migration. Converting a space to
+int8 moves its vectors to the `.vecs` file and deletes the `/v/` keys.
 
 ### Vector storage modes
 
