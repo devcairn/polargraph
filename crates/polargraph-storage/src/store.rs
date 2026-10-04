@@ -706,7 +706,15 @@ impl TripleStore {
                 let id = NodeId(uuid::Uuid::from_bytes(
                     key[id_start..id_start + 16].try_into().unwrap(),
                 ));
-                let (node_vector, max_layer, neighbors) = hnsw::deserialize_node(&value)?;
+                let (mut node_vector, max_layer, neighbors) = hnsw::deserialize_node(&value)?;
+                if let hnsw::NodeVector::Separate(v) = &mut node_vector {
+                    let bytes = db
+                        .get_cf(&hnsw_cf, hnsw::vector_key_for_space(&space, id))?
+                        .ok_or_else(|| {
+                            StorageError::KeyDecode(format!("hnsw vector missing for {id:?}"))
+                        })?;
+                    *v = hnsw::vector_from_bytes(&bytes);
+                }
                 idx.load_node(id, node_vector, max_layer, neighbors);
             }
 
@@ -819,7 +827,16 @@ impl TripleStore {
         let mut batch = WriteBatch::default();
         let mut spaces = self.inner.hnsw_spaces.write().unwrap();
         let idx = self.space_index(&mut spaces, space, opts, &mut batch)?;
+        let vector_bytes = hnsw::vector_to_bytes(&vector);
         let modified = idx.insert(node_id, vector);
+        if !idx.is_mmap() {
+            // Memory mode: the vector is written once, under its own key.
+            batch.put_cf(
+                &hnsw_cf,
+                hnsw::vector_key_for_space(space, node_id),
+                vector_bytes,
+            );
+        }
         if let Some(codes) = idx.codes_of(node_id) {
             batch.put_cf(
                 &hnsw_cf,
@@ -883,6 +900,8 @@ impl TripleStore {
                     hnsw::node_key_for_space(space, id),
                     idx.serialize_node_for(id),
                 );
+                // The full vector moved to the `.vecs` file.
+                batch.delete_cf(&hnsw_cf, hnsw::vector_key_for_space(space, id));
             }
             let ids: Vec<NodeId> = idx.nodes.keys().copied().collect();
             for id in ids {
@@ -979,8 +998,18 @@ impl TripleStore {
         let mut inserted = 0usize;
         let mut errors: Vec<(usize, StorageError)> = Vec::new();
 
+        // Nodes whose records changed, each written once after the batch
+        // (a hot neighbour changes many times per batch).
+        let mut modified: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
         for (node_id, vector) in items.iter() {
-            let modified = idx.insert(*node_id, vector.clone());
+            modified.extend(idx.insert(*node_id, vector.clone()));
+            if !idx.is_mmap() {
+                batch.put_cf(
+                    &hnsw_cf,
+                    hnsw::vector_key_for_space(space, *node_id),
+                    hnsw::vector_to_bytes(vector),
+                );
+            }
             if let Some(codes) = idx.codes_of(*node_id) {
                 batch.put_cf(
                     &hnsw_cf,
@@ -988,22 +1017,22 @@ impl TripleStore {
                     codes.to_bytes(),
                 );
             }
-            for id in &modified {
-                let serialized = idx.serialize_node_for(*id);
-                if !serialized.is_empty() {
-                    batch.put_cf(&hnsw_cf, hnsw::node_key_for_space(space, *id), serialized);
-                }
-            }
-            if let Some(ep_id) = idx.entry_point {
-                if let Some(ep_node) = idx.nodes.get(&ep_id) {
-                    batch.put_cf(
-                        &hnsw_cf,
-                        hnsw::ep_key_for_space(space),
-                        hnsw::serialize_entry_point(ep_id, ep_node.max_layer),
-                    );
-                }
-            }
             inserted += 1;
+        }
+        for id in &modified {
+            let serialized = idx.serialize_node_for(*id);
+            if !serialized.is_empty() {
+                batch.put_cf(&hnsw_cf, hnsw::node_key_for_space(space, *id), serialized);
+            }
+        }
+        if let Some(ep_id) = idx.entry_point {
+            if let Some(ep_node) = idx.nodes.get(&ep_id) {
+                batch.put_cf(
+                    &hnsw_cf,
+                    hnsw::ep_key_for_space(space),
+                    hnsw::serialize_entry_point(ep_id, ep_node.max_layer),
+                );
+            }
         }
 
         if let Err(e) = self.inner.db.write(batch) {
@@ -2850,6 +2879,136 @@ impl TripleStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn vec_for(i: usize, dims: usize) -> Vec<f32> {
+        let mut v: Vec<f32> = (0..dims)
+            .map(|d| ((i * 31 + d * 7) % 13) as f32 - 6.0)
+            .collect();
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+        v.iter_mut().for_each(|x| *x /= n);
+        v
+    }
+
+    fn hnsw_values(store: &TripleStore, infix: &[u8]) -> Vec<Vec<u8>> {
+        let cf = store.cf_handle(cf::HNSW).unwrap();
+        store
+            .inner
+            .db
+            .iterator_cf(&cf, IteratorMode::Start)
+            .map(|kv| kv.unwrap())
+            .filter(|(k, _)| k.windows(infix.len()).any(|w| w == infix))
+            .map(|(_, v)| v.to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn memory_vectors_are_stored_once_and_reload() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ids: Vec<NodeId> = (0..300)
+            .map(|i| NodeId(uuid::Uuid::from_u128(i + 1)))
+            .collect();
+        {
+            let store = TripleStore::open(dir.path()).unwrap();
+            let items: Vec<_> = ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (*id, vec_for(i, 48)))
+                .collect();
+            let (n, errs) = store.batch_insert_vectors("s", &items[..200], StorageMode::Memory);
+            assert_eq!((n, errs.len()), (200, 0));
+            for (id, v) in &items[200..] {
+                store
+                    .insert_vector("s", *id, v.clone(), StorageMode::Memory)
+                    .unwrap();
+            }
+            // One vector record per node; node records hold no vector.
+            assert_eq!(hnsw_values(&store, b"/v/").len(), 300);
+            for record in hnsw_values(&store, b"/n/") {
+                let (v, _, _) = hnsw::deserialize_node(&record).unwrap();
+                assert!(matches!(v, hnsw::NodeVector::Separate(_)));
+            }
+        }
+        let store = TripleStore::open(dir.path()).unwrap();
+        let hits = store.search_vector_ef("s", &vec_for(7, 48), 1, 50);
+        assert_eq!(hits[0].0, ids[7]);
+    }
+
+    #[test]
+    fn legacy_inline_records_still_load() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (a, b) = (
+            NodeId(uuid::Uuid::from_u128(1)),
+            NodeId(uuid::Uuid::from_u128(2)),
+        );
+        {
+            let store = TripleStore::open(dir.path()).unwrap();
+            let cf = store.cf_handle(cf::HNSW).unwrap();
+            // Records as written before vectors had their own key.
+            for (id, other, v) in [(a, b, vec![1.0, 0.0]), (b, a, vec![0.0, 1.0])] {
+                let node = hnsw::HnswNode {
+                    vector: v,
+                    max_layer: 0,
+                    neighbors: vec![vec![other]],
+                    inline: true,
+                };
+                store
+                    .inner
+                    .db
+                    .put_cf(
+                        &cf,
+                        hnsw::node_key_for_space("old", id),
+                        hnsw::serialize_node(&node, None),
+                    )
+                    .unwrap();
+            }
+            store
+                .inner
+                .db
+                .put_cf(
+                    &cf,
+                    hnsw::ep_key_for_space("old"),
+                    hnsw::serialize_entry_point(a, 0),
+                )
+                .unwrap();
+        }
+        let store = TripleStore::open(dir.path()).unwrap();
+        assert_eq!(store.search_vector_ef("old", &[0.1, 0.9], 1, 10)[0].0, b);
+        // New inserts use the new format alongside the old records.
+        let c = NodeId(uuid::Uuid::from_u128(3));
+        store
+            .insert_vector("old", c, vec![0.7, 0.7], StorageMode::Memory)
+            .unwrap();
+        drop(store);
+        let store = TripleStore::open(dir.path()).unwrap();
+        assert_eq!(store.search_vector_ef("old", &[0.71, 0.7], 1, 10)[0].0, c);
+        assert_eq!(store.search_vector_ef("old", &[1.0, 0.0], 1, 10)[0].0, a);
+    }
+
+    #[test]
+    fn converting_to_int8_drops_vector_keys() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = TripleStore::open(dir.path()).unwrap();
+        let items: Vec<_> = (0..50)
+            .map(|i| {
+                (
+                    NodeId(uuid::Uuid::from_u128(i + 1)),
+                    vec_for(i as usize, 16),
+                )
+            })
+            .collect();
+        store.batch_insert_vectors("s", &items, StorageMode::Memory);
+        assert_eq!(hnsw_values(&store, b"/v/").len(), 50);
+        let opts = hnsw::SpaceOptions {
+            mode: StorageMode::Mmap,
+            int8: true,
+        };
+        store.batch_insert_vectors("s", &items[..1], opts);
+        assert!(hnsw_values(&store, b"/v/").is_empty());
+        drop(store);
+        let store = TripleStore::open(dir.path()).unwrap();
+        let hit = store.search_vector_ef("s", &vec_for(9, 16), 1, 50)[0];
+        assert!(hit.1 > 0.999, "exact match after conversion: {hit:?}");
+    }
 
     #[test]
     fn conflicting_iri_for_a_node_is_rejected() {

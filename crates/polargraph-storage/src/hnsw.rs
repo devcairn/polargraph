@@ -278,10 +278,14 @@ impl MmapState {
 
 /// What `deserialize_node` found in the dim field of a RocksDB node record.
 pub enum NodeVector {
-    /// In-memory mode: vector data is embedded in the record.
+    /// In-memory mode, legacy records: vector data is embedded in the record.
     Data(Vec<f32>),
     /// Mmap mode: the record stores a dense index into the `.vecs` file.
     MmapIndex(usize),
+    /// In-memory mode: the vector is stored once under its own key
+    /// ([`vector_key_for_space`]), so neighbour-list updates don't rewrite
+    /// it. `deserialize_node` returns it empty; the loader fills it in.
+    Separate(Vec<f32>),
 }
 
 // ── Core data structures ──────────────────────────────────────────────────────
@@ -294,6 +298,9 @@ pub struct HnswNode {
     pub(crate) max_layer: usize,
     /// `neighbors[l]` = neighbor IDs at layer l (0..=max_layer).
     pub(crate) neighbors: Vec<Vec<NodeId>>,
+    /// Loaded from a legacy record with the vector inline; keeps that
+    /// format when rewritten (its vector has no key of its own).
+    pub(crate) inline: bool,
 }
 
 /// How a space stores vectors: [`StorageMode`] plus optional int8 codes.
@@ -499,14 +506,15 @@ impl HnswIndex {
         max_layer: usize,
         neighbors: Vec<Vec<NodeId>>,
     ) {
-        let vector = match node_data {
-            NodeVector::Data(v) => v,
+        let (vector, inline) = match node_data {
+            NodeVector::Data(v) => (v, true),
+            NodeVector::Separate(v) => (v, false),
             NodeVector::MmapIndex(idx) => {
                 // Register the dense index so distance queries can find it.
                 if let Some(ms) = &mut self.mmap_state {
                     ms.register_id(id, idx);
                 }
-                Vec::new() // vector lives in mmap, not in the node struct
+                (Vec::new(), false) // vector lives in mmap, not in the node struct
             }
         };
         self.nodes.insert(
@@ -515,6 +523,7 @@ impl HnswIndex {
                 vector,
                 max_layer,
                 neighbors,
+                inline,
             },
         );
     }
@@ -577,6 +586,7 @@ impl HnswIndex {
                     vector: stored_vector,
                     max_layer: level,
                     neighbors,
+                    inline: false,
                 },
             );
             self.entry_point = Some(id);
@@ -608,6 +618,7 @@ impl HnswIndex {
                 vector: stored_vector,
                 max_layer: level,
                 neighbors: (0..=level).map(|_| Vec::new()).collect(),
+                inline: false,
             },
         );
 
@@ -623,11 +634,9 @@ impl HnswIndex {
             }
 
             let m_at_layer = if lc == 0 { self.m_max0 } else { self.m };
-            let neighbors_for_new: Vec<NodeId> = w_sorted
-                .iter()
-                .take(m_at_layer)
-                .map(|Far(_, nid)| *nid)
-                .collect();
+            let candidates: Vec<(f32, NodeId)> =
+                w_sorted.iter().map(|Far(d, nid)| (*d, *nid)).collect();
+            let neighbors_for_new = self.select_neighbors_heuristic(&candidates, m_at_layer);
 
             self.nodes.get_mut(&id).unwrap().neighbors[lc] = neighbors_for_new.clone();
             modified.push(id);
@@ -657,7 +666,12 @@ impl HnswIndex {
                     // All &mut borrows are released here; we can call &self methods.
                     let nv = self.get_vector_owned(neighbor_id);
                     let nprobe = self.probe(&nv);
-                    let pruned = self.select_neighbors_by_dist(&nprobe, &candidates, m_max);
+                    let mut scored: Vec<(f32, NodeId)> = candidates
+                        .iter()
+                        .map(|&c| (self.dist(c, &nprobe), c))
+                        .collect();
+                    scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(cmp::Ordering::Equal));
+                    let pruned = self.select_neighbors_heuristic(&scored, m_max);
                     if let Some(n) = self.nodes.get_mut(&neighbor_id) {
                         n.neighbors[lc] = pruned;
                     }
@@ -869,19 +883,29 @@ impl HnswIndex {
         found
     }
 
-    /// Select the `m` nearest neighbors from a candidate list by distance to `query`.
-    fn select_neighbors_by_dist(
-        &self,
-        query: &Probe,
-        candidates: &[NodeId],
-        m: usize,
-    ) -> Vec<NodeId> {
-        let mut scored: Vec<(f32, NodeId)> = candidates
-            .iter()
-            .map(|&id| (self.dist(id, query), id))
-            .collect();
-        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
-        scored.into_iter().take(m).map(|(_, id)| id).collect()
+    /// Select up to `m` neighbours from `candidates` (`(distance to the base
+    /// node, id)`, nearest first) with the HNSW heuristic (Malkov & Yashunin,
+    /// algorithm 4, as in hnswlib): a candidate is kept only if it is closer
+    /// to the base than to every neighbour already kept. Plain nearest-`m`
+    /// selection links each node only inside its own cluster, so on
+    /// clustered data (real embeddings) the graph splits into islands and
+    /// searches can't leave the entry point's cluster.
+    fn select_neighbors_heuristic(&self, candidates: &[(f32, NodeId)], m: usize) -> Vec<NodeId> {
+        if candidates.len() <= m {
+            return candidates.iter().map(|(_, id)| *id).collect();
+        }
+        let mut kept: Vec<NodeId> = Vec::with_capacity(m);
+        for &(d, c) in candidates {
+            if kept.len() >= m {
+                break;
+            }
+            let cv = self.get_vector_owned(c);
+            let cprobe = self.probe(&cv);
+            if kept.iter().all(|&k| self.dist(k, &cprobe) > d) {
+                kept.push(c);
+            }
+        }
+        kept
     }
 
     /// Generate a random layer using the HNSW exponential distribution.
@@ -919,6 +943,31 @@ const EP_SUFFIX: &[u8] = b"/__ep";
 const NODE_INFIX: &[u8] = b"/n/";
 /// Sentinel stored in the `dim` field of a mmap-mode node record.
 const MMAP_SENTINEL: u32 = u32::MAX;
+
+/// Sentinel stored in the `dim` field of a memory-mode node record whose
+/// vector lives under its own key ([`vector_key_for_space`]).
+const SEPARATE_SENTINEL: u32 = u32::MAX - 1;
+
+/// RocksDB key for a memory-mode node's vector: `<space>/v/<16_id_bytes>`
+/// (raw `f32` LE). Written once at insert.
+pub fn vector_key_for_space(space: &str, id: NodeId) -> Vec<u8> {
+    let mut k = space.as_bytes().to_vec();
+    k.extend_from_slice(b"/v/");
+    k.extend_from_slice(id.as_bytes());
+    k
+}
+
+/// A vector as stored under [`vector_key_for_space`].
+pub fn vector_to_bytes(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// Inverse of [`vector_to_bytes`].
+pub fn vector_from_bytes(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
+}
 
 /// RocksDB key for a space's entry-point record: `<space>/__ep`.
 pub fn ep_key_for_space(space: &str) -> Vec<u8> {
@@ -1008,6 +1057,9 @@ pub fn serialize_node(node: &HnswNode, dense_index: Option<usize>) -> Vec<u8> {
         // Mmap mode: sentinel + dense index, no vector bytes.
         v.extend_from_slice(&MMAP_SENTINEL.to_le_bytes());
         v.extend_from_slice(&(idx as u32).to_le_bytes());
+    } else if !node.inline {
+        // Memory mode: the vector has its own key.
+        v.extend_from_slice(&SEPARATE_SENTINEL.to_le_bytes());
     } else {
         // Memory mode: dim + vector bytes.
         let dim = node.vector.len();
@@ -1049,6 +1101,8 @@ pub fn deserialize_node(
         }
         let idx = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         (NodeVector::MmapIndex(idx), 12)
+    } else if dim_or_sentinel == SEPARATE_SENTINEL {
+        (NodeVector::Separate(Vec::new()), 8)
     } else {
         // Memory mode: read float vector.
         let dim = dim_or_sentinel as usize;
@@ -1103,6 +1157,10 @@ mod tests {
         NodeId(Uuid::from_bytes([seed; 16]))
     }
 
+    fn nth_id(i: usize) -> NodeId {
+        NodeId(Uuid::from_u128(i as u128 + 1))
+    }
+
     fn unit_vec(dim: usize, hot: usize) -> Vec<f32> {
         let mut v = vec![0.0_f32; dim];
         v[hot % dim] = 1.0;
@@ -1143,23 +1201,45 @@ mod tests {
     }
 
     #[test]
-    fn memory_node_round_trips() {
+    fn legacy_inline_node_round_trips() {
         let id_a = make_id(1);
         let id_b = make_id(2);
         let node = HnswNode {
             vector: vec![1.0, 2.0, 3.0],
             max_layer: 1,
             neighbors: vec![vec![id_a], vec![id_b]],
+            inline: true,
         };
-        let bytes = serialize_node(&node, None); // memory mode
+        let bytes = serialize_node(&node, None); // legacy memory-mode record
         let (nv, max_layer, nbrs) = deserialize_node(&bytes).unwrap();
         match nv {
             NodeVector::Data(v) => assert_eq!(v, node.vector),
-            NodeVector::MmapIndex(_) => panic!("expected Data"),
+            _ => panic!("expected Data"),
         }
         assert_eq!(max_layer, 1);
         assert_eq!(nbrs[0], vec![id_a]);
         assert_eq!(nbrs[1], vec![id_b]);
+    }
+
+    #[test]
+    fn separate_vector_node_round_trips() {
+        let id_a = make_id(1);
+        let node = HnswNode {
+            vector: vec![1.0, 2.0, 3.0],
+            max_layer: 0,
+            neighbors: vec![vec![id_a]],
+            inline: false,
+        };
+        let bytes = serialize_node(&node, None);
+        // The record carries no vector: 4 + 4 + (4 + 16) bytes.
+        assert_eq!(bytes.len(), 28);
+        let (nv, _, nbrs) = deserialize_node(&bytes).unwrap();
+        assert!(matches!(nv, NodeVector::Separate(v) if v.is_empty()));
+        assert_eq!(nbrs[0], vec![id_a]);
+        assert_eq!(
+            vector_from_bytes(&vector_to_bytes(&node.vector)),
+            node.vector
+        );
     }
 
     #[test]
@@ -1169,12 +1249,13 @@ mod tests {
             vector: Vec::new(), // empty in mmap mode
             max_layer: 0,
             neighbors: vec![vec![id_a]],
+            inline: false,
         };
         let bytes = serialize_node(&node, Some(42)); // mmap mode, dense index 42
         let (nv, max_layer, nbrs) = deserialize_node(&bytes).unwrap();
         match nv {
             NodeVector::MmapIndex(idx) => assert_eq!(idx, 42),
-            NodeVector::Data(_) => panic!("expected MmapIndex"),
+            _ => panic!("expected MmapIndex"),
         }
         assert_eq!(max_layer, 0);
         assert_eq!(nbrs[0], vec![id_a]);
@@ -1186,6 +1267,7 @@ mod tests {
             vector: vec![],
             max_layer: 0,
             neighbors: vec![vec![]],
+            inline: true,
         };
         let bytes = serialize_node(&node, None);
         let (nv, max_layer, nbrs) = deserialize_node(&bytes).unwrap();
@@ -1198,6 +1280,97 @@ mod tests {
     }
 
     // ── insert / search (memory mode) ────────────────────────────────────────
+
+    /// Clustered unit vectors (`clusters` centroids, noise of norm ≈ 0.9)
+    /// and queries near populated centroids — the shape of real embeddings.
+    fn clustered(n: usize, dims: usize, clusters: usize) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut normal = move || {
+            let mut unit = || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 11) as f64 / (1u64 << 53) as f64
+            };
+            let (u1, u2) = (unit().max(f64::MIN_POSITIVE), unit());
+            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        };
+        let mut around = |c: Option<&[f32]>, spread: f64| {
+            let sigma = spread / (dims as f64).sqrt();
+            let mut v: Vec<f32> = (0..dims)
+                .map(|i| (c.map_or(0.0, |c| c[i] as f64) + sigma * normal()) as f32)
+                .collect();
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            v.iter_mut().for_each(|x| *x /= norm);
+            v
+        };
+        let centroids: Vec<Vec<f32>> = (0..clusters).map(|_| around(None, 1.0)).collect();
+        let data = (0..n)
+            .map(|i| around(Some(&centroids[i % clusters]), 0.9))
+            .collect();
+        let queries = (0..40)
+            .map(|q| around(Some(&centroids[(q * 7) % clusters]), 0.9))
+            .collect();
+        (data, queries)
+    }
+
+    /// recall@10 of `idx` against brute force.
+    fn recall_at_10(
+        idx: &HnswIndex,
+        ids: &[NodeId],
+        data: &[Vec<f32>],
+        queries: &[Vec<f32>],
+    ) -> f64 {
+        let mut hit = 0;
+        for q in queries {
+            let mut exact: Vec<(f32, NodeId)> = data
+                .iter()
+                .zip(ids)
+                .map(|(v, id)| (cosine_distance(v, q), *id))
+                .collect();
+            exact.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            let got: HashSet<NodeId> = idx
+                .search(q, 10, 100)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            hit += exact
+                .iter()
+                .take(10)
+                .filter(|(_, id)| got.contains(id))
+                .count();
+        }
+        hit as f64 / (10 * queries.len()) as f64
+    }
+
+    #[test]
+    fn clustered_data_stays_connected() {
+        // Plain nearest-M linking split clustered data into islands
+        // (recall@10 0.67 here, 0.73 for int8); the heuristic keeps
+        // clusters linked (1.0).
+        let (data, queries) = clustered(6_000, 64, 120);
+        let ids: Vec<NodeId> = (0..data.len()).map(nth_id).collect();
+        let mut idx = HnswIndex::new();
+        for (id, v) in ids.iter().zip(&data) {
+            idx.insert(*id, v.clone());
+        }
+        let r = recall_at_10(&idx, &ids, &data, &queries);
+        assert!(r >= 0.9, "recall@10 on clustered data: {r}");
+    }
+
+    #[test]
+    fn clustered_data_stays_connected_int8() {
+        let dir = tempfile::tempdir().unwrap();
+        let (data, queries) = clustered(4_000, 64, 80);
+        let ids: Vec<NodeId> = (0..data.len()).map(nth_id).collect();
+        let mut idx = HnswIndex::new_mmap(dir.path().join("s.vecs"));
+        idx.enable_int8(dir.path().join("s.vecs")).unwrap();
+        for (id, v) in ids.iter().zip(&data) {
+            idx.insert(*id, v.clone());
+        }
+        let r = recall_at_10(&idx, &ids, &data, &queries);
+        assert!(r >= 0.9, "int8 recall@10 on clustered data: {r}");
+    }
 
     #[test]
     fn insert_single_and_search() {
