@@ -1,34 +1,39 @@
-# cb-bench — this repo as a living knowledge graph — design note
+# Repo graph — this repo as a living knowledge graph (application spec)
 
-Status: decisions A–K **approved as recommended** (Mark, 2026-10-03). §9
-(architecture layer) added on Mark's request; its decisions L–S await
-approval. Asked for by Mark, 2026-10-02: "make it based on this database
-and repo, so it can stand as a living example … tie [new nodes and edges]
-to commits."
+Status: **application-side** (Mark, 2026-10-03: "the application will be
+responsible for doing all of that"). Lives in ContxtBroker or a separate
+tool, **built only on PolarGraph's public APIs** (gRPC / REST); nothing
+here is built in the engine repo. Decisions A–F, I (from the original
+cb-bench note) and the architecture-layer design (L–S) carry over as the
+app's design; the engine-side benchmark is `docs/design/cb-bench.md`.
 
-## 1. Goals
+## 1. What it is
 
-1. **A real, growing dataset** — the repo's own history (commits, PRs, design
-   notes and their decisions, plan steps, crates, RPCs, column families,
-   findings) as a knowledge graph with provenance, extended automatically by
-   each new commit.
-2. **A readable demo** — a newcomer runs a few SPARQL / Cypher / SHACL /
-   inference / `Subscribe` / time-travel queries over a graph they already
-   understand (this project) and sees how the engine works.
-3. **The plan's benchmark** — the repo graph is the *seed and fixture*; a
-   synthetic generator scales its shape up to the plan's team and company
-   scenarios, so the performance targets (plan § Capacity) get numbers.
-4. **Golden questions** for the WS8 evaluation harness ("why were Cypher
-   writes deprecated, who approved it, which PR did it?").
+The engine repo's own history — commits, PRs, design notes and their
+lettered decisions, plan steps, crates, RPCs, column families, findings —
+plus **how the engine works** (subsystems, flows, key layouts, code
+locations) as a knowledge graph with per-commit provenance, grown by CI,
+rendered as diagrams a newcomer can drill from into the code.
 
-Honest about scale: the real graph is small — ~206 commits, 17 PRs, 7
-design notes (~45 lettered decisions), ~200 tracked files in 9 crates, ~20
-plan steps → roughly **5–15K quads**. Fine for the demo and correctness; it measures nothing at
-company scale. §6 covers the scale-up.
+## 2. Engine APIs it uses
 
-## 2. Model
+| Need | Engine API |
+|---|---|
+| Per-commit / per-PR graphs with provenance metadata | `CreateGraph` (metadata), `ApplyChanges`, `/import/rdf` (N-Quads) |
+| Promote merged facts into `current` | `ValidateShapes` (overlay) + `ApplyChanges` with `read_ts` |
+| Ontology / shapes | ordinary graphs; the app scopes queries to its data graphs with `FROM` / `graphs` / `USE GRAPH`, and names its shapes graphs in `ValidateShapes` |
+| Inference over its ontology | OWL RL inference, with the app's ontology graph as the inference schema graph |
+| Queries and views | SPARQL (property paths, `GRAPH`, `ORDER BY`, aggregates), Cypher, `as_of_valid_time` |
+| Live updates | `Subscribe` |
+| Search | vector search with a `graphs` filter |
 
-### 2.1 Vocabulary
+Engine gaps this app surfaced: SPARQL `BIND` is ignored silently (needed by
+the onboarding query's natural form); there is no graph diff RPC (the app
+diffs two as-of query results itself).
+
+## 3. Model
+
+### 3.1 Vocabulary
 
 Reuse the plan's vocabularies where they fit (`prov:`, `dcterms:`, `cb:`
 graph kinds / supersession, `rec:` records, `work:` plan items), plus a
@@ -63,7 +68,7 @@ domains / ranges, inverses — exercised by inference) and `shapes.ttl` (SHACL
 | `pgr:fixes` / `pgr:foundIn` | Commit → Finding / Finding → PullRequest |
 | `prov:wasAttributedTo`, `prov:generatedAtTime` | Commit, PR, graph → agent / time |
 
-### 2.2 Graphs and provenance
+### 3.2 Graphs and provenance
 
 - **One graph per commit** — `…/repo/graph/commit/<sha>` — holding exactly
   the facts extracted from that commit, with graph metadata
@@ -80,7 +85,7 @@ domains / ranges, inverses — exercised by inference) and `shapes.ttl` (SHACL
 - **Valid time = commit time**, so `as_of_valid_time` answers "which
   decisions stood on 2026-10-01?"; transaction time is load time.
 
-## 3. Capturing decisions
+## 4. Capturing decisions
 
 Most design notes use a `| # | Question | Recommendation |` table with
 letter ids (the step 9 note has its decisions only in prose); approval
@@ -121,9 +126,9 @@ reliably parseable, so:
   findings), drafted from branch names, PR titles and commit prefixes, then
   reviewed by hand once.
 
-## 4. Extraction, incremental runs, idempotency
+## 5. Extraction, incremental runs, idempotency
 
-`polargraph-bench repo-graph` (Rust, in the existing bench crate; reads git
+The `repo-graph` tool (Rust; reads git
 via the `git` CLI, design notes with a YAML + table parser, `proto` and
 `cf.rs` for RPCs / CFs):
 
@@ -141,12 +146,12 @@ via the `git` CLI, design notes with a YAML + table parser, `proto` and
 - **The dataset is not committed** — it is a pure function of git history +
   front matter + backfill, so committing it would only create a loop. CI
   regenerates it.
-- **CI job `repo-graph`** (on push to `main`): extract → load into a fresh
+- **A CI job in the engine repo** (on push to `main`, calling the tool): extract → load into a fresh
   `polargraphd` → SHACL-validate → run the demo queries and the small bench
   → upload the N-Quads and a report as artifacts. An optional long-running
   demo instance gets incremental loads from the watermark.
 
-## 5. Demo queries (`bench/repo-graph/queries/`, runnable as a script)
+## 6. Demo queries
 
 | Engine feature | Query |
 |---|---|
@@ -159,80 +164,14 @@ via the `git` CLI, design notes with a YAML + table parser, `proto` and
 | `Subscribe` | Tail `current` while the extractor promotes a new PR |
 | Vector search | Design-note sections embedded (real model via `--embed-cmd`, else a deterministic hash embedding) → "notes most similar to this question" |
 
-## 6. Scale-up to the plan's targets
-
-The real graph is the **seed**. `polargraph-bench cb --scale <SF>` generates
-on top of it, cloning its shape and the plan's company model:
-
-- **Spine entities** (people, teams, services, customers) — counts from the
-  plan scenarios; org structure as in WS4 seed packages.
-- **Records with chunks** (WS7 ladder: envelope ~20 quads, 20 chunks × 3
-  quads, text in `blob`, one 384-dim vector per chunk), **mentions** to
-  entities with **Zipf skew (s ≈ 1.1)** so a few entities have 50K mentions.
-- **Graphs and ACL**: record graphs per team, approved graphs per domain,
-  proposals, grants per group (WS2.8) — so every read runs with a real user
-  bitmap.
-- **Repo-shaped projects**: N synthetic "projects" each a renamed clone of
-  the repo graph (decisions, commits, PRs) with Zipf-sized histories — keeps
-  the demo vocabulary exercised at scale.
-- **Vectors**: synthetic clustered unit vectors (so recall is measurable),
-  int8 and f32 spaces.
-- Loaded through **SST import** (WS2.7) for the base, then the live paths
-  for the measured operations.
-
-`SF = 1` ≈ team (~10M quads, 2M chunk vectors); `SF = 20` ≈ company
-(~195M quads, 40M vectors).
-
-| Plan target | How cb-bench measures it |
-|---|---|
-| Load one graph (1K quads) p50 ≤ 2 ms | `ExportGraph` / GSPO scan of record graphs and repo commit graphs |
-| `describe(entity)` p95 ≤ 10 ms | All facts of a Zipf-sampled entity across a user's visible graphs (hot entities dominate the tail) |
-| Hybrid search k=20 p95 ≤ 25 ms | `VectorSeedQuery` / `SearchVectorInSet` over an entity's mention set, f32 vs int8 |
-| Context assembly 4K tokens p95 ≤ 300 ms | Proxy: describe + hybrid search + chunk text fetch (the real assembly is WS8, app-side) |
-| Promote 500-quad proposal incl. SHACL p95 ≤ 200 ms | `ValidateShapes` overlay + `ApplyChanges` with `read_ts` — same flow as the repo PR promotion |
-| Incremental materialization lag ≤ 2 s | `--inference` under sustained writes; `polargraph_inference_lag_seconds` |
-| Sustained ingestion ≥ 50 records/s | One `ApplyChanges` + vector batch per record, model latency excluded |
-| (capacity) disk / RAM | Bytes per quad, HNSW RAM f32 vs int8 — checks the plan's estimates |
-
-CI runs a small scale (`SF = 0.05`) as a **regression report** (no hard
-thresholds on shared runners); the company run is manual on NVMe, with
-results in `BENCHMARKS.md` and the tracker.
-
-## 7. Layout
-
-```
-bench/repo-graph/
-  ontology.ttl  shapes.ttl  backfill.toml
-  queries/      *.rq *.cypher demo.sh
-crates/polargraph-bench/src/
-  repo_graph/   extract.rs  notes.rs  load.rs
-  cb/           generate.rs  measure.rs
-```
-
-## 8. Decisions needed
-
-| # | Question | Recommendation |
-|---|----------|----------------|
-| A | Where decision status lives | **YAML front matter** on design notes (authoritative), tables kept for humans; CI checks they agree. Backfill the 7 existing notes once. |
-| B | Linking commits to steps / decisions | **Git trailers** going forward (`Plan-Step`, `Implements`, `Fixes`) + a reviewed **`backfill.toml`** for history. |
-| C | Graph granularity | **Graph per commit and per PR** (immutable, with `prov:wasDerivedFrom` the SHA and the author) + a **`current`** approved graph promoted on merge via `ValidateShapes` + `ApplyChanges` (dogfoods step 8). |
-| D | Vocabulary | Plan vocabularies (`prov`, `dcterms`, `cb`, `rec`, `work`) + a small `pgr:` namespace for code artifacts; ontology and shapes checked in. |
-| E | Extractor | **Rust**, a `repo-graph` subcommand of `polargraph-bench`; git via the CLI. |
-| F | Is the dataset committed? | **No** — regenerated deterministically from git; CI uploads it as an artifact; incremental loads into a demo instance by watermark. |
-| G | Scale-up | Repo graph as seed + synthetic generator (spine entities, records / chunks / mentions with Zipf skew, ACL graphs, cloned repo-shaped projects, clustered vectors), `--scale`; SST bulk load. |
-| H | CI vs manual | CI: extract + validate + demo queries + `SF = 0.05` regression report (no hard thresholds). Company scale: manual, recorded in `BENCHMARKS.md`. |
-| I | People | Agents by GitHub login / name slug, **no email addresses** in the dataset; Claude co-authors as `prov:SoftwareAgent`. |
-| J | Embeddings for the demo | Deterministic hash embedding by default; `--embed-cmd` to plug in a real model. |
-| K | Delivery | Two PRs: (1) conventions (front matter + backfill + trailers), ontology / shapes, extractor, loader, demo queries, CI job; (2) scale-up generator and measurements. |
-
-## 9. Architecture layer — how the engine works, as a navigable graph
+## 7. Architecture layer — how the engine works, as a navigable graph
 
 Mark, 2026-10-03: "store the current working state of how the database
 works (query engine, n-quads, indexes, etc.) for a junior dev to come in
 and understand and be able to dig into the codebase from a graph in
 diagram form."
 
-### 9.1 What it models
+### 7.1 What it models
 
 | Level | Nodes (`pgr:`) | Example |
 |---|---|---|
@@ -270,7 +209,7 @@ Alongside the containment tree:
   section), `sourceAt` → a `SourceLocation` (path, start / end line, commit,
   GitHub permalink `…/blob/<sha>/<path>#L<a>-L<b>`).
 
-### 9.2 Extracted vs curated
+### 7.2 Extracted vs curated
 
 | Automatic (every commit) | Source |
 |---|---|
@@ -298,7 +237,7 @@ It also reports (warning, then failure once clean) modules not assigned to
 a subsystem and RPCs / CFs not appearing in any flow. Renaming a function
 therefore forces the flow that names it to be updated in the same PR.
 
-### 9.3 Diagrams
+### 7.3 Diagrams
 
 Each canonical view is **a graph query plus a template**, rendered to
 **Mermaid** now (our docs use it) and **D2** later (WS5):
@@ -316,10 +255,10 @@ Each canonical view is **a graph query plus a template**, rendered to
   so a diagram is a map you drill from into code.
 - Output: `docs/architecture/generated/*.md` — **committed**, so GitHub
   renders it; CI regenerates and **fails if the committed output is
-  stale** (no bot commits). `polargraph-bench repo-graph render [view]`
+  stale** (no bot commits). `repo-graph render [view]`
   regenerates locally.
 
-### 9.4 Versioning
+### 7.4 Versioning
 
 - Each commit graph records what the commit **changed** in the
   architecture (symbols / RPCs / CFs introduced, removed, moved — and
@@ -327,10 +266,10 @@ Each canonical view is **a graph query plus a template**, rendered to
 - The `current` graph holds the architecture **bitemporally**: a fact opens
   at the commit time it appeared and closes when it went away. So
   "how did the engine look at commit X" is `as_of_valid_time` = X's time,
-  and "what changed between X and Y" is `DiffGraphs` on `current` at the two
-  times (type-packages P4) — architecture diffs dogfood time travel.
+  and "what changed between X and Y" diffs two queries of `current` with
+  `as_of_valid_time` at the two times — architecture diffs dogfood time travel.
 
-### 9.5 Onboarding query
+### 7.5 Onboarding query
 
 "Show me everything involved in how the engine handles Cypher queries":
 
@@ -360,10 +299,11 @@ error rather than a no-op.)
 E), and the PRs / commits that implemented them — each with a link into
 the code. The same question as text or vector search returns **instances**
 (decisions, symbols, flows), not the `pgr:Decision` class or its shape:
-the ontology and shapes are loaded as **schema graphs** (type-packages
-note, graph roles), which data queries and search leave out.
+the app keeps its ontology and shapes in their own graphs and scopes data
+queries and search (`FROM` / `graphs` / the vector `graphs` filter) to its
+data graphs.
 
-### 9.6 Decisions (architecture layer)
+### 7.6 Decisions (architecture layer)
 
 | # | Question | Recommendation |
 |---|----------|----------------|
@@ -373,5 +313,5 @@ note, graph roles), which data queries and search leave out.
 | O | Honesty checks | Dangling references **fail CI**; unassigned modules and RPCs / CFs missing from flows warn first, then fail. |
 | P | Diagrams | Generated from graph queries; **Mermaid** now (sequence, flowchart, `packet` for key layouts), D2 via WS5 later; click-through to GitHub permalinks. |
 | Q | Generated docs | Committed under `docs/architecture/generated/`; CI fails if stale (no bot commits). |
-| R | Versioning | Architecture changes in commit graphs; `current` holds it bitemporally (valid time = commit time); diffs via `DiffGraphs` with `as_of`. |
-| S | Delivery | Part of cb-bench PR 1 (with the repo graph); initial curated model: the subsystems and the six canonical flows above. |
+| R | Versioning | Architecture changes in commit graphs; `current` holds it bitemporally (valid time = commit time); diffs from two `as_of_valid_time` queries. |
+| S | Delivery | In the app, with the repo graph; initial curated model: the subsystems and the six canonical flows above. |
