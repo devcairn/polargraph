@@ -456,6 +456,7 @@ async fn search_vector_empty_query_returns_invalid_argument() {
     let (svc, _dir) = open();
     let err = svc
         .search_vector(Request::new(SearchVectorRequest {
+            graphs: vec![],
             query: vec![],
             k: 5,
             space: String::new(),
@@ -497,6 +498,7 @@ async fn insert_then_search_vector_finds_nearest() {
 
     let resp = svc
         .search_vector(Request::new(SearchVectorRequest {
+            graphs: vec![],
             query: vec![1.0, 0.0, 0.0],
             k: 1,
             space: String::new(),
@@ -516,6 +518,7 @@ async fn search_vector_empty_index_returns_empty() {
     let (svc, _dir) = open();
     let resp = svc
         .search_vector(Request::new(SearchVectorRequest {
+            graphs: vec![],
             query: vec![1.0, 0.0],
             k: 5,
             space: String::new(),
@@ -543,6 +546,7 @@ async fn search_vector_default_k_when_zero() {
     // k=0 should default to 10, returning all 5 results.
     let resp = svc
         .search_vector(Request::new(SearchVectorRequest {
+            graphs: vec![],
             query: vec![1.0, 0.0],
             k: 0,
             space: String::new(),
@@ -570,6 +574,7 @@ async fn search_vector_respects_ef() {
 
     let resp = svc
         .search_vector(Request::new(SearchVectorRequest {
+            graphs: vec![],
             query: vec![1.0, 0.0],
             k: 1,
             space: String::new(),
@@ -1402,6 +1407,7 @@ async fn insert_vector_named_space_is_independent() {
     // space_a should return only id_a
     let resp = svc
         .search_vector(Request::new(SearchVectorRequest {
+            graphs: vec![],
             query: vec![1.0, 0.0],
             k: 5,
             space: "space_a".into(),
@@ -1525,6 +1531,7 @@ async fn batch_insert_vectors_inserts_all() {
 
     let search = svc
         .search_vector(Request::new(SearchVectorRequest {
+            graphs: vec![],
             query: vec![1.0, 0.0, 0.0],
             k: 1,
             space: "default".into(),
@@ -1604,6 +1611,7 @@ async fn search_vector_in_set_limits_to_allowed() {
     // id1 is the best match but not in the allowed set (id2, id3).
     let resp = svc
         .search_vector_in_set(Request::new(SearchVectorInSetRequest {
+            graphs: vec![],
             space: "default".into(),
             query: vec![1.0, 0.0, 0.0],
             k: 2,
@@ -1625,6 +1633,7 @@ async fn search_vector_in_set_empty_query_returns_invalid_argument() {
     let (svc, _dir) = open();
     let err = svc
         .search_vector_in_set(Request::new(SearchVectorInSetRequest {
+            graphs: vec![],
             space: "default".into(),
             query: vec![],
             k: 5,
@@ -1642,6 +1651,7 @@ async fn search_vector_filtered_missing_filter_returns_invalid_argument() {
     let (svc, _dir) = open();
     let err = svc
         .search_vector_filtered(Request::new(SearchVectorFilteredRequest {
+            graphs: vec![],
             space: "default".into(),
             query: vec![1.0, 0.0],
             k: 5,
@@ -1692,6 +1702,7 @@ async fn search_vector_filtered_by_node_type_returns_only_matching_nodes() {
 
     let resp = svc
         .search_vector_filtered(Request::new(SearchVectorFilteredRequest {
+            graphs: vec![],
             space: "default".into(),
             query: vec![1.0, 0.0, 0.0],
             k: 5,
@@ -1815,6 +1826,7 @@ async fn vector_seed_query_with_node_type_filter() {
 
     let resp = svc
         .vector_seed_query(Request::new(VectorSeedQueryRequest {
+            graphs: vec![],
             space: "default".into(),
             query_vector: vec![1.0, 0.0],
             k: 5,
@@ -1965,6 +1977,7 @@ async fn mmap_storage_mode_insert_and_search() {
 
     let resp = svc
         .search_vector(Request::new(SearchVectorRequest {
+            graphs: vec![],
             query: vec![1.0, 0.0, 0.0],
             k: 1,
             space: "mmap_space".into(),
@@ -8478,4 +8491,88 @@ async fn inference_settings_select_schema_graphs() {
         .into_inner();
     assert!(!settings.all_graphs);
     assert_eq!(settings.schema_graphs, vec!["", "urn:onto"]);
+}
+
+#[tokio::test]
+async fn vector_searches_filter_by_graph() {
+    let (svc, _dir) = open();
+    let (_, a) = new_node();
+    let (_, b) = new_node();
+    for (node, graph) in [(&a, "urn:g:a"), (&b, "")] {
+        svc.insert(Request::new(InsertRequest {
+            triples: vec![text_prop(node.clone(), "name", "x")],
+            graph: graph.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        svc.insert_vector(Request::new(InsertVectorRequest {
+            node_id: Some(node.clone()),
+            vector: vec![1.0, 0.1],
+            space: String::new(),
+        }))
+        .await
+        .unwrap();
+    }
+    let ids = |results: Vec<polargraph_server::proto::VectorSearchResult>| -> Vec<Vec<u8>> {
+        results
+            .into_iter()
+            .map(|r| r.node_id.unwrap().bytes)
+            .collect()
+    };
+    let search = |graphs: Vec<&str>| SearchVectorRequest {
+        query: vec![1.0, 0.0],
+        k: 5,
+        space: String::new(),
+        ef: 0,
+        graphs: graphs.into_iter().map(str::to_string).collect(),
+    };
+
+    let all = svc
+        .search_vector(Request::new(search(vec![])))
+        .await
+        .unwrap();
+    assert_eq!(all.into_inner().results.len(), 2);
+    let only_a = svc
+        .search_vector(Request::new(search(vec!["urn:g:a"])))
+        .await
+        .unwrap();
+    assert_eq!(ids(only_a.into_inner().results), vec![a.bytes.clone()]);
+    let only_b = svc
+        .search_vector(Request::new(search(vec![""])))
+        .await
+        .unwrap();
+    assert_eq!(ids(only_b.into_inner().results), vec![b.bytes.clone()]);
+    let none = svc
+        .search_vector(Request::new(search(vec!["urn:g:missing"])))
+        .await
+        .unwrap();
+    assert!(none.into_inner().results.is_empty());
+
+    let in_set = svc
+        .search_vector_in_set(Request::new(SearchVectorInSetRequest {
+            space: String::new(),
+            query: vec![1.0, 0.0],
+            k: 5,
+            node_ids: vec![a.clone(), b.clone()],
+            graphs: vec!["urn:g:a".into()],
+        }))
+        .await
+        .unwrap();
+    assert_eq!(ids(in_set.into_inner().results), vec![a.bytes.clone()]);
+
+    let seeded = svc
+        .vector_seed_query(Request::new(VectorSeedQueryRequest {
+            space: String::new(),
+            query_vector: vec![1.0, 0.0],
+            k: 5,
+            seed_variable: "n".into(),
+            graphs: vec!["urn:g:a".into()],
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(seeded.bindings.len(), 1);
+    assert_eq!(seeded.bindings[0].vars["n"].bytes, a.bytes);
 }

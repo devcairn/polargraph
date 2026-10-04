@@ -650,6 +650,7 @@ async fn run_filtered_search(
                     type_name: TYPE_NAME.into(),
                 })),
                 user_id: String::new(),
+                graphs: vec![],
             })
             .await
             .context("search_vector_filtered")?

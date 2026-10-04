@@ -230,6 +230,9 @@ struct VectorSearchBody {
     /// HNSW exploration factor. 0 or absent = use server default.
     #[serde(default)]
     ef: u32,
+    /// Only nodes with a live quad in these graphs ("" = default graph).
+    #[serde(default)]
+    graphs: Vec<String>,
 }
 
 fn default_namespace() -> String {
@@ -822,6 +825,7 @@ async fn handle_vector_search(
         k: body.top_k,
         space: body.namespace,
         ef: body.ef,
+        graphs: body.graphs,
     };
 
     let mut client = state.client.clone();

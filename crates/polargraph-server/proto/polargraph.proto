@@ -338,6 +338,9 @@ message SearchVectorRequest {
     /// HNSW exploration factor. Higher = better recall, slower.
     /// 0 means use the server-wide default (--default-vector-ef, default 50).
     uint32         ef    = 4;
+    /// Only nodes with a live quad in one of these graphs ("" = default
+    /// graph); empty = every graph.
+    repeated string graphs = 5;
 }
 
 message VectorSearchResult {
@@ -377,6 +380,9 @@ message SearchVectorFilteredRequest {
     uint32         ef    = 6;
     /// Optional identity for access-control filtering.
     string         user_id = 7;
+    /// Only nodes with a live quad in one of these graphs ("" = default
+    /// graph); empty = every graph.
+    repeated string graphs = 8;
 }
 
 message SearchVectorFilteredResponse {
@@ -390,6 +396,9 @@ message SearchVectorInSetRequest {
     repeated float query    = 2;
     uint32         k        = 3;
     repeated NodeId node_ids = 4;
+    /// Only nodes with a live quad in one of these graphs ("" = default
+    /// graph); empty = every graph.
+    repeated string graphs = 5;
 }
 
 message SearchVectorInSetResponse {
@@ -607,6 +616,9 @@ message VectorSeedQueryRequest {
     /// Named query parameters for `$param` substitution. Keys are parameter names
     /// (without the `$`); values are JSON-encoded `Value` objects.
     map<string, string> params       = 11;
+    /// Only seeds with a live quad in one of these graphs ("" = default
+    /// graph), and the patterns read only these graphs; empty = every graph.
+    repeated string graphs = 12;
 }
 
 message VectorSeedQueryResponse {
