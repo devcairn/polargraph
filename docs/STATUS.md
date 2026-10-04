@@ -34,8 +34,14 @@ Main CI is green on the step 10 merge (`c3fa88f`).
    - Legacy records load as is; no migration. Existing spaces keep their
      old links (improve as vectors are added); a rebuild operation would
      be a new decision.
-   - State: code and tests done, storage tests green; before/after numbers
-     being collected; then full pre-PR checks, PR link, wait for merge.
+   - Cosine with cached norms and a vectorizable dot product, so the
+     heuristic's extra distance work doesn't slow bulk builds.
+   - Result (100K clustered 384-dim vectors): recall@20 0.30 → 1.00 (f32
+     and int8); disk 10.2 → 1.9 GB; f32 build 74 → 65 s. Online inserts do
+     about 2× the distance work: single-writer ingestion at 20K vectors
+     69 → 47 records/s (f32), 120 → 64 (int8); at 100K 54 → 100 (f32).
+   - State: all pre-PR checks green except e2e (running); PR next, then
+     wait for the merge.
 2. **`db/cb-bench`** — engine benchmark (tracker row 11): seed
    (`crates/polargraph-bench/seed/`), generator, SST loader, in-process
    measurements vs the plan targets, JSON/Markdown report. Pushed as WIP
