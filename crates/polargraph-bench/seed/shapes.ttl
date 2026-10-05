@@ -1,0 +1,23 @@
+# cb-bench SHACL shapes — the promotion path validates proposals against
+# these (loaded into <urn:cb:shapes>).
+
+@prefix cb:  <https://cb.example/ont#> .
+@prefix sh:  <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+cb:RecordShape a sh:NodeShape ;
+    sh:targetClass cb:Record ;
+    sh:property [ sh:path cb:title ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ; sh:maxLength 200 ] ;
+    sh:property [ sh:path cb:createdAt ; sh:minCount 1 ; sh:datatype xsd:integer ] ;
+    sh:property [ sh:path cb:sensitivity ; sh:minCount 1 ; sh:in ( "public" "internal" "confidential" ) ] ;
+    sh:property [ sh:path cb:author ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] .
+
+cb:DecisionShape a sh:NodeShape ;
+    sh:targetClass cb:Decision ;
+    sh:property [ sh:path cb:status ; sh:minCount 1 ; sh:maxCount 1 ; sh:in ( "proposed" "accepted" "superseded" ) ] ;
+    sh:property [ sh:path cb:decidedIn ; sh:minCount 1 ; sh:nodeKind sh:IRI ] .
+
+cb:ChunkShape a sh:NodeShape ;
+    sh:targetClass cb:Chunk ;
+    sh:property [ sh:path cb:chunkOf ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path cb:text ; sh:minCount 1 ; sh:datatype xsd:string ] .

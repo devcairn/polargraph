@@ -1,0 +1,46 @@
+# cb-bench ontology — the shape of a company knowledge graph, small enough to
+# read. Loaded into <urn:cb:ontology> and used as the inference schema graph.
+# Exercises: subclass closure, a transitive property, inverses, a
+# sub-property feeding the transitive one, domains and ranges.
+
+@prefix cb:   <https://cb.example/ont#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+
+# ── Classes ──────────────────────────────────────────────────────────────────
+
+cb:Entity    a owl:Class .
+cb:Person    a owl:Class ; rdfs:subClassOf cb:Entity .
+cb:Team      a owl:Class ; rdfs:subClassOf cb:Entity .
+cb:Service   a owl:Class ; rdfs:subClassOf cb:Entity .
+cb:Customer  a owl:Class ; rdfs:subClassOf cb:Entity .
+cb:Org       a owl:Class ; rdfs:subClassOf cb:Entity .
+
+cb:Record    a owl:Class .
+cb:Document  a owl:Class ; rdfs:subClassOf cb:Record .
+cb:Ticket    a owl:Class ; rdfs:subClassOf cb:Record .
+cb:Thread    a owl:Class ; rdfs:subClassOf cb:Record .
+cb:Decision  a owl:Class ; rdfs:subClassOf cb:Record .
+cb:Change    a owl:Class ; rdfs:subClassOf cb:Record .
+cb:Chunk     a owl:Class .
+cb:Project   a owl:Class .
+
+# ── Structure ────────────────────────────────────────────────────────────────
+
+cb:partOf    a owl:TransitiveProperty .
+cb:memberOf  rdfs:subPropertyOf cb:partOf ; rdfs:domain cb:Person ; rdfs:range cb:Team .
+cb:teamOf    rdfs:subPropertyOf cb:partOf ; rdfs:domain cb:Team .
+cb:decidedIn rdfs:subPropertyOf cb:partOf ; rdfs:domain cb:Decision ; rdfs:range cb:Project .
+
+cb:owns      owl:inverseOf cb:ownedBy ; rdfs:domain cb:Team ; rdfs:range cb:Service .
+cb:dependsOn rdfs:domain cb:Service ; rdfs:range cb:Service .
+cb:serves    rdfs:domain cb:Service ; rdfs:range cb:Customer .
+
+# ── Records ──────────────────────────────────────────────────────────────────
+
+cb:mentions   rdfs:range cb:Entity .
+cb:author     rdfs:range cb:Person .
+cb:chunkOf    owl:inverseOf cb:hasChunk ; rdfs:domain cb:Chunk ; rdfs:range cb:Record .
+cb:supersedes owl:inverseOf cb:supersededBy ; rdfs:domain cb:Decision ; rdfs:range cb:Decision .
+cb:implements rdfs:domain cb:Change ; rdfs:range cb:Decision .
