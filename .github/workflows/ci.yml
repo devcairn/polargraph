@@ -147,3 +147,42 @@ jobs:
 
       - name: Run E2E tests
         run: bash tests/e2e/run.sh
+
+  # cb-bench at a small scale (docs/design/cb-bench.md): a regression report
+  # against the plan's performance targets, written to the job summary and
+  # uploaded as JSON. Shared runners are noisy, so there are no thresholds:
+  # the job fails only if the benchmark itself fails.
+  cb-bench:
+    name: cb-bench report
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-bench-
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y librocksdb-dev clang libclang-dev protobuf-compiler
+
+      - name: Run cb-bench (scale 0.05)
+        run: >
+          cargo run --release --locked -p polargraph-bench -- cb
+          --scale 0.05 --samples 100 --budget-secs 15 --ingest-records 300
+          --lag-secs 10 --recall-queries 20
+          --json cb-bench.json --markdown "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: cb-bench-report
+          path: cb-bench.json

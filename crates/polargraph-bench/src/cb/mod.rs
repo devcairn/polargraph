@@ -120,14 +120,20 @@ pub async fn run(args: &CbArgs) -> Result<()> {
     ms.push(measure::promote(&ctx).await?);
     step("time travel");
     ms.push(measure::time_travel(&ctx, loaded.pre_supersession_ts).await?);
+    // Before ingestion: its vectors aren't in the exact baseline.
+    step("recall");
+    let recall = measure::recall(&ctx, args.recall_queries).await?;
     step("ingestion");
     ms.push(measure::ingestion(&ctx, args.ingest_records).await?);
     step("inference lag");
     ms.push(measure::inference_lag(&ctx, args.lag_secs, args.lag_rate).await?);
-    step("recall");
-    let recall = measure::recall(&ctx, args.recall_queries).await?;
 
     let quads = loaded.base_quads + loaded.inferred_quads;
+    // Steady-state size: flush memtables and compact, so the WAL and
+    // superseded files don't count.
+    for cf in polargraph_storage::cf::ALL {
+        let _ = store.compact_cf(cf);
+    }
     let disk = report::dir_size(&dir);
     let report = report::Report {
         scale: plan.scale,
@@ -156,13 +162,40 @@ pub async fn run(args: &CbArgs) -> Result<()> {
     Ok(())
 }
 
+/// OS, CPU model, core count and RAM.
 fn host() -> String {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(0);
+    let sysctl = |key: &str| -> Option<String> {
+        let out = std::process::Command::new("sysctl")
+            .args(["-n", key])
+            .output()
+            .ok()?;
+        Some(String::from_utf8(out.stdout).ok()?.trim().to_string()).filter(|s| !s.is_empty())
+    };
+    let proc_line = |file: &str, key: &str| -> Option<String> {
+        std::fs::read_to_string(file)
+            .ok()?
+            .lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split(':').nth(1))
+            .map(|v| v.trim().to_string())
+    };
+    let model = sysctl("machdep.cpu.brand_string")
+        .or_else(|| proc_line("/proc/cpuinfo", "model name"))
+        .unwrap_or_else(|| std::env::consts::ARCH.to_string());
+    let ram_gib = sysctl("hw.memsize")
+        .and_then(|b| b.parse::<f64>().ok())
+        .map(|b| b / 1024f64.powi(3))
+        .or_else(|| {
+            proc_line("/proc/meminfo", "MemTotal")
+                .and_then(|v| v.split_whitespace().next()?.parse::<f64>().ok())
+                .map(|kb| kb / 1024f64.powi(2))
+        });
     format!(
-        "{} {}, {cpus} CPUs",
+        "{} · {model} · {cpus} cores · {} RAM",
         std::env::consts::OS,
-        std::env::consts::ARCH
+        ram_gib.map_or("? GiB".into(), |g| format!("{g:.0} GiB"))
     )
 }

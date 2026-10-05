@@ -31,11 +31,52 @@ fn mib(b: u64) -> String {
     format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0))
 }
 
+/// The plan's performance targets (`docs/contxtbroker-platform-plan.md`,
+/// "Performance targets") and the measurement that answers each.
+const PLAN_TARGETS: [(&str, &str); 7] = [
+    ("Load one graph (1K quads)", "Load one graph"),
+    ("describe(entity) across visible graphs", "describe(entity)"),
+    ("Hybrid search, k=20", "Hybrid search k=20"),
+    ("Context assembly, 4K tokens", "Context assembly"),
+    (
+        "Promote a 500-quad proposal incl. SHACL",
+        "Promote 500-quad",
+    ),
+    (
+        "Incremental materialization lag",
+        "Incremental materialization lag",
+    ),
+    ("Sustained ingestion", "Sustained ingestion"),
+];
+
 impl Report {
+    /// Per plan target: "met", "missed" or "unmeasured", with the rows.
+    pub fn target_status(&self) -> Vec<(&'static str, &'static str, Vec<&Measurement>)> {
+        PLAN_TARGETS
+            .iter()
+            .map(|(target, prefix)| {
+                let rows: Vec<&Measurement> = self
+                    .measurements
+                    .iter()
+                    .filter(|m| m.name.starts_with(prefix) && m.target.is_some())
+                    .collect();
+                let status = if rows.is_empty() || rows.iter().any(|m| m.meets.is_none()) {
+                    "unmeasured"
+                } else if rows.iter().all(|m| m.meets == Some(true)) {
+                    "met"
+                } else {
+                    "missed"
+                };
+                (*target, status, rows)
+            })
+            .collect()
+    }
+
     pub fn markdown(&self) -> String {
         let mut s = format!(
             "### cb-bench — scale {} ({} base quads, {} inferred, {} chunks)\n\n\
              Host: {}. In-process (no network); reads as a team member with the graph ACL.\n\n\
+             {}\n\
              | Measurement | Target | n | p50 ms | p95 ms | p99 ms | max ms | Rate | Meets | Notes |\n\
              |---|---|---:|---:|---:|---:|---:|---:|:-:|---|\n",
             self.scale,
@@ -43,6 +84,7 @@ impl Report {
             self.load.inferred_quads,
             self.chunks,
             self.host,
+            self.targets_markdown(),
         );
         for m in &self.measurements {
             s.push_str(&format!(
@@ -97,10 +139,55 @@ impl Report {
             s.push_str(&format!("| Recall@20 `{space}` | {r:.3} |\n"));
         }
         s.push_str(&format!(
-            "| Disk | {} ({:.0} bytes per quad, incl. inferred quads, blobs and vectors) |\n",
+            "| Disk (after compaction) | {} ({:.0} bytes per quad, incl. inferred quads, blobs and vectors) |\n",
             mib(self.disk_bytes),
             self.bytes_per_quad
         ));
+        // The plan's team-scenario estimates, scaled linearly.
+        s.push_str(&format!(
+            "| Disk vs plan estimate (~9 GB × scale) | {:.1} GB vs ~{:.1} GB |\n",
+            self.disk_bytes as f64 / 1e9,
+            9.0 * self.scale
+        ));
+        if let Some(sp) = l.spaces.iter().find(|sp| !sp.int8) {
+            if let Some(rss) = sp.rss_growth_bytes {
+                s.push_str(&format!(
+                    "| HNSW RAM, memory mode, vs plan (~4 GB × scale) | {:.2} GB vs ~{:.2} GB |\n",
+                    rss as f64 / 1e9,
+                    4.0 * self.scale
+                ));
+            }
+        }
+        s
+    }
+
+    fn targets_markdown(&self) -> String {
+        let mut s = String::from("| Plan target | Status | Measured |\n|---|:-:|---|\n");
+        for (target, status, rows) in self.target_status() {
+            let measured = rows
+                .iter()
+                .map(|m| match m.rate_per_s {
+                    Some(r) => format!("{r:.0}/s"),
+                    None if m.target.as_deref().is_some_and(|t| t.starts_with("p50")) => {
+                        format!("p50 {} ms", fmt_ms(m.p50_ms))
+                    }
+                    None => format!("p95 {} ms", fmt_ms(m.p95_ms)),
+                })
+                .zip(&rows)
+                .map(|(v, m)| match m.name.rfind('(') {
+                    // Variants of one target (f32 / int8) are labelled.
+                    Some(i) if rows.len() > 1 => format!("{} {v}", &m.name[i..]),
+                    _ => v,
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            let mark = match status {
+                "met" => "✅ met",
+                "missed" => "❌ missed",
+                _ => "— unmeasured",
+            };
+            s.push_str(&format!("| {target} | {mark} | {measured} |\n"));
+        }
         s
     }
 }
