@@ -1,6 +1,6 @@
 # Engine status — handoff
 
-Snapshot: 2026-10-03. Detailed history: §0.2 tracker in
+Snapshot: 2026-10-05. Detailed history: §0.2 tracker in
 `docs/contxtbroker-platform-plan.md`. Per-feature notes: `CLAUDE.md`
 ("Current state"), `docs/design/*`, release notes `docs/upgrade-*.md`.
 
@@ -18,37 +18,49 @@ Snapshot: 2026-10-03. Detailed history: §0.2 tracker in
 | 8.6 | Value bindings (literal-valued query variables; SPARQL values, FILTER, ORDER BY) | — |
 | 9 | Queryable inference (inferred graphs), DRed `--inference`, int8 vectors, counters (`sts` CF) | #15 |
 | 10 | Atomic SPARQL Update (`?dry_run`, `?read_ts`), inference schema graphs, vector `graphs` filter, Cypher reads confined to the dataset, time-travel ACL fix | #16 |
+| 11a | HNSW connectivity (heuristic neighbour selection; recall@20 on clustered data 0.30 → 1.00), memory-mode vectors stored once, cached norms + vectorized dot product | #17 |
 
-Main CI is green on the step 10 merge (`c3fa88f`).
+Main CI is green on the 11a merge (`85d96b4`).
 
 ## In progress
 
-1. **`db/hnsw-connectivity`** — HNSW fix found by cb-bench (Mark chose
-   option A: its own PR first). Tracker row 11a.
-   - Heuristic neighbour selection. Plain nearest-M split clustered data
-     into islands: recall@20 0.17 (f32) / 0.19 (int8) at 20K clustered
-     vectors, unchanged by `ef`.
-   - Memory-mode vectors stored once (`<space>/v/<id>`); node records hold
-     only neighbour lists and are written once per batch. Before: 20K f32
-     vectors grew RSS by 1.4 GB.
-   - Legacy records load as is; no migration. Existing spaces keep their
-     old links (improve as vectors are added); a rebuild operation would
-     be a new decision.
-   - Cosine with cached norms and a vectorizable dot product, so the
-     heuristic's extra distance work doesn't slow bulk builds.
-   - Result (100K clustered 384-dim vectors): recall@20 0.30 → 1.00 (f32
-     and int8); disk 10.2 → 1.9 GB; f32 build 74 → 65 s. Online inserts do
-     about 2× the distance work: single-writer ingestion at 20K vectors
-     69 → 47 records/s (f32), 120 → 64 (int8); at 100K 54 → 100 (f32).
-   - State: all pre-PR checks green except e2e (running); PR next, then
-     wait for the merge.
-2. **`db/cb-bench`** — engine benchmark (tracker row 11): seed
-   (`crates/polargraph-bench/seed/`), generator, SST loader, in-process
-   measurements vs the plan targets, JSON/Markdown report. Pushed as WIP
-   (no PR). Next: rebase onto main after the HNSW merge, add the CI job
-   (`--scale 0.05`, regression report, no hard thresholds), record numbers
-   in `BENCHMARKS.md`, then PR. Company scale (`--scale 20`) is a manual
-   NVMe run.
+- **`db/cb-bench`** — engine benchmark (tracker row 11), rebased on main,
+  **in review**: seed, generator, SST loader, in-process measurements vs
+  the plan targets, report (targets met / missed / unmeasured, hardware,
+  disk by CF), CI job (`--scale 0.05`, job summary, no thresholds),
+  results in `BENCHMARKS.md` Part 4.
+
+## cb-bench results (Apple M4 Pro, 48 GiB, NVMe)
+
+The plan's targets are for company scale (`--scale 20`); measured so far:
+
+| Plan target | Scale 0.05 | Scale 1 (team) |
+|---|---|---|
+| Load one graph p50 ≤ 2 ms | ✅ 0.87 | ✅ 0.76 |
+| describe p95 ≤ 10 ms | ✅ 2.3 | ❌ 15 |
+| Hybrid search p95 ≤ 25 ms | ❌ 256 | ❌ 2,681 |
+| Context assembly p95 ≤ 300 ms | ✅ 260 | ❌ 2,253 |
+| Promote 500 quads p95 ≤ 200 ms | ✅ 58 | ❌ 450 |
+| Inference lag ≤ 2 s | ✅ 1.3 s | ❌ 12.3 s |
+| Ingestion ≥ 50 records/s | ✅ 101 | ❌ 27 |
+
+Engine work these point to (proposed order; needs Mark's prioritisation):
+
+1. **DRed batch cost** — `infer_changes` scans every live inferred quad per
+   batch (`live_inferred`); look up only the facts the batch touches.
+2. **Mention-set hybrid search** — unbounded sets (86K chunks for hot
+   entities) and a per-node visibility scan in `SearchVectorInSet`; needs a
+   design (bounded / ranked mention sets, filtered ANN, or bitmap
+   visibility).
+3. **mmap / int8 bulk append** — quadratic (resize + remap + full flush per
+   vector); grow in chunks. Blocks measuring int8 at scale.
+4. **Promotion latency growth** (58 → 450 ms) — profile SHACL overlay vs
+   `ApplyChanges`.
+5. **Default `ef`** — recall@20 at 2M vectors is 0.64 at ef 100, 0.96 at
+   ef 400; the server default is 50.
+6. **Ingestion at 2M vectors** (27/s) — HNSW insert cost; parallel batch
+   insert or a lower `ef_construction` for online inserts.
+7. Then the company-scale run (`--scale 20`, manual NVMe).
 
 ## Agreed boundaries (engine vs application)
 
@@ -67,7 +79,8 @@ Main CI is green on the step 10 merge (`c3fa88f`).
 - **F1 verified identity** — JWT from an IdP (issuer, audience, JWKS,
   expiry) instead of trusting a bare `user_id` / `x-polargraph-user-id`.
 - **Remove Cypher writes** after the deprecation release.
-- **PQ / vector tiering** — decide from cb-bench numbers.
+- **PQ / vector tiering** — decide from cb-bench numbers (HNSW RAM at team
+  scale is 4.0 GB in memory mode, as the plan estimated).
 - **Inference full-recompute memory** — `materialize()` holds the whole
   closure in memory; a schema change or pruned change log triggers it.
   Risk at company scale; measure with cb-bench, then bound it.
