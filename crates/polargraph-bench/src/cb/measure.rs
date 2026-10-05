@@ -236,15 +236,18 @@ impl Ctx {
     }
 
     /// Hybrid search over an entity's mention set: mention → chunks query,
-    /// then exact k=20 ranking in that set. Returns (top ids, set size).
+    /// then exact k=20 ranking in that set. Returns (top ids, set size,
+    /// ms spent building the set).
     async fn hybrid_in_set(
         &self,
         user: &str,
         entity: &str,
         space: &str,
         query: Vec<f32>,
-    ) -> Result<(Vec<NodeId>, usize)> {
+    ) -> Result<(Vec<NodeId>, usize, f64)> {
+        let t = Instant::now();
         let set = self.mention_chunks(user, entity).await?;
+        let set_ms = ms(t);
         let n = set.len();
         let resp = self
             .server
@@ -266,7 +269,7 @@ impl Ctx {
             .filter_map(|r| r.node_id.as_ref())
             .filter_map(|n| convert::node_id_from_proto(n).ok())
             .collect();
-        Ok((ids, n))
+        Ok((ids, n, set_ms))
     }
 
     /// ANN-seeded join: k=200 candidates joined to chunks of records that
@@ -393,25 +396,32 @@ pub async fn hybrid(ctx: &Ctx) -> Result<Vec<Measurement>> {
     for (space, int8) in &ctx.spaces {
         let label = if *int8 { "int8" } else { "f32" };
         let mut rng = Rng::of(101, 0);
-        let (mut samples, mut sizes) = (Vec::new(), Vec::new());
+        let (mut samples, mut sizes, mut set_ms) = (Vec::new(), Vec::new(), Vec::new());
         let start = Instant::now();
         while ctx.budget.more(samples.len(), start) {
             let user = ctx.user(&mut rng);
             let entity = ctx.plan.entity(ctx.mentions.sample(&mut rng));
             let q = ctx.entity_query(&mut rng);
             let t = Instant::now();
-            let (_, n) = ctx.hybrid_in_set(&user, &entity, space, q).await?;
+            let (_, n, set) = ctx.hybrid_in_set(&user, &entity, space, q).await?;
             samples.push(ms(t));
             sizes.push(n);
+            set_ms.push(set);
         }
         sizes.sort_unstable();
+        set_ms.sort_by(|a, b| a.total_cmp(b));
+        let set_p95 = set_ms
+            .get((set_ms.len() * 95).div_ceil(100).saturating_sub(1))
+            .copied()
+            .unwrap_or(f64::NAN);
         out.push(summarize(
             &format!("Hybrid search k=20, mention set ({label})"),
             Goal::P95(25.0),
             samples,
             None,
             format!(
-                "set size: median {}, max {}",
+                "set size: median {}, max {}; building the set (mention query) p95 {set_p95:.0} ms, \
+                 the rest is SearchVectorInSet",
                 sizes.get(sizes.len() / 2).copied().unwrap_or(0),
                 sizes.last().copied().unwrap_or(0)
             ),
@@ -460,7 +470,7 @@ pub async fn context_assembly(ctx: &Ctx) -> Result<Option<Measurement>> {
         let q = ctx.entity_query(&mut rng);
         let t = Instant::now();
         ctx.describe(&user, &entity).await?;
-        let (top, _) = ctx.hybrid_in_set(&user, &entity, space, q).await?;
+        let (top, _, _) = ctx.hybrid_in_set(&user, &entity, space, q).await?;
         let mut text = 0usize;
         for c in top {
             let resp = ctx

@@ -14,6 +14,10 @@ pub struct Report {
     pub recall: Vec<(String, f64)>,
     pub disk_bytes: u64,
     pub bytes_per_quad: f64,
+    /// Column families by size after compaction (RocksDB estimate).
+    pub cf_sizes: Vec<(String, u64)>,
+    /// `.vecs` files (mmap / int8 full vectors).
+    pub vectors_dir_bytes: u64,
     pub host: String,
 }
 
@@ -142,6 +146,17 @@ impl Report {
             "| Disk (after compaction) | {} ({:.0} bytes per quad, incl. inferred quads, blobs and vectors) |\n",
             mib(self.disk_bytes),
             self.bytes_per_quad
+        ));
+        let by_cf: Vec<String> = self
+            .cf_sizes
+            .iter()
+            .take(8)
+            .map(|(cf, b)| format!("`{cf}` {}", mib(*b)))
+            .collect();
+        s.push_str(&format!(
+            "| Disk by column family | {}; `.vecs` files {} |\n",
+            by_cf.join(", "),
+            mib(self.vectors_dir_bytes)
         ));
         // The plan's team-scenario estimates, scaled linearly.
         s.push_str(&format!(

@@ -135,12 +135,30 @@ pub async fn run(args: &CbArgs) -> Result<()> {
         let _ = store.compact_cf(cf);
     }
     let disk = report::dir_size(&dir);
+    let mut cf_sizes: Vec<(String, u64)> = {
+        use polargraph_server::proto::{
+            polar_graph_service_server::PolarGraphService, ShowIndexesRequest,
+        };
+        ctx.server
+            .show_indexes(tonic::Request::new(ShowIndexesRequest {}))
+            .await?
+            .into_inner()
+            .column_families
+            .into_iter()
+            .map(|c| (c.name, c.approx_size_bytes))
+            .filter(|(_, b)| *b > 0)
+            .collect()
+    };
+    cf_sizes.sort_by_key(|c| std::cmp::Reverse(c.1));
+    let vectors_dir = report::dir_size(&dir.join("vectors"));
     let report = report::Report {
         scale: plan.scale,
         quads,
         chunks: plan.chunks() as u64,
         disk_bytes: disk,
         bytes_per_quad: disk as f64 / quads.max(1) as f64,
+        cf_sizes,
+        vectors_dir_bytes: vectors_dir,
         load: loaded,
         measurements: ms,
         recall,

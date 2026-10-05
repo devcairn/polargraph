@@ -77,3 +77,39 @@ crates/polargraph-bench/
 | H | CI: `SF = 0.05` regression report, no hard thresholds; company scale manual on NVMe, recorded in `BENCHMARKS.md`. |
 | J | Synthetic vectors (clustered, so recall is measurable); f32 and int8 spaces. |
 | K | One engine PR: seed, generator, loader, measurements, report, CI job. |
+
+## 6. As built
+
+`polargraph-bench cb` (`crates/polargraph-bench/src/cb/`, seed in
+`crates/polargraph-bench/seed/`):
+
+- **Scale** (`--scale SF`, linear): 300 people, 15 teams, 120 services, 400
+  customers, 100K records × 20 chunks, 200 decision projects at SF 1;
+  384-dim vectors in 256 topic clusters. Generation is deterministic
+  (SplitMix64 per item), so vectors are regenerated for exact recall.
+- **Load**: seed + generated base through `SstImporter` in 1M-quad batches
+  (IRIs into the dictionary, chunk text in `blob`); supersession on the
+  live path (status `Replace`, so decisions have history); team-group
+  grants; inference schema graph = `<urn:cb:ontology>` (runs the full
+  materialization); vector spaces `cb_chunks_f32` (memory) and
+  `cb_chunks_int8` (`--vectors both|f32|int8|none`).
+- **Measure**: in-process through `PolarGraphServer` (the RPC handlers,
+  graph ACL included; no network), reads as a sampled person. Each latency
+  scenario stops at `--samples` or `--budget-secs`. Rows: the seven plan
+  targets, plus ANN + join hybrid, time travel, recall@20 at ef 100 / 400
+  (before ingestion), load and capacity figures.
+- **Mapping notes**: "Load one graph" exports decision-project graphs
+  nearest 1K quads (`ExportGraph`, as the owning team); "Hybrid search" is
+  the plan's mitigation shape — mention set via `Query`, then
+  `SearchVectorInSet` k = 20; context assembly is a proxy (describe +
+  hybrid + top-chunk text); promotion validates a 500-quad overlay then
+  `ApplyChanges` (adds to the approved graph, retractions from the proposal
+  graph) with `read_ts`; inference lag runs the `--inference` task while
+  decisions are written at `--lag-rate`.
+- **Report**: plan targets as met / missed / unmeasured, then all rows;
+  JSON (`--json`) and Markdown (`--markdown`, appended — CI writes the job
+  summary).
+- **CI**: job `cb-bench report` (`.github/workflows/ci.yml`), scale 0.05
+  on main and PRs into main, no thresholds.
+- **Finding**: the first runs exposed HNSW recall collapsing on clustered
+  data and heavy f32 vector writes — fixed separately (tracker row 11a).
