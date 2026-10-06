@@ -28,7 +28,7 @@ Main CI on the cb-bench merge (`09c9817`): see the tracker.
 Mark chose findings **#1 and #3** to build now (2026-10-06), as separate
 PRs, #1 first; the rest are recorded below for later.
 
-- **`db/dred-batch-cost`** — finding #1 (in progress).
+- **`db/dred-batch-cost`** — finding #1, **in review**: team-scale inference lag p95 13.0 s → 0.97 s.
 - Then finding #3 (int8 / mmap bulk append), its own branch.
 
 ## cb-bench results (Apple M4 Pro, 48 GiB, NVMe)
