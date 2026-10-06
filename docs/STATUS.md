@@ -1,6 +1,6 @@
 # Engine status — handoff
 
-Snapshot: 2026-10-05. Detailed history: §0.2 tracker in
+Snapshot: 2026-10-06. Detailed history: §0.2 tracker in
 `docs/contxtbroker-platform-plan.md`. Per-feature notes: `CLAUDE.md`
 ("Current state"), `docs/design/*`, release notes `docs/upgrade-*.md`.
 
@@ -18,17 +18,18 @@ Snapshot: 2026-10-05. Detailed history: §0.2 tracker in
 | 8.6 | Value bindings (literal-valued query variables; SPARQL values, FILTER, ORDER BY) | — |
 | 9 | Queryable inference (inferred graphs), DRed `--inference`, int8 vectors, counters (`sts` CF) | #15 |
 | 10 | Atomic SPARQL Update (`?dry_run`, `?read_ts`), inference schema graphs, vector `graphs` filter, Cypher reads confined to the dataset, time-travel ACL fix | #16 |
+| 11 | cb-bench: engine benchmark vs the plan targets, CI report job, results in `BENCHMARKS.md` Part 4 | #18 |
 | 11a | HNSW connectivity (heuristic neighbour selection; recall@20 on clustered data 0.30 → 1.00), memory-mode vectors stored once, cached norms + vectorized dot product | #17 |
 
-Main CI is green on the 11a merge (`85d96b4`).
+Main CI on the cb-bench merge (`09c9817`): see the tracker.
 
 ## In progress
 
-- **`db/cb-bench`** — engine benchmark (tracker row 11), rebased on main,
-  **in review**: seed, generator, SST loader, in-process measurements vs
-  the plan targets, report (targets met / missed / unmeasured, hardware,
-  disk by CF), CI job (`--scale 0.05`, job summary, no thresholds),
-  results in `BENCHMARKS.md` Part 4.
+Mark chose findings **#1 and #3** to build now (2026-10-06), as separate
+PRs, #1 first; the rest are recorded below for later.
+
+- **`db/dred-batch-cost`** — finding #1 (in progress).
+- Then finding #3 (int8 / mmap bulk append), its own branch.
 
 ## cb-bench results (Apple M4 Pro, 48 GiB, NVMe)
 
@@ -44,23 +45,71 @@ The plan's targets are for company scale (`--scale 20`); measured so far:
 | Inference lag ≤ 2 s | ✅ 1.3 s | ❌ 12.3 s |
 | Ingestion ≥ 50 records/s | ✅ 101 | ❌ 27 |
 
-Engine work these point to (proposed order; needs Mark's prioritisation):
+## cb-bench findings
 
-1. **DRed batch cost** — `infer_changes` scans every live inferred quad per
-   batch (`live_inferred`); look up only the facts the batch touches.
-2. **Mention-set hybrid search** — unbounded sets (86K chunks for hot
-   entities) and a per-node visibility scan in `SearchVectorInSet`; needs a
-   design (bounded / ranked mention sets, filtered ANN, or bitmap
-   visibility).
-3. **mmap / int8 bulk append** — quadratic (resize + remap + full flush per
-   vector); grow in chunks. Blocks measuring int8 at scale.
-4. **Promotion latency growth** (58 → 450 ms) — profile SHACL overlay vs
-   `ApplyChanges`.
-5. **Default `ef`** — recall@20 at 2M vectors is 0.64 at ef 100, 0.96 at
-   ef 400; the server default is 50.
-6. **Ingestion at 2M vectors** (27/s) — HNSW insert cost; parallel batch
-   insert or a lower `ef_construction` for online inserts.
-7. Then the company-scale run (`--scale 20`, manual NVMe).
+Numbers are from `BENCHMARKS.md` Part 4 (scale 1 = 8.0M base + 4.1M
+inferred quads, 2M 384-dim chunk vectors).
+
+1. **Inference lag grows with the store** — *building now.*
+   - Cause: each DRed batch (`owl_rl::infer_changes`) built a map of every
+     live inferred quad (`live_inferred`, `crates/polargraph-storage/src/owl_rl.rs:731`)
+     to check over-deletes and find quads to close.
+   - Evidence: lag p95 1.3 s at scale 0.05 → 12.3 s at scale 1 (4.1M
+     inferred quads), at 20 commits/s.
+   - Approach: memoized point lookups of only the facts a batch touches;
+     live count kept in META.
+2. **Hybrid search over a mention set doesn't scale** — *needs a design note.*
+   - Cause: hot entities' mention sets are unbounded (up to 86K chunks at
+     team scale; Zipf 1.1); building the set (mention → chunk query) is up
+     to 323 ms p95; `SearchVectorInSet`
+     (`crates/polargraph-server/src/service.rs:2926`) then checks graph
+     visibility node by node (`node_visible_in`, `service.rs:1010`, one
+     subject scan per node) before exact scoring.
+   - Evidence: p95 256 ms at scale 0.05, 2,681 ms at scale 1 (target
+     25 ms); context assembly misses for the same reason (2,253 ms). The
+     ANN + join alternative is 7 ms but keeps a median of one result.
+   - Approaches to weigh: skip the per-node check when the set came from
+     an ACL-scoped query; filtered ANN (graph search restricted to an
+     allowed set or bitmap); bounded / pre-ranked mention sets (recency,
+     importance) per the plan's "never materialize the full fan-out".
+3. **int8 / mmap bulk load is quadratic** — *building after #1.*
+   - Cause: `MmapState::append` (`crates/polargraph-storage/src/hnsw.rs:218`)
+     resizes the `.vecs` file, remaps it and flushes the whole mapping on
+     every vector.
+   - Evidence: 100K vectors int8 64 s (≈ f32 60 s); 2M vectors: f32 37 min,
+     int8 unfinished after 80 min (~1.5M appended).
+   - Approach: grow the file geometrically, remap only on growth, flush
+     once per batch (or on close); count in the header kept consistent.
+4. **Promotion slows as the approved graph grows** — *needs profiling.*
+   - Cause unknown: `ValidateShapes` overlay (`service.rs:2145`) vs
+     `ApplyChanges` with `read_ts` (`service.rs:1938`).
+   - Evidence: p95 58 ms at scale 0.05 → 450 ms at scale 1 for the same
+     500-quad proposal (target 200 ms).
+   - Approach: time the two halves in cb-bench; check whether SHACL target
+     resolution (`sh:targetClass` with subclasses) scans the whole class.
+5. **Default `ef` too low at scale** — *small change, decision on value.*
+   - Cause: server default `ef` 50 (`service.rs:273`, `--default-vector-ef`).
+   - Evidence: recall@20 at 2M clustered vectors 0.64 at ef 100, 0.96 at
+     ef 400 (1.0 at 100K for both).
+   - Approach: raise the default (e.g. 200), or scale it with space size;
+     measure latency vs recall in cb-bench.
+6. **Ingestion at 2M vectors** — *needs measurement of options.*
+   - Cause: HNSW inserts into a 2M-vector graph dominate (~36 ms per
+     record of 20 chunks, single writer; `ef_construction` 200,
+     `hnsw.rs:67`).
+   - Evidence: 101 records/s at scale 0.05 → 27/s at scale 1 (target 50).
+   - Approach: parallel batch insert (search phase under a read lock),
+     a lower `ef_construction` for online inserts, or int8 for chunk
+     spaces (cheaper distances; depends on #3).
+7. **Company-scale run** (`--scale 20`, manual, NVMe) — after #1–#3 (and
+   ideally #2) land; needs int8 for the vector budget.
+
+**Open decision — rebuild old HNSW spaces.** Spaces built before the
+connectivity fix (#17) keep their old links and only improve as vectors
+are added. A rebuild operation (re-insert every vector into a fresh
+index, swap) would restore full recall for existing data; not built —
+decide whether it's needed (it matters only for stores with vectors
+written before #17).
 
 ## Agreed boundaries (engine vs application)
 
@@ -88,8 +137,7 @@ Engine work these point to (proposed order; needs Mark's prioritisation):
   vector `graphs`, `ApplyChanges` helpers) are only partly wrapped.
 - **Node-level ACL cache** — the legacy `AccessCache` (per-user
   `HashSet<NodeId>`) won't scale; graph-level ACL is the primary model.
-- **HNSW rebuild** — an operation to rebuild a space built before the
-  connectivity fix (needs a decision).
+- **HNSW rebuild** — see "Open decision" above.
 
 ## Working rules
 
