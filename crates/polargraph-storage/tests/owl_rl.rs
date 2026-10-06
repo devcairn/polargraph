@@ -537,3 +537,42 @@ fn schema_axioms_come_only_from_the_selected_schema_graphs() {
     owl_rl::set_schema_graphs(&store, None).unwrap();
     assert!(is("http://ex/Pet"));
 }
+
+/// Live quads in the inferred graphs.
+fn live_inferred_count(store: &TripleStore) -> u64 {
+    let ids: Vec<GraphId> = owl_rl::InferredGraphs::load(store)
+        .ids()
+        .iter()
+        .map(GraphId)
+        .collect();
+    store
+        .snapshot(Timestamp(store.oracle_ts()))
+        .scan_scoped(None, None, None, &GraphScope::set(ids))
+        .unwrap()
+        .len() as u64
+}
+
+#[test]
+fn incremental_runs_report_the_live_inferred_count() {
+    let (store, _d) = open_store();
+    rel(
+        &store,
+        "",
+        "http://ex/Cat",
+        RDFS_SUBCLASS_OF,
+        "http://ex/Animal",
+    );
+    rel(&store, "", "http://ex/tom", RDF_TYPE, "http://ex/Cat");
+    let full = owl_rl::materialize(&store, true).unwrap();
+    assert_eq!(full.derived_triples, live_inferred_count(&store));
+
+    rel(&store, "", "http://ex/kit", RDF_TYPE, "http://ex/Cat");
+    let add = owl_rl::infer_changes(&store).unwrap().unwrap();
+    assert_eq!((add.asserted, add.full), (1, false));
+    assert_eq!(add.derived_triples, live_inferred_count(&store));
+
+    retract(&store, "", "http://ex/tom", RDF_TYPE, "http://ex/Cat");
+    let del = owl_rl::infer_changes(&store).unwrap().unwrap();
+    assert_eq!(del.closed, 1);
+    assert_eq!(del.derived_triples, live_inferred_count(&store));
+}
