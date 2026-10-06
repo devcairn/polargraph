@@ -862,6 +862,8 @@ impl TripleStore {
             }
         }
 
+        // The records written below refer to the vector by its mmap index.
+        idx.flush_vectors()?;
         self.inner.db.write(batch)?;
         Ok(())
     }
@@ -1035,6 +1037,11 @@ impl TripleStore {
             }
         }
 
+        // The records written below refer to vectors by their mmap index.
+        if let Err(e) = idx.flush_vectors() {
+            errors.push((0, e));
+            return (0, errors);
+        }
         if let Err(e) = self.inner.db.write(batch) {
             errors.push((0, StorageError::Rocks(e)));
             return (0, errors);
