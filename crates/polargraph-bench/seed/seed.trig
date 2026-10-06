@@ -1,0 +1,69 @@
+# cb-bench seed — one hand-built slice of the company the generator scales
+# up: an org with two teams, people, services, a customer, records with
+# chunks and mentions, and a decision project with a supersession.
+# Every generated instance follows these shapes (see src/cb/generate.rs).
+# Graph layout and access:
+#   <urn:cb:approved:org>       spine entities  (everyone reads)
+#   <urn:cb:records:team-N>     a team's records (the team reads)
+#   <urn:cb:project:N>          a decision project (the owning team reads)
+#   <urn:cb:proposals:team-N>   unreviewed changes (the team writes)
+
+@prefix cb:  <https://cb.example/ont#> .
+@prefix e:   <https://cb.example/id/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+<urn:cb:approved:org> {
+    e:org a cb:Org ; cb:name "Example Co" .
+
+    e:team-seed-platform a cb:Team ; cb:name "Platform" ; cb:teamOf e:org .
+    e:team-seed-billing  a cb:Team ; cb:name "Billing"  ; cb:teamOf e:org .
+
+    e:person-seed-ada a cb:Person ; cb:name "Ada" ; cb:role "engineer" ; cb:memberOf e:team-seed-platform .
+    e:person-seed-bo  a cb:Person ; cb:name "Bo"  ; cb:role "manager"  ; cb:memberOf e:team-seed-billing .
+
+    e:service-seed-ledger a cb:Service ; cb:name "ledger" ; cb:tier 1 .
+    e:service-seed-gate   a cb:Service ; cb:name "gate"   ; cb:tier 2 ; cb:dependsOn e:service-seed-ledger .
+    e:team-seed-billing  cb:owns e:service-seed-ledger .
+    e:team-seed-platform cb:owns e:service-seed-gate .
+
+    e:customer-seed-acme a cb:Customer ; cb:name "Acme" ; cb:segment "enterprise" .
+    e:service-seed-ledger cb:serves e:customer-seed-acme .
+}
+
+<urn:cb:records:team-seed-platform> {
+    e:record-seed-1 a cb:Document ;
+        cb:title "Gate rate limiting runbook" ;
+        cb:createdAt 1790000000 ;
+        cb:author e:person-seed-ada ;
+        cb:sensitivity "internal" ;
+        cb:source "wiki" ;
+        cb:mentions e:service-seed-gate , e:service-seed-ledger .
+    e:record-seed-1-c0 a cb:Chunk ; cb:chunkOf e:record-seed-1 ; cb:position 0 ;
+        cb:text "When the gate sheds load it returns 429 and the ledger stays protected." .
+    e:record-seed-1-c1 a cb:Chunk ; cb:chunkOf e:record-seed-1 ; cb:position 1 ;
+        cb:text "Raise the bucket size only after checking the ledger's write headroom." .
+}
+
+<urn:cb:project:seed-1> {
+    e:project-seed-1 a cb:Project ; cb:name "Ledger v2" ; cb:ownedByTeam e:team-seed-billing .
+    e:decision-seed-1 a cb:Decision ;
+        cb:title "Store amounts as integer cents" ;
+        cb:createdAt 1790000100 ;
+        cb:sensitivity "internal" ;
+        cb:status "superseded" ;
+        cb:decidedIn e:project-seed-1 ;
+        cb:mentions e:service-seed-ledger .
+    e:decision-seed-2 a cb:Decision ;
+        cb:title "Store amounts as decimal with currency" ;
+        cb:createdAt 1790000200 ;
+        cb:sensitivity "internal" ;
+        cb:status "accepted" ;
+        cb:decidedIn e:project-seed-1 ;
+        cb:supersedes e:decision-seed-1 ;
+        cb:mentions e:service-seed-ledger , e:customer-seed-acme .
+    e:change-seed-1 a cb:Change ;
+        cb:title "Migrate ledger columns" ;
+        cb:createdAt 1790000300 ;
+        cb:sensitivity "internal" ;
+        cb:implements e:decision-seed-2 .
+}

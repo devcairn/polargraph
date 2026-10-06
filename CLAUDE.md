@@ -46,7 +46,7 @@ polargraph/
     ├── polargraph-sparql/      # SPARQL 1.1 translation layer (library, no server dep)
     ├── polargraph-shacl/       # SHACL Core validation over the store (library)
     ├── polargraph-server/      # gRPC binary (polargraphd)
-    ├── polargraph-bench/       # end-to-end benchmark scenarios (binary)
+    ├── polargraph-bench/       # benchmark scenarios incl. `cb` (plan targets) and BSBM (binary)
     ├── polargraph-import/      # bulk N-Triples importer via SST ingestion (binary)
     └── polargraph-rest/        # HTTP/JSON REST gateway — proxies to polargraphd over gRPC (binary)
 ```
@@ -518,6 +518,7 @@ entries were superseded by storage format v3 (last entries below).
 - [x] Step 9 (`docs/design/step9-inference-vectors-stats.md`, release note `docs/upgrade-step9.md`) — 9a: OWL 2 RL writes queryable inferred graphs (`urn:pg:inferred:<g>`, service-only `urn:pg:inferred:cross`), ACL inherited from the source graph, `exclude_inferred` opt-out, recompute-and-diff `materialize()`, canonical IRI hashing (RDF-loaded schema now fires), `drvg` retired; 9b: `--inference` background DRed (`infer_changes`) from the change log; 9c: int8 vector quantization (`VectorSpaceDef.quantization`, exact re-ranking); 9d: counters (`sts` CF, `IncrementCounters` / `GetCounters`, REST `/counters`)
 - [x] Step 10 (`docs/design/type-packages-boundary.md`: type packages are application-only; release note `docs/upgrade-step10.md`) — atomic SPARQL Update: data operations compile to one `ApplyChanges` changeset (`?dry_run`, `?read_ts`, WHERE at one read point, graph ops can't be mixed); `QuadRef.all_graphs`, `ApplyChangesRequest.edge_annotations`; inference schema graphs (`Get`/`SetInferenceSettings`, REST `/inference/settings`); `graphs` filter on vector RPCs; Cypher reads confined to the dataset (`Snapshot::within_graphs`); fixed time-travel reads (`as_of_tx_time` / `snapshot_ts`) bypassing the graph ACL
 - [x] HNSW connectivity + vector write cost (found by cb-bench) — heuristic neighbour selection for new links and pruning (plain nearest-M split clustered data into islands: recall@20 0.17–0.19 at 20K clustered vectors regardless of `ef`); memory-mode vectors stored once under `<space>/v/<id>` (node records carry only neighbour lists; legacy inline records still load, no migration); `batch_insert_vectors` writes each changed node once per batch; clustered-data recall tests in `hnsw::tests`
+- [x] cb-bench (plan step 11, `docs/design/cb-bench.md`) — `polargraph-bench cb --scale SF`: hand-built seed (`crates/polargraph-bench/seed/`: ontology, SHACL shapes, TriG), deterministic generator (spine, records + chunks with Zipf mentions, decision projects with supersession history, team ACL groups, clustered vectors), SST bulk load, in-process measurements through `PolarGraphServer` as a team member against the plan's targets, report (met / missed / unmeasured, hardware, disk by CF; `--json`, `--markdown`); CI job `cb-bench report` (scale 0.05, job summary, no thresholds); results and findings in `BENCHMARKS.md` Part 4
 
 ## Adding a new predicate
 

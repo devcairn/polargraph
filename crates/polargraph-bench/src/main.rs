@@ -15,6 +15,7 @@
 //! RocksDB — no server needed.
 
 mod bsbm;
+mod cb;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -66,6 +67,9 @@ enum Command {
     VectorNearGraph,
     /// BSBM 12-query e-commerce suite — no server needed
     Bsbm(BsbmArgs),
+    /// ContxtBroker engine benchmark: synthetic company at a scale factor,
+    /// measured against the plan's targets — no server needed
+    Cb(cb::CbArgs),
 }
 
 #[derive(Args, Debug)]
@@ -871,6 +875,9 @@ async fn main() -> Result<()> {
         }
         Command::Bsbm(args) => {
             run_bsbm_scenario(args).await?;
+        }
+        Command::Cb(args) => {
+            cb::run(args).await?;
         }
         Command::Write(args) => {
             let client = PolarGraphServiceClient::connect(args.addr.clone())
