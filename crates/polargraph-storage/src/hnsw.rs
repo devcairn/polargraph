@@ -143,6 +143,11 @@ pub struct MmapState {
     pub path: PathBuf,
     /// `None` only when `count == 0` (file has 12-byte header, no vector data yet).
     pub mmap: Option<MmapMut>,
+    /// Vectors the file has room for (the file grows geometrically, so an
+    /// append rarely resizes and remaps it).
+    capacity: usize,
+    /// Byte range written since the last [`MmapState::flush`].
+    dirty: Option<(usize, usize)>,
 }
 
 impl MmapState {
@@ -169,6 +174,8 @@ impl MmapState {
             file,
             path,
             mmap: None,
+            capacity: 0,
+            dirty: None,
         })
     }
 
@@ -197,6 +204,9 @@ impl MmapState {
             None
         };
 
+        // Files may be longer than `count` vectors (spare capacity); the
+        // header count is authoritative.
+        let capacity = (file_len - Self::HEADER) / (dims * 4).max(1);
         Ok(Self {
             dims,
             count,
@@ -204,6 +214,8 @@ impl MmapState {
             file,
             path,
             mmap,
+            capacity,
+            dirty: None,
         })
     }
 
@@ -214,34 +226,61 @@ impl MmapState {
 
     /// Append a new vector to the file. Returns the assigned dense index.
     ///
-    /// Drops and remaps the mmap to accommodate the larger file.
+    /// The file grows geometrically; it is resized and remapped only when
+    /// full. Nothing is flushed here: call [`MmapState::flush`] once per
+    /// batch, before committing records that reference the new vectors.
+    /// (Resizing, remapping and flushing the whole file per vector made bulk
+    /// loads quadratic.)
     pub fn append(&mut self, id: NodeId, vector: &[f32]) -> Result<usize, StorageError> {
         debug_assert_eq!(vector.len(), self.dims, "vector length != dims");
         let idx = self.count;
-
-        // Must drop the mmap before resizing the file (OS requirement).
-        drop(self.mmap.take());
-
-        let new_file_len = Self::HEADER + (self.count + 1) * self.dims * 4;
-        self.file.set_len(new_file_len as u64)?;
-
-        let mut mmap = unsafe { MmapMut::map_mut(&self.file)? };
+        self.ensure_capacity(idx + 1)?;
+        let mmap = self.mmap.as_mut().expect("mapped after ensure_capacity");
 
         // Write vector bytes at the assigned offset.
         let byte_start = Self::HEADER + idx * self.dims * 4;
         let vector_bytes: &[u8] =
             unsafe { std::slice::from_raw_parts(vector.as_ptr() as *const u8, vector.len() * 4) };
-        mmap[byte_start..byte_start + vector_bytes.len()].copy_from_slice(vector_bytes);
+        let byte_end = byte_start + vector_bytes.len();
+        mmap[byte_start..byte_end].copy_from_slice(vector_bytes);
 
         // Update count in header.
         self.count += 1;
         mmap[4..12].copy_from_slice(&(self.count as u64).to_le_bytes());
 
-        mmap.flush()?;
-
-        self.mmap = Some(mmap);
+        self.dirty = Some(match self.dirty {
+            Some((a, b)) => (a.min(byte_start), b.max(byte_end)),
+            None => (byte_start, byte_end),
+        });
         self.id_to_index.insert(id, idx);
         Ok(idx)
+    }
+
+    /// Make room for `n` vectors: double the capacity (at least 1 024
+    /// vectors), resize the file and remap.
+    fn ensure_capacity(&mut self, n: usize) -> Result<(), StorageError> {
+        if n <= self.capacity && self.mmap.is_some() {
+            return Ok(());
+        }
+        let capacity = n.max(self.capacity * 2).max(1024);
+        // Must drop the mmap before resizing the file (OS requirement); the
+        // mapping is shared, so written pages stay in the file.
+        drop(self.mmap.take());
+        self.file
+            .set_len((Self::HEADER + capacity * self.dims * 4) as u64)?;
+        self.mmap = Some(unsafe { MmapMut::map_mut(&self.file)? });
+        self.capacity = capacity;
+        Ok(())
+    }
+
+    /// Write the vectors appended since the last flush, and the header, to
+    /// disk.
+    pub fn flush(&mut self) -> Result<(), StorageError> {
+        if let (Some((a, b)), Some(mmap)) = (self.dirty.take(), self.mmap.as_ref()) {
+            mmap.flush_range(a, b - a)?;
+            mmap.flush_range(0, Self::HEADER)?;
+        }
+        Ok(())
     }
 
     /// Return a borrowed `&[f32]` slice for `id`'s vector.
@@ -254,6 +293,9 @@ impl MmapState {
     /// satisfying `f32` alignment requirements.
     pub fn get_slice(&self, id: NodeId) -> Option<&[f32]> {
         let &idx = self.id_to_index.get(&id)?;
+        if idx >= self.count {
+            return None;
+        }
         let mmap = self.mmap.as_ref()?;
         let byte_start = Self::HEADER + idx * self.dims * 4;
         let byte_end = byte_start + self.dims * 4;
@@ -492,6 +534,15 @@ impl HnswIndex {
 
     pub fn is_mmap(&self) -> bool {
         self.mmap_path.is_some()
+    }
+
+    /// Flush vectors appended to the mmap file since the last flush (no-op
+    /// in memory mode). Call before committing the records that use them.
+    pub fn flush_vectors(&mut self) -> Result<(), StorageError> {
+        match &mut self.mmap_state {
+            Some(ms) => ms.flush(),
+            None => Ok(()),
+        }
     }
 
     // ── persistence helpers (called by store.rs) ──────────────────────────────
@@ -1495,16 +1546,48 @@ mod tests {
     }
 
     #[test]
-    fn mmap_state_file_size_matches_layout() {
+    fn mmap_state_grows_geometrically_and_reopens() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("size.vecs");
         let mut ms = MmapState::create(path.clone(), 3).unwrap();
-        let id = make_id(5);
-        ms.append(id, &[1.0, 2.0, 3.0]).unwrap();
-        ms.append(id, &[4.0, 5.0, 6.0]).unwrap(); // overwrite with same id for size check
+        ms.append(make_id(1), &[1.0, 2.0, 3.0]).unwrap();
+        ms.append(make_id(2), &[4.0, 5.0, 6.0]).unwrap();
+        // Room for 1 024 vectors up front; the header counts two.
+        let len = |p: &PathBuf| std::fs::metadata(p).unwrap().len() as usize;
+        assert_eq!(len(&path), MmapState::HEADER + 1024 * 3 * 4);
+        for i in 2..1100u32 {
+            let v = i as f32;
+            ms.append(NodeId(Uuid::from_u128(i as u128 + 100)), &[v, v, v])
+                .unwrap();
+        }
+        assert_eq!(len(&path), MmapState::HEADER + 2048 * 3 * 4, "doubled once");
+        ms.flush().unwrap();
+        drop(ms);
 
-        let expected = MmapState::HEADER + 2 * 3 * 4; // 12 + 2*12 = 36
-        assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, expected);
+        let mut ms = MmapState::open(path.clone()).unwrap();
+        assert_eq!(ms.count, 1100);
+        ms.register_id(make_id(2), 1);
+        assert_eq!(ms.get_slice(make_id(2)).unwrap(), &[4.0, 5.0, 6.0]);
+        // Appends after reopening continue at the counted end.
+        assert_eq!(ms.append(make_id(9), &[9.0, 9.0, 9.0]).unwrap(), 1100);
+    }
+
+    #[test]
+    fn mmap_state_opens_exact_size_files() {
+        // Files written before spare capacity: header + exactly `count` vectors.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.vecs");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&1.5f32.to_le_bytes());
+        bytes.extend_from_slice(&2.5f32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let mut ms = MmapState::open(path).unwrap();
+        ms.register_id(make_id(1), 0);
+        assert_eq!(ms.get_slice(make_id(1)).unwrap(), &[1.5, 2.5]);
+        assert_eq!(ms.append(make_id(2), &[3.0, 4.0]).unwrap(), 1);
+        assert_eq!(ms.get_slice(make_id(1)).unwrap(), &[1.5, 2.5]);
     }
 
     #[test]

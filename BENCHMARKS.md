@@ -251,7 +251,7 @@ cores, 48 GiB RAM, internal NVMe), after the HNSW connectivity fix.
 | Promote 500-quad proposal incl. SHACL, p95 ≤ 200 ms | ✅ 58 ms | ❌ 450 ms |
 | Incremental materialization lag ≤ 2 s | ✅ 1.3 s | ❌ 12.3 s |
 | Sustained ingestion ≥ 50 records/s | ✅ 101/s | ❌ 27/s |
-| int8 vector space | measured (recall 1.0) | **unmeasured** — bulk-loading 2M vectors into an mmap / int8 space did not finish in 80 min (see findings) |
+| int8 vector space | measured (recall 1.0) | measured after the mmap append fix (below): 2M vectors in 24 min, recall@20 0.69 at ef 100 / 0.92 at ef 400, ingestion 42/s |
 
 ### Findings (scale 1)
 
@@ -360,3 +360,47 @@ Host: macos · Apple M4 Pro · 14 cores · 48 GiB RAM. In-process (no network); 
 | Disk by column family | `hnsw` 3890.1 MiB, `ospg` 596.8 MiB, `opsg` 596.4 MiB, `psog` 595.8 MiB, `blob` 574.1 MiB, `sopg` 565.4 MiB, `gspo` 564.5 MiB, `gpos` 553.7 MiB; `.vecs` files 0.0 MiB |
 | Disk vs plan estimate (~9 GB × scale) | 11.0 GB vs ~9.0 GB |
 | HNSW RAM, memory mode, vs plan (~4 GB × scale) | 4.01 GB vs ~4.00 GB |
+
+### int8 at team scale (after the mmap append fix)
+
+Recorded 2026-10-06, same host. `--scale 1 --vectors int8`. Inference lag
+here predates the DRed batch fix (branch `db/dred-batch-cost`, 0.97 s p95).
+
+#### cb-bench — scale 1 (8008381 base quads, 4130354 inferred, 2000000 chunks)
+
+Host: macos · Apple M4 Pro · 14 cores · 48 GiB RAM. In-process (no network); reads as a team member with the graph ACL.
+
+| Plan target | Status | Measured |
+|---|:-:|---|
+| Load one graph (1K quads) | ✅ met | p50 0.86 ms |
+| describe(entity) across visible graphs | ❌ missed | p95 16 ms |
+| Hybrid search, k=20 | ❌ missed | p95 2959 ms |
+| Context assembly, 4K tokens | ❌ missed | p95 2343 ms |
+| Promote a 500-quad proposal incl. SHACL | ❌ missed | p95 449 ms |
+| Incremental materialization lag | ❌ missed | p95 12416 ms |
+| Sustained ingestion | ❌ missed | 42/s |
+
+| Measurement | Target | n | p50 ms | p95 ms | p99 ms | max ms | Rate | Meets | Notes |
+|---|---|---:|---:|---:|---:|---:|---:|:-:|---|
+| Load one graph (ExportGraph) | p50 ≤ 2 ms | 200 | 0.86 | 1.45 | 1.55 | 3.23 |  | ✅ | 917 quads per graph on average |
+| describe(entity) | p95 ≤ 10 ms | 200 | 2.85 | 16 | 18 | 22 |  | ❌ | facts returned: median 619, max 4454 |
+| Hybrid search k=20, mention set (int8) | p95 ≤ 25 ms | 25 | 811 | 2959 | 4878 | 4878 |  | ❌ | set size: median 24860, max 86020; building the set (mention query) p95 378 ms, the rest is SearchVectorInSet |
+| Hybrid search, ANN k=200 + join (int8) |  | 200 | 5.98 | 7.00 | 8.29 | 8.70 |  |  | results kept: median 1, max 18 |
+| Context assembly proxy (describe + hybrid + chunk text) | p95 ≤ 300 ms | 53 | 162 | 2343 | 2624 | 2624 |  | ❌ | 14068 bytes of chunk text (~3517 tokens) |
+| Promote 500-quad proposal incl. SHACL | p95 ≤ 200 ms | 68 | 431 | 449 | 453 | 453 |  | ❌ | 0 SHACL results in total (expected 0) |
+| Time travel: decision status as of load vs now |  | 200 | 0.03 | 0.04 | 0.04 | 100 |  |  | 200/200 differed (expected all) |
+| Sustained ingestion (ApplyChanges + 20 vectors per record) | ≥ 50 records/s | 500 | 23 | 29 | 31 | 46 | 42/s | ❌ | 500 records, single writer, vectors into cb_chunks_int8 |
+| Incremental materialization lag | ≤ 2 s (p95) | 381 | 9418 | 12416 | 12731 | 12887 |  | ❌ | 381 commits at 20/s over 20 s; 0 not covered within 10 s |
+
+| Load / capacity | Value |
+|---|---|
+| Base load (SST import) | 8008381 quads in 88.6 s (90393 quads/s) |
+| Supersession pass (live writes) | 1167 status changes in 0.0 s |
+| Graph grants | 290 |
+| Full materialization | 4130354 inferred quads in 141.2 s |
+| Vector space `cb_chunks_int8` (int8) | 2000000 vectors in 1442.4 s; vector RAM 740.1 MiB; RSS growth 2351.0 MiB |
+| Recall@20 `cb_chunks_int8 ef=100` | 0.693 |
+| Recall@20 `cb_chunks_int8 ef=400` | 0.920 |
+| Disk (after compaction) | 11525.2 MiB (996 bytes per quad, incl. inferred quads, blobs and vectors) |
+| Disk by column family | `hnsw` 1671.9 MiB, `ospg` 597.9 MiB, `opsg` 597.5 MiB, `psog` 597.2 MiB, `blob` 574.1 MiB, `sopg` 568.0 MiB, `gspo` 564.5 MiB, `gpos` 555.4 MiB; `.vecs` files 3072.0 MiB |
+| Disk vs plan estimate (~9 GB × scale) | 12.1 GB vs ~9.0 GB |
