@@ -99,6 +99,9 @@ const META_INFERENCE_APPLIED: &[u8] = b"__inference__/applied_ts";
 /// The graphs schema axioms are read from (JSON array of IRIs, "" = the
 /// default graph); absent = every graph.
 const META_SCHEMA_GRAPHS: &[u8] = b"__inference__/schema_graphs";
+/// Live inferred facts (big-endian u64), kept by every run so a batch
+/// needn't count them.
+const META_INFERRED_COUNT: &[u8] = b"__inference__/live_count";
 
 /// Commit at most this many quad writes per transaction.
 const CHUNK: usize = 10_000;
@@ -751,6 +754,69 @@ fn live_inferred(
     Ok(out)
 }
 
+/// Point lookups of stored inferred facts, memoized: a DRed batch asks only
+/// about the facts it touches (scanning every live inferred quad made each
+/// batch cost O(inferred facts)).
+struct LiveInferred<'a> {
+    snap: Snapshot,
+    graphs: &'a InferredGraphs,
+    seen: std::cell::RefCell<HashMap<Fact, Option<(GraphId, Triple)>>>,
+}
+
+impl<'a> LiveInferred<'a> {
+    fn new(snap: Snapshot, graphs: &'a InferredGraphs) -> Self {
+        Self {
+            snap,
+            graphs,
+            seen: Default::default(),
+        }
+    }
+
+    /// The stored quad of inferred fact `f`, if live.
+    fn get(&self, f: &Fact) -> Result<Option<(GraphId, Triple)>, StorageError> {
+        if let Some(hit) = self.seen.borrow().get(f) {
+            return Ok(hit.clone());
+        }
+        let found = match self.graphs.graph_of.get(&f.label) {
+            None => None,
+            Some(g) => self
+                .snap
+                .scan_scoped(Some(&f.s), Some(&f.p), Some(&f.o), &GraphScope::One(*g))?
+                .into_iter()
+                .find(|(_, t)| matches!(t, Triple::Relation { .. })),
+        };
+        self.seen.borrow_mut().insert(f.clone(), found.clone());
+        Ok(found)
+    }
+
+    fn contains(&self, f: &Fact) -> Result<bool, StorageError> {
+        Ok(self.get(f)?.is_some())
+    }
+}
+
+/// The live inferred fact count (scanned once if a store predates it).
+fn get_inferred_count(store: &TripleStore, graphs: &InferredGraphs) -> Result<u64, StorageError> {
+    let meta = store.cf_handle(crate::cf::META)?;
+    if let Some(b) = store
+        .db_ref()
+        .get_cf(&meta, META_INFERRED_COUNT)?
+        .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok())
+    {
+        return Ok(u64::from_be_bytes(b));
+    }
+    let n = live_inferred(&store.snapshot(Timestamp(store.oracle_ts())), graphs)?.len() as u64;
+    put_inferred_count(store, n)?;
+    Ok(n)
+}
+
+fn put_inferred_count(store: &TripleStore, n: u64) -> Result<(), StorageError> {
+    let meta = store.cf_handle(crate::cf::META)?;
+    store
+        .db_ref()
+        .put_cf(&meta, META_INFERRED_COUNT, n.to_be_bytes())?;
+    Ok(())
+}
+
 /// The last commit inference has covered (`None` before the first run).
 pub fn inference_applied(store: &TripleStore) -> Result<Option<Timestamp>, StorageError> {
     get_applied(store)
@@ -911,6 +977,7 @@ fn materialize_at(
         .map(|(_, v)| v.clone())
         .collect();
     write(store, &mut graphs, &assert, &close)?;
+    put_inferred_count(store, derived.len() as u64)?;
     Ok(MaterializationStats {
         asserted: assert.len() as u64,
         closed: close.len() as u64,
@@ -1004,14 +1071,15 @@ pub fn infer_changes(store: &TripleStore) -> Result<Option<MaterializationStats>
         removed: HashSet::new(),
         added: MemFacts::default(),
     };
-    let live = live_inferred(&store.snapshot(to), &graphs)?;
+    let live = LiveInferred::new(store.snapshot(to), &graphs);
 
     // 1. Over-delete: inferred facts with a derivation through a deleted fact.
     let mut over: HashSet<Fact> = HashSet::new();
     let mut queue: VecDeque<Fact> = deleted.iter().cloned().collect();
     while let Some(f) = queue.pop_front() {
         for c in schema.consequences(&f, &old)? {
-            if live.contains_key(&c) && over.insert(c.clone()) {
+            if !over.contains(&c) && live.contains(&c)? {
+                over.insert(c.clone());
                 queue.push_back(c);
             }
         }
@@ -1059,19 +1127,22 @@ pub fn infer_changes(store: &TripleStore) -> Result<Option<MaterializationStats>
     }
 
     // What stays over-deleted is closed.
-    let close: Vec<(GraphId, Triple)> = new
-        .removed
-        .iter()
-        .filter_map(|f| live.get(f).cloned())
-        .collect();
+    let mut close: Vec<(GraphId, Triple)> = Vec::new();
+    for f in &new.removed {
+        close.extend(live.get(f)?);
+    }
     drop(new);
     drop(old);
+    drop(live);
+    let before = get_inferred_count(store, &graphs)?;
     write(store, &mut graphs, &added, &close)?;
+    let derived = (before + added.len() as u64).saturating_sub(close.len() as u64);
+    put_inferred_count(store, derived)?;
     put_applied(store, to)?;
     Ok(Some(MaterializationStats {
         asserted: added.len() as u64,
         closed: close.len() as u64,
-        derived_triples: (live.len() + added.len()).saturating_sub(close.len()) as u64,
+        derived_triples: derived,
         full: false,
     }))
 }
