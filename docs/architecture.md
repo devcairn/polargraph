@@ -755,11 +755,35 @@ visibility); searches over-fetch `max(k, ef)` candidates to fill k.
 
 ### SearchVectorInSet
 
-`SearchVectorInSetRequest` carries a space, query, k, and an explicit
-`repeated NodeId node_ids`. The server drops nodes the caller can't see (or
-outside `graphs`), scores the rest against the query using the stored
-embedding (skipping nodes absent from the index) and returns the top-k. O(|node_ids|) — appropriate for small sets derived from
-graph traversals.
+`SearchVectorInSetRequest` carries a space, query, k, and the candidates —
+either an explicit `repeated NodeId node_ids`, or **`candidate_patterns` +
+`rank_var`**: pattern rows evaluated in the server under the caller's
+snapshot (and `graphs` as dataset), whose `rank_var` nodes are the
+candidates. The plan's "rank within the mention set" is then one call:
+
+```text
+candidate_patterns: ?r <mentions> <entity> . ?c <chunkOf> ?r      rank_var: c
+```
+
+The server drops candidates the caller can't see (or outside `graphs`),
+scores the rest exactly (int8 spaces: by codes, then the best `4k`
+re-ranked with the full vectors) and returns the top-k. Linear in the
+candidate set; see `docs/design/hybrid-search.md`.
+
+**Vector visibility index.** A vector hit is visible iff the node has a
+live quad (as subject) in a readable graph. Rather than a store scan per
+candidate, the server keeps `node → graphs` for nodes with vectors
+(`polargraph-server::vector_visibility`): built in the background from one
+pass over `spog` keys and validity headers (`Snapshot::all_subject_graphs`,
+no value decoding), caught up from the change log on each check (touched
+subjects recomputed with `Snapshot::subject_graphs`), rebuilt after graph
+operations or a pruned log; until ready, and for nodes added since, the
+per-node check is used. All vector RPCs use it. At team scale the per-node
+check was ~95 % of `SearchVectorInSet` time on large sets.
+
+**`ef`.** The default is 400 (`--default-vector-ef`); the effective `ef` is
+never below `2·k`. Recall@20 at 2M clustered 384-dim vectors: 0.52 at ef
+50, 0.96 at 400, 0.98 at 800 (< 4 ms p95 at 400).
 
 ### BatchInsertVectors
 
