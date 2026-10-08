@@ -32,6 +32,9 @@ polargraph/
 ├── docs/
 │   ├── architecture.md         # design narrative
 │   ├── api-reference.md        # public API surface
+│   ├── STATUS.md               # where the engine stands: merged, trust model, "Later" list
+│   ├── design/                 # design notes and decisions per step
+│   ├── upgrade-*.md            # release notes / upgrade guides
 │   └── contxtbroker-platform-plan.md  # knowledge-platform roadmap; §0.1–0.2 = engine decisions + sequencing
 ├── clients/
 │   ├── python/                 # Python SDK (sync + async, grpc)
@@ -396,6 +399,14 @@ Optimistic concurrency:
 
 The oracle counter persists to the META CF so restarts don't reuse timestamps.
 
+### Identity and trust
+
+The engine **trusts the user id the calling application sends** (`user_id`,
+`x-polargraph-user-id`, REST `X-User-Id`) and enforces graph-level access
+control for it; the application authenticates users. The API key
+authenticates the application; no user id = trusted service call. Verified
+identity (JWT) is on the "Later" list in `docs/STATUS.md`.
+
 ### IDs
 
 `NodeId` and `EdgeId` are UUID v7 (time-ordered). This gives chronological
@@ -419,7 +430,7 @@ sort order and is cluster-safe without a central sequence generator.
 
 ---
 
-## Current state (phase 2 in progress)
+## Current state (engine phase complete pending `db/hybrid-search`; see `docs/STATUS.md`)
 
 Entries describe each feature as it was built; storage key formats in older
 entries were superseded by storage format v3 (last entries below).

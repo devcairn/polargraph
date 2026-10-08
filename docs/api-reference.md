@@ -327,7 +327,7 @@ TripleStore::open_as_replica(path: &Path, primary_address: String) -> Result<Tri
 polargraph_storage::migrate_v3::open_for_migration(path) -> Result<TripleStore, StorageError>
 ```
 
-`open` opens (or creates) the database with all 17 column families and loads
+`open` opens (or creates) the database with all 19 column families and loads
 the predicate and graph intern tables. A new store is stamped storage format
 3. A store that still holds v2 data returns `StorageError::NeedsMigration`
 (run `polargraphd migrate`); one written by a newer build returns
@@ -729,6 +729,112 @@ quad-index scan.
 Service: `polargraph.v1.PolarGraphService`
 
 Proto source: `crates/polargraph-server/proto/polargraph.proto`
+
+**Trust model.** The engine trusts the user id the calling application
+sends (`user_id` field or `x-polargraph-user-id` metadata; REST
+`X-User-Id`) and enforces graph access for it; it does not authenticate
+users. The application is responsible for authentication — the API key
+(`--api-key`) only authenticates the application itself. A call without a
+user id is a trusted service call. Verified identity (JWT) is on the
+"Later" list in `docs/STATUS.md`.
+
+### RPC index
+
+All 72 RPCs, grouped (descriptions from the proto). Details follow below
+and in `docs/architecture.md`.
+
+| Group | RPC | Description |
+|---|---|---|
+| Writes | `Insert` | Insert one or more triples in a single atomic transaction |
+|  | `ApplyChanges` | Apply adds and retractions across graphs atomically |
+|  | `DeleteTriples` | Soft-delete triples for one or more subjects by closing their valid-time window |
+|  | `BeginTransaction` | Open a new multi-RPC transaction |
+|  | `CommitTransaction` | Commit an open transaction |
+|  | `RollbackTransaction` | Roll back an open transaction, discarding all buffered writes |
+|  | `CypherWrite` | DEPRECATED — removed in the next release; write with ApplyChanges or SPARQL Update (docs/upgrade-cypher-rdf.md) |
+| Queries | `Query` | Execute a conjunctive query and return all satisfying variable bindings |
+|  | `QueryStream` (stream) | Like `Query` but streams results in chunks of up to 500 bindings each |
+|  | `ExplainQuery` | Return the static execution plan for a query without running it |
+|  | `CypherQuery` | Parse and execute a Cypher query string |
+|  | `CypherQueryStream` (stream) | Like `CypherQuery` but streams results in chunks |
+|  | `Reachable` | Return all nodes transitively reachable from `start` via `predicate` |
+|  | `GetPropertyHistory` | Return all historical versions of a node property, ordered newest-first by transaction time |
+|  | `ResolveIris` | Map node IDs back to IRIs via the IRI dictionary |
+|  | `GetEdgeAnnotations` | Return all RDF-star annotations on the edge identified by `edge_id` |
+|  | `GetEdgeIdsByTriple` | Resolve the edge UUID(s) for a specific (subject, predicate, object) relation triple |
+| Vectors | `InsertVector` | Insert or update a node's embedding vector in the HNSW index |
+|  | `BatchInsertVectors` | Insert multiple vectors into a named space atomically |
+|  | `SearchVector` | Search for the k nearest neighbors of a query vector |
+|  | `SearchVectorFiltered` | Vector search with a node-type or reachability filter |
+|  | `SearchVectorInSet` | Rank a candidate set against a query vector; return top-k |
+|  | `VectorSeedQuery` | Run an ANN vector search and use the results as seed bindings for a conjunctive Datalog query |
+| Named graphs | `CreateGraph` | Register a named graph (idempotent) and set its metadata |
+|  | `ListGraphs` | List named graphs with their metadata, optionally filtered |
+|  | `GraphStats` | Live-quad count and last write time of one graph |
+|  | `CopyGraph` | Copy a graph's live quads into another graph (COPY / ADD semantics) |
+|  | `MoveGraph` | Copy into the target (replacing it), then drop the source |
+|  | `DropGraph` | Close every live quad of a graph (bitemporal tombstones) |
+|  | `ExportGraph` (stream) | Stream the live quads of one graph, or of the whole dataset |
+| Change feed and validation | `Subscribe` (stream) | Stream committed changes (with resume), filtered by graph access |
+|  | `ValidateShapes` | Validate a dataset (optionally with uncommitted changes) against SHACL shapes |
+| Inference | `RunMaterialization` | Run OWL 2 RL forward-chaining materialization to fixpoint |
+|  | `GetInferenceSettings` | Which graphs inference reads schema axioms from |
+|  | `SetInferenceSettings` | Change them (service calls, primary only); recomputes the inferred graphs and returns the run's statistics |
+| Vocabulary | `GetVocabulary` | The vocabulary base, prefixes and legacy-conversion status |
+|  | `SetVocabularyBase` | Set the base IRI for bare names |
+|  | `PutPrefix` | Declare or re-point a prefix |
+|  | `RemovePrefix` | Remove a prefix (no-op if absent) |
+|  | `ConvertLegacyData` | One-time conversion of pre-vocabulary data: bare predicates → IRIs, `__type` labels → `rdf:type` |
+| Access control and API keys | `GrantGraphAccess` | Grant a user or group a level on a named graph |
+|  | `RevokeGraphAccess` | Revoke a user's or group's grant on a named graph |
+|  | `GetGraphAccess` | A user's effective graph access |
+|  | `GrantAccess` | Grant a group access to a specific node or all nodes of a given type |
+|  | `RevokeAccess` | Revoke a group's access grant by closing the valid time of the HAS_ACCESS / HAS_ACCESS_TYPE triple and updating the cache |
+|  | `AddUserToGroup` | Add a user to a group by writing a MEMBER_OF triple and updating the in-memory access cache |
+|  | `GetUserAccess` | Return all node IDs and type grants accessible to a user, derived from their group memberships and HAS_ACCESS / HAS_ACCESS_TYPE triples |
+|  | `AddApiKey` | Add a new API key to the live key store |
+|  | `RevokeApiKey` | Remove an API key from the live key store |
+|  | `ListApiKeys` | List all configured API keys as masked prefixes (first 4 chars + "****") |
+| Schema registry (advisory) | `RegisterNodeType` | Register (or overwrite) a node type schema |
+|  | `GetNodeType` | Look up a registered node type by name |
+|  | `ListNodeTypes` | Return all registered node type schemas |
+|  | `ValidateNode` | Validate a property map against a registered schema |
+|  | `RegisterEdgeType` | Register (or overwrite) an edge type schema |
+|  | `GetEdgeType` | Look up a registered edge type by predicate name |
+|  | `ListEdgeTypes` | Return all registered edge type schemas |
+|  | `ValidateEdge` | Validate an edge's endpoint types and property map against a schema |
+|  | `ListPredicatesBetween` | Return all registered predicate names whose domain and range match the supplied node type names |
+|  | `ValidateOntology` | Check the full ontology for consistency: - cardinality violations across all committed triples - missing inverse-predicate counterparts - cycles in the node type hierarchy (should not occur if RegisterNodeType enforcement is in place, but this double-checks the live data) |
+| Counters | `IncrementCounters` | Add to counters (service calls, primary only) |
+|  | `GetCounters` | Read counters (service calls) |
+| Operations | `CreateBackup` | Create a new incremental backup of the live store |
+|  | `ListBackups` | List all available backups with ID, timestamp, size, and file count |
+|  | `PurgeOldBackups` | Delete all but the keep_n most recent backups |
+|  | `RunRetention` | Scan all quad-order column families and delete superseded versions (and triples whose valid-time windows have fully expired) per the policy |
+|  | `MigrateSchema` | Apply any pending schema migrations and return the list of versions run |
+|  | `MigrationStatus` | Return the current and latest migration version, plus the full history of applied migrations with timestamps |
+|  | `ShowIndexes` | Return per-column-family key counts and sizes, plus HNSW space info |
+|  | `ShowStats` | Return server-wide storage and MVCC statistics |
+|  | `ReplicaStatus` | Return replication status for this server instance |
+|  | `StreamWal` (stream) | Stream WAL entries from the primary |
+
+### `SearchVectorInSet` — candidates as ids or patterns
+
+| Field | Meaning |
+|---|---|
+| `space`, `query`, `k` | Space, query vector, results (k = 0 → 10) |
+| `node_ids` | Explicit candidates |
+| `candidate_patterns` + `rank_var` | Candidates as a pattern query evaluated in the server as the caller: the nodes bound to `rank_var` (e.g. `?r <mentions> <e> . ?c <chunkOf> ?r`, `c`). Use either this or `node_ids` (`INVALID_ARGUMENT` otherwise) |
+| `graphs` | Only candidates with a live quad in these graphs (`""` = default graph); also the dataset the patterns read |
+
+Candidates the caller can't see are dropped first (vector visibility
+index), then scored exactly — int8 spaces by codes with the best `4k`
+re-ranked from full vectors. Design and numbers:
+`docs/design/hybrid-search.md`.
+
+**`ef` for every vector search**: request `ef` (Cypher inline `ef=`), else
+the server default **400** (`--default-vector-ef`); the effective value is
+never below `2·k`.
 
 ---
 
@@ -1400,7 +1506,8 @@ Storage API: `Transaction::set_author`, `Transaction::record_graph_op`,
 See `docs/design/graph-acl.md` and `docs/upgrade-graph-acl.md`. Principals
 and callers are node UUIDs or IRIs. The caller is `user_id` or the
 `x-polargraph-user-id` metadata; without one the call is a trusted service
-call.
+call. The engine trusts that id — the application authenticates users (see
+"Trust model" at the top of this section).
 
 | RPC | Request → Response | Notes |
 |---|---|---|

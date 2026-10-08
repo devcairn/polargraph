@@ -1654,7 +1654,8 @@ service PolarGraphService {
     /// Runs HNSW with a large candidate pool then post-filters to the allowed set.
     rpc SearchVectorFiltered(SearchVectorFilteredRequest) returns (SearchVectorFilteredResponse);
 
-    /// Score an explicit set of node IDs against a query vector; return top-k.
+    /// Rank a candidate set against a query vector; return top-k. Candidates
+    /// are explicit node IDs or `candidate_patterns` evaluated in the server.
     rpc SearchVectorInSet(SearchVectorInSetRequest) returns (SearchVectorInSetResponse);
 
     /// Insert multiple vectors into a named space atomically.
@@ -1678,7 +1679,7 @@ service PolarGraphService {
     /// Note: restore is an offline operation — see docs/architecture.md.
     rpc PurgeOldBackups(PurgeOldBackupsRequest) returns (PurgeOldBackupsResponse);
 
-    /// Scan all hexastore column families and delete superseded versions (and
+    /// Scan all quad-order column families and delete superseded versions (and
     /// triples whose valid-time windows have fully expired) per the policy.
     /// Triggers a full RocksDB compaction on any CF that had deletions.
     rpc RunRetention(RunRetentionRequest) returns (RunRetentionResponse);

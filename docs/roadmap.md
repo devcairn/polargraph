@@ -1,5 +1,9 @@
 # PolarGraph DB Engine — Engineering Roadmap
 
+> **Historical.** This is the original engineering roadmap; it is kept for context and is
+> not maintained. Current state: [`STATUS.md`](STATUS.md); plan and
+> tracker: [`contxtbroker-platform-plan.md`](contxtbroker-platform-plan.md).
+
 This document describes planned feature areas for PolarGraph, grounded in the
 current implementation.  Each section covers the gap, the proposed design,
 ordered implementation tasks, complexity estimates, and open design questions.

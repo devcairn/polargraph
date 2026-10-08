@@ -242,18 +242,30 @@ cores, 48 GiB RAM, internal NVMe), after the HNSW connectivity fix.
 
 ### Summary
 
-| Plan target | Scale 0.05 (410K quads, 100K vectors) | Scale 1 — team (8.0M + 4.1M inferred quads, 2M vectors) |
-|---|---|---|
-| Load one graph (1K quads), p50 ≤ 2 ms | ✅ 0.87 ms | ✅ 0.76 ms |
-| describe(entity), p95 ≤ 10 ms | ✅ 2.3 ms | ❌ 15 ms |
-| Hybrid search k=20, p95 ≤ 25 ms | ❌ 256 ms | ❌ 2,681 ms |
-| Context assembly 4K tokens, p95 ≤ 300 ms | ✅ 260 ms | ❌ 2,253 ms |
-| Promote 500-quad proposal incl. SHACL, p95 ≤ 200 ms | ✅ 58 ms | ❌ 450 ms |
-| Incremental materialization lag ≤ 2 s | ✅ 1.3 s | ❌ 12.3 s |
-| Sustained ingestion ≥ 50 records/s | ✅ 101/s | ❌ 27/s |
-| int8 vector space | measured (recall 1.0) | measured after the mmap append fix (below): 2M vectors in 24 min, recall@20 0.69 at ef 100 / 0.92 at ef 400, ingestion 42/s |
+Team scale "first run" is cb-bench's first measurement (2026-10-05);
+"current" is main plus `db/hybrid-search` after the fixes it led to
+(HNSW connectivity #17, DRed #19, mmap append #20, hybrid search + `ef`).
 
-### Findings (scale 1)
+| Plan target | Scale 0.05 (410K quads, 100K vectors) | Team scale, first run | Team scale, current |
+|---|---|---|---|
+| Load one graph (1K quads), p50 ≤ 2 ms | ✅ 0.87 ms | ✅ 0.76 ms | ✅ 0.97 ms |
+| describe(entity), p95 ≤ 10 ms | ✅ 2.3 ms | ❌ 15 ms | ❌ 16 ms |
+| Hybrid search k=20, p95 ≤ 25 ms | ❌ 256 ms | ❌ 2,681 ms | ❌ 162 ms (f32) / 140 ms (int8); ✅ 17 / 13 ms for mention sets < 10K chunks |
+| Context assembly 4K tokens, p95 ≤ 300 ms | ✅ 260 ms | ❌ 2,253 ms | ✅ 173 ms |
+| Promote 500-quad proposal incl. SHACL, p95 ≤ 200 ms | ✅ 58 ms | ❌ 450 ms | ❌ 452 ms |
+| Incremental materialization lag ≤ 2 s | ✅ 1.3 s | ❌ 12.3 s | ✅ 0.97 s |
+| Sustained ingestion ≥ 50 records/s | ✅ 101/s | ❌ 27/s | ❌ 27/s (f32), 42/s (int8) |
+| int8 vector space at 2M vectors | — | unmeasured (bulk load unfinished) | builds in 24 min; recall@20 0.94 at ef 400 |
+| Recall@20 at the default `ef` | 1.0 | 0.52 (ef 50) | 0.96 f32 / 0.94 int8 (ef 400) |
+
+Open items behind the remaining misses are on the "Later / nice-to-have"
+list in [`docs/STATUS.md`](docs/STATUS.md).
+
+### Findings (scale 1, first run)
+
+Status of each (fixed, open, with numbers): `docs/STATUS.md` — 1 fixed
+(#19), 3 fixed (#20), 5 fixed and 2 mostly fixed (hybrid search; the
+popular-entity cache is on the "Later" list), 4 and 6 open.
 
 1. **Inference lag grows with the store, not the change.** Each DRed batch
    (`owl_rl::infer_changes`) scans every live inferred quad

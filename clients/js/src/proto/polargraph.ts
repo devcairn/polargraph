@@ -20085,7 +20085,10 @@ export const PolarGraphServiceService = {
       Buffer.from(SearchVectorFilteredResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): SearchVectorFilteredResponse => SearchVectorFilteredResponse.decode(value),
   },
-  /** / Score an explicit set of node IDs against a query vector; return top-k. */
+  /**
+   * / Rank a candidate set against a query vector; return top-k. Candidates
+   * / are explicit node IDs or `candidate_patterns` evaluated in the server.
+   */
   searchVectorInSet: {
     path: "/polargraph.v1.PolarGraphService/SearchVectorInSet" as const,
     requestStream: false as const,
@@ -20169,7 +20172,7 @@ export const PolarGraphServiceService = {
     responseDeserialize: (value: Buffer): PurgeOldBackupsResponse => PurgeOldBackupsResponse.decode(value),
   },
   /**
-   * / Scan all hexastore column families and delete superseded versions (and
+   * / Scan all quad-order column families and delete superseded versions (and
    * / triples whose valid-time windows have fully expired) per the policy.
    * / Triggers a full RocksDB compaction on any CF that had deletions.
    */
@@ -20700,7 +20703,10 @@ export interface PolarGraphServiceServer extends UntypedServiceImplementation {
    * / Runs HNSW with a large candidate pool then post-filters to the allowed set.
    */
   searchVectorFiltered: handleUnaryCall<SearchVectorFilteredRequest, SearchVectorFilteredResponse>;
-  /** / Score an explicit set of node IDs against a query vector; return top-k. */
+  /**
+   * / Rank a candidate set against a query vector; return top-k. Candidates
+   * / are explicit node IDs or `candidate_patterns` evaluated in the server.
+   */
   searchVectorInSet: handleUnaryCall<SearchVectorInSetRequest, SearchVectorInSetResponse>;
   /** / Insert multiple vectors into a named space atomically. */
   batchInsertVectors: handleUnaryCall<BatchInsertVectorsRequest, BatchInsertVectorsResponse>;
@@ -20727,7 +20733,7 @@ export interface PolarGraphServiceServer extends UntypedServiceImplementation {
    */
   purgeOldBackups: handleUnaryCall<PurgeOldBackupsRequest, PurgeOldBackupsResponse>;
   /**
-   * / Scan all hexastore column families and delete superseded versions (and
+   * / Scan all quad-order column families and delete superseded versions (and
    * / triples whose valid-time windows have fully expired) per the policy.
    * / Triggers a full RocksDB compaction on any CF that had deletions.
    */
@@ -21499,7 +21505,10 @@ export interface PolarGraphServiceClient extends Client {
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: SearchVectorFilteredResponse) => void,
   ): ClientUnaryCall;
-  /** / Score an explicit set of node IDs against a query vector; return top-k. */
+  /**
+   * / Rank a candidate set against a query vector; return top-k. Candidates
+   * / are explicit node IDs or `candidate_patterns` evaluated in the server.
+   */
   searchVectorInSet(
     request: SearchVectorInSetRequest,
     callback: (error: ServiceError | null, response: SearchVectorInSetResponse) => void,
@@ -21610,7 +21619,7 @@ export interface PolarGraphServiceClient extends Client {
     callback: (error: ServiceError | null, response: PurgeOldBackupsResponse) => void,
   ): ClientUnaryCall;
   /**
-   * / Scan all hexastore column families and delete superseded versions (and
+   * / Scan all quad-order column families and delete superseded versions (and
    * / triples whose valid-time windows have fully expired) per the policy.
    * / Triggers a full RocksDB compaction on any CF that had deletions.
    */

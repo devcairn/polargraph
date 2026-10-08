@@ -4,6 +4,26 @@ Snapshot: 2026-10-08. Detailed history: §0.2 tracker in
 `docs/contxtbroker-platform-plan.md`. Per-feature notes: `CLAUDE.md`
 ("Current state"), `docs/design/*`, release notes `docs/upgrade-*.md`.
 
+## Where we are
+
+**The engine phase is complete, pending the merge of `db/hybrid-search`.**
+Everything the platform plan asked of the engine is built and measured;
+what's left on the engine side is the "Later / nice-to-have" list below,
+none of it blocking.
+
+**Next work is application-side** — the ContxtBroker service on top of the
+engine's public APIs:
+
+- **MCP / context assembly** (plan WS8): retrieval over hybrid search
+  (`SearchVectorInSet` with `candidate_patterns`), `describe`, chunk text;
+  ranking and candidate caps are application policy.
+- **Promotion / review** (WS3): proposals, review, promotion policy and
+  provenance, using `ApplyChanges` (atomic, `read_ts`) and `ValidateShapes`.
+- **Ingestion** (WS7): records, chunks and embeddings through
+  `ApplyChanges` + `BatchInsertVectors` (or SST import for backfills).
+- **Repo-graph tool**: specified in `docs/design/repo-graph-app.md`
+  (extractor, architecture model, diagrams) — not built in the engine.
+
 ## Merged to main
 
 | Step | What | PR |
@@ -19,146 +39,136 @@ Snapshot: 2026-10-08. Detailed history: §0.2 tracker in
 | 9 | Queryable inference (inferred graphs), DRed `--inference`, int8 vectors, counters (`sts` CF) | #15 |
 | 10 | Atomic SPARQL Update (`?dry_run`, `?read_ts`), inference schema graphs, vector `graphs` filter, Cypher reads confined to the dataset, time-travel ACL fix | #16 |
 | 11 | cb-bench: engine benchmark vs the plan targets, CI report job, results in `BENCHMARKS.md` Part 4 | #18 |
+| 11a | HNSW connectivity (heuristic neighbour selection; recall@20 on clustered data 0.30 → 1.00), memory-mode vectors stored once, cached norms + vectorized dot product | #17 |
 | 11b #1 | DRed batches look up only the facts they touch: team-scale inference lag p95 13.0 s → 0.97 s | #19 |
 | 11b #3 | mmap / int8 vector files grow geometrically, flushed once per batch: 200K int8 build 166 → 72 s; 2M int8 now builds (24 min) | #20 |
-| 11a | HNSW connectivity (heuristic neighbour selection; recall@20 on clustered data 0.30 → 1.00), memory-mode vectors stored once, cached norms + vectorized dot product | #17 |
+| 11c | **In review** (`db/hybrid-search`): hybrid search (vector visibility index, `candidate_patterns`, int8 in-set ranking) + default `ef` 400 | — |
 
-Main CI is green on the #20 merge (`ac5d594`), including the cb-bench report job.
+## Performance against the plan's targets
 
-## In progress
+cb-bench on an Apple M4 Pro (14 cores, 48 GiB, NVMe), in-process, reading as
+a team member with the graph ACL. The plan's targets are for **company**
+scale (`--scale 20`, not yet run); team scale is `--scale 1` (8.0M base +
+4.1M inferred quads, 2M 384-dim chunk vectors). Current = main plus
+`db/hybrid-search`.
 
-- **`db/hybrid-search`** — findings #2 + #5, decisions A, B, C, F of
-  `docs/design/hybrid-search.md`, **in review**. Team scale: hybrid search
-  p95 3.7 s → 162 ms (f32) / 2.4 s → 140 ms (int8); context assembly
-  2.4 s → 173 ms ✅; recall@20 at the default `ef` 0.52 → 0.96.
-
-## cb-bench results (Apple M4 Pro, 48 GiB, NVMe)
-
-The plan's targets are for company scale (`--scale 20`); measured so far:
-
-| Plan target | Scale 0.05 | Scale 1 (team) |
+| Plan target | Scale 0.05 | Team scale, current |
 |---|---|---|
-| Load one graph p50 ≤ 2 ms | ✅ 0.87 | ✅ 0.76 |
-| describe p95 ≤ 10 ms | ✅ 2.3 | ❌ 15 |
-| Hybrid search p95 ≤ 25 ms | ❌ 256 | ❌ 2,681 → ❌ 162 (f32) / 140 (int8) after hybrid search; ✅ 17 / 13 for sets < 10K chunks |
-| Context assembly p95 ≤ 300 ms | ✅ 260 | ❌ 2,253 → ✅ 173 after hybrid search |
-| Promote 500 quads p95 ≤ 200 ms | ✅ 58 | ❌ 450 |
-| Inference lag ≤ 2 s | ✅ 1.3 s | ❌ 12.3 s → ✅ 0.97 s after #19 |
-| Ingestion ≥ 50 records/s | ✅ 101 | ❌ 27 |
+| Load one graph p50 ≤ 2 ms | ✅ 0.87 ms | ✅ 0.97 ms |
+| `describe(entity)` p95 ≤ 10 ms | ✅ 2.3 ms | ❌ 16 ms |
+| Hybrid search k=20 p95 ≤ 25 ms | ❌ 256 ms (before hybrid search; not re-run) | ❌ 162 ms (f32) / 140 ms (int8); ✅ 17 / 13 ms for mention sets < 10K chunks |
+| Context assembly p95 ≤ 300 ms | ✅ 260 ms | ✅ 173 ms |
+| Promote 500 quads incl. SHACL p95 ≤ 200 ms | ✅ 58 ms | ❌ 452 ms |
+| Incremental materialization lag ≤ 2 s | ✅ 1.3 s | ✅ 0.97 s |
+| Sustained ingestion ≥ 50 records/s | ✅ 101/s | ❌ 27/s (f32 space), 42/s (int8) |
 
-## cb-bench findings
-
-Numbers are from `BENCHMARKS.md` Part 4 (scale 1 = 8.0M base + 4.1M
-inferred quads, 2M 384-dim chunk vectors).
-
-1. **Inference lag grows with the store** — ✅ **fixed** (#19): team-scale
-   p95 13.0 s → 0.97 s (re-measured on main with #19 + #20: 0.97 s).
-   - Cause: each DRed batch (`owl_rl::infer_changes`) built a map of every
-     live inferred quad (`live_inferred`, `crates/polargraph-storage/src/owl_rl.rs:731`)
-     to check over-deletes and find quads to close.
-   - Evidence: lag p95 1.3 s at scale 0.05 → 12.3 s at scale 1 (4.1M
-     inferred quads), at 20 commits/s.
-   - Approach: memoized point lookups of only the facts a batch touches;
-     live count kept in META.
-2. **Hybrid search over a mention set doesn't scale** — ✅ **mostly fixed**
-   (`db/hybrid-search`): p95 2.4–3.7 s → 140–162 ms; small mention sets
-   meet the 25 ms target. Remaining: **D**, below.
-   - Cause: hot entities' mention sets are unbounded (up to 86K chunks at
-     team scale; Zipf 1.1); building the set (mention → chunk query) is up
-     to 323 ms p95; `SearchVectorInSet`
-     (`crates/polargraph-server/src/service.rs:2926`) then checks graph
-     visibility node by node (`node_visible_in`, `service.rs:1010`, one
-     subject scan per node) before exact scoring.
-   - Evidence: p95 256 ms at scale 0.05, 2,681 ms at scale 1 (target
-     25 ms); context assembly misses for the same reason (2,253 ms). The
-     ANN + join alternative is 7 ms but keeps a median of one result.
-   - Approaches to weigh: skip the per-node check when the set came from
-     an ACL-scoped query; filtered ANN (graph search restricted to an
-     allowed set or bitmap); bounded / pre-ranked mention sets (recency,
-     importance) per the plan's "never materialize the full fan-out".
-3. **int8 / mmap bulk load is quadratic** — ✅ **fixed** (#20): 200K int8
-   vectors 166 → 72 s, ingestion 36 → ~105 records/s; 2M int8 vectors build
-   in 24 min (recall@20 0.69 at ef 100, 0.92 at ef 400; ingestion 42/s).
-   - Cause: `MmapState::append` (`crates/polargraph-storage/src/hnsw.rs:218`)
-     resizes the `.vecs` file, remaps it and flushes the whole mapping on
-     every vector.
-   - Evidence: 100K vectors int8 64 s (≈ f32 60 s); 2M vectors: f32 37 min,
-     int8 unfinished after 80 min (~1.5M appended).
-   - Approach: grow the file geometrically, remap only on growth, flush
-     once per batch (or on close); count in the header kept consistent.
-4. **Promotion slows as the approved graph grows** — *needs profiling.*
-   - Cause unknown: `ValidateShapes` overlay (`service.rs:2145`) vs
-     `ApplyChanges` with `read_ts` (`service.rs:1938`).
-   - Evidence: p95 58 ms at scale 0.05 → 450 ms at scale 1 for the same
-     500-quad proposal (target 200 ms).
-   - Approach: time the two halves in cb-bench; check whether SHACL target
-     resolution (`sh:targetClass` with subclasses) scans the whole class.
-5. **Default `ef` too low at scale** — ✅ **fixed** (`db/hybrid-search`):
-   default 400, effective `max(ef, 2·k)`; recall@20 at 2M 0.52 → 0.96
-   (f32), 0.50 → 0.94 (int8), search p95 ~3.5 ms.
-   - Cause: server default `ef` 50 (`service.rs:273`, `--default-vector-ef`).
-   - Evidence: recall@20 at 2M clustered vectors 0.64 at ef 100, 0.96 at
-     ef 400 (1.0 at 100K for both).
-   - Approach: raise the default (e.g. 200), or scale it with space size;
-     measure latency vs recall in cb-bench.
-6. **Ingestion at 2M vectors** — *needs measurement of options.*
-   - Cause: HNSW inserts into a 2M-vector graph dominate (~36 ms per
-     record of 20 chunks, single writer; `ef_construction` 200,
-     `hnsw.rs:67`).
-   - Evidence: 101 records/s at scale 0.05 → 27/s at scale 1 (target 50).
-   - Approach: parallel batch insert (search phase under a read lock),
-     a lower `ef_construction` for online inserts, or int8 for chunk
-     spaces (cheaper distances; depends on #3).
-7. **D — cached candidate sets for popular entities** (follow-up to #2;
-   *needed*, not built).
-   - Evidence (team scale, after `db/hybrid-search`): hybrid search p95 is
-     17 ms (f32) / 13 ms (int8) for mention sets < 10K chunks, but
-     173 / 143 ms for sets ≥ 10K (96 of 200 Zipf-sampled entities). For
-     those, evaluating the mention → chunk join in the server (~150 ms for
-     86K chunks; the id path's query took 161 ms p95) dominates; visibility
-     and scoring are a few ms. At company scale the sets grow ~20×.
-   - Approach (design note, decision D / option B3): cache candidate sets
-     keyed by (patterns with bound values, dataset, readable graphs),
-     invalidated through the change log by the patterns' predicates;
-     expected ~10–20 ms p95 for cached popular entities. Alternative or
-     complement: an application cap on candidates (most recent N records).
-8. **Company-scale run** (`--scale 20`, manual, NVMe) — after #1–#3 (and
-   ideally #2) land; needs int8 for the vector budget.
-
-**Open decision — rebuild old HNSW spaces.** Spaces built before the
-connectivity fix (#17) keep their old links and only improve as vectors
-are added. A rebuild operation (re-insert every vector into a fresh
-index, swap) would restore full recall for existing data; not built —
-decide whether it's needed (it matters only for stores with vectors
-written before #17).
+Recall@20 at the default `ef` 400: 0.96 (f32) / 0.94 (int8) at 2M
+vectors. Disk at team scale: 11 GB with one vector space (plan estimate
+~9 GB); HNSW RAM 2.5–4 GB in memory mode (estimate ~4 GB).
 
 ## Agreed boundaries (engine vs application)
 
-- **Application-side**: proposals/review/promotion workflow (the engine
+- **Application-side**: proposals / review / promotion workflow (the engine
   gives `ApplyChanges` + `ValidateShapes`); type packages; which schemas
   and graphs a query reads (the engine gives `FROM` / `USE GRAPH` /
-  `graphs` and the inference schema-graphs setting); the repo-as-a-graph
-  extractor and architecture diagrams (`docs/design/repo-graph-app.md`);
-  context assembly and ranking.
+  `graphs` and the inference schema-graphs setting); retrieval policy,
+  candidate caps, context assembly and ranking; the repo-as-a-graph tool
+  (`docs/design/repo-graph-app.md`).
 - **Cypher is read-only** going forward: `CypherWrite` / `POST /cypher/write`
   are deprecated (warning header, metric); writes go through `ApplyChanges`
   (`POST /changes`) or SPARQL Update.
 
-## Open follow-ups (not scheduled)
+## Trust model
 
-- **F1 verified identity** — JWT from an IdP (issuer, audience, JWKS,
-  expiry) instead of trusting a bare `user_id` / `x-polargraph-user-id`.
-- **Remove Cypher writes** after the deprecation release.
-- **PQ / vector tiering** — decide from cb-bench numbers (HNSW RAM at team
-  scale is 4.0 GB in memory mode, as the plan estimated).
-- **Inference full-recompute memory** — `materialize()` holds the whole
-  closure in memory; a schema change or pruned change log triggers it.
-  Risk at company scale; measure with cb-bench, then bound it.
-- **SDK convenience methods** — newer RPCs (inference settings, counters,
-  vector `graphs`, `ApplyChanges` helpers) are only partly wrapped.
-- **Node-level ACL cache** — the legacy `AccessCache` (per-user
-  `HashSet<NodeId>`) won't scale; graph-level ACL is the primary model.
-- **HNSW rebuild** — see "Open decision" above.
+**The engine trusts the user id the calling application sends** (`user_id`
+field, `x-polargraph-user-id` gRPC metadata, REST `X-User-Id`) and enforces
+graph-level access control for it. **The application is responsible for
+authentication**: it must forward only ids it has verified. The API key
+(`--api-key`) authenticates the application itself; a call without a user
+id is a trusted service call with full access. Decided by Mark, 2026-10-08
+("for now we trust what the app sends"); verified identity is the first
+item below.
+
+## Later / nice-to-have
+
+Not scheduled; none blocks the application work. Numbers are team scale
+unless noted.
+
+1. **F1 — verified identity (JWT).** Accept signed identity tokens from an
+   IdP and derive the caller's user id / groups from verified claims, instead
+   of trusting `user_id`. Approach: a tower layer validating issuer,
+   audience, expiry and signature against a JWKS (key rotation, cached
+   keys); a claim → principal mapping; `user_id` accepted only from
+   service callers. Until then: trust model above.
+2. **D — cached candidate sets for popular entities** (hybrid search
+   follow-up; measured as needed). Hybrid search p95 is 17 / 13 ms
+   (f32 / int8) for mention sets < 10K chunks but 173 / 143 ms for sets
+   ≥ 10K (96 of 200 Zipf-sampled entities): evaluating the mention → chunk
+   join (~150 ms for 86K chunks) dominates. Sets grow ~20× at company scale.
+   Approach (`docs/design/hybrid-search.md` B3): cache candidate sets keyed
+   by (patterns with bound values, dataset, readable graphs), invalidated
+   via the change log by the patterns' predicates; expected ~10–20 ms p95
+   for cached entities. Alternative / complement: an application cap on
+   candidates (most recent N records).
+3. **#4 — promotion latency grows with the approved graph.** p95 58 ms at
+   scale 0.05 → 452 ms at team scale for the same 500-quad proposal (target
+   200 ms). Cause not profiled: `ValidateShapes` overlay
+   (`crates/polargraph-server/src/service.rs`, `validate_shapes`) vs
+   `ApplyChanges` with `read_ts` (`apply_changes`). Approach: time the two
+   halves in cb-bench; check whether SHACL `sh:targetClass` resolution
+   (with subclasses) scans the whole class instead of the touched nodes.
+4. **#6 — ingestion at 2M vectors.** 101 records/s at scale 0.05 → 27/s at
+   team scale with an f32 space (42/s int8; target 50): HNSW inserts
+   dominate (~36 ms per record of 20 chunks, single writer;
+   `ef_construction` 200, `crates/polargraph-storage/src/hnsw.rs`).
+   Approach: parallel batch insert (search phase under a read lock, link
+   phase serialized), a lower `ef_construction` for online inserts, or
+   int8 for chunk spaces.
+5. **`describe(entity)` tail.** p95 16 ms vs 10 ms at team scale; popular
+   entities return up to 4,454 facts (incoming mentions). Approach: page or
+   cap incoming facts per predicate (with counts) in the describe shape the
+   application uses, or count-only for high-fan-in predicates.
+6. **Company-scale run** (`--scale 20`, manual, NVMe; ~195M quads, 40M
+   vectors). Needs int8 for the vector budget and, ideally, D. Approach:
+   `polargraph-bench cb --scale 20 --vectors int8` on a large NVMe host;
+   record in `BENCHMARKS.md`.
+7. **Rebuild old HNSW spaces.** Spaces built before the connectivity fix
+   (#17) keep their old links (recall@20 0.17–0.30 on clustered data) and
+   only improve as vectors are added. Approach: a `RebuildVectorSpace`
+   operation that re-inserts every vector into a fresh index and swaps it
+   in. Only matters for stores with vectors written before #17.
+8. **Remove Cypher writes** after the deprecation release
+   (`docs/upgrade-cypher-rdf.md`): delete `CypherWrite`, `POST /cypher/write`
+   and the SDK write methods.
+9. **SDK convenience methods.** Newer RPCs (`ApplyChanges` helpers,
+   candidate patterns, inference settings, counters, vector `graphs`) are
+   reachable through the generated stubs but only partly wrapped in the
+   Python / Go / TS clients. Approach: wrap them alongside the first
+   application that uses them.
+10. **Inference full-recompute memory.** `owl_rl::materialize()` holds the
+    whole closure in memory (team scale: 4.1M inferred facts, ~2 min). A
+    schema change, a schema-graphs setting change or a pruned change log
+    triggers it; memory at company scale (~80M inferred facts) is
+    unmeasured. Approach: measure RSS in cb-bench; then compute per source
+    graph or in chunks, streaming the diff.
+11. **Node-level ACL cache.** The legacy `AccessCache` (per-user
+    `HashSet<NodeId>`) won't scale to tens of millions of nodes; graph-level
+    ACL is the primary model. Approach: deprecate node-level grants, or back
+    them with per-graph bitmaps.
+12. **PQ / vector tiering.** Team scale: 2M vectors use 2.9 GB (f32) or
+    0.74 GB (int8) of vector RAM; company scale (40M) needs ~15 GB with
+    int8 codes plus graph links. Approach: product quantization for
+    another ~4×, and/or document-level vectors for old records (plan
+    § Capacity), decided from a company-scale run.
+13. **`DiffGraphs` / graph digest** (P4 / P5, dropped from the engine
+    plan). Diffs can be computed from `ExportGraph`; a per-graph digest
+    would help verify replicas and backups. Approach: revisit if replica
+    verification is needed.
+14. **The 5.1 s hybrid-search outlier.** One f32 sample (of 200) at team
+    scale took 5.1 s (p99 386 ms). Hypothesis: it ran before the vector
+    visibility index finished its background build, falling back to the
+    per-node check. Approach: report index readiness and build time in
+    cb-bench (and wait for it before measuring); add a metric for fallbacks.
 
 ## Working rules
 
@@ -166,8 +176,10 @@ written before #17).
   check with Mark before big design decisions.
 - One fresh branch per step off main (no stacking), small commits, push
   often; Mark merges via PR. Send the PR link only when green.
-- Pre-PR checks: `cargo fmt --all -- --check`; `cargo clippy --workspace
-  -- -D warnings` on Rust 1.96 (MSRV stays 1.78); `cargo test --workspace`;
+- Pre-PR checks, **from a clean checkout of the pushed branch** (a fresh
+  `git worktree` — untracked local files must not mask missing commits):
+  `cargo fmt --all -- --check`; `cargo clippy --workspace -- -D warnings`
+  on Rust 1.96 (MSRV stays 1.78); `cargo test --workspace --locked`;
   Docker e2e `tests/e2e/run.sh`.
 - Keep the §0.2 tracker, `CLAUDE.md` and this file current; release notes
   for behaviour changes.

@@ -73,8 +73,12 @@ Recorded after auditing this plan against the code at `849839a`.
 
 ### 0.2 Engine sequencing
 
-> **Current state / handoff:** `docs/STATUS.md` (merged, in progress,
-> boundaries, follow-ups, working rules).
+> **Engine phase complete** (pending the merge of `db/hybrid-search`,
+> row 11c). Current state, measured performance against the targets, the
+> trust model ("the engine trusts the user id the app sends; the app
+> authenticates"), and the "Later / nice-to-have" list (F1 JWT first):
+> `docs/STATUS.md`. Next work is application-side (ContxtBroker service:
+> MCP / context assembly, promotion / review, ingestion, repo-graph tool).
 
 | Step | Work | Migration | Status |
 |------|------|-----------|--------|
@@ -103,6 +107,9 @@ Recorded after auditing this plan against the code at `849839a`.
 ---
 
 ## 1. Current state (what research found)
+
+> Historical: the audit that motivated the plan (as of `849839a`). For the
+> engine as built, see `docs/STATUS.md` and `CLAUDE.md`.
 
 Audit of the repo as of commit `849839a`.
 
@@ -1246,6 +1253,10 @@ vector for records older than a configurable age).
   ACL graphs.
 
 ### Performance targets (company scenario, single node, NVMe)
+
+> Measured with cb-bench at scale 0.05 and team scale (`--scale 1`):
+> `BENCHMARKS.md` Part 4 and the summary in `docs/STATUS.md`. The company
+> run is on the "Later" list.
 
 | Operation | Target |
 |-----------|--------|
