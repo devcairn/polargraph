@@ -602,9 +602,18 @@ export interface SearchVectorInSetRequest {
   nodeIds: NodeId[];
   /**
    * / Only nodes with a live quad in one of these graphs ("" = default
-   * / graph); empty = every graph.
+   * / graph); empty = every graph. Also the dataset `candidate_patterns`
+   * / read.
    */
   graphs: string[];
+  /**
+   * / Candidates as a pattern query instead of ids: the nodes bound to
+   * / `rank_var` by these patterns, evaluated in the server as the caller
+   * / (e.g. `?r <mentions> <e> . ?c <chunkOf> ?r`, rank_var "c"). Use
+   * / either this or `node_ids`.
+   */
+  candidatePatterns: VarPattern[];
+  rankVar: string;
 }
 
 export interface SearchVectorInSetResponse {
@@ -6210,7 +6219,7 @@ export const SearchVectorFilteredResponse: MessageFns<SearchVectorFilteredRespon
 };
 
 function createBaseSearchVectorInSetRequest(): SearchVectorInSetRequest {
-  return { space: "", query: [], k: 0, nodeIds: [], graphs: [] };
+  return { space: "", query: [], k: 0, nodeIds: [], graphs: [], candidatePatterns: [], rankVar: "" };
 }
 
 export const SearchVectorInSetRequest: MessageFns<SearchVectorInSetRequest> = {
@@ -6231,6 +6240,12 @@ export const SearchVectorInSetRequest: MessageFns<SearchVectorInSetRequest> = {
     }
     for (const v of message.graphs) {
       writer.uint32(42).string(v!);
+    }
+    for (const v of message.candidatePatterns) {
+      VarPattern.encode(v!, writer.uint32(50).fork()).join();
+    }
+    if (message.rankVar !== "") {
+      writer.uint32(58).string(message.rankVar);
     }
     return writer;
   },
@@ -6292,6 +6307,22 @@ export const SearchVectorInSetRequest: MessageFns<SearchVectorInSetRequest> = {
           message.graphs.push(reader.string());
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.candidatePatterns.push(VarPattern.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.rankVar = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6312,6 +6343,16 @@ export const SearchVectorInSetRequest: MessageFns<SearchVectorInSetRequest> = {
         ? object.node_ids.map((e: any) => NodeId.fromJSON(e))
         : [],
       graphs: globalThis.Array.isArray(object?.graphs) ? object.graphs.map((e: any) => globalThis.String(e)) : [],
+      candidatePatterns: globalThis.Array.isArray(object?.candidatePatterns)
+        ? object.candidatePatterns.map((e: any) => VarPattern.fromJSON(e))
+        : globalThis.Array.isArray(object?.candidate_patterns)
+        ? object.candidate_patterns.map((e: any) => VarPattern.fromJSON(e))
+        : [],
+      rankVar: isSet(object.rankVar)
+        ? globalThis.String(object.rankVar)
+        : isSet(object.rank_var)
+        ? globalThis.String(object.rank_var)
+        : "",
     };
   },
 
@@ -6332,6 +6373,12 @@ export const SearchVectorInSetRequest: MessageFns<SearchVectorInSetRequest> = {
     if (message.graphs?.length) {
       obj.graphs = message.graphs;
     }
+    if (message.candidatePatterns?.length) {
+      obj.candidatePatterns = message.candidatePatterns.map((e) => VarPattern.toJSON(e));
+    }
+    if (message.rankVar !== "") {
+      obj.rankVar = message.rankVar;
+    }
     return obj;
   },
 
@@ -6345,6 +6392,8 @@ export const SearchVectorInSetRequest: MessageFns<SearchVectorInSetRequest> = {
     message.k = object.k ?? 0;
     message.nodeIds = object.nodeIds?.map((e) => NodeId.fromPartial(e)) || [];
     message.graphs = object.graphs?.map((e) => e) || [];
+    message.candidatePatterns = object.candidatePatterns?.map((e) => VarPattern.fromPartial(e)) || [];
+    message.rankVar = object.rankVar ?? "";
     return message;
   },
 };
