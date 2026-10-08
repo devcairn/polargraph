@@ -182,7 +182,8 @@ type PolarGraphServiceClient interface {
 	// / Vector search with a node-type or reachability filter.
 	// / Runs HNSW with a large candidate pool then post-filters to the allowed set.
 	SearchVectorFiltered(ctx context.Context, in *SearchVectorFilteredRequest, opts ...grpc.CallOption) (*SearchVectorFilteredResponse, error)
-	// / Score an explicit set of node IDs against a query vector; return top-k.
+	// / Rank a candidate set against a query vector; return top-k. Candidates
+	// / are explicit node IDs or `candidate_patterns` evaluated in the server.
 	SearchVectorInSet(ctx context.Context, in *SearchVectorInSetRequest, opts ...grpc.CallOption) (*SearchVectorInSetResponse, error)
 	// / Insert multiple vectors into a named space atomically.
 	BatchInsertVectors(ctx context.Context, in *BatchInsertVectorsRequest, opts ...grpc.CallOption) (*BatchInsertVectorsResponse, error)
@@ -200,7 +201,7 @@ type PolarGraphServiceClient interface {
 	// / Returns FAILED_PRECONDITION if the server was not started with --backup-dir.
 	// / Note: restore is an offline operation — see docs/architecture.md.
 	PurgeOldBackups(ctx context.Context, in *PurgeOldBackupsRequest, opts ...grpc.CallOption) (*PurgeOldBackupsResponse, error)
-	// / Scan all hexastore column families and delete superseded versions (and
+	// / Scan all quad-order column families and delete superseded versions (and
 	// / triples whose valid-time windows have fully expired) per the policy.
 	// / Triggers a full RocksDB compaction on any CF that had deletions.
 	RunRetention(ctx context.Context, in *RunRetentionRequest, opts ...grpc.CallOption) (*RunRetentionResponse, error)
@@ -1181,7 +1182,8 @@ type PolarGraphServiceServer interface {
 	// / Vector search with a node-type or reachability filter.
 	// / Runs HNSW with a large candidate pool then post-filters to the allowed set.
 	SearchVectorFiltered(context.Context, *SearchVectorFilteredRequest) (*SearchVectorFilteredResponse, error)
-	// / Score an explicit set of node IDs against a query vector; return top-k.
+	// / Rank a candidate set against a query vector; return top-k. Candidates
+	// / are explicit node IDs or `candidate_patterns` evaluated in the server.
 	SearchVectorInSet(context.Context, *SearchVectorInSetRequest) (*SearchVectorInSetResponse, error)
 	// / Insert multiple vectors into a named space atomically.
 	BatchInsertVectors(context.Context, *BatchInsertVectorsRequest) (*BatchInsertVectorsResponse, error)
@@ -1199,7 +1201,7 @@ type PolarGraphServiceServer interface {
 	// / Returns FAILED_PRECONDITION if the server was not started with --backup-dir.
 	// / Note: restore is an offline operation — see docs/architecture.md.
 	PurgeOldBackups(context.Context, *PurgeOldBackupsRequest) (*PurgeOldBackupsResponse, error)
-	// / Scan all hexastore column families and delete superseded versions (and
+	// / Scan all quad-order column families and delete superseded versions (and
 	// / triples whose valid-time windows have fully expired) per the policy.
 	// / Triggers a full RocksDB compaction on any CF that had deletions.
 	RunRetention(context.Context, *RunRetentionRequest) (*RunRetentionResponse, error)

@@ -5,6 +5,9 @@ Results collected June 2026 using the suites in `polargraph-storage/benches/stor
 All numbers are from a single run on the machine described below and are meant as
 directional guidance, not production SLAs.
 
+> Current results (cb-bench against the platform plan's targets, BSBM)
+> are in [`../BENCHMARKS.md`](../BENCHMARKS.md).
+>
 > These measurements predate storage format v3 (named graphs, 8 quad orders,
 > value-hashed keys). The v2 → v3 comparison — end-to-end inserts −9%, union
 > scans 3–17% faster, a 1K-quad graph load in 0.37 ms — is in

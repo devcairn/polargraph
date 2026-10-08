@@ -670,7 +670,8 @@ class PolarGraphServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def SearchVectorInSet(self, request, context):
-        """/ Score an explicit set of node IDs against a query vector; return top-k.
+        """/ Rank a candidate set against a query vector; return top-k. Candidates
+        / are explicit node IDs or `candidate_patterns` evaluated in the server.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -718,7 +719,7 @@ class PolarGraphServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def RunRetention(self, request, context):
-        """/ Scan all hexastore column families and delete superseded versions (and
+        """/ Scan all quad-order column families and delete superseded versions (and
         / triples whose valid-time windows have fully expired) per the policy.
         / Triggers a full RocksDB compaction on any CF that had deletions.
         """

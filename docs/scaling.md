@@ -268,3 +268,21 @@ Horizontal write scaling via sharding is significantly more complex for graph wo
 - The graph has a natural partition structure (e.g., tenants, time windows) that avoids edge cuts.
 
 Until those conditions are met, read replicas provide the most practical scale-out path.
+
+---
+
+## Vector index sizing (measured)
+
+From cb-bench at team scale (2M 384-dim chunk vectors, Apple M4 Pro;
+`BENCHMARKS.md` Part 4):
+
+| Space | Vector RAM | Build (bulk) | Recall@20 at ef 400 | Search p95 at ef 400 |
+|---|---|---|---|---|
+| f32, memory mode | 2.9 GB (+ graph links) | 37 min | 0.96 | ~3.7 ms |
+| int8 (codes in RAM, full vectors in `.vecs`) | 0.74 GB (+ graph links) | 24 min | 0.94 | ~3.3 ms |
+
+Company scale (40M vectors) is ~20× that: use int8 (or mmap) spaces, and see
+the PQ / tiering item on the "Later" list in `docs/STATUS.md`. Online
+ingestion into a 2M-vector space is ~27–42 records/s per single writer (20
+vectors per record); bulk backfills should batch vectors
+(`BatchInsertVectors`) and quads (SST import).

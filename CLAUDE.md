@@ -32,6 +32,9 @@ polargraph/
 ├── docs/
 │   ├── architecture.md         # design narrative
 │   ├── api-reference.md        # public API surface
+│   ├── STATUS.md               # where the engine stands: merged, trust model, "Later" list
+│   ├── design/                 # design notes and decisions per step
+│   ├── upgrade-*.md            # release notes / upgrade guides
 │   └── contxtbroker-platform-plan.md  # knowledge-platform roadmap; §0.1–0.2 = engine decisions + sequencing
 ├── clients/
 │   ├── python/                 # Python SDK (sync + async, grpc)
@@ -183,6 +186,7 @@ query layers over gRPC.
 | `ui_api` | `UiState`, `build_ui_router` — axum REST handlers + embedded SPA for the management UI |
 | `wal_client` | `run_replication` — WAL streaming client (replica mode) |
 | `rate_limit` | `RateLimitLayer` / `RateLimitService` — per-IP token-bucket rate limiting tower middleware |
+| `vector_visibility` | `VectorVisibility` — node → graphs for nodes with vectors (graph-ACL checks on vector candidates), built from one `spog` key pass, caught up from the change log, rebuilt after graph ops |
 | `type_index` | `TypeIndex` — `rdf:type` membership by class node, caught up from the change log on read (all write paths, replicas); drives typed vector filters, `Subscribe` types, `HAS_ACCESS_TYPE` |
 | `retention_scheduler` | `run_retention_scheduler()` — background task that fires `CompactionManager::run_retention()` on a configurable interval |
 
@@ -219,7 +223,7 @@ See `polargraph.example.toml` in the repo root for a fully-commented example.
 | `--retention-tx-age-secs N` | `POLARGRAPH_RETENTION_TX_AGE_SECS` | *(none)* | Delete versions superseded more than N seconds ago (current values are kept); runs once at startup |
 | `--retention-vt-lookback-secs N` | `POLARGRAPH_RETENTION_VT_LOOKBACK_SECS` | *(none)* | Also delete triples whose versions all ended (valid time) more than N seconds ago |
 | `--retention-schedule` | `POLARGRAPH_RETENTION_SCHEDULE` | `false` | Enable background periodic retention task |
-| `--default-vector-ef N` | `POLARGRAPH_DEFAULT_VECTOR_EF` | `50` | Default HNSW exploration factor for vector searches |
+| `--default-vector-ef N` | `POLARGRAPH_DEFAULT_VECTOR_EF` | `400` | Default HNSW exploration factor for vector searches (effective `max(ef, 2·k)`) |
 | `--query-cache-size N` | `POLARGRAPH_QUERY_CACHE_SIZE` | `1000` | Max Cypher query plans to cache |
 | `--auto-materialize` | `POLARGRAPH_AUTO_MATERIALIZE` | `false` | Run OWL 2 RL inference at startup (implies `--inference`) |
 | `--inference` | `POLARGRAPH_INFERENCE` | `false` | Keep the inferred graphs current from the change log (DRed, ~1 s) |
@@ -395,6 +399,14 @@ Optimistic concurrency:
 
 The oracle counter persists to the META CF so restarts don't reuse timestamps.
 
+### Identity and trust
+
+The engine **trusts the user id the calling application sends** (`user_id`,
+`x-polargraph-user-id`, REST `X-User-Id`) and enforces graph-level access
+control for it; the application authenticates users. The API key
+authenticates the application; no user id = trusted service call. Verified
+identity (JWT) is on the "Later" list in `docs/STATUS.md`.
+
 ### IDs
 
 `NodeId` and `EdgeId` are UUID v7 (time-ordered). This gives chronological
@@ -418,7 +430,7 @@ sort order and is cluster-safe without a central sequence generator.
 
 ---
 
-## Current state (phase 2 in progress)
+## Current state (engine phase complete pending `db/hybrid-search`; see `docs/STATUS.md`)
 
 Entries describe each feature as it was built; storage key formats in older
 entries were superseded by storage format v3 (last entries below).
@@ -482,7 +494,7 @@ entries were superseded by storage format v3 (last entries below).
 - [x] JavaScript/TypeScript SDK — `clients/js/` package (`@polargraph/client`); `@grpc/grpc-js` transport; full TypeScript types; `tsup` build; streaming, wire transactions, Cypher; `clients/js/README.md`
 - [x] Helm chart — `deploy/helm/polargraph/` with 8 Kubernetes resources: Namespace, ConfigMap, Secret, PVC, Deployment, Services×3 (gRPC, UI, metrics), HPA; values file for image tag, replica count, resource limits, storage size
 - [x] Simplified CI/CD — single `.github/workflows/ci.yml`; jobs: `test` (cargo test), `lint` (clippy + fmt), `release` (binary artifact upload on `main`/tags), `docker-build` (build-only smoke test, no push)
-- [x] ef tuning — `default_vector_ef: u32` field on `PolarGraphServer`; `--default-vector-ef N` CLI flag + `POLARGRAPH_DEFAULT_VECTOR_EF` env var; `[query] default_vector_ef` TOML key; three-level resolution hierarchy: Cypher inline `ef=N` > per-request `ef` field > server default (built-in: 50); `with_default_vector_ef()` builder method
+- [x] ef tuning — `default_vector_ef: u32` field on `PolarGraphServer`; `--default-vector-ef N` CLI flag + `POLARGRAPH_DEFAULT_VECTOR_EF` env var; `[query] default_vector_ef` TOML key; three-level resolution hierarchy: Cypher inline `ef=N` > per-request `ef` field > server default (built-in: 400 since the hybrid-search change; effective `max(ef, 2·k)`); `with_default_vector_ef()` builder method
 - [x] VectorSpaceDef in core schema — `VectorSpaceDef` with `space_name`, `dimensions`, `embedding_model`, `storage_mode` string fields in `polargraph-core::schema`; associated with `NodeTypeDef`; `storage_mode` round-trips through proto `VectorSpaceDefProto` and `convert.rs`
 - [x] RDF-star edge annotations — additive `Triple::EdgeProperty { edge, predicate, value, temporal }` and `Triple::EdgeRelation { edge, predicate, object, temporal }` variants in `polargraph-core::triple`; two new RocksDB column families: `EPA` (key `[edge_id:16][pred_id:4][tt:8]` = 28 bytes, value = codec Property bytes) and `EPO` (key `[edge_id:16][pred_id:4][obj_id:16][tt:8]` = 44 bytes, value = `[vt_start:8][vt_end:8]`); `EdgeAnnotation`, `EdgeAnnotationValue` in `polargraph-storage::store`; `scan_edge_annotations(edge, snapshot_ts)` and `get_edge_annotation(edge, predicate, snapshot_ts)` on `TripleStore`; `EdgeAnnotation` + `GetEdgeAnnotationsRequest/Response` proto messages; `repeated EdgeAnnotation edge_annotations` on `InsertRequest`; `GetEdgeAnnotations` gRPC RPC; `edge_annotation_from_proto` / `edge_annotation_to_proto` in `convert.rs`; REST `POST /edge-annotations` and `GET /edge-annotations/:edge_id`; 6 storage integration tests in `crates/polargraph-storage/tests/annotation.rs`; 3 gRPC integration tests; existing `Triple` variants and key formats unchanged
 - [x] Graph-native access control — `BUILTIN_USER_TYPE`, `BUILTIN_GROUP_TYPE`, `BUILTIN_MEMBER_OF_PRED`, `BUILTIN_HAS_ACCESS_PRED`, `BUILTIN_HAS_ACCESS_TYPE_PRED` constants + `builtin_node_types()` / `builtin_edge_types()` in `polargraph-core::schema`; `AccessCache: Arc<RwLock<HashMap<String, HashSet<NodeId>>>>` on `PolarGraphServer` built from MEMBER_OF + HAS_ACCESS + HAS_ACCESS_TYPE triples at startup and refreshed on AC-touching inserts; `user_id: string` field on `QueryRequest`, `CypherQueryRequest`, `VectorSeedQueryRequest`, `SearchVectorFilteredRequest`; identity also accepted via `x-polargraph-user-id` gRPC metadata / `X-User-Id` HTTP header; `filter_bindings()` post-filter restricts results to allowed NodeIds; `GrantAccess`, `RevokeAccess`, `AddUserToGroup`, `GetUserAccess` gRPC RPCs (blocked on replicas); `attach_user_id()` helper + `/access/grant`, `/access/revoke`, `/access/add-user`, `/access/user/:user_id` REST endpoints; 4 storage integration tests in `crates/polargraph-storage/tests/access_control.rs`; 5 gRPC integration tests; 2 REST unit tests; "Access Control" section in `docs/architecture.md`
@@ -519,6 +531,7 @@ entries were superseded by storage format v3 (last entries below).
 - [x] Step 10 (`docs/design/type-packages-boundary.md`: type packages are application-only; release note `docs/upgrade-step10.md`) — atomic SPARQL Update: data operations compile to one `ApplyChanges` changeset (`?dry_run`, `?read_ts`, WHERE at one read point, graph ops can't be mixed); `QuadRef.all_graphs`, `ApplyChangesRequest.edge_annotations`; inference schema graphs (`Get`/`SetInferenceSettings`, REST `/inference/settings`); `graphs` filter on vector RPCs; Cypher reads confined to the dataset (`Snapshot::within_graphs`); fixed time-travel reads (`as_of_tx_time` / `snapshot_ts`) bypassing the graph ACL
 - [x] HNSW connectivity + vector write cost (found by cb-bench) — heuristic neighbour selection for new links and pruning (plain nearest-M split clustered data into islands: recall@20 0.17–0.19 at 20K clustered vectors regardless of `ef`); memory-mode vectors stored once under `<space>/v/<id>` (node records carry only neighbour lists; legacy inline records still load, no migration); `batch_insert_vectors` writes each changed node once per batch; clustered-data recall tests in `hnsw::tests`
 - [x] cb-bench (plan step 11, `docs/design/cb-bench.md`) — `polargraph-bench cb --scale SF`: hand-built seed (`crates/polargraph-bench/seed/`: ontology, SHACL shapes, TriG), deterministic generator (spine, records + chunks with Zipf mentions, decision projects with supersession history, team ACL groups, clustered vectors), SST bulk load, in-process measurements through `PolarGraphServer` as a team member against the plan's targets, report (met / missed / unmeasured, hardware, disk by CF; `--json`, `--markdown`); CI job `cb-bench report` (scale 0.05, job summary, no thresholds); results and findings in `BENCHMARKS.md` Part 4
+- [x] Hybrid search (finding #2, `docs/design/hybrid-search.md`) + default `ef` (finding #5) — `SearchVectorInSet.candidate_patterns` + `rank_var` (candidates evaluated in the server as the caller); vector visibility index (`polargraph-server::vector_visibility`; `Snapshot::subject_graphs` / `all_subject_graphs`, `TripleStore::vector_node_ids`) used by every vector RPC; int8 in-set ranking by codes with exact re-rank of the best `4k`; default `ef` 400, effective `max(ef, 2·k)`; release note `docs/upgrade-hybrid-search.md`
 
 ## Adding a new predicate
 

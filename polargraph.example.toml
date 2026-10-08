@@ -158,7 +158,7 @@
 # Per-request `ef` fields (on SearchVector, SearchVectorFiltered, etc.) override
 # this value when non-zero.
 # Equivalent to --default-vector-ef / POLARGRAPH_DEFAULT_VECTOR_EF
-# default_vector_ef = 50
+# default_vector_ef = 400
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 

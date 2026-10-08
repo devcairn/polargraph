@@ -5,6 +5,17 @@ on 2026-09-30: A changed to "always enforced, no flag"; B–F and the `roaring`
 dependency as proposed. Upgrade path and release note:
 [`docs/upgrade-graph-acl.md`](../upgrade-graph-acl.md).
 
+## Trust model
+
+**The engine trusts the user id the calling application sends** (`user_id`,
+`x-polargraph-user-id`, REST `X-User-Id`) and enforces graph access for that
+id. It does not authenticate users: **the application is responsible for
+authentication** and must forward only ids it has verified. The API key
+authenticates the application; a call without a user id is a trusted
+service call with full access. Verified identity (JWT from an IdP) is the
+first item on the "Later / nice-to-have" list in `docs/STATUS.md`
+(Mark, 2026-10-08: "for now we trust what the app sends").
+
 ## Before
 
 - Identity is `user_id` / `x-polargraph-user-id` (REST `X-User-Id`),

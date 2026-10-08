@@ -545,6 +545,40 @@ impl Snapshot {
         self.store.scan_by_subject_at(subject, &self.read_at())
     }
 
+    /// The graphs in which `subject` has a live quad (as subject), readable
+    /// to this snapshot. Reads keys and validity headers only.
+    pub fn subject_graphs(&self, subject: &NodeId) -> Result<Vec<GraphId>, StorageError> {
+        let mut out: Vec<GraphId> = Vec::new();
+        self.store
+            .live_subject_graphs_at(subject.as_bytes(), &self.read_at(), |_, g| {
+                if !out.contains(&g) {
+                    out.push(g);
+                }
+            })?;
+        Ok(out)
+    }
+
+    /// Every live quad's `(subject, graph)` in one pass over `spog`, for the
+    /// subjects `keep` selects (e.g. nodes with vectors). Reads keys and
+    /// validity headers only.
+    pub fn all_subject_graphs(
+        &self,
+        keep: impl Fn(&NodeId) -> bool,
+    ) -> Result<std::collections::HashMap<NodeId, Vec<GraphId>>, StorageError> {
+        let mut out: std::collections::HashMap<NodeId, Vec<GraphId>> =
+            std::collections::HashMap::new();
+        self.store
+            .live_subject_graphs_at(&[], &self.read_at(), |s, g| {
+                if keep(&s) {
+                    let graphs = out.entry(s).or_default();
+                    if !graphs.contains(&g) {
+                        graphs.push(g);
+                    }
+                }
+            })?;
+        Ok(out)
+    }
+
     pub fn scan_by_subject_predicate(
         &self,
         subject: &NodeId,

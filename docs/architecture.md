@@ -38,9 +38,13 @@ flowchart LR
     rest -->|gRPC| server["polargraphd<br/>(polargraph-server)"]
     ui["Management UI"] -->|HTTP| server
     server --> query["polargraph-query<br/>Datalog · Cypher · planner"]
+    server --> shacl["polargraph-shacl<br/>SHACL validation"]
     server --> storage
-    query --> storage["polargraph-storage<br/>quad index · MVCC · HNSW"]
-    storage --> rocks[("RocksDB<br/>17 column families")]
+    shacl --> storage
+    query --> storage["polargraph-storage<br/>quad index · MVCC · HNSW ·<br/>change log · inference"]
+    storage --> rocks[("RocksDB<br/>19 column families")]
+    app["application<br/>(authenticates users,<br/>sends user id)"] -->|gRPC / REST| server
+    server -. "Subscribe (change feed)" .-> app
     import["polargraph-import<br/>(offline bulk load)"] --> storage
     replica["replica polargraphd"] -. "StreamWal" .-> server
 ```
@@ -56,9 +60,11 @@ flowchart BT
     query["polargraph-query<br/>Datalog · Cypher · planner"] --> storage
     sparql["polargraph-sparql<br/>SPARQL translation · RDF I/O"] --> query
     server["polargraph-server<br/>polargraphd (gRPC, UI, metrics)"] --> query
+    shacl["polargraph-shacl<br/>SHACL Core"] --> storage
+    server --> shacl
     rest["polargraph-rest<br/>HTTP gateway"] --> sparql
     importer["polargraph-import<br/>bulk SST loader"] --> storage
-    bench["polargraph-bench"] --> server
+    bench["polargraph-bench<br/>cb-bench · BSBM"] --> server
 ```
 
 `polargraph-core` is intentionally dependency-free at the I/O level. Every
@@ -183,14 +189,14 @@ written by older builds must be migrated offline — see
 
 ### Column families
 
-PolarGraph opens seventeen RocksDB column families:
+PolarGraph opens nineteen RocksDB column families:
 
 | CF | Purpose | Key |
 |----|---------|-----|
 | `spog` `sopg` `psog` `posg` `ospg` `opsg` | Quad index, six non-graph-leading orders | 48 bytes, see [Key layout](#key-layout) |
 | `gspo` `gpos` | Quad index, graph-leading orders | 48 bytes |
 | `meta` | Predicate and graph intern tables, timestamp oracle, storage format, schema-migration version | text keys |
-| `hnsw` | HNSW vector index nodes and entry points (per named space) | `<space>/n/<id>`, `<space>/__ep` |
+| `hnsw` | HNSW vector index per named space: node neighbour lists, entry point, memory-mode vectors, int8 codes | `<space>/n/<id>`, `<space>/__ep`, `<space>/v/<id>`, `<space>/q/<id>` |
 | `trig` | Trigram full-text index | `[trigram:3][pred:4][g:4][subject:16]` |
 | `drvg` | Legacy OWL 2 RL derived facts (retired in step 9; inferred facts live in `urn:pg:inferred:*` graphs) | `spog` layout |
 | `sts` | Counters (`IncrementCounters` / `GetCounters`), add merge operator, unversioned | `[namespace][0x00][node:16]` → `i64` LE |
@@ -199,6 +205,7 @@ PolarGraph opens seventeen RocksDB column families:
 | `peag` | Predicate-first index over `epag` | `[pred:4][edge:16][g:4][tt:8]` |
 | `iri` | IRI dictionary | `[node_id:16]` → IRI |
 | `blob` | Out-of-line property values | `[value_hash:16]` → payload |
+| `chg` | Change log: one entry per commit (author, graph ops, quad versions) for `Subscribe`, the type index, the vector visibility index and incremental inference | `[commit_ts:8]` |
 
 Every quad version is written to all eight quad-index CFs in one atomic
 `WriteBatch`. That makes every read O(log n) with no secondary lookups, at
@@ -550,18 +557,20 @@ more of the graph before picking the final top-k, trading latency for recall.
 
 ### Quality / speed tradeoff
 
-| ef | Character |
-|----|-----------|
-| 20 | Fastest; a few percent recall loss vs. brute force |
-| 50 | Safe default; good recall on most workloads |
-| 100+ | High-recall mode; noticeably slower on large indexes |
+Measured with cb-bench at 2M clustered 384-dim vectors, k = 20
+(`BENCHMARKS.md` Part 4):
 
-**Rule of thumb:** `ef ≥ k`. Below `k` the search may not even fill the
-result set. The built-in fallback in `search_vector` uses
-`ef = max(ef_construction / 2, k)` when no caller `ef` is supplied.
+| ef | Recall@20 f32 / int8 | Search p95 |
+|----|------|------|
+| 50 | 0.52 / 0.50 | ~1 ms |
+| 100 | 0.68 / 0.69 | ~1.5 ms |
+| 200 | 0.88 / 0.84 | ~2.6 ms |
+| **400 (default)** | 0.96 / 0.94 | ~3.5 ms |
+| 800 | 0.98 / 0.98 | ~4.7 ms |
 
-**Benchmark data point:** at 100K nodes / 128 dims / k=10, ef=50 runs ~583 µs
-p50; ef=20 roughly halves that at the cost of a few percent recall.
+At 100K vectors every `ef` ≥ 100 gives 1.0, so the default costs small
+spaces fractions of a millisecond. The effective `ef` is never below `2·k`
+(`PolarGraphServer::effective_ef`).
 
 ### Three-level resolution hierarchy
 
@@ -574,13 +583,13 @@ When a search request arrives, `ef` is resolved in priority order:
    "use the server default".
 3. **Server default** — `--default-vector-ef` CLI flag /
    `POLARGRAPH_DEFAULT_VECTOR_EF` env var / `[query] default_vector_ef` in
-   the TOML config file. Built-in default: **50**.
+   the TOML config file. Built-in default: **400**.
 
 ```toml
 [query]
 timeout_ms        = 30000
 slow_query_ms     = 1000
-default_vector_ef = 50    # override here to tune globally
+default_vector_ef = 400   # override here to tune globally
 ```
 
 This hierarchy lets you set a conservative global default while allowing
@@ -678,25 +687,9 @@ over gRPC. The generated code lives in `polargraph_server::proto`.
 
 ### RPCs
 
-| RPC | Request | Response | Notes |
-|-----|---------|----------|-------|
-| `Insert` | `InsertRequest` | `InsertResponse` | Atomically commits ≥1 triples; returns `ABORTED` on write-write conflict |
-| `Query` | `QueryRequest` | `QueryResponse` | Conjunctive pattern query; returns all satisfying variable bindings |
-| `InsertVector` | `InsertVectorRequest` | `InsertVectorResponse` | Upserts a node's embedding vector into the HNSW index |
-| `SearchVector` | `SearchVectorRequest` | `SearchVectorResponse` | Returns k nearest neighbors with cosine similarity scores |
-| `Reachable` | `ReachableRequest` | `ReachableResponse` | Transitive closure from a start node along a named predicate |
-| `RegisterNodeType` | `RegisterNodeTypeRequest` | `RegisterNodeTypeResponse` | Register or overwrite a node type schema |
-| `GetNodeType` | `GetNodeTypeRequest` | `GetNodeTypeResponse` | Look up a schema by type name; returns empty if unknown |
-| `ListNodeTypes` | `ListNodeTypesRequest` | `ListNodeTypesResponse` | Return all registered schemas |
-| `ValidateNode` | `ValidateNodeRequest` | `ValidateNodeResponse` | Validate a property map against a schema; returns errors if invalid |
-| `RegisterEdgeType` | `RegisterEdgeTypeRequest` | `RegisterEdgeTypeResponse` | Register or overwrite an edge type schema |
-| `GetEdgeType` | `GetEdgeTypeRequest` | `GetEdgeTypeResponse` | Look up an edge schema by predicate name; returns empty if unknown |
-| `ListEdgeTypes` | `ListEdgeTypesRequest` | `ListEdgeTypesResponse` | Return all registered edge type schemas |
-| `ValidateEdge` | `ValidateEdgeRequest` | `ValidateEdgeResponse` | Validate endpoint types and property map; returns errors if invalid |
-| `ListPredicatesBetween` | `ListPredicatesBetweenRequest` | `ListPredicatesBetweenResponse` | Return predicate names whose domain/range match the given node types |
-| `SearchVectorFiltered` | `SearchVectorFilteredRequest` | `SearchVectorFilteredResponse` | HNSW search with a node-type or reachability post-filter |
-| `SearchVectorInSet` | `SearchVectorInSetRequest` | `SearchVectorInSetResponse` | Score an explicit node-ID set against a query vector; return top-k |
-| `BatchInsertVectors` | `BatchInsertVectorsRequest` | `BatchInsertVectorsResponse` | Insert multiple vectors into a named space in a single write |
+The complete list (72 RPCs, grouped, with descriptions) is the **RPC
+index** in [`api-reference.md`](api-reference.md#rpc-index); the sections
+below describe the main ones.
 
 ### Insert
 
@@ -755,11 +748,35 @@ visibility); searches over-fetch `max(k, ef)` candidates to fill k.
 
 ### SearchVectorInSet
 
-`SearchVectorInSetRequest` carries a space, query, k, and an explicit
-`repeated NodeId node_ids`. The server drops nodes the caller can't see (or
-outside `graphs`), scores the rest against the query using the stored
-embedding (skipping nodes absent from the index) and returns the top-k. O(|node_ids|) — appropriate for small sets derived from
-graph traversals.
+`SearchVectorInSetRequest` carries a space, query, k, and the candidates —
+either an explicit `repeated NodeId node_ids`, or **`candidate_patterns` +
+`rank_var`**: pattern rows evaluated in the server under the caller's
+snapshot (and `graphs` as dataset), whose `rank_var` nodes are the
+candidates. The plan's "rank within the mention set" is then one call:
+
+```text
+candidate_patterns: ?r <mentions> <entity> . ?c <chunkOf> ?r      rank_var: c
+```
+
+The server drops candidates the caller can't see (or outside `graphs`),
+scores the rest exactly (int8 spaces: by codes, then the best `4k`
+re-ranked with the full vectors) and returns the top-k. Linear in the
+candidate set; see `docs/design/hybrid-search.md`.
+
+**Vector visibility index.** A vector hit is visible iff the node has a
+live quad (as subject) in a readable graph. Rather than a store scan per
+candidate, the server keeps `node → graphs` for nodes with vectors
+(`polargraph-server::vector_visibility`): built in the background from one
+pass over `spog` keys and validity headers (`Snapshot::all_subject_graphs`,
+no value decoding), caught up from the change log on each check (touched
+subjects recomputed with `Snapshot::subject_graphs`), rebuilt after graph
+operations or a pruned log; until ready, and for nodes added since, the
+per-node check is used. All vector RPCs use it. At team scale the per-node
+check was ~95 % of `SearchVectorInSet` time on large sets.
+
+**`ef`.** The default is 400 (`--default-vector-ef`); the effective `ef` is
+never below `2·k`. Recall@20 at 2M clustered 384-dim vectors: 0.52 at ef
+50, 0.96 at 400, 0.98 at 800 (< 4 ms p95 at 400).
 
 ### BatchInsertVectors
 
@@ -1979,6 +1996,17 @@ PolarGraph uses transport-level API key authentication implemented as a tower
 middleware layer (`polargraph_server::auth::ApiKeyLayer`). This is not
 per-user RBAC — all callers with a valid key have identical access.
 
+### Trust model
+
+The API key authenticates the **calling application**. End users are
+identified by the user id the application sends (`user_id`,
+`x-polargraph-user-id`, REST `X-User-Id`): **the engine trusts that id and
+enforces graph-level access control for it; the application is responsible
+for authenticating users.** A request without a user id is a trusted service
+call. Verified identity (JWT) is on the "Later / nice-to-have" list in
+[`STATUS.md`](STATUS.md).
+
+
 ### Configuration
 
 | Flag | Env variable | Description |
@@ -2791,7 +2819,7 @@ confirmation step above keeps results correct.
 1. If the predicate has a registered `EdgeTypeDef` with a `domain` type, the evaluator prefixes the scan with a type filter: only subjects that are `rdf:type` instances of the domain class are considered.
 2. If the predicate has a `range` type, the same filter is applied to the object variable.
 
-This prunes join branches early when the schema indicates only a subset of node types can participate in a predicate, avoiding unnecessary hexastore scans. The optimization is applied automatically by the gRPC handler when an `EdgeTypeRegistry` is present; no query syntax changes are required.
+This prunes join branches early when the schema indicates only a subset of node types can participate in a predicate, avoiding unnecessary quad-index scans. The optimization is applied automatically by the gRPC handler when an `EdgeTypeRegistry` is present; no query syntax changes are required.
 
 `SchemaHints` is a lightweight wrapper that caches per-predicate domain/range lookups in a `HashMap` to avoid repeated registry reads within a single multi-pattern query.
 
@@ -2986,9 +3014,16 @@ For read-replica deployments, set `polargraph.replicaOf` in values to point at t
 
 ## Access Control
 
-PolarGraph implements graph-native access control: permissions are stored as
-ordinary triples, enabling the same query and traversal primitives that work
-on domain data to also express policy.
+Two layers: **graph-level access control** (the primary model — per-graph
+grants enforced inside every scan; see "Named graphs" above,
+`design/graph-acl.md` and `upgrade-graph-acl.md`) and the older
+**node-level** model below (kept for compatibility; its per-user node cache
+doesn't scale — see `STATUS.md`). Both apply to the user id the application
+sends, which the engine trusts (see [Trust model](#trust-model)).
+
+The node-level model stores permissions as ordinary triples, enabling the
+same query and traversal primitives that work on domain data to also
+express policy.
 
 ### Data model
 

@@ -1,5 +1,9 @@
 # Implementation Plan: Cypher Edge Annotation Filters + SPARQL 1.1 Endpoint
 
+> **Historical.** This is the 2026-06 implementation plan for edge annotations and SPARQL; it is kept for context and is
+> not maintained. Current state: [`STATUS.md`](STATUS.md); plan and
+> tracker: [`contxtbroker-platform-plan.md`](contxtbroker-platform-plan.md).
+
 **Date**: 2026-06-27  
 **Status**: Draft  
 **Scope**: Two independent features; edge annotations first (small), SPARQL second (large)

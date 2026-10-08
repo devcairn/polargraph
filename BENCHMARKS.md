@@ -242,18 +242,30 @@ cores, 48 GiB RAM, internal NVMe), after the HNSW connectivity fix.
 
 ### Summary
 
-| Plan target | Scale 0.05 (410K quads, 100K vectors) | Scale 1 — team (8.0M + 4.1M inferred quads, 2M vectors) |
-|---|---|---|
-| Load one graph (1K quads), p50 ≤ 2 ms | ✅ 0.87 ms | ✅ 0.76 ms |
-| describe(entity), p95 ≤ 10 ms | ✅ 2.3 ms | ❌ 15 ms |
-| Hybrid search k=20, p95 ≤ 25 ms | ❌ 256 ms | ❌ 2,681 ms |
-| Context assembly 4K tokens, p95 ≤ 300 ms | ✅ 260 ms | ❌ 2,253 ms |
-| Promote 500-quad proposal incl. SHACL, p95 ≤ 200 ms | ✅ 58 ms | ❌ 450 ms |
-| Incremental materialization lag ≤ 2 s | ✅ 1.3 s | ❌ 12.3 s |
-| Sustained ingestion ≥ 50 records/s | ✅ 101/s | ❌ 27/s |
-| int8 vector space | measured (recall 1.0) | measured after the mmap append fix (below): 2M vectors in 24 min, recall@20 0.69 at ef 100 / 0.92 at ef 400, ingestion 42/s |
+Team scale "first run" is cb-bench's first measurement (2026-10-05);
+"current" is main plus `db/hybrid-search` after the fixes it led to
+(HNSW connectivity #17, DRed #19, mmap append #20, hybrid search + `ef`).
 
-### Findings (scale 1)
+| Plan target | Scale 0.05 (410K quads, 100K vectors) | Team scale, first run | Team scale, current |
+|---|---|---|---|
+| Load one graph (1K quads), p50 ≤ 2 ms | ✅ 0.87 ms | ✅ 0.76 ms | ✅ 0.97 ms |
+| describe(entity), p95 ≤ 10 ms | ✅ 2.3 ms | ❌ 15 ms | ❌ 16 ms |
+| Hybrid search k=20, p95 ≤ 25 ms | ❌ 256 ms | ❌ 2,681 ms | ❌ 162 ms (f32) / 140 ms (int8); ✅ 17 / 13 ms for mention sets < 10K chunks |
+| Context assembly 4K tokens, p95 ≤ 300 ms | ✅ 260 ms | ❌ 2,253 ms | ✅ 173 ms |
+| Promote 500-quad proposal incl. SHACL, p95 ≤ 200 ms | ✅ 58 ms | ❌ 450 ms | ❌ 452 ms |
+| Incremental materialization lag ≤ 2 s | ✅ 1.3 s | ❌ 12.3 s | ✅ 0.97 s |
+| Sustained ingestion ≥ 50 records/s | ✅ 101/s | ❌ 27/s | ❌ 27/s (f32), 42/s (int8) |
+| int8 vector space at 2M vectors | — | unmeasured (bulk load unfinished) | builds in 24 min; recall@20 0.94 at ef 400 |
+| Recall@20 at the default `ef` | 1.0 | 0.52 (ef 50) | 0.96 f32 / 0.94 int8 (ef 400) |
+
+Open items behind the remaining misses are on the "Later / nice-to-have"
+list in [`docs/STATUS.md`](docs/STATUS.md).
+
+### Findings (scale 1, first run)
+
+Status of each (fixed, open, with numbers): `docs/STATUS.md` — 1 fixed
+(#19), 3 fixed (#20), 5 fixed and 2 mostly fixed (hybrid search; the
+popular-entity cache is on the "Later" list), 4 and 6 open.
 
 1. **Inference lag grows with the store, not the change.** Each DRed batch
    (`owl_rl::infer_changes`) scans every live inferred quad
@@ -404,3 +416,65 @@ Host: macos · Apple M4 Pro · 14 cores · 48 GiB RAM. In-process (no network); 
 | Disk (after compaction) | 11525.2 MiB (996 bytes per quad, incl. inferred quads, blobs and vectors) |
 | Disk by column family | `hnsw` 1671.9 MiB, `ospg` 597.9 MiB, `opsg` 597.5 MiB, `psog` 597.2 MiB, `blob` 574.1 MiB, `sopg` 568.0 MiB, `gspo` 564.5 MiB, `gpos` 555.4 MiB; `.vecs` files 3072.0 MiB |
 | Disk vs plan estimate (~9 GB × scale) | 12.1 GB vs ~9.0 GB |
+
+### Hybrid search and default `ef` at team scale (after `db/hybrid-search`)
+
+Recorded 2026-10-08, same host, `--scale 1 --vectors both`. Hybrid search
+now passes candidates as patterns (`SearchVectorInSet.candidate_patterns`);
+the old id path is kept as a comparison row. Before → after (p95):
+hybrid search 3,683 → 162 ms (f32), 2,412 → 140 ms (int8); context
+assembly 2,420 → 173 ms; recall@20 at the default `ef` 0.52 → 0.96 (f32),
+0.50 → 0.94 (int8).
+
+#### cb-bench — scale 1 (8008381 base quads, 4130354 inferred, 2000000 chunks)
+
+Host: macos · Apple M4 Pro · 14 cores · 48 GiB RAM. In-process (no network); reads as a team member with the graph ACL.
+
+| Plan target | Status | Measured |
+|---|:-:|---|
+| Load one graph (1K quads) | ✅ met | p50 0.97 ms |
+| describe(entity) across visible graphs | ❌ missed | p95 16 ms |
+| Hybrid search, k=20 | ❌ missed | (f32) p95 162 ms; (int8) p95 140 ms |
+| Context assembly, 4K tokens | ✅ met | p95 173 ms |
+| Promote a 500-quad proposal incl. SHACL | ❌ missed | p95 452 ms |
+| Incremental materialization lag | ✅ met | p95 969 ms |
+| Sustained ingestion | ❌ missed | 27/s |
+
+| Measurement | Target | n | p50 ms | p95 ms | p99 ms | max ms | Rate | Meets | Notes |
+|---|---|---:|---:|---:|---:|---:|---:|:-:|---|
+| Load one graph (ExportGraph) | p50 ≤ 2 ms | 200 | 0.97 | 1.66 | 1.89 | 2.72 |  | ✅ | 917 quads per graph on average |
+| describe(entity) | p95 ≤ 10 ms | 200 | 2.78 | 16 | 18 | 21 |  | ❌ | facts returned: median 619, max 4454 |
+| Hybrid search k=20, mention set (f32) | p95 ≤ 25 ms | 200 | 18 | 162 | 386 | 5120 |  | ❌ | candidates as patterns (mention → chunks) evaluated in the server; p95 for sets ≥ 10K chunks 173 ms (n 96), < 10K 17 ms (n 104) |
+| Mention set as ids, k=20 (f32) |  | 200 | 20 | 206 | 214 | 218 |  |  | set size: median 8840, max 86020; building the set (mention query) p95 161 ms, the rest is SearchVectorInSet |
+| Hybrid search, ANN k=200 + join (f32) |  | 200 | 3.60 | 5.29 | 6.24 | 8.16 |  |  | results kept: median 2, max 28 |
+| Hybrid search k=20, mention set (int8) | p95 ≤ 25 ms | 200 | 14 | 140 | 149 | 162 |  | ❌ | candidates as patterns (mention → chunks) evaluated in the server; p95 for sets ≥ 10K chunks 143 ms (n 96), < 10K 13 ms (n 104) |
+| Mention set as ids, k=20 (int8) |  | 200 | 18 | 189 | 193 | 200 |  |  | set size: median 8840, max 86020; building the set (mention query) p95 161 ms, the rest is SearchVectorInSet |
+| Hybrid search, ANN k=200 + join (int8) |  | 200 | 3.29 | 4.62 | 5.84 | 6.00 |  |  | results kept: median 2, max 28 |
+| Context assembly proxy (describe + hybrid + chunk text) | p95 ≤ 300 ms | 200 | 21 | 173 | 177 | 191 |  | ✅ | 14069 bytes of chunk text (~3517 tokens) |
+| Promote 500-quad proposal incl. SHACL | p95 ≤ 200 ms | 68 | 435 | 452 | 466 | 466 |  | ❌ | 0 SHACL results in total (expected 0) |
+| Time travel: decision status as of load vs now |  | 200 | 0.04 | 0.04 | 0.04 | 108 |  |  | 200/200 differed (expected all) |
+| Sustained ingestion (ApplyChanges + 20 vectors per record) | ≥ 50 records/s | 500 | 37 | 44 | 49 | 61 | 27/s | ❌ | 500 records, single writer, vectors into cb_chunks_f32 |
+| Incremental materialization lag | ≤ 2 s (p95) | 380 | 529 | 969 | 1013 | 1023 |  | ✅ | 380 commits at 20/s over 20 s; 0 not covered within 10 s |
+
+| Load / capacity | Value |
+|---|---|
+| Base load (SST import) | 8008381 quads in 74.3 s (107726 quads/s) |
+| Supersession pass (live writes) | 1167 status changes in 0.0 s |
+| Graph grants | 290 |
+| Full materialization | 4130354 inferred quads in 119.2 s |
+| Vector space `cb_chunks_f32` (f32) | 2000000 vectors in 2215.9 s; vector RAM 2929.7 MiB; RSS growth 2417.8 MiB |
+| Vector space `cb_chunks_int8` (int8) | 2000000 vectors in 1368.0 s; vector RAM 740.1 MiB; RSS growth 1787.8 MiB |
+| Recall@20 `cb_chunks_f32 ef=50 (search p50 0.65 ms, p95 0.95 ms)` | 0.520 |
+| Recall@20 `cb_chunks_f32 ef=100 (search p50 1.02 ms, p95 1.63 ms)` | 0.677 |
+| Recall@20 `cb_chunks_f32 ef=200 (search p50 1.55 ms, p95 2.63 ms)` | 0.881 |
+| Recall@20 `cb_chunks_f32 ef=400, server default (search p50 2.30 ms, p95 3.66 ms)` | 0.956 |
+| Recall@20 `cb_chunks_f32 ef=800 (search p50 3.16 ms, p95 4.60 ms)` | 0.983 |
+| Recall@20 `cb_chunks_int8 ef=50 (search p50 0.47 ms, p95 0.82 ms)` | 0.501 |
+| Recall@20 `cb_chunks_int8 ef=100 (search p50 0.73 ms, p95 1.23 ms)` | 0.685 |
+| Recall@20 `cb_chunks_int8 ef=200 (search p50 1.21 ms, p95 1.91 ms)` | 0.844 |
+| Recall@20 `cb_chunks_int8 ef=400, server default (search p50 1.97 ms, p95 3.30 ms)` | 0.939 |
+| Recall@20 `cb_chunks_int8 ef=800 (search p50 2.95 ms, p95 4.70 ms)` | 0.984 |
+| Disk (after compaction) | 17099.9 MiB (1477 bytes per quad, incl. inferred quads, blobs and vectors) |
+| Disk by column family | `hnsw` 5553.8 MiB, `ospg` 595.4 MiB, `opsg` 594.9 MiB, `psog` 594.2 MiB, `blob` 574.1 MiB, `sopg` 567.9 MiB, `gspo` 563.5 MiB, `spog` 552.5 MiB; `.vecs` files 3072.0 MiB |
+| Disk vs plan estimate (~9 GB × scale) | 17.9 GB vs ~9.0 GB |
+| HNSW RAM, memory mode, vs plan (~4 GB × scale) | 2.54 GB vs ~4.00 GB |

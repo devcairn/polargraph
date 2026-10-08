@@ -202,6 +202,8 @@ pub struct PolarGraphServer {
     slow_query_ms: u64,
     /// Default HNSW exploration factor for all vector search RPCs.
     default_vector_ef: u32,
+    /// Node → graphs for vector nodes (graph-ACL checks on vector hits).
+    vector_visibility: Arc<crate::vector_visibility::VectorVisibility>,
     #[allow(dead_code)]
     start_time: Instant,
     /// Live wire transactions. Shared across all clones via Arc.
@@ -260,7 +262,7 @@ impl PolarGraphServer {
             .map(|dir| BackupManager::open(dir, &store).map(Arc::new))
             .transpose()?;
         Ok(Self {
-            store,
+            store: store.clone(),
             registry,
             edge_registry,
             type_cache,
@@ -270,7 +272,12 @@ impl PolarGraphServer {
             replica_state: None,
             query_timeout_ms: 30_000,
             slow_query_ms: 1_000,
-            default_vector_ef: 50,
+            default_vector_ef: 400,
+            vector_visibility: {
+                let v = crate::vector_visibility::VectorVisibility::new(store.clone());
+                v.spawn_build();
+                v
+            },
             start_time: Instant::now(),
             tx_map: Arc::new(DashMap::new()),
             tx_idle_timeout_ms: 300_000,
@@ -378,7 +385,7 @@ impl PolarGraphServer {
         )));
         let replica_state = ReplicaState::new(primary_address.to_owned());
         let server = Self {
-            store,
+            store: store.clone(),
             registry,
             edge_registry,
             type_cache,
@@ -388,7 +395,12 @@ impl PolarGraphServer {
             replica_state: Some(replica_state.clone()),
             query_timeout_ms: 30_000,
             slow_query_ms: 1_000,
-            default_vector_ef: 50,
+            default_vector_ef: 400,
+            vector_visibility: {
+                let v = crate::vector_visibility::VectorVisibility::new(store.clone());
+                v.spawn_build();
+                v
+            },
             start_time: Instant::now(),
             tx_map: Arc::new(DashMap::new()),
             tx_idle_timeout_ms: 300_000,
@@ -1020,6 +1032,65 @@ impl PolarGraphServer {
                 .scan_scoped(Some(node), None, None, scope)
                 .is_ok_and(|t| !t.is_empty()),
         }
+    }
+
+    /// Which of `nodes` are visible to `access` within `scope` (order kept):
+    /// the vector-visibility index when it's ready, else the per-node check.
+    fn visible_mask(
+        &self,
+        nodes: &[NodeId],
+        access: &Option<Arc<polargraph_storage::UserGraphAccess>>,
+        scope: &Option<polargraph_storage::GraphScope>,
+    ) -> Vec<bool> {
+        if access.is_none() && scope.is_none() {
+            return vec![true; nodes.len()];
+        }
+        let readable = access.as_ref().map(|a| a.readable());
+        match self
+            .vector_visibility
+            .filter(nodes, readable.as_deref(), scope.as_ref())
+        {
+            Ok(Some(mask)) => mask,
+            Ok(None) => nodes
+                .iter()
+                .map(|n| self.node_visible_in(n, access, scope))
+                .collect(),
+            Err(e) => {
+                warn!("vector visibility index: {e}; checking per node");
+                nodes
+                    .iter()
+                    .map(|n| self.node_visible_in(n, access, scope))
+                    .collect()
+            }
+        }
+    }
+
+    /// `hits` without the nodes `access` can't see (or outside `scope`).
+    fn keep_visible(
+        &self,
+        hits: impl IntoIterator<Item = (NodeId, f32)>,
+        access: &Option<Arc<polargraph_storage::UserGraphAccess>>,
+        scope: &Option<polargraph_storage::GraphScope>,
+    ) -> std::vec::IntoIter<(NodeId, f32)> {
+        let hits: Vec<(NodeId, f32)> = hits.into_iter().collect();
+        let ids: Vec<NodeId> = hits.iter().map(|(id, _)| *id).collect();
+        let mask = self.visible_mask(&ids, access, scope);
+        hits.into_iter()
+            .zip(mask)
+            .filter_map(|(h, keep)| keep.then_some(h))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    /// The `ef` a vector search uses: the request's (or the server default),
+    /// never narrower than twice the results asked for.
+    fn effective_ef(&self, requested: usize, k: usize) -> usize {
+        let ef = if requested > 0 {
+            requested
+        } else {
+            self.default_vector_ef as usize
+        };
+        ef.max(2 * k)
     }
 
     /// The graph `iri` names, checked for `level` when the caller is a user.
@@ -2786,11 +2857,7 @@ impl PolarGraphService for PolarGraphServer {
         } else {
             &req.space
         };
-        let ef = if req.ef > 0 {
-            req.ef as usize
-        } else {
-            self.default_vector_ef as usize
-        };
+        let ef = self.effective_ef(req.ef as usize, k);
 
         debug!(
             "search_vector: space={} dim={} k={k} ef={ef}",
@@ -2807,9 +2874,8 @@ impl PolarGraphService for PolarGraphServer {
             k
         };
         let hits = self.store.search_vector_ef(space, &req.query, fetch, ef);
-        let results = hits
-            .into_iter()
-            .filter(|(id, _)| self.node_visible_in(id, &access, &scope))
+        let results = self
+            .keep_visible(hits, &access, &scope)
             .take(k)
             .map(|(id, score)| VectorSearchResult {
                 node_id: Some(convert::node_id_to_proto(id)),
@@ -2839,11 +2905,7 @@ impl PolarGraphService for PolarGraphServer {
         } else {
             &req.space
         };
-        let ef = if req.ef > 0 {
-            req.ef as usize
-        } else {
-            self.default_vector_ef as usize
-        };
+        let ef = self.effective_ef(req.ef as usize, k);
 
         // Access filter (may be None when user_id is not set).
         let access_allowed = self.get_access_filter(&user_id);
@@ -2864,11 +2926,12 @@ impl PolarGraphService for PolarGraphServer {
 
                 // HNSW with large ef, then O(1)-per-candidate HashSet filter.
                 let candidates = self.store.search_vector_ef(space, &req.query, ef, ef);
-                let results: Vec<_> = candidates
+                let candidates = candidates
                     .into_iter()
                     .filter(|(id, _)| type_allowed.contains(id))
-                    .filter(|(id, _)| access_allowed.as_ref().map_or(true, |s| s.contains(id)))
-                    .filter(|(id, _)| self.node_visible_in(id, &access, &scope))
+                    .filter(|(id, _)| access_allowed.as_ref().map_or(true, |s| s.contains(id)));
+                let results: Vec<_> = self
+                    .keep_visible(candidates, &access, &scope)
                     .take(k)
                     .map(|(id, score)| VectorSearchResult {
                         node_id: Some(convert::node_id_to_proto(id)),
@@ -2903,11 +2966,12 @@ impl PolarGraphService for PolarGraphServer {
                 .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
 
                 let candidates = self.store.search_vector_ef(space, &req.query, ef, ef);
-                let results: Vec<_> = candidates
+                let candidates = candidates
                     .into_iter()
                     .filter(|(id, _)| reach_allowed.contains(id))
-                    .filter(|(id, _)| access_allowed.as_ref().map_or(true, |s| s.contains(id)))
-                    .filter(|(id, _)| self.node_visible_in(id, &access, &scope))
+                    .filter(|(id, _)| access_allowed.as_ref().map_or(true, |s| s.contains(id)));
+                let results: Vec<_> = self
+                    .keep_visible(candidates, &access, &scope)
                     .take(k)
                     .map(|(id, score)| VectorSearchResult {
                         node_id: Some(convert::node_id_to_proto(id)),
@@ -2941,11 +3005,43 @@ impl PolarGraphService for PolarGraphServer {
             &req.space
         };
 
-        let allowed: Vec<polargraph_core::NodeId> = req
-            .node_ids
-            .iter()
-            .map(convert::node_id_from_proto)
-            .collect::<Result<_, _>>()?;
+        let allowed: Vec<polargraph_core::NodeId> = if req.candidate_patterns.is_empty() {
+            req.node_ids
+                .iter()
+                .map(convert::node_id_from_proto)
+                .collect::<Result<_, _>>()?
+        } else {
+            if !req.node_ids.is_empty() {
+                return Err(Status::invalid_argument(
+                    "use either node_ids or candidate_patterns, not both",
+                ));
+            }
+            if req.rank_var.is_empty() {
+                return Err(Status::invalid_argument(
+                    "rank_var is required with candidate_patterns",
+                ));
+            }
+            // Evaluated in the server as the caller: no id round trip.
+            let patterns =
+                convert::var_patterns_from_proto(&req.candidate_patterns, &req.graphs, &|iri| {
+                    self.store.graph_id(iri)
+                })?;
+            let mut query = Query::new();
+            query.patterns = patterns;
+            let snapshot = self.snapshot_for(self.store.begin().read_ts, &access);
+            let rows = execute_query(
+                &query,
+                &snapshot,
+                self.make_deadline(),
+                Some(&self.edge_registry),
+            )
+            .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
+            let mut seen = HashSet::with_capacity(rows.len());
+            rows.into_iter()
+                .filter_map(|b| b.get(&req.rank_var).copied())
+                .filter(|id| seen.insert(*id))
+                .collect()
+        };
 
         debug!(
             "search_vector_in_set: space={} set_size={} k={k}",
@@ -2956,9 +3052,11 @@ impl PolarGraphService for PolarGraphServer {
         // Drop nodes the caller can't see (or outside `graphs`) before
         // ranking, so up to k visible nodes come back.
         let scope = self.vector_graph_scope(&req.graphs);
+        let mask = self.visible_mask(&allowed, &access, &scope);
         let allowed: Vec<polargraph_core::NodeId> = allowed
             .into_iter()
-            .filter(|id| self.node_visible_in(id, &access, &scope))
+            .zip(mask)
+            .filter_map(|(id, keep)| keep.then_some(id))
             .collect();
         let hits = self
             .store
@@ -3474,11 +3572,7 @@ impl PolarGraphService for PolarGraphServer {
         } else {
             &req.space
         };
-        let ef = if req.ef > 0 {
-            req.ef as usize
-        } else {
-            self.default_vector_ef as usize
-        };
+        let ef = self.effective_ef(req.ef as usize, k);
         let seed_var = req.seed_variable.clone();
 
         debug!(
@@ -3495,13 +3589,12 @@ impl PolarGraphService for PolarGraphServer {
         let ann_hits: Vec<(NodeId, f32)> = match &req.filter {
             Some(SeedFilter::NodeTypeFilter(f)) => {
                 let allowed = self.instances_of_types(std::slice::from_ref(&f.type_name));
-                self.store
+                let hits = self
+                    .store
                     .search_vector_ef(space, &req.query_vector, ef, ef)
                     .into_iter()
-                    .filter(|(id, _)| allowed.contains(id))
-                    .filter(|(id, _)| self.node_visible_in(id, &access, &scope))
-                    .take(k)
-                    .collect()
+                    .filter(|(id, _)| allowed.contains(id));
+                self.keep_visible(hits, &access, &scope).take(k).collect()
             }
             Some(SeedFilter::ReachabilityFilter(f)) => {
                 let from = convert::node_id_from_proto(
@@ -3517,19 +3610,20 @@ impl PolarGraphService for PolarGraphServer {
                     reachable_from_hops(from, &f.predicate, &snap, f.max_hops as usize, deadline)
                 }
                 .map_err(|e| query_err_to_status(e, self.query_timeout_ms))?;
-                self.store
+                let hits = self
+                    .store
                     .search_vector_ef(space, &req.query_vector, ef, ef)
                     .into_iter()
-                    .filter(|(id, _)| allowed.contains(id))
-                    .filter(|(id, _)| self.node_visible_in(id, &access, &scope))
-                    .take(k)
-                    .collect()
+                    .filter(|(id, _)| allowed.contains(id));
+                self.keep_visible(hits, &access, &scope).take(k).collect()
             }
             None if access.is_some() || scope.is_some() => self
-                .store
-                .search_vector_ef(space, &req.query_vector, k.max(ef), ef)
-                .into_iter()
-                .filter(|(id, _)| self.node_visible_in(id, &access, &scope))
+                .keep_visible(
+                    self.store
+                        .search_vector_ef(space, &req.query_vector, k.max(ef), ef),
+                    &access,
+                    &scope,
+                )
                 .take(k)
                 .collect(),
             None => self.store.search_vector(space, req.query_vector.clone(), k),
@@ -3940,22 +4034,21 @@ impl PolarGraphService for PolarGraphServer {
             }
             let space = &vn.space;
             let k = vn.k as usize;
-            let ef = vn
-                .ef
-                .map(|e| e as usize)
-                .filter(|&e| e > 0)
-                .unwrap_or(if req.ef > 0 {
-                    req.ef as usize
-                } else {
-                    self.default_vector_ef as usize
-                });
+            let ef = self.effective_ef(
+                vn.ef
+                    .map(|e| e as usize)
+                    .filter(|&e| e > 0)
+                    .unwrap_or(req.ef as usize),
+                k,
+            );
             let seed_var = vn.seed_variable.clone();
 
             let ann_hits = self
-                .store
-                .search_vector_ef(space, &req.vector, ef, ef)
-                .into_iter()
-                .filter(|(id, _)| self.node_visible(id, &access))
+                .keep_visible(
+                    self.store.search_vector_ef(space, &req.vector, ef, ef),
+                    &access,
+                    &None,
+                )
                 .take(k)
                 .collect::<Vec<_>>();
 
@@ -4324,21 +4417,20 @@ impl PolarGraphService for PolarGraphServer {
             }
             let space = &vn.space;
             let k = vn.k as usize;
-            let ef = vn
-                .ef
-                .map(|e| e as usize)
-                .filter(|&e| e > 0)
-                .unwrap_or(if req.ef > 0 {
-                    req.ef as usize
-                } else {
-                    self.default_vector_ef as usize
-                });
+            let ef = self.effective_ef(
+                vn.ef
+                    .map(|e| e as usize)
+                    .filter(|&e| e > 0)
+                    .unwrap_or(req.ef as usize),
+                k,
+            );
             let seed_var = vn.seed_variable.clone();
             let ann_hits = self
-                .store
-                .search_vector_ef(space, &req.vector, ef, ef)
-                .into_iter()
-                .filter(|(id, _)| self.node_visible(id, &access))
+                .keep_visible(
+                    self.store.search_vector_ef(space, &req.vector, ef, ef),
+                    &access,
+                    &None,
+                )
                 .take(k)
                 .collect::<Vec<_>>();
             if ann_hits.is_empty() {

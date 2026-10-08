@@ -6,14 +6,15 @@ PolarGraph is a purpose-built, Rust graph database engine. The core abstraction 
 
 ## Feature highlights
 
-- **Hexastore index** — six RocksDB column families give O(log n) lookups on any (S, P, O) bind pattern without secondary scans
+- **Quad index** — every quad is written to eight RocksDB orders (six graph-trailing, two graph-leading) for O(log n) lookups on any (S, P, O, G) bind pattern; property values are hashed into the key, so they are indexed too (storage format v3)
 - **Bitemporal versioning** — valid time (world truth) and transaction time (record time) independently queryable on every triple; time-travel queries on both axes
 - **Optimistic MVCC** — snapshot-isolated reads; conflict-detected writes; timestamps are real wall-clock µs for meaningful time-travel
 - **Datalog queries** — conjunctive pattern joins, recursive rules, transitive reachability, hybrid vector-seed queries, named parameters
-- **Cypher surface** — readable graph queries compiled to Datalog IR; `MATCH`, `WHERE`, `RETURN`, `LIMIT`, `ORDER BY`, `SKIP`, `WITH`, aggregations (`COUNT`, `SUM`, `AVG`, etc.), `CREATE`/`MERGE`/`SET`/`DELETE`, transitive closure `[:pred*]`, bounded paths `[:pred*1..n]`, and `VECTOR_NEAR`; plan cache
+- **Cypher surface (read-only)** — readable graph queries compiled to Datalog IR; `MATCH`, `WHERE`, `RETURN`, `LIMIT`, `ORDER BY`, `SKIP`, `WITH`, aggregations (`COUNT`, `SUM`, `AVG`, etc.), transitive closure `[:pred*]`, bounded paths `[:pred*1..n]`, `USE GRAPH`, and `VECTOR_NEAR`; plan cache. Cypher writes (`CREATE`/`MERGE`/`SET`/`DELETE`) are **deprecated** — write with `ApplyChanges` or SPARQL Update
 - **SPARQL 1.1 endpoint** — `polargraph-sparql` library; `GET /sparql`, `POST /sparql`, `POST /sparql/update`; SELECT, ASK, CONSTRUCT, DESCRIBE; UNION, OPTIONAL, FILTER, property paths, GROUP BY, HAVING; full SPARQL-star (subject and object position, variable predicates, Turtle-star/N-Triples-star serialization, Update with embedded triples); INSERT/DELETE WHERE; each Update request is one transaction (`?dry_run`, `?read_ts`)
-- **HNSW vector index** — pure-Rust; named spaces with independent dimensionality; Memory and Mmap storage modes; batch insert; configurable exploration factor (`ef`) for recall/latency tuning
-- **OWL 2 RL materialization** — forward-chaining engine; 12 rules (rdfs2, rdfs3, rdfs5, rdfs7/prp-spo1, rdfs9, rdfs11, prp-symp, prp-trp, prp-inv1/2, eq-sym/trans); derived facts in dedicated `DRV` CF; `RunMaterialization` RPC + `POST /materialize`
+- **HNSW vector index** — pure-Rust, heuristic neighbour selection (stays connected on clustered embeddings); named spaces; Memory and Mmap storage; opt-in int8 quantization with exact re-ranking; batch insert; `graphs` filter; default `ef` 400 (recall@20 0.96 at 2M vectors)
+- **Hybrid search** — `SearchVectorInSet` ranks a candidate set given as ids or as `candidate_patterns` evaluated in the server ("chunks of records mentioning X" in one call), with graph-ACL checks from an in-memory vector visibility index; `VectorSeedQuery` and Cypher `VECTOR_NEAR` join ANN results to graph patterns. See [`docs/upgrade-hybrid-search.md`](docs/upgrade-hybrid-search.md)
+- **OWL 2 RL inference** — 12 rules (rdfs2, rdfs3, rdfs5, rdfs7/prp-spo1, rdfs9, rdfs11, prp-symp, prp-trp, prp-inv1/2, eq-sym/trans); inferred facts are ordinary quads in `urn:pg:inferred:*` graphs, kept current incrementally (DRed, `--inference`, ~1 s lag); choose which graphs supply schema axioms (`/inference/settings`); `RunMaterialization` / `POST /materialize` for a full recompute
 - **RDF interoperability** — multi-format import (`POST /import/rdf`): N-Triples, Turtle, JSON-LD, N-Quads, TriG with `Content-Type` detection; JSON-LD export (`GET`/`POST /export/jsonld`); Accept-negotiated subgraph export (`GET /export/subgraph`): N-Triples, Turtle, JSON-LD, N-Quads or TriG; whole-graph / dataset export (`GET /graphs/export`); PolarGraph-to-PolarGraph transfer via `POST /import/subgraph`; OWL/RDFS schema round-trip (`GET /schema/rdf`, `POST /schema/rdf`); `polargraph-import --format ntriples|turtle|jsonld|nquads|trig`
 - **Named graphs** — every quad lives in a graph; graph-scoped query patterns (`@default`, `@<iri>`, `@?g`) and datasets; graph metadata, stats, copy/move and bitemporal drop (`CreateGraph`, `ListGraphs`, `GraphStats`, `CopyGraph`, `MoveGraph`, `DropGraph`, `ExportGraph` RPCs; REST `/graphs*`); SPARQL `GRAPH` / `FROM` / `FROM NAMED` and graph Update ops (`CLEAR`, `DROP`, `CREATE`, `ADD`, `COPY`, `MOVE`); Cypher `USE GRAPH <iri>`
 - **Graph-level access control** — per-graph `read` / `propose` / `write` / `admin` grants for users and groups, enforced inside every scan for requests that carry a user id (deny by default; the default graph stays open); `GrantGraphAccess` / `RevokeGraphAccess` / `GetGraphAccess`, REST `/graphs/access`. **Breaking for user-scoped callers** — see [`docs/upgrade-graph-acl.md`](docs/upgrade-graph-acl.md)
@@ -28,13 +29,14 @@ PolarGraph is a purpose-built, Rust graph database engine. The core abstraction 
 - **gRPC API** — full-featured `polargraph.v1.PolarGraphService` via tonic; server-streaming variants for large result sets
 - **REST gateway** — standalone `polargraph-rest` binary; HTTP/JSON → gRPC proxy; no client stub required
 - **Schema registry** — optional advisory node and edge type schemas with field validation; stored as triples with bitemporal versioning
-- **Graph-native access control** — permissions as triples (`User`, `Group`, `HAS_ACCESS`, `HAS_ACCESS_TYPE`); access cache; identity via request field or HTTP header
-- **Full-text trigram search** — `TRI` column family; `CONTAINS`, `STARTS WITH`, `=~` in Cypher WHERE automatically routed to trigram index
+- **Node-level access control (legacy)** — permissions as triples (`User`, `Group`, `HAS_ACCESS`, `HAS_ACCESS_TYPE`) with a per-user node cache; superseded by graph-level access control, kept for compatibility
+- **Full-text trigram index** — `trig` column family for text values ≤ 512 bytes, read by `Snapshot::text_search` (Cypher `CONTAINS` / `STARTS WITH` / `=~` currently post-filter bindings rather than reading it)
 - **Property version history** — `GetPropertyHistory` RPC and `GET /property-history` expose full MVCC history of any scalar property
 - **Bulk import** — `polargraph-import` binary ingests N-Triples via RocksDB SST file ingestion (10–100× faster than streaming inserts)
 - **WAL streaming replication** — `--replica-of` enables read replicas with automatic reconnect and exponential backoff
 - **TLS** — server-side TLS on gRPC, management UI, and Prometheus; replica CA cert for mutual chain verification
-- **API key authentication** — tower middleware; constant-time key comparison; multi-key rotation without downtime; runtime key management RPCs
+- **API key authentication** — authenticates the calling application (tower middleware; constant-time comparison; multi-key rotation; runtime key management RPCs). End users are identified by the user id the application sends, which the engine trusts — see [Trust model](#trust-model)
+- **cb-bench** — `polargraph-bench cb --scale SF`: a synthetic company measured against the platform plan's performance targets, in CI at scale 0.05; results in [`BENCHMARKS.md`](BENCHMARKS.md) Part 4
 - **Rate limiting** — per-client-IP token bucket; configurable RPS; stale-entry cleanup
 - **Prometheus metrics** — per-RPC counters and histograms; vector space, WAL, backup, compaction, retention, materialization, and query cache gauges
 - **Management UI** — embedded SPA with Query, Schema, Insert, Search, and Status tabs; query history; Mermaid schema diagram; auth overlay
@@ -221,14 +223,14 @@ Query timeout, slow-query logging, and default HNSW ef.
 [query]
 timeout_ms        = 30000   # --query-timeout-ms / POLARGRAPH_QUERY_TIMEOUT_MS
 slow_query_ms     = 1000    # --slow-query-ms / POLARGRAPH_SLOW_QUERY_MS
-default_vector_ef = 50      # --default-vector-ef / POLARGRAPH_DEFAULT_VECTOR_EF
+default_vector_ef = 400     # --default-vector-ef / POLARGRAPH_DEFAULT_VECTOR_EF
 ```
 
 | Flag | Env variable | Default | Description |
 |------|-------------|---------|-------------|
 | `--query-timeout-ms MS` | `POLARGRAPH_QUERY_TIMEOUT_MS` | `30000` | Max query execution time; 0 = unlimited |
 | `--slow-query-ms MS` | `POLARGRAPH_SLOW_QUERY_MS` | `1000` | Emit WARN + increment counter when exceeded; 0 = disabled |
-| `--default-vector-ef N` | `POLARGRAPH_DEFAULT_VECTOR_EF` | `50` | Default HNSW exploration factor for all vector searches |
+| `--default-vector-ef N` | `POLARGRAPH_DEFAULT_VECTOR_EF` | `400` | Default HNSW exploration factor for all vector searches (effective `max(ef, 2·k)`) |
 
 ### [rate_limit]
 
@@ -690,21 +692,22 @@ grpcurl -plaintext \
 
 `ef` (exploration factor) controls the candidate list size during ANN graph traversal: larger `ef` explores more of the graph before picking the final top-k, trading latency for recall.
 
-| ef | Character |
-|----|-----------|
-| 20 | Fastest; minor recall loss vs. brute force |
-| 50 | Safe default; good recall on most workloads |
-| 100+ | High-recall mode; noticeably slower on large indexes |
+Measured at 2M clustered 384-dim vectors (cb-bench team scale, k = 20):
 
-**Rule of thumb:** `ef ≥ k`. Below `k` the search may not fill the result set.
+| ef | Recall@20 (f32 / int8) | Search p95 |
+|----|-----------|-----------|
+| 50 | 0.52 / 0.50 | ~1 ms |
+| 200 | 0.88 / 0.84 | ~2.6 ms |
+| **400 (default)** | 0.96 / 0.94 | ~3.5 ms |
+| 800 | 0.98 / 0.98 | ~4.7 ms |
 
-**Benchmark:** at 100K nodes / 128 dims / k=10, ef=50 runs ~583 µs p50; ef=20 roughly halves that at a few percent recall cost.
+At 100K vectors every `ef` ≥ 100 gives recall 1.0. The effective `ef` is never below `2·k`.
 
 **Three-level resolution hierarchy** (highest priority wins):
 
 1. **Cypher inline** — `VECTOR_NEAR(a, "space", 10, ef=100)` overrides everything for that predicate
 2. **Per-request field** — `ef` field on `SearchVectorRequest`, `VectorSeedQueryRequest`, `CypherQueryRequest` (0 = use server default)
-3. **Server default** — `[query] default_vector_ef` in TOML / `--default-vector-ef` / `POLARGRAPH_DEFAULT_VECTOR_EF` (built-in: 50)
+3. **Server default** — `[query] default_vector_ef` in TOML / `--default-vector-ef` / `POLARGRAPH_DEFAULT_VECTOR_EF` (built-in: 400; never below `2·k`)
 
 This lets you set a conservative global default while allowing latency-sensitive callers to drop `ef` and recall-critical callers to raise it — without server restarts.
 
@@ -716,6 +719,7 @@ Each HNSW space is created in one of two modes, set at registration time:
 |------|----------------------|-------------|
 | `memory` (default) | `Vec<f32>` on the heap | Small-to-medium spaces; fastest search |
 | `mmap` | Flat `.vecs` file under `<data_dir>/vectors/`, OS-paged | Large spaces that exceed available RAM |
+| int8 (`quantization = "int8"`) | int8 codes in RAM, full vectors in the `.vecs` file; exact re-ranking | Large spaces; ~4× less vector RAM |
 
 Once a space is created in a given mode it retains that mode for the lifetime of the data directory.
 
@@ -1148,52 +1152,24 @@ no_ui = true
 
 Service: `polargraph.v1.PolarGraphService` — full proto at `crates/polargraph-server/proto/polargraph.proto`.
 
-| RPC | Description |
-|-----|-------------|
-| `Insert` | Atomically commit ≥1 triples; returns `ABORTED` on write-write conflict |
-| `Query` | Conjunctive pattern query; returns all satisfying variable bindings |
-| `ExplainQuery` | Static execution plan for a query; no DB access |
-| `CypherQuery` | Parse and execute a Cypher query string |
-| `Reachable` | Transitive closure from a start node along a named predicate |
-| `InsertVector` | Upsert a node's embedding vector into a named HNSW space |
-| `SearchVector` | k-NN search with optional `ef` override |
-| `SearchVectorFiltered` | k-NN with node-type or reachability post-filter |
-| `SearchVectorInSet` | Score an explicit node-ID set against a query vector; return top-k |
-| `BatchInsertVectors` | Insert multiple vectors in a single write-lock acquisition |
-| `VectorSeedQuery` | ANN search → seed bindings → Datalog graph join, in one call |
-| `RegisterNodeType` | Register or overwrite a node type schema |
-| `GetNodeType` | Look up a schema by type name |
-| `ListNodeTypes` | Return all registered node type schemas |
-| `ValidateNode` | Validate a property map against a schema |
-| `RegisterEdgeType` | Register or overwrite an edge type schema |
-| `GetEdgeType` | Look up an edge schema by predicate name |
-| `ListEdgeTypes` | Return all registered edge type schemas |
-| `ValidateEdge` | Validate endpoint types and edge property map |
-| `ListPredicatesBetween` | Return predicate names whose domain/range match given node types |
-| `CreateBackup` | Create an incremental backup of the live store |
-| `ListBackups` | List available backups with ID, timestamp, size, file count |
-| `PurgeOldBackups` | Delete all but the `keep_n` most recent backups |
-| `RunRetention` | Scan and delete expired triples; triggers RocksDB compaction |
-| `ReplicaStatus` | Replication status: is_replica, lag, last_applied_seq (auth-exempt) |
-| `StreamWal` | Server-streaming WAL entries from the primary (replica use only) |
-| `MigrateSchema` | Apply pending schema migrations; `dry_run` for preview |
-| `MigrationStatus` | Current and latest version; full applied-migration history |
-| `CypherQuery` | Parse and execute a Cypher read query (MATCH/WHERE/RETURN) |
-| `CypherWrite` | Execute a Cypher write statement (CREATE/MERGE/SET/DELETE) |
-| `QueryStream` | Server-streaming `Query` — delivers bindings in 500-row chunks |
-| `CypherQueryStream` | Server-streaming `CypherQuery` |
-| `BeginTransaction` | Open a wire transaction; returns `tx_id` token |
-| `CommitTransaction` | Commit a wire transaction atomically |
-| `RollbackTransaction` | Discard a wire transaction |
-| `ShowIndexes` | CF key counts, estimated sizes, HNSW space metadata |
-| `ShowStats` | RocksDB properties, oracle timestamp, open transaction count |
-| `GetEdgeAnnotations` | RDF-star annotations on an edge (MVCC-filtered) |
-| `GetEdgeIdsByTriple` | Resolve `(subject, predicate, object)` tuples to `EdgeId` UUIDs |
-| `RunMaterialization` | OWL 2 RL forward-chaining materialization; writes derived facts to `DRV` CF |
+72 RPCs in groups: writes (`Insert`, `ApplyChanges`, `DeleteTriples`, wire
+transactions), queries (`Query`, `CypherQuery`, streaming variants,
+`ExplainQuery`, `Reachable`, property history, IRIs, edge annotations),
+vectors (`InsertVector`, `BatchInsertVectors`, `SearchVector`,
+`SearchVectorFiltered`, `SearchVectorInSet`, `VectorSeedQuery`), named
+graphs, change feed (`Subscribe`), SHACL (`ValidateShapes`), inference,
+vocabulary, access control and API keys, the advisory schema registry,
+counters, and operations (backups, retention, migrations, diagnostics,
+replication). The full grouped list with descriptions is the **RPC index**
+in [`docs/api-reference.md`](docs/api-reference.md#rpc-index).
 
 ### Authentication
 
-All RPCs except `ReplicaStatus` require `Authorization: Bearer <key>` (or `Authorization: ApiKey <key>`) when the server is configured with `--api-key`. Requests without a valid key receive gRPC status `UNAUTHENTICATED` (16).
+All RPCs except `ReplicaStatus` require `Authorization: Bearer <key>` (or `Authorization: ApiKey <key>`) when the server is configured with `--api-key`. Requests without a valid key receive gRPC status `UNAUTHENTICATED` (16). The key authenticates the **calling application**, not end users.
+
+### Trust model
+
+The engine **trusts the user id the calling application sends** (`user_id` request field, `x-polargraph-user-id` gRPC metadata, or REST `X-User-Id`) and enforces graph-level access control for that id. It does not authenticate users: **the application is responsible for authentication** (and must not forward ids it hasn't verified). A request without a user id is a trusted service call with full access. Accepting signed identity tokens (JWT) is on the "Later / nice-to-have" list in [`docs/STATUS.md`](docs/STATUS.md).
 
 ### gRPC health service
 
@@ -1384,6 +1360,12 @@ polargraph-rest:   generated proto client only (no storage deps)
 
 ## Further reading
 
+- [`docs/STATUS.md`](docs/STATUS.md) — where the engine stands: what's merged, the engine / application boundary, the trust model, and the "Later / nice-to-have" list
+- [`docs/api-reference.md`](docs/api-reference.md) — public Rust API by crate, the gRPC RPC index, REST endpoints
+- [`BENCHMARKS.md`](BENCHMARKS.md) — micro-benchmarks, BSBM, and cb-bench results against the platform plan's targets
+- Upgrade guides / release notes: [graph ACL](docs/upgrade-graph-acl.md) (breaking), [Cypher over RDF](docs/upgrade-cypher-rdf.md) (breaking), [value bindings](docs/upgrade-value-bindings.md), [step 9: inference, int8, counters](docs/upgrade-step9.md), [step 10: atomic SPARQL Update](docs/upgrade-step10.md), [hybrid search and `ef`](docs/upgrade-hybrid-search.md)
+- [`docs/contxtbroker-platform-plan.md`](docs/contxtbroker-platform-plan.md) — the knowledge-platform plan; §0.2 is the engine tracker
+- [`docs/design/`](docs/design/) — design notes and decisions per step
 - [`docs/architecture.md`](docs/architecture.md) — quad-index storage layout (with diagrams), write path and MVCC, migration, HNSW algorithm, Datalog evaluator, bitemporal model, Cypher compilation, replication, TLS, rate limiting, schema migrations
 - [`polargraph.example.toml`](polargraph.example.toml) — fully-commented configuration reference covering every option
 - [`CLAUDE.md`](CLAUDE.md) — codebase guide for contributors and AI assistants; conventions, crate responsibilities, implementation status

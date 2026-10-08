@@ -397,8 +397,15 @@ message SearchVectorInSetRequest {
     uint32         k        = 3;
     repeated NodeId node_ids = 4;
     /// Only nodes with a live quad in one of these graphs ("" = default
-    /// graph); empty = every graph.
+    /// graph); empty = every graph. Also the dataset `candidate_patterns`
+    /// read.
     repeated string graphs = 5;
+    /// Candidates as a pattern query instead of ids: the nodes bound to
+    /// `rank_var` by these patterns, evaluated in the server as the caller
+    /// (e.g. `?r <mentions> <e> . ?c <chunkOf> ?r`, rank_var "c"). Use
+    /// either this or `node_ids`.
+    repeated VarPattern candidate_patterns = 6;
+    string rank_var = 7;
 }
 
 message SearchVectorInSetResponse {
@@ -1647,7 +1654,8 @@ service PolarGraphService {
     /// Runs HNSW with a large candidate pool then post-filters to the allowed set.
     rpc SearchVectorFiltered(SearchVectorFilteredRequest) returns (SearchVectorFilteredResponse);
 
-    /// Score an explicit set of node IDs against a query vector; return top-k.
+    /// Rank a candidate set against a query vector; return top-k. Candidates
+    /// are explicit node IDs or `candidate_patterns` evaluated in the server.
     rpc SearchVectorInSet(SearchVectorInSetRequest) returns (SearchVectorInSetResponse);
 
     /// Insert multiple vectors into a named space atomically.
@@ -1671,7 +1679,7 @@ service PolarGraphService {
     /// Note: restore is an offline operation — see docs/architecture.md.
     rpc PurgeOldBackups(PurgeOldBackupsRequest) returns (PurgeOldBackupsResponse);
 
-    /// Scan all hexastore column families and delete superseded versions (and
+    /// Scan all quad-order column families and delete superseded versions (and
     /// triples whose valid-time windows have fully expired) per the policy.
     /// Triggers a full RocksDB compaction on any CF that had deletions.
     rpc RunRetention(RunRetentionRequest) returns (RunRetentionResponse);

@@ -73,8 +73,12 @@ Recorded after auditing this plan against the code at `849839a`.
 
 ### 0.2 Engine sequencing
 
-> **Current state / handoff:** `docs/STATUS.md` (merged, in progress,
-> boundaries, follow-ups, working rules).
+> **Engine phase complete** (pending the merge of `db/hybrid-search`,
+> row 11c). Current state, measured performance against the targets, the
+> trust model ("the engine trusts the user id the app sends; the app
+> authenticates"), and the "Later / nice-to-have" list (F1 JWT first):
+> `docs/STATUS.md`. Next work is application-side (ContxtBroker service:
+> MCP / context assembly, promotion / review, ingestion, repo-graph tool).
 
 | Step | Work | Migration | Status |
 |------|------|-----------|--------|
@@ -96,12 +100,16 @@ Recorded after auditing this plan against the code at `849839a`.
 | 10 | **Atomic SPARQL Update (P2) + graph-selection gaps**: SPARQL Update as one transaction per request (dry run, `read_ts`); inference schema graphs setting; `graphs` filter on vector search; Cypher reads confined to the query's dataset | — | Agreed with Mark 2026-10-03 (`docs/design/type-packages-boundary.md`: type packages are **application-only**; graph roles, registry derivation, `DiffGraphs`, digest dropped). ✅ **merged** (PR #16, branch `db/sparql-atomic-update`): all four parts, plus a fix for time-travel reads bypassing the graph ACL; release note `docs/upgrade-step10.md` |
 | 11 | **cb-bench (engine)**: performance harness + synthetic scale-up generator from a hand-built seed, measuring the plan's targets (`docs/design/cb-bench.md`) | — | Approved (Mark, 2026-10-03). The repo-as-a-graph app and architecture views are application-side (`docs/design/repo-graph-app.md`), not built here ✅ **merged** (PR #18, branch `db/cb-bench`): results in `BENCHMARKS.md` Part 4 — scale 0.05 meets 6/7 targets (hybrid search misses), team scale (`--scale 1`) meets 1/7; findings and proposed next work in `docs/STATUS.md` |
 | 11a | **HNSW connectivity + vector write cost** (found by cb-bench): heuristic neighbour selection (clustered data stayed in islands: recall@20 0.17–0.19 at 20K vectors, unchanged by `ef`); memory-mode vectors stored once (`<space>/v/<id>`), node records written once per batch | none (legacy records load as is) | Separate PR before cb-bench (Mark, 2026-10-03). ✅ **merged** (PR #17, branch `db/hnsw-connectivity`): recall@20 at 100K clustered vectors 0.30 → 1.00, disk 10.2 → 1.9 GB; norms cached + vectorized dot product |
-| 11b | **cb-bench findings** (`docs/STATUS.md` "cb-bench findings"): #1 DRed batch cost (lag 12.3 s at team scale), #3 int8 / mmap bulk append (quadratic) — chosen to build (Mark, 2026-10-06), separate PRs; recorded for later: #2 mention-set hybrid search (design note), #4 promotion latency (profile), #5 default `ef`, #6 ingestion at 2M vectors, company-scale run; open decision: rebuild pre-#17 HNSW spaces | none | #1 **in review** (branch `db/dred-batch-cost`): team-scale lag p95 13.0 s → 0.97 s |
+| 11b | **cb-bench findings** (`docs/STATUS.md` "cb-bench findings"): #1 DRed batch cost (lag 12.3 s at team scale), #3 int8 / mmap bulk append (quadratic) — chosen to build (Mark, 2026-10-06), separate PRs; recorded for later: #2 mention-set hybrid search (design note), #4 promotion latency (profile), #5 default `ef`, #6 ingestion at 2M vectors, company-scale run; open decision: rebuild pre-#17 HNSW spaces | none | #1 ✅ **merged** (PR #19): team-scale lag p95 13.0 s → 0.97 s; #3 ✅ **merged** (PR #20): 200K int8 build 166 → 72 s, 2M int8 builds in 24 min. Next: #2 hybrid search with #5 default `ef` (design note first, Mark 2026-10-07) |
+| 11c | **Hybrid search (finding #2) + default `ef` (#5)** — `docs/design/hybrid-search.md` decisions A, B, C, F: vector visibility index, `SearchVectorInSet.candidate_patterns`, int8 in-set ranking, default `ef` 400 | none | Approved (Mark, 2026-10-07). **In review** (branch `db/hybrid-search`): team-scale hybrid p95 3.7 s → 162 ms (f32) / 2.4 s → 140 ms (int8), context assembly 2.4 s → 173 ms ✅, recall@20 0.52 → 0.96; D (popular-entity cache) measured as needed — follow-up in `docs/STATUS.md` |
 | F1 | **Follow-up (not scheduled):** verified identity — accept signed identity tokens (JWT from an IdP: issuer, audience, JWKS key rotation, expiry) and derive the caller's user id / groups from verified claims instead of trusting a bare `user_id` / `x-polargraph-user-id` / `X-User-Id`. Needed because the graph ACL (step 6) trusts a client-asserted user id; see `docs/upgrade-graph-acl.md` "trust model" | — | not started |
 
 ---
 
 ## 1. Current state (what research found)
+
+> Historical: the audit that motivated the plan (as of `849839a`). For the
+> engine as built, see `docs/STATUS.md` and `CLAUDE.md`.
 
 Audit of the repo as of commit `849839a`.
 
@@ -1245,6 +1253,10 @@ vector for records older than a configurable age).
   ACL graphs.
 
 ### Performance targets (company scenario, single node, NVMe)
+
+> Measured with cb-bench at scale 0.05 and team scale (`--scale 1`):
+> `BENCHMARKS.md` Part 4 and the summary in `docs/STATUS.md`. The company
+> run is on the "Later" list.
 
 | Operation | Target |
 |-----------|--------|

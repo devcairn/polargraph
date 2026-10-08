@@ -231,7 +231,7 @@ struct Cli {
     tx_idle_timeout_ms: Option<u64>,
 
     /// Default HNSW exploration factor for vector searches (higher = better recall, slower).
-    /// Per-request `ef` fields override this value when non-zero. Default: 50.
+    /// Per-request `ef` fields override this value when non-zero. Default: 400; the effective ef is never below 2·k.
     #[arg(
         long = "default-vector-ef",
         env = "POLARGRAPH_DEFAULT_VECTOR_EF",
@@ -464,7 +464,7 @@ async fn main() -> Result<()> {
     let tls_key = resolve_path_opt(cli.tls_key, cfg.tls.key);
     let replica_tls_ca = resolve_path_opt(cli.replica_tls_ca, cfg.replication.tls_ca);
     let rate_limit_rps = resolve(cli.rate_limit_rps, cfg.rate_limit.max_rps, 0u32);
-    let default_vector_ef = resolve(cli.default_vector_ef, cfg.query.default_vector_ef, 50u32);
+    let default_vector_ef = resolve(cli.default_vector_ef, cfg.query.default_vector_ef, 400u32);
     let tx_idle_timeout_ms = resolve(cli.tx_idle_timeout_ms, None::<u64>, 300_000u64);
     let query_cache_size = resolve(cli.query_cache_size, cfg.query.cache_size, 1000usize);
     let auto_materialize = cli.auto_materialize || cfg.storage.auto_materialize.unwrap_or(false);
