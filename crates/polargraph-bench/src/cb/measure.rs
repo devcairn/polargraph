@@ -258,6 +258,7 @@ impl Ctx {
                     k: 20,
                     node_ids: set.into_iter().map(convert::node_id_to_proto).collect(),
                     graphs: vec![],
+                    ..Default::default()
                 }),
                 user,
             ))

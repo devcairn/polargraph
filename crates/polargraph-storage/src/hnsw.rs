@@ -758,6 +758,27 @@ impl HnswIndex {
     /// Nodes absent from the index are silently skipped.  O(|allowed|).
     pub fn search_in_set(&self, query: &[f32], k: usize, allowed: &[NodeId]) -> Vec<(NodeId, f32)> {
         let qn = norm(query);
+        // int8 spaces: rank by codes (in RAM), then re-rank the best 4k with
+        // the full vectors (mmap) for exact scores.
+        let shortlist;
+        let allowed = if self.is_int8() && allowed.len() > 4 * k {
+            let probe = Codes::quantize(query);
+            let mut coarse: Vec<(f32, NodeId)> = allowed
+                .iter()
+                .filter_map(|&id| Some((self.codes_of(id)?.distance(&probe), id)))
+                .collect();
+            let keep = (4 * k).min(coarse.len());
+            if keep < coarse.len() {
+                coarse.select_nth_unstable_by(keep, |a, b| {
+                    a.0.partial_cmp(&b.0).unwrap_or(cmp::Ordering::Equal)
+                });
+                coarse.truncate(keep);
+            }
+            shortlist = coarse.into_iter().map(|(_, id)| id).collect::<Vec<_>>();
+            &shortlist[..]
+        } else {
+            allowed
+        };
         let mut scored: Vec<(NodeId, f32)> = allowed
             .iter()
             .filter_map(|&id| {
@@ -1469,6 +1490,42 @@ mod tests {
         }
         let r = recall_at_10(&idx, &ids, &data, &queries);
         assert!(r >= 0.9, "recall@10 on clustered data: {r}");
+    }
+
+    #[test]
+    fn int8_in_set_ranking_matches_exact() {
+        // Codes pick a 4k shortlist; exact re-ranking orders it.
+        let dir = tempfile::tempdir().unwrap();
+        let (data, queries) = clustered(3_000, 64, 30);
+        let ids: Vec<NodeId> = (0..data.len()).map(nth_id).collect();
+        let mut idx = HnswIndex::new_mmap(dir.path().join("s.vecs"));
+        idx.enable_int8(dir.path().join("s.vecs")).unwrap();
+        for (id, v) in ids.iter().zip(&data) {
+            idx.insert(*id, v.clone());
+        }
+        let set: Vec<NodeId> = ids.iter().step_by(2).copied().collect();
+        let mut hit = 0;
+        for q in &queries {
+            let mut exact: Vec<(f32, NodeId)> = data
+                .iter()
+                .zip(&ids)
+                .step_by(2)
+                .map(|(v, id)| (cosine_distance(v, q), *id))
+                .collect();
+            exact.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            let got: HashSet<NodeId> = idx
+                .search_in_set(q, 10, &set)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            hit += exact
+                .iter()
+                .take(10)
+                .filter(|(_, id)| got.contains(id))
+                .count();
+        }
+        let r = hit as f64 / (10 * queries.len()) as f64;
+        assert!(r >= 0.95, "int8 in-set recall@10: {r}");
     }
 
     #[test]

@@ -221,14 +221,14 @@ Query timeout, slow-query logging, and default HNSW ef.
 [query]
 timeout_ms        = 30000   # --query-timeout-ms / POLARGRAPH_QUERY_TIMEOUT_MS
 slow_query_ms     = 1000    # --slow-query-ms / POLARGRAPH_SLOW_QUERY_MS
-default_vector_ef = 50      # --default-vector-ef / POLARGRAPH_DEFAULT_VECTOR_EF
+default_vector_ef = 400     # --default-vector-ef / POLARGRAPH_DEFAULT_VECTOR_EF
 ```
 
 | Flag | Env variable | Default | Description |
 |------|-------------|---------|-------------|
 | `--query-timeout-ms MS` | `POLARGRAPH_QUERY_TIMEOUT_MS` | `30000` | Max query execution time; 0 = unlimited |
 | `--slow-query-ms MS` | `POLARGRAPH_SLOW_QUERY_MS` | `1000` | Emit WARN + increment counter when exceeded; 0 = disabled |
-| `--default-vector-ef N` | `POLARGRAPH_DEFAULT_VECTOR_EF` | `50` | Default HNSW exploration factor for all vector searches |
+| `--default-vector-ef N` | `POLARGRAPH_DEFAULT_VECTOR_EF` | `400` | Default HNSW exploration factor for all vector searches (effective `max(ef, 2·k)`) |
 
 ### [rate_limit]
 
@@ -704,7 +704,7 @@ grpcurl -plaintext \
 
 1. **Cypher inline** — `VECTOR_NEAR(a, "space", 10, ef=100)` overrides everything for that predicate
 2. **Per-request field** — `ef` field on `SearchVectorRequest`, `VectorSeedQueryRequest`, `CypherQueryRequest` (0 = use server default)
-3. **Server default** — `[query] default_vector_ef` in TOML / `--default-vector-ef` / `POLARGRAPH_DEFAULT_VECTOR_EF` (built-in: 50)
+3. **Server default** — `[query] default_vector_ef` in TOML / `--default-vector-ef` / `POLARGRAPH_DEFAULT_VECTOR_EF` (built-in: 400; never below `2·k`)
 
 This lets you set a conservative global default while allowing latency-sensitive callers to drop `ef` and recall-critical callers to raise it — without server restarts.
 

@@ -397,8 +397,15 @@ message SearchVectorInSetRequest {
     uint32         k        = 3;
     repeated NodeId node_ids = 4;
     /// Only nodes with a live quad in one of these graphs ("" = default
-    /// graph); empty = every graph.
+    /// graph); empty = every graph. Also the dataset `candidate_patterns`
+    /// read.
     repeated string graphs = 5;
+    /// Candidates as a pattern query instead of ids: the nodes bound to
+    /// `rank_var` by these patterns, evaluated in the server as the caller
+    /// (e.g. `?r <mentions> <e> . ?c <chunkOf> ?r`, rank_var "c"). Use
+    /// either this or `node_ids`.
+    repeated VarPattern candidate_patterns = 6;
+    string rank_var = 7;
 }
 
 message SearchVectorInSetResponse {

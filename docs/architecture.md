@@ -580,7 +580,7 @@ When a search request arrives, `ef` is resolved in priority order:
 [query]
 timeout_ms        = 30000
 slow_query_ms     = 1000
-default_vector_ef = 50    # override here to tune globally
+default_vector_ef = 400   # override here to tune globally
 ```
 
 This hierarchy lets you set a conservative global default while allowing

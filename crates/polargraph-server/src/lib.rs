@@ -10,6 +10,7 @@ pub mod service;
 pub mod telemetry;
 pub mod type_index;
 pub mod ui_api;
+pub mod vector_visibility;
 pub mod wal_client;
 
 #[allow(clippy::enum_variant_names)]

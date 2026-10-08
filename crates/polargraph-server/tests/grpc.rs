@@ -1616,6 +1616,7 @@ async fn search_vector_in_set_limits_to_allowed() {
             query: vec![1.0, 0.0, 0.0],
             k: 2,
             node_ids: vec![id2.clone(), id3.clone()],
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -1638,6 +1639,7 @@ async fn search_vector_in_set_empty_query_returns_invalid_argument() {
             query: vec![],
             k: 5,
             node_ids: vec![],
+            ..Default::default()
         }))
         .await
         .unwrap_err();
@@ -8556,6 +8558,7 @@ async fn vector_searches_filter_by_graph() {
             k: 5,
             node_ids: vec![a.clone(), b.clone()],
             graphs: vec!["urn:g:a".into()],
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -8659,4 +8662,109 @@ async fn cypher_reads_stay_in_the_dataset_and_time_travel_keeps_the_acl() {
         .insert("x-polargraph-user-id", alice.to_string().parse().unwrap());
     let bindings = svc.query(req).await.unwrap().into_inner().bindings;
     assert_eq!(bindings.len(), 1, "only the urn:g:1 title");
+}
+
+#[tokio::test]
+async fn search_in_set_ranks_candidates_from_patterns_as_the_caller() {
+    use polargraph_server::proto::GrantGraphAccessRequest;
+
+    let (svc, _dir) = open();
+    let (_, e) = new_node();
+    let (_, r1) = new_node();
+    let (_, r2) = new_node();
+    let chunks: Vec<NodeId> = (0..3).map(|_| new_node().1).collect();
+    let (alice, _) = new_node();
+    for (graph, record, cs) in [
+        ("urn:g:open", &r1, &chunks[..2]),
+        ("urn:g:closed", &r2, &chunks[2..]),
+    ] {
+        let mut triples = vec![rel(record.clone(), "mentions", e.clone())];
+        triples.extend(cs.iter().map(|c| rel(c.clone(), "chunkOf", record.clone())));
+        svc.insert(Request::new(InsertRequest {
+            triples,
+            graph: graph.into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    }
+    for (i, c) in chunks.iter().enumerate() {
+        svc.insert_vector(Request::new(InsertVectorRequest {
+            node_id: Some(c.clone()),
+            vector: vec![1.0, i as f32 * 0.1],
+            space: String::new(),
+        }))
+        .await
+        .unwrap();
+    }
+    svc.grant_graph_access(Request::new(GrantGraphAccessRequest {
+        principal: alice.to_string(),
+        graph: "urn:g:open".into(),
+        level: "read".into(),
+        user_id: String::new(),
+    }))
+    .await
+    .unwrap();
+
+    let by_patterns = || SearchVectorInSetRequest {
+        query: vec![1.0, 0.0],
+        k: 10,
+        candidate_patterns: vec![
+            pattern(var("r"), "mentions", bound(&e)),
+            pattern(var("c"), "chunkOf", var("r")),
+        ],
+        rank_var: "c".into(),
+        ..Default::default()
+    };
+    let ids = |resp: polargraph_server::proto::SearchVectorInSetResponse| -> Vec<Vec<u8>> {
+        resp.results
+            .into_iter()
+            .map(|r| r.node_id.unwrap().bytes)
+            .collect()
+    };
+
+    // As a service: every chunk, in the same order as passing the ids.
+    let from_patterns = ids(svc
+        .search_vector_in_set(Request::new(by_patterns()))
+        .await
+        .unwrap()
+        .into_inner());
+    let from_ids = ids(svc
+        .search_vector_in_set(Request::new(SearchVectorInSetRequest {
+            query: vec![1.0, 0.0],
+            k: 10,
+            node_ids: chunks.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner());
+    assert_eq!(from_patterns.len(), 3);
+    assert_eq!(from_patterns, from_ids);
+
+    // As alice: only the chunks in the graph she can read.
+    let mut req = Request::new(by_patterns());
+    req.metadata_mut()
+        .insert("x-polargraph-user-id", alice.to_string().parse().unwrap());
+    let mut got = ids(svc.search_vector_in_set(req).await.unwrap().into_inner());
+    got.sort();
+    let mut want: Vec<Vec<u8>> = chunks[..2].iter().map(|c| c.bytes.clone()).collect();
+    want.sort();
+    assert_eq!(got, want);
+
+    // Either ids or patterns, and patterns need rank_var.
+    let mut both = by_patterns();
+    both.node_ids = chunks.clone();
+    let err = svc
+        .search_vector_in_set(Request::new(both))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    let mut no_var = by_patterns();
+    no_var.rank_var.clear();
+    let err = svc
+        .search_vector_in_set(Request::new(no_var))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }

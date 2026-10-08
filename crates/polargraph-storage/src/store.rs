@@ -920,6 +920,17 @@ impl TripleStore {
         Ok(idx)
     }
 
+    /// Every node that has a vector in some space.
+    pub fn vector_node_ids(&self) -> std::collections::HashSet<NodeId> {
+        self.inner
+            .hnsw_spaces
+            .read()
+            .unwrap()
+            .values()
+            .flat_map(|idx| idx.nodes.keys().copied())
+            .collect()
+    }
+
     /// Return the number of named HNSW vector spaces in this store.
     pub fn hnsw_space_count(&self) -> usize {
         self.inner.hnsw_spaces.read().unwrap().len()
@@ -1706,6 +1717,71 @@ impl TripleStore {
                 && o.map_or(true, |o| o == qo)
         });
         Ok(quads.into_iter().map(|((_, _, _, g), t)| (g, t)).collect())
+    }
+
+    /// Stream the `spog` entries under `prefix` and call `on_live(s, g)` for
+    /// every quad that is live at `at`, without decoding values. Versions of
+    /// a quad are adjacent in `spog` (`[s][p][o][g][tt]`), so the governing
+    /// version (as in [`Self::snapshot_scan`]) is resolved in one pass.
+    pub(crate) fn live_subject_graphs_at(
+        &self,
+        prefix: &[u8],
+        at: &ReadAt,
+        mut on_live: impl FnMut(NodeId, GraphId),
+    ) -> Result<(), StorageError> {
+        let vt = at.vt_as_of.unwrap_or_else(|| Timestamp::now().0);
+        let cf = self.cf_handle(cf::SPOG)?;
+        let iter = self
+            .inner
+            .db
+            .iterator_cf(&cf, IteratorMode::From(prefix, Direction::Forward));
+        // The quad being resolved: its 40-byte id and best (vt_start, tt, vt_end).
+        let mut cur: Option<([u8; 40], i64, Timestamp, i64)> = None;
+        let mut flush = |cur: &Option<([u8; 40], i64, Timestamp, i64)>| {
+            if let Some((id, _, _, vt_end)) = cur {
+                if vt < *vt_end {
+                    let s = NodeId(uuid::Uuid::from_bytes(id[..16].try_into().unwrap()));
+                    let g = Order::Spog.graph_of(id);
+                    on_live(s, g);
+                }
+            }
+        };
+        for item in iter {
+            let (key, value) = item?;
+            if !key.starts_with(prefix) {
+                break;
+            }
+            if key.len() < 48 || keys::key_tt(&key) > at.ts {
+                continue;
+            }
+            let g = Order::Spog.graph_of(&key);
+            if !at.can_read(g) {
+                continue;
+            }
+            let Some((vt_start, vt_end)) = codec::valid_time(&value) else {
+                continue;
+            };
+            if vt_start.0 > vt {
+                continue;
+            }
+            let id: [u8; 40] = key[..40].try_into().unwrap();
+            let tt = keys::key_tt(&key);
+            match &mut cur {
+                Some((cid, best_start, best_tt, best_end)) if *cid == id => {
+                    if vt_start.0 > *best_start || (vt_start.0 == *best_start && tt > *best_tt) {
+                        *best_start = vt_start.0;
+                        *best_tt = tt;
+                        *best_end = vt_end.0;
+                    }
+                }
+                _ => {
+                    flush(&cur);
+                    cur = Some((id, vt_start.0, tt, vt_end.0));
+                }
+            }
+        }
+        flush(&cur);
+        Ok(())
     }
 
     // ── snapshot scan implementation ──────────────────────────────────────────
@@ -2886,6 +2962,70 @@ impl TripleStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subject_graphs_follow_live_quads_and_readers() {
+        use polargraph_core::{temporal::BiTemporalRange, triple::Predicate, value::Value};
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = TripleStore::open(dir.path()).unwrap();
+        let (g1, g2) = (
+            store.create_graph("urn:g:1", &[]).unwrap(),
+            store.create_graph("urn:g:2", &[]).unwrap(),
+        );
+        let n = NodeId(uuid::Uuid::from_u128(7));
+        let other = NodeId(uuid::Uuid::from_u128(8));
+        let prop = |v: &str| Triple::Property {
+            subject: n,
+            predicate: Predicate::new("urn:p"),
+            value: Value::Text(v.into()),
+            temporal: BiTemporalRange::assert_now(Timestamp::now()),
+        };
+        let mut tx = store.begin();
+        tx.insert_in(prop("a"), g1, WriteMode::Add);
+        tx.insert_in(prop("b"), g2, WriteMode::Add);
+        tx.insert_in(
+            Triple::Property {
+                subject: other,
+                predicate: Predicate::new("urn:p"),
+                value: Value::Text("c".into()),
+                temporal: BiTemporalRange::assert_now(Timestamp::now()),
+            },
+            GraphId::DEFAULT,
+            WriteMode::Add,
+        );
+        tx.commit().unwrap();
+        let snap = || store.snapshot(Timestamp(store.oracle_ts()));
+        let mut gs = snap().subject_graphs(&n).unwrap();
+        gs.sort();
+        assert_eq!(gs, vec![g1, g2]);
+
+        // Closing the g2 quad removes g2.
+        let live = snap()
+            .scan_scoped(Some(&n), None, None, &GraphScope::One(g2))
+            .unwrap();
+        let mut tx = store.begin();
+        for (g, t) in live {
+            tx.insert_in(
+                crate::graphs::close_at(t, Timestamp::now()),
+                g,
+                WriteMode::Add,
+            );
+        }
+        tx.commit().unwrap();
+        assert_eq!(snap().subject_graphs(&n).unwrap(), vec![g1]);
+
+        // A reader without g1 sees nothing for n.
+        let readable: roaring::RoaringBitmap = [GraphId::DEFAULT.0, g2.0].into_iter().collect();
+        let restricted = snap().with_readable_graphs(std::sync::Arc::new(readable));
+        assert!(restricted.subject_graphs(&n).unwrap().is_empty());
+
+        // One pass over everything, filtered to the subjects asked for.
+        let all = snap()
+            .all_subject_graphs(|s| *s == n || *s == other)
+            .unwrap();
+        assert_eq!(all[&n], vec![g1]);
+        assert_eq!(all[&other], vec![GraphId::DEFAULT]);
+    }
 
     fn vec_for(i: usize, dims: usize) -> Vec<f32> {
         let mut v: Vec<f32> = (0..dims)
