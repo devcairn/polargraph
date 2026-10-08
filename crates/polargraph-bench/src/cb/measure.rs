@@ -273,6 +273,42 @@ impl Ctx {
         Ok((ids, n, set_ms))
     }
 
+    /// Hybrid search with the candidates as patterns, evaluated in the
+    /// server: `SearchVectorInSet` with `candidate_patterns` (the plan's
+    /// "rank within the mention set" as one call).
+    async fn hybrid_patterns(
+        &self,
+        user: &str,
+        entity: &str,
+        space: &str,
+        query: Vec<f32>,
+    ) -> Result<Vec<NodeId>> {
+        let resp = self
+            .server
+            .search_vector_in_set(as_user(
+                Request::new(SearchVectorInSetRequest {
+                    space: space.into(),
+                    query,
+                    k: 20,
+                    candidate_patterns: vec![
+                        pattern(var("r"), &gen::p("mentions"), bound(entity)),
+                        pattern(var("c"), &gen::p("chunkOf"), var("r")),
+                    ],
+                    rank_var: "c".into(),
+                    ..Default::default()
+                }),
+                user,
+            ))
+            .await?
+            .into_inner();
+        Ok(resp
+            .results
+            .iter()
+            .filter_map(|r| r.node_id.as_ref())
+            .filter_map(|n| convert::node_id_from_proto(n).ok())
+            .collect())
+    }
+
     /// ANN-seeded join: k=200 candidates joined to chunks of records that
     /// mention the entity. Returns the results kept (≤ 200).
     async fn hybrid_seed_join(
@@ -397,6 +433,29 @@ pub async fn hybrid(ctx: &Ctx) -> Result<Vec<Measurement>> {
     for (space, int8) in &ctx.spaces {
         let label = if *int8 { "int8" } else { "f32" };
         let mut rng = Rng::of(101, 0);
+        let mut samples = Vec::new();
+        let start = Instant::now();
+        while ctx.budget.more(samples.len(), start) {
+            let user = ctx.user(&mut rng);
+            let entity = ctx.plan.entity(ctx.mentions.sample(&mut rng));
+            let q = ctx.entity_query(&mut rng);
+            let t = Instant::now();
+            ctx.hybrid_patterns(&user, &entity, space, q).await?;
+            samples.push(ms(t));
+        }
+        let pattern_samples = samples.clone();
+        let pattern_row = out.len();
+        out.push(summarize(
+            &format!("Hybrid search k=20, mention set ({label})"),
+            Goal::P95(25.0),
+            samples,
+            None,
+            "candidates as patterns (mention → chunks) evaluated in the server".into(),
+        ));
+
+        // The same entities through the id path (query, then ids), for
+        // comparison.
+        let mut rng = Rng::of(101, 0);
         let (mut samples, mut sizes, mut set_ms) = (Vec::new(), Vec::new(), Vec::new());
         let start = Instant::now();
         while ctx.budget.more(samples.len(), start) {
@@ -409,6 +468,27 @@ pub async fn hybrid(ctx: &Ctx) -> Result<Vec<Measurement>> {
             sizes.push(n);
             set_ms.push(set);
         }
+        // Same seed, so sample i is the same entity in both loops: split the
+        // pattern path's latency by mention-set size (is a cache for popular
+        // entities needed?).
+        let split = |big: bool| -> (usize, f64) {
+            let mut v: Vec<f64> = pattern_samples
+                .iter()
+                .zip(&sizes)
+                .filter(|(_, n)| (**n >= 10_000) == big)
+                .map(|(ms, _)| *ms)
+                .collect();
+            v.sort_by(|a, b| a.total_cmp(b));
+            let p95 = v
+                .get((v.len() * 95).div_ceil(100).saturating_sub(1))
+                .copied()
+                .unwrap_or(f64::NAN);
+            (v.len(), p95)
+        };
+        let ((n_big, p_big), (n_small, p_small)) = (split(true), split(false));
+        out[pattern_row].note.push_str(&format!(
+            "; p95 for sets ≥ 10K chunks {p_big:.0} ms (n {n_big}), < 10K {p_small:.0} ms (n {n_small})"
+        ));
         sizes.sort_unstable();
         set_ms.sort_by(|a, b| a.total_cmp(b));
         let set_p95 = set_ms
@@ -416,8 +496,8 @@ pub async fn hybrid(ctx: &Ctx) -> Result<Vec<Measurement>> {
             .copied()
             .unwrap_or(f64::NAN);
         out.push(summarize(
-            &format!("Hybrid search k=20, mention set ({label})"),
-            Goal::P95(25.0),
+            &format!("Mention set as ids, k=20 ({label})"),
+            Goal::None,
             samples,
             None,
             format!(
@@ -471,7 +551,7 @@ pub async fn context_assembly(ctx: &Ctx) -> Result<Option<Measurement>> {
         let q = ctx.entity_query(&mut rng);
         let t = Instant::now();
         ctx.describe(&user, &entity).await?;
-        let (top, _, _) = ctx.hybrid_in_set(&user, &entity, space, q).await?;
+        let top = ctx.hybrid_patterns(&user, &entity, space, q).await?;
         let mut text = 0usize;
         for c in top {
             let resp = ctx
@@ -901,9 +981,11 @@ pub async fn recall(ctx: &Ctx, queries: usize) -> Result<Vec<(String, f64)>> {
     }
     let mut out = Vec::new();
     for (space, _) in &ctx.spaces {
-        for ef in [100u32, 400] {
+        for ef in [50u32, 100, 200, 400, 800] {
             let mut hit = 0usize;
+            let mut lat = Vec::with_capacity(qs.len());
             for (q, exact) in qs.iter().zip(&best) {
+                let t = Instant::now();
                 let resp = ctx
                     .server
                     .search_vector(Request::new(SearchVectorRequest {
@@ -915,6 +997,7 @@ pub async fn recall(ctx: &Ctx, queries: usize) -> Result<Vec<(String, f64)>> {
                     }))
                     .await?
                     .into_inner();
+                lat.push(ms(t));
                 let got: std::collections::HashSet<NodeId> = resp
                     .results
                     .iter()
@@ -923,8 +1006,15 @@ pub async fn recall(ctx: &Ctx, queries: usize) -> Result<Vec<(String, f64)>> {
                     .collect();
                 hit += exact.iter().filter(|(_, id)| got.contains(id)).count();
             }
+            lat.sort_by(|a, b| a.total_cmp(b));
+            let p = |q: f64| lat[((lat.len() as f64 * q).ceil() as usize).clamp(1, lat.len()) - 1];
+            let default = if ef == 400 { ", server default" } else { "" };
             out.push((
-                format!("{space} ef={ef}"),
+                format!(
+                    "{space} ef={ef}{default} (search p50 {:.2} ms, p95 {:.2} ms)",
+                    p(0.5),
+                    p(0.95)
+                ),
                 hit as f64 / (20 * queries) as f64,
             ));
         }
