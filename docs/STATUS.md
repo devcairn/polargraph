@@ -1,6 +1,6 @@
 # Engine status — handoff
 
-Snapshot: 2026-10-07. Detailed history: §0.2 tracker in
+Snapshot: 2026-10-08. Detailed history: §0.2 tracker in
 `docs/contxtbroker-platform-plan.md`. Per-feature notes: `CLAUDE.md`
 ("Current state"), `docs/design/*`, release notes `docs/upgrade-*.md`.
 
@@ -27,9 +27,10 @@ Main CI is green on the #20 merge (`ac5d594`), including the cb-bench report job
 
 ## In progress
 
-- **Finding #2 (hybrid search) with #5 (default `ef`) folded in** — Mark's
-  pick (2026-10-07). Design note first (`docs/design/hybrid-search.md`),
-  decisions before code.
+- **`db/hybrid-search`** — findings #2 + #5, decisions A, B, C, F of
+  `docs/design/hybrid-search.md`, **in review**. Team scale: hybrid search
+  p95 3.7 s → 162 ms (f32) / 2.4 s → 140 ms (int8); context assembly
+  2.4 s → 173 ms ✅; recall@20 at the default `ef` 0.52 → 0.96.
 
 ## cb-bench results (Apple M4 Pro, 48 GiB, NVMe)
 
@@ -39,8 +40,8 @@ The plan's targets are for company scale (`--scale 20`); measured so far:
 |---|---|---|
 | Load one graph p50 ≤ 2 ms | ✅ 0.87 | ✅ 0.76 |
 | describe p95 ≤ 10 ms | ✅ 2.3 | ❌ 15 |
-| Hybrid search p95 ≤ 25 ms | ❌ 256 | ❌ 2,681 |
-| Context assembly p95 ≤ 300 ms | ✅ 260 | ❌ 2,253 |
+| Hybrid search p95 ≤ 25 ms | ❌ 256 | ❌ 2,681 → ❌ 162 (f32) / 140 (int8) after hybrid search; ✅ 17 / 13 for sets < 10K chunks |
+| Context assembly p95 ≤ 300 ms | ✅ 260 | ❌ 2,253 → ✅ 173 after hybrid search |
 | Promote 500 quads p95 ≤ 200 ms | ✅ 58 | ❌ 450 |
 | Inference lag ≤ 2 s | ✅ 1.3 s | ❌ 12.3 s → ✅ 0.97 s after #19 |
 | Ingestion ≥ 50 records/s | ✅ 101 | ❌ 27 |
@@ -59,8 +60,9 @@ inferred quads, 2M 384-dim chunk vectors).
      inferred quads), at 20 commits/s.
    - Approach: memoized point lookups of only the facts a batch touches;
      live count kept in META.
-2. **Hybrid search over a mention set doesn't scale** — *next (with #5);
-   design note in progress.*
+2. **Hybrid search over a mention set doesn't scale** — ✅ **mostly fixed**
+   (`db/hybrid-search`): p95 2.4–3.7 s → 140–162 ms; small mention sets
+   meet the 25 ms target. Remaining: **D**, below.
    - Cause: hot entities' mention sets are unbounded (up to 86K chunks at
      team scale; Zipf 1.1); building the set (mention → chunk query) is up
      to 323 ms p95; `SearchVectorInSet`
@@ -91,7 +93,9 @@ inferred quads, 2M 384-dim chunk vectors).
      500-quad proposal (target 200 ms).
    - Approach: time the two halves in cb-bench; check whether SHACL target
      resolution (`sh:targetClass` with subclasses) scans the whole class.
-5. **Default `ef` too low at scale** — *next, folded into #2's design note.*
+5. **Default `ef` too low at scale** — ✅ **fixed** (`db/hybrid-search`):
+   default 400, effective `max(ef, 2·k)`; recall@20 at 2M 0.52 → 0.96
+   (f32), 0.50 → 0.94 (int8), search p95 ~3.5 ms.
    - Cause: server default `ef` 50 (`service.rs:273`, `--default-vector-ef`).
    - Evidence: recall@20 at 2M clustered vectors 0.64 at ef 100, 0.96 at
      ef 400 (1.0 at 100K for both).
@@ -105,7 +109,20 @@ inferred quads, 2M 384-dim chunk vectors).
    - Approach: parallel batch insert (search phase under a read lock),
      a lower `ef_construction` for online inserts, or int8 for chunk
      spaces (cheaper distances; depends on #3).
-7. **Company-scale run** (`--scale 20`, manual, NVMe) — after #1–#3 (and
+7. **D — cached candidate sets for popular entities** (follow-up to #2;
+   *needed*, not built).
+   - Evidence (team scale, after `db/hybrid-search`): hybrid search p95 is
+     17 ms (f32) / 13 ms (int8) for mention sets < 10K chunks, but
+     173 / 143 ms for sets ≥ 10K (96 of 200 Zipf-sampled entities). For
+     those, evaluating the mention → chunk join in the server (~150 ms for
+     86K chunks; the id path's query took 161 ms p95) dominates; visibility
+     and scoring are a few ms. At company scale the sets grow ~20×.
+   - Approach (design note, decision D / option B3): cache candidate sets
+     keyed by (patterns with bound values, dataset, readable graphs),
+     invalidated through the change log by the patterns' predicates;
+     expected ~10–20 ms p95 for cached popular entities. Alternative or
+     complement: an application cap on candidates (most recent N records).
+8. **Company-scale run** (`--scale 20`, manual, NVMe) — after #1–#3 (and
    ideally #2) land; needs int8 for the vector budget.
 
 **Open decision — rebuild old HNSW spaces.** Spaces built before the
