@@ -1,6 +1,6 @@
 # Engine status — handoff
 
-Snapshot: 2026-10-06. Detailed history: §0.2 tracker in
+Snapshot: 2026-10-07. Detailed history: §0.2 tracker in
 `docs/contxtbroker-platform-plan.md`. Per-feature notes: `CLAUDE.md`
 ("Current state"), `docs/design/*`, release notes `docs/upgrade-*.md`.
 
@@ -19,17 +19,17 @@ Snapshot: 2026-10-06. Detailed history: §0.2 tracker in
 | 9 | Queryable inference (inferred graphs), DRed `--inference`, int8 vectors, counters (`sts` CF) | #15 |
 | 10 | Atomic SPARQL Update (`?dry_run`, `?read_ts`), inference schema graphs, vector `graphs` filter, Cypher reads confined to the dataset, time-travel ACL fix | #16 |
 | 11 | cb-bench: engine benchmark vs the plan targets, CI report job, results in `BENCHMARKS.md` Part 4 | #18 |
+| 11b #1 | DRed batches look up only the facts they touch: team-scale inference lag p95 13.0 s → 0.97 s | #19 |
+| 11b #3 | mmap / int8 vector files grow geometrically, flushed once per batch: 200K int8 build 166 → 72 s; 2M int8 now builds (24 min) | #20 |
 | 11a | HNSW connectivity (heuristic neighbour selection; recall@20 on clustered data 0.30 → 1.00), memory-mode vectors stored once, cached norms + vectorized dot product | #17 |
 
-Main CI on the cb-bench merge (`09c9817`): see the tracker.
+Main CI is green on the #20 merge (`ac5d594`), including the cb-bench report job.
 
 ## In progress
 
-Mark chose findings **#1 and #3** to build now (2026-10-06), as separate
-PRs, #1 first; the rest are recorded below for later.
-
-- **`db/dred-batch-cost`** — finding #1, **in review**: team-scale inference lag p95 13.0 s → 0.97 s.
-- Then finding #3 (int8 / mmap bulk append), its own branch.
+- **Finding #2 (hybrid search) with #5 (default `ef`) folded in** — Mark's
+  pick (2026-10-07). Design note first (`docs/design/hybrid-search.md`),
+  decisions before code.
 
 ## cb-bench results (Apple M4 Pro, 48 GiB, NVMe)
 
@@ -42,7 +42,7 @@ The plan's targets are for company scale (`--scale 20`); measured so far:
 | Hybrid search p95 ≤ 25 ms | ❌ 256 | ❌ 2,681 |
 | Context assembly p95 ≤ 300 ms | ✅ 260 | ❌ 2,253 |
 | Promote 500 quads p95 ≤ 200 ms | ✅ 58 | ❌ 450 |
-| Inference lag ≤ 2 s | ✅ 1.3 s | ❌ 12.3 s |
+| Inference lag ≤ 2 s | ✅ 1.3 s | ❌ 12.3 s → ✅ 0.97 s after #19 |
 | Ingestion ≥ 50 records/s | ✅ 101 | ❌ 27 |
 
 ## cb-bench findings
@@ -50,7 +50,8 @@ The plan's targets are for company scale (`--scale 20`); measured so far:
 Numbers are from `BENCHMARKS.md` Part 4 (scale 1 = 8.0M base + 4.1M
 inferred quads, 2M 384-dim chunk vectors).
 
-1. **Inference lag grows with the store** — *building now.*
+1. **Inference lag grows with the store** — ✅ **fixed** (#19): team-scale
+   p95 13.0 s → 0.97 s (re-measured on main with #19 + #20: 0.97 s).
    - Cause: each DRed batch (`owl_rl::infer_changes`) built a map of every
      live inferred quad (`live_inferred`, `crates/polargraph-storage/src/owl_rl.rs:731`)
      to check over-deletes and find quads to close.
@@ -58,7 +59,8 @@ inferred quads, 2M 384-dim chunk vectors).
      inferred quads), at 20 commits/s.
    - Approach: memoized point lookups of only the facts a batch touches;
      live count kept in META.
-2. **Hybrid search over a mention set doesn't scale** — *needs a design note.*
+2. **Hybrid search over a mention set doesn't scale** — *next (with #5);
+   design note in progress.*
    - Cause: hot entities' mention sets are unbounded (up to 86K chunks at
      team scale; Zipf 1.1); building the set (mention → chunk query) is up
      to 323 ms p95; `SearchVectorInSet`
@@ -72,7 +74,9 @@ inferred quads, 2M 384-dim chunk vectors).
      an ACL-scoped query; filtered ANN (graph search restricted to an
      allowed set or bitmap); bounded / pre-ranked mention sets (recency,
      importance) per the plan's "never materialize the full fan-out".
-3. **int8 / mmap bulk load is quadratic** — *building after #1.*
+3. **int8 / mmap bulk load is quadratic** — ✅ **fixed** (#20): 200K int8
+   vectors 166 → 72 s, ingestion 36 → ~105 records/s; 2M int8 vectors build
+   in 24 min (recall@20 0.69 at ef 100, 0.92 at ef 400; ingestion 42/s).
    - Cause: `MmapState::append` (`crates/polargraph-storage/src/hnsw.rs:218`)
      resizes the `.vecs` file, remaps it and flushes the whole mapping on
      every vector.
@@ -87,7 +91,7 @@ inferred quads, 2M 384-dim chunk vectors).
      500-quad proposal (target 200 ms).
    - Approach: time the two halves in cb-bench; check whether SHACL target
      resolution (`sh:targetClass` with subclasses) scans the whole class.
-5. **Default `ef` too low at scale** — *small change, decision on value.*
+5. **Default `ef` too low at scale** — *next, folded into #2's design note.*
    - Cause: server default `ef` 50 (`service.rs:273`, `--default-vector-ef`).
    - Evidence: recall@20 at 2M clustered vectors 0.64 at ef 100, 0.96 at
      ef 400 (1.0 at 100K for both).
